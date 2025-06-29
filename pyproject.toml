@@ -21,7 +21,8 @@ dependencies = [
     "pandas",
     "tqdm",
     "simple-useragent",
-    "requests"
+    "requests",
+    "docker",
 ]
 
 [project.urls]
@@ -37,13 +38,17 @@ dev = [
     "deptry>=0.23.0",
     "mypy>=0.991",
     "pytest-cov>=4.0.0",
+    "docker",
     "ruff>=0.11.5",
     "asv",
+    "pyarrow",
     "ipython",
     "pandas-stubs",
     "types-requests",
     "types-tqdm",
-
+    "types-docker",
+    "ipykernel",
+    "matplotlib",
 ]
 
 [build-system]

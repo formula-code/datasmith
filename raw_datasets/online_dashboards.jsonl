@@ -1,0 +1,5 @@
+{"url": "https://pv.github.io/scipy-bench/", "output_dir": "raw_datasets/downloads/scipy"}
+{"url": "https://pandas-dev.github.io/asv-runner/", "output_dir": "raw_datasets/downloads/pandas"}
+{"url": "https://scikit-learn.org/scikit-learn-benchmarks/", "output_dir": "raw_datasets/downloads/sklearn"}
+{"url": "https://spacetelescope.github.io/bench/astropy-benchmarks/", "output_dir": "raw_datasets/downloads/astropy"}
+{"url": "https://pv.github.io/numpy-bench/", "output_dir": "raw_datasets/downloads/numpy"}

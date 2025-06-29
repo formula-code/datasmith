@@ -1,6 +1,15 @@
 import os
+import sys
 
-with open("tokens.env", encoding="utf-8") as f:
-    lines = f.readlines()
-    tokens = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in lines if "=" in line}
-os.environ.update(tokens)
+
+def setup_environment() -> None:
+    if os.path.exists("tokens.env"):
+        with open("tokens.env", encoding="utf-8") as f:
+            lines = f.readlines()
+            tokens = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in lines if "=" in line}
+        os.environ.update(tokens)
+    else:
+        sys.stderr.write("No tokens.env file found. Skipping environment variable setup.\n")
+
+
+setup_environment()

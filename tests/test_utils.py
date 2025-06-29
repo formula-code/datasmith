@@ -1,7 +1,7 @@
 import pickle
 import sqlite3
 
-from datasmith.scraping.utils import cache_completion
+from datasmith.utils import cache_completion
 
 
 @cache_completion("tests/test_cache.db", "test_cache")

@@ -2,7 +2,7 @@ import argparse
 
 import pandas as pd
 
-from datasmith.scraping.scrape_dashboards import scrape_public_dashboard
+from datasmith.scrape.scrape_dashboards import scrape_public_dashboard
 
 
 def parse_args() -> argparse.Namespace:
@@ -16,10 +16,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main():
     args = parse_args()
     dashboards = pd.read_json(args.dashboards, lines=True)
 
     for _, row in dashboards.iterrows():
         scrape_public_dashboard(base_url=row["url"], dl_dir=row["output_dir"], force=args.force)
         print(f"Data downloaded to {row['output_dir']}")
+
+
+if __name__ == "__main__":
+    main()

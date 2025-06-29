@@ -5,7 +5,7 @@ import urllib.parse
 import pandas as pd
 from tqdm import tqdm
 
-from datasmith.scraping.utils import dl_and_open
+from datasmith.scrape.utils import dl_and_open
 
 
 def make_graph_dir(param_dict: dict, all_keys: list) -> str:

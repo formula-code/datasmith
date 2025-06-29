@@ -5,7 +5,7 @@ Detect online and offline dashboards. Assumes access to data/bigquery_repos.csv
 import pandas as pd
 from tqdm.auto import tqdm
 
-from datasmith.scraping.utils import _extract_repo_full_name, _get_repo_metadata
+from datasmith.scrape.utils import _extract_repo_full_name, _get_repo_metadata
 
 
 def is_forked(url: str) -> bool:

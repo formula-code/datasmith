@@ -10,8 +10,8 @@ import sys
 
 import pandas as pd
 
-from datasmith.scraping.detect_dashboards import scrape_github
-from datasmith.scraping.filter_dashboards import filter_dashboards
+from datasmith.scrape.detect_dashboards import scrape_github
+from datasmith.scrape.filter_dashboards import filter_dashboards
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,6 +73,8 @@ def main():
     df["url"] = df.repo_name.apply(lambda x: f"https://github.com/{x}")
 
     filtered_df = filter_dashboards(df, url_col="url")
+    # remove airspeed-velocity/asv
+    filtered_df = filtered_df[filtered_df.repo_name != "airspeed-velocity/asv"]
     if filtered_df.empty:
         raise ValueError("No dashboards found in the repositories.")  # noqa: TRY003
 

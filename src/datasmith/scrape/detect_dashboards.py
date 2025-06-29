@@ -6,7 +6,8 @@ from collections.abc import Generator
 
 import requests
 
-from datasmith.scraping.utils import SEARCH_URL, _build_headers, _request_with_backoff
+from datasmith.scrape.utils import SEARCH_URL
+from datasmith.utils import _build_headers, _request_with_backoff
 
 
 def search_pages(
