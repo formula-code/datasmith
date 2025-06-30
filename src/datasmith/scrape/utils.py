@@ -2,14 +2,9 @@ import os
 import re
 import sys
 import time
-import typing
-from typing import cast
 from urllib.parse import unquote, urlparse
 
 import requests
-from requests.exceptions import HTTPError, RequestException
-
-from datasmith.utils import CACHE_LOCATION, _request_with_backoff, cache_completion
 
 SEARCH_URL = "https://api.github.com/search/code"
 
@@ -51,29 +46,14 @@ def _extract_repo_full_name(url: str) -> str | None:
     return f"{owner}/{repo}"
 
 
-@cache_completion(CACHE_LOCATION)
-def _get_repo_metadata(full_name: str) -> dict[str, typing.Any] | None:
+def _parse_commit_url(url: str) -> tuple[str, str, str]:
     """
-    Call the GitHub REST API for ``owner/repo`` and return the JSON.
-    Falls back to *None* when the repo cannot be reached.
+    Parse a GitHub commit URL and return the owner, repo, and commit SHA.
     """
-    if not full_name:
-        return None
-
-    api_url = f"https://api.github.com/repos/{full_name}"
-    try:
-        r = _request_with_backoff(api_url)
-    except HTTPError as e:
-        status = getattr(e.response, "status_code", None)
-        if status in (404, 451, 410):
-            return None
-        print(f"Failed to fetch {api_url}: {status} {e}")
-        return None
-    except RequestException as e:
-        print(f"Error fetching {api_url}: {e}")
-        return None
-
-    return cast(dict[str, typing.Any], r.json())
+    m = re.match(r"https://github\.com/([^/]+)/([^/]+)/commit/([0-9a-f]{7,40})", url)
+    if not m:
+        raise ValueError(f"Not a GitHub commit URL: {url!r}")  # noqa: TRY003
+    return m.group(1), m.group(2), m.group(3)
 
 
 def dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = False) -> str | None:

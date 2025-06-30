@@ -1,15 +1,11 @@
 from requests.exceptions import HTTPError
 
-from datasmith.utils import retrieve_commit_info
-
-COMMIT_URL = "https://api.github.com/repos/{repository}/commits/{commit_sha}"
-REPO_URL = "https://api.github.com/repos/{repository}"
+from datasmith.utils import _get_github_metadata
 
 
 def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
-    url = COMMIT_URL.format(repository=repo_name, commit_sha=commit_sha)
     try:
-        commit_info = retrieve_commit_info(url)
+        commit_info = _get_github_metadata(endpoint=f"/repos/{repo_name}/commits/{commit_sha}")
     except HTTPError as e:
         print(f"Error fetching commit info: {e}")
         return {
@@ -34,11 +30,8 @@ def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
 
 
 def find_file_in_tree(repo: str, filename: str, branch: str | None = None) -> list[str] | None:
-    repo_api = REPO_URL.format(repository=repo)
-
-    # 1) If no branch was given, look up the repos default_branch
     if branch is None:
-        repo_info = retrieve_commit_info(repo_api)
+        repo_info = _get_github_metadata(endpoint=f"/repos/{repo}")
         # sometimes the API returns a single-element list
         if isinstance(repo_info, list):
             if len(repo_info) == 1:
@@ -49,9 +42,7 @@ def find_file_in_tree(repo: str, filename: str, branch: str | None = None) -> li
         if not branch:
             raise ValueError("Could not determine the default branch for this repository")  # noqa: TRY003
 
-    # 2) Resolve that branch name to a commit SHA
-    ref_url = f"{repo_api}/git/refs/heads/{branch}"
-    r = retrieve_commit_info(ref_url)
+    r = _get_github_metadata(endpoint=f"/repos/{repo}/git/refs/heads/{branch}")
     if isinstance(r, list):
         if len(r) == 1:
             r = r[0]
@@ -59,9 +50,7 @@ def find_file_in_tree(repo: str, filename: str, branch: str | None = None) -> li
             raise ValueError()
     sha = r["object"]["sha"]
 
-    # 3) Fetch the recursive tree for that SHA
-    tree_url = f"{repo_api}/git/trees/{sha}?recursive=1"
-    r = retrieve_commit_info(tree_url)
+    r = _get_github_metadata(endpoint=f"/repos/{repo}/git/trees/{sha}?recursive=1")
     tree = r["tree"]
 
     # 4) Return any blobs whose path ends with the filename

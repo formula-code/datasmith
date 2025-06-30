@@ -2,10 +2,25 @@
 Detect online and offline dashboards. Assumes access to data/bigquery_repos.csv
 """
 
+import typing
+
 import pandas as pd
 from tqdm.auto import tqdm
 
-from datasmith.scrape.utils import _extract_repo_full_name, _get_repo_metadata
+from datasmith.scrape.utils import _extract_repo_full_name
+from datasmith.utils import _get_github_metadata
+
+
+def _get_repo_metadata(full_name: str | None) -> dict[str, typing.Any] | None:
+    """
+    Call the GitHub REST API for ``owner/repo`` and return the JSON.
+    Falls back to *None* when the repo cannot be reached.
+    """
+    if not full_name:
+        return None
+
+    metadata: dict[str, typing.Any] | None = _get_github_metadata(endpoint=f"/repos/{full_name}")
+    return metadata
 
 
 def is_forked(url: str) -> bool:

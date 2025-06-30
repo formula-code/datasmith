@@ -20,14 +20,20 @@ def search_pages(
     jitter: float = 0.3,
 ) -> Generator[str, None, None]:
     seen: set[str] = set()
-    headers = _build_headers()
+    headers = _build_headers(name="github")
 
     with requests.Session() as sess:
         sess.headers.update(headers)
         for page in range(1, max_pages + 1):
             url = f"{SEARCH_URL}?q={query}&per_page={per_page}&page={page}"
             data = _request_with_backoff(
-                url=url, session=sess, rps=2, base_delay=base_delay, max_retries=max_retries, max_backoff=max_backoff
+                url=url,
+                site_name="github",
+                session=sess,
+                rps=2,
+                base_delay=base_delay,
+                max_retries=max_retries,
+                max_backoff=max_backoff,
             ).json()
             items = data.get("items", [])
             if not items:

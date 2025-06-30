@@ -23,6 +23,10 @@ dependencies = [
     "simple-useragent",
     "requests",
     "docker",
+    "asv",
+    "numpy",
+    "ruptures",
+    "tiktoken",
 ]
 
 [project.urls]

@@ -21,7 +21,7 @@ def query_commits(
 ) -> typing.Optional[dict[str, typing.Any]]:
     url = PULL_URL.format(repository=repo_name) + f"?state={state}&per_page={per_page}&page={page}"
     try:
-        r = _request_with_backoff(url, **query_args)
+        r = _request_with_backoff(url, site_name="github", **query_args)
     except HTTPError as e:
         status = getattr(e.response, "status_code", None)
         if status in (404, 451, 410):

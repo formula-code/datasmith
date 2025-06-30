@@ -1,5 +1,8 @@
+import logging
 import os
-import sys
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def setup_environment() -> None:
@@ -9,7 +12,7 @@ def setup_environment() -> None:
             tokens = {line.split("=")[0].strip(): line.split("=")[1].strip() for line in lines if "=" in line}
         os.environ.update(tokens)
     else:
-        sys.stderr.write("No tokens.env file found. Skipping environment variable setup.\n")
+        logger.warning("No tokens.env file found. Skipping environment variable setup.")
 
 
 setup_environment()

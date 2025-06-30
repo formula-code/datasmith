@@ -38,6 +38,16 @@ $ uv run pre-commit run -a
 $ make check
 ```
 
+For querying github and codecov, we need to set up a few environment variables. You can do this by creating a `tokens.env` file in the root of the repository with the following content.
+
+```bash
+$ cat tokens.env
+GH_TOKEN=github_pat_???
+COVERALLS_TOKEN=XdK???
+CODECOV_TOKEN=54c6???
+CACHE_LOCATION=/home/???/formulacode/datasmith/cache.db
+```
+
 ## FormulaCode-Lite
 
 FormulaCode Lite is a small dataset of 5 repositories with ~440 performance improving commits that was presented in the workshop paper. These repositories have a combined 157,000+ GitHub stars and 200,000+ academic citations and each repository uses Airspeed Velocity for regression testing. FormulaCode Lite was an initial proof-of-concept for the methodology used to build the larger FormulaCode dataset.
@@ -66,6 +76,22 @@ This should create a directory called `raw_datasets/downloads` that contains the
 
 
 ### 2. Detect performance improving commits
+
+To detect performance improving commits, we provide two methods:
+1. **asv's internal regression detection**: Airspeed Velocity maintains a built-in regression detection mechanism that is finetuned to detect changes in performance when the underlying data is noisy.
+2. **rupture's RBF kernel**: This is a more general-purpose method that detects changes in the performance data using a kernel-based change point detection algorithm.
+
+Either method can be used by passing `--method 'asv'` or `--method 'rbf'` to the script. The `rupture` method is enabled by default as we might not have mean + standard deviation data for all commits in the dataset (that is required by `asv.step_detect`).
+
+```bash
+$ python scripts/detect_breakpoints.py --build-reports --method 'rbf' --compute-coverage --dataset raw_datasets/downloads/astropy
+# Saved break-points to 'raw_datasets/downloads/astropy/breakpoints/breakpoints.csv'.
+# Saved reports to 'raw_datasets/downloads/astropy/breakpoints/reports'.
+# Saved merged data to 'raw_datasets/downloads/astropy/breakpoints/merged.csv'.
+```
+
+These files (`breakpoints.csv`, `reports`, and `merged.csv`) contain the detected performance improving commits, a markdown report for each commit (with useful hints for the optimizer), and a merged CSV file that contains the performance data for all commits in the repository. These files can then be used in the evaluation harness for benchmarking the performance of an optimizer `[@TODO:link_formula-code/swebench-evaluation-harness]`.
+
 
 
 ## FormulaCode
