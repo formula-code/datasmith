@@ -116,6 +116,7 @@ def summarize_gh_resource(res: tuple[str, ...]) -> str:
 
 
 def md_commit_block(c: dict, owner: str, repo: str) -> str:
+    message = c["message"].replace("\n", "\n  ")
     return textwrap.dedent(
         f"""
         Generic Information:
@@ -123,7 +124,7 @@ def md_commit_block(c: dict, owner: str, repo: str) -> str:
          - Commit: https://github.com/{owner}/{repo}/commit/{c["sha"]}
          - Date of Commit: {c["date_iso"]}
         ## Commit message
-          {c["message"].replace("\n", "\n  ")}
+          {message}
         """
     ).strip("\n")
 
