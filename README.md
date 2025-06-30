@@ -98,7 +98,7 @@ These files (`breakpoints.csv`, `reports`, and `merged.csv`) contain the detecte
 
 FormulaCode is a larger dataset of 701 repositories with ??? performance improving commits that is being prepared for a future publication. The dataset is built using the same methodology as FormulaCode Lite, but with a larger set of repositories and more quality-of-life features improvements.
 
-![img](static/CommitDist.png)
+![img](static/CommitDist2.png)
 
 ### 3. Scrape Github for asv-compatible repositories
 
