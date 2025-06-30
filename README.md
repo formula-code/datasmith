@@ -131,7 +131,8 @@ $ python scripts/analyze_benchmark_results.py --benchmark-results benchmark_resu
 
 ## TODOs
 
-- [ ] FormulaCode Lite: Add ethical scraper.
-- [ ] FormulaCode: Add script to find and filter all asv repositories.
+- [X] FormulaCode Lite: Add ethical scraper.
+- [X] FormulaCode: Add script to find and filter all asv repositories.
+- [X] FormulaCode: Large scale benchmarking for all commits in the dataset
+- [ ] FormulaCode: Parameter tuning for large scale benchmarking scripts.
 - [ ] FormulaCode: `asv` supports profiling the benchmarking function. We should collect such profiling data for all commits in the dataset.
-- [ ] FormulaCode: Large scale benchmarking for all commits in the dataset + parameter tuning.
