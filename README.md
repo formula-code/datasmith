@@ -100,16 +100,29 @@ FormulaCode is a larger dataset of 701 repositories with ??? performance improvi
 
 ![img](static/CommitDist2.png)
 
-### 3. Scrape Github for asv-compatible repositories
+### 1. Scrape Github for asv-compatible repositories
 
+We start by collecting all repositories that use Airspeed Velocity (asv) for benchmarking. We developed two scripts for this purpose:
+
+1. Google BigQuery: Google maintains a public dataset of GitHub repositories that can be queried using SQL. We use this to find all repositories that have a `asv.conf.json` file in their root directory.
+
+2. Github Search API: We use the GitHub Search API to find all repositories that have a `asv.conf.json` file in their root directory. This is a more comprehensive search that can find repositories that are not indexed by Google BigQuery. _This version is implemented here._
+
+To run the script, you need to have a GitHub token with `repo` and `read:org` permissions. You can create a token by following the instructions [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token).
+
+
+The scraper can be run using the following command:
 ```bash
 $ python scripts/scrape_repositories.py --outfile raw_datasets/asv_benchmarks.csv
 # Writes raw_datasets/asv_benchmarks.csv and raw_datasets/asv_benchmarks_filtered.csv
 ```
 
+The `asv_benchmarks_filtered.csv` file contains a subset of the repositories that aren't forks / reuploads / pass other sanity checks. We found around 700 filtered repositories for this dataset.
+
 
 ### 4. Collect relevant commits for all repositories
 
+Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch. We use the `collect_commits.py` script to do this. The `filter_commits.py` script then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes). The script also limits the number of repositories to a maximum of 350 to ensure we don't burden the GitHub API with too many requests. The scripts can be run as follows:
 
 ```bash
 $ python scripts/collect_commits.py --dashboards raw_datasets/asv_benchmarks_filtered.csv --outfile raw_datasets/benchmark_commits_merged.jsonl
@@ -117,10 +130,21 @@ $ python scripts/filter_commits.py --filtered-benchmarks-pth raw_datasets/asv_be
 ```
 ### 5. Benchmark all commits
 
+> [!IMPORTANT]
+> We haven't finished benchmarking all commits yet. The resources required to benchmark all commits (initially) is very large. We present a basic, scalable benchmarking script that can be used to benchmark all commits in parallel (without any of the code needed to deploy to AWS/GCP/SLURM/etc.)
+
+Once we've collected the relevant commits, we can benchmark their performance using `asv`. `asv` includes many quality-of-life features to ensure that benchmarks are robust to noise and that the results are reproducible. Our script benchmarks multiple commits in parallel. Proper benchmarking requires some system tuning. Refer to the [asv tuning guidelines](https://asv.readthedocs.io/en/latest/tuning.html) for more details.
 
 ```bash
+(sudo) $ export OPENBLAS_NUM_THREADS=1
+(sudo) $ export MKL_NUM_THREADS=1
+(sudo) $ export OMP_NUM_THREADS=1
+(sudo) $ sudo python -m pyperf system tune
+# in userspace:
 $ python scripts/benchmark_commits.py --filtered-commits raw_datasets/benchmark_commits_filtered.jsonl --max-concurrency 15 --num-cores 4 --asv-args "--interleave-rounds --append-samples -a rounds=2 -a repeat=2" --output-dir benchmark_results/
 ```
+
+Generally, each benchmark takes ~2 minutes to run, so benchmarking 70,000 commits on 16 dedicated 4-core machines takes around 6 days. The script will create a directory called `benchmark_results/` that contains the results of the benchmarks for each commit. The results are stored in a structured format that can be easily processed later.
 
 ### 6. Analyze benchmark results
 
