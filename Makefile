@@ -4,6 +4,22 @@ install: ## Install the virtual environment and install the pre-commit hooks
 	@uv sync
 	@uv run pre-commit install
 
+.PHONY: backup
+backup: ## Create a backup of the datasets, results, and analysis directories
+	@echo "🚀 Creating backup archive"
+	@/usr/bin/env bash -euo pipefail -c '\
+		if [ ! -f tokens.env ]; then \
+			echo "❌ Error: tokens.env file not found"; exit 1; \
+		fi; \
+		BACKUP_DIR=$$(grep -E "^BACKUP_DIR=" tokens.env | head -n1 | cut -d "=" -f2-); \
+		if [ -z "$$BACKUP_DIR" ]; then \
+			echo "❌ Error: BACKUP_DIR not defined in tokens.env"; exit 1; \
+		fi; \
+		mkdir -p "$$BACKUP_DIR"; \
+		zip -qr "$$BACKUP_DIR/datasmith.bckp" raw_datasets results analysis; \
+		cp -f cache.db "$$BACKUP_DIR/datasmith.cache.bckp"; \
+	'
+
 .PHONY: check
 check: ## Run code quality tools.
 	@echo "🚀 Checking lock file consistency with 'pyproject.toml'"

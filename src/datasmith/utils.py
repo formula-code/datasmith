@@ -258,7 +258,6 @@ def _get_github_metadata(endpoint: str, params: dict[str, str] | None = None) ->
     """
     if not endpoint:
         return None
-
     endpoint = endpoint.lstrip("/")
     api_url = prepare_url(f"https://api.github.com/{endpoint}", params=params)
     try:
@@ -267,10 +266,15 @@ def _get_github_metadata(endpoint: str, params: dict[str, str] | None = None) ->
         status = getattr(e.response, "status_code", None)
         if status in (404, 451, 410):
             return None
-        print(f"Failed to fetch {api_url}: {status} {e}")
+        # print(f"Failed to fetch {api_url}: {status} {e}")
+        logger.error("Failed to fetch %s: %s %s", api_url, status, e, exc_info=True)
         return None
     except RequestException as e:
-        print(f"Error fetching {api_url}: {e}")
+        # print(f"Error fetching {api_url}: {e}")
+        logger.error("Error fetching %s: %s", api_url, e, exc_info=True)
+        return None
+    except RuntimeError as e:
+        logger.error("Runtime error fetching %s: %s", api_url, e, exc_info=True)
         return None
 
     return cast(dict[str, typing.Any], r.json())
@@ -292,10 +296,11 @@ def _get_codecov_metadata(endpoint: str, params: dict[str, str] | None = None) -
         status = getattr(e.response, "status_code", None)
         if status in (404, 451, 410):
             return None
-        print(f"Failed to fetch {api_url}: {status} {e}")
+        # print(f"Failed to fetch {api_url}: {status} {e}")
+        logger.error("Failed to fetch %s: %s %s", api_url, status, e, exc_info=True)
         return None
     except RequestException as e:
-        print(f"Error fetching {api_url}: {e}")
+        logger.error("Error fetching %s: %s", api_url, e, exc_info=True)
         return None
 
     return cast(dict[str, typing.Any], r.json())

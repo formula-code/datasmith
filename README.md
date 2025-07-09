@@ -126,7 +126,7 @@ Given the list of repositories, we find the subset of commits that have already 
 
 ```bash
 $ python scripts/collect_commits.py --dashboards raw_datasets/asv_benchmarks_filtered.csv --outfile raw_datasets/benchmark_commits_merged.jsonl
-$ python scripts/filter_commits.py --filtered-benchmarks-pth raw_datasets/asv_benchmarks_filtered.csv --merged-commits-pth raw_datasets/benchmark_commits_merged.jsonl --output-pth raw_datasets/benchmark_commits_filtered.jsonl --max-repos 150 --threads 8 --procs 8
+$ python scripts/filter_commits.py --filtered-benchmarks-pth raw_datasets/asv_benchmarks_filtered.csv --merged-commits-pth raw_datasets/benchmark_commits_merged.jsonl --output-pth raw_datasets/benchmark_commits_filtered.jsonl --max-repos 350 --threads 8 --procs 8
 ```
 ### 5. Benchmark all commits
 
@@ -136,6 +136,7 @@ $ python scripts/filter_commits.py --filtered-benchmarks-pth raw_datasets/asv_be
 Once we've collected the relevant commits, we can benchmark their performance using `asv`. `asv` includes many quality-of-life features to ensure that benchmarks are robust to noise and that the results are reproducible. Our script benchmarks multiple commits in parallel. Proper benchmarking requires some system tuning. Refer to the [asv tuning guidelines](https://asv.readthedocs.io/en/latest/tuning.html) for more details.
 
 ```bash
+# in a root shell:
 (sudo) $ export OPENBLAS_NUM_THREADS=1
 (sudo) $ export MKL_NUM_THREADS=1
 (sudo) $ export OMP_NUM_THREADS=1
@@ -149,7 +150,7 @@ Generally, each benchmark takes ~2 minutes to run, so benchmarking 70,000 commit
 ### 6. Analyze benchmark results
 
 ```bash
-$ python scripts/analyze_benchmark_results.py --benchmark-results benchmark_results/ --output-dir analysis
+$ python scripts/analyze_benchmark_results.py --results-dir benchmark_results/results --output-dir analysis/ --commit-metadata raw_datasets/benchmark_commits_filtered.jsonl
 ```
 
 

@@ -6,8 +6,21 @@ from datasmith.utils import _get_github_metadata
 def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
     try:
         commit_info = _get_github_metadata(endpoint=f"/repos/{repo_name}/commits/{commit_sha}")
+        if commit_info is None:
+            # Try to bypass cache if the commit info is not found
+            commit_info = _get_github_metadata(endpoint=f"/repos/{repo_name}/commits/{commit_sha}", bypass_cache=True)
     except HTTPError as e:
         print(f"Error fetching commit info: {e}")
+        return {
+            "sha": commit_sha,
+            "date": None,
+            "message": None,
+            "total_additions": 0,
+            "total_deletions": 0,
+            "total_files_changed": 0,
+            "files_changed": "",
+        }
+    if not commit_info:
         return {
             "sha": commit_sha,
             "date": None,

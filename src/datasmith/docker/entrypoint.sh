@@ -43,6 +43,7 @@ config.results_dir = str(path / 'results')
 config.html_dir = str(path / 'html')
 
 asv.util.write_json('asv.conf.json', config.__dict__, api_version=1)
+asv.util.write_json(path / 'asv.conf.json', config.__dict__, api_version=1)
 "
 
     micromamba create -y -n "asv_${version}" -c conda-forge python="$version" \

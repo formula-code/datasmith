@@ -18,15 +18,16 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "pandas",
-    "tqdm",
-    "simple-useragent",
-    "requests",
-    "docker",
     "asv",
+    "docker",
+    "gitpython",
     "numpy",
+    "pandas",
+    "requests",
     "ruptures",
+    "simple-useragent",
     "tiktoken",
+    "tqdm",
 ]
 
 [project.urls]
@@ -36,23 +37,24 @@ Documentation = "https://formula-code.github.io/datasmith/"
 
 [dependency-groups]
 dev = [
-    "pytest>=7.2.0",
-    "pre-commit>=2.20.0",
-    "tox-uv>=1.11.3",
-    "deptry>=0.23.0",
-    "mypy>=0.991",
-    "pytest-cov>=4.0.0",
-    "docker",
-    "ruff>=0.11.5",
     "asv",
-    "pyarrow",
+    "deptry>=0.23.0",
+    "docker",
+    "gitpython",
+    "ipykernel",
     "ipython",
+    "matplotlib",
+    "mypy>=0.991",
     "pandas-stubs",
+    "pre-commit>=2.20.0",
+    "pyarrow",
+    "pytest-cov>=4.0.0",
+    "pytest>=7.2.0",
+    "ruff>=0.11.5",
+    "tox-uv>=1.11.3",
+    "types-docker",
     "types-requests",
     "types-tqdm",
-    "types-docker",
-    "ipykernel",
-    "matplotlib",
 ]
 
 [build-system]
