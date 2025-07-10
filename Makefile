@@ -16,7 +16,7 @@ backup: ## Create a backup of the datasets, results, and analysis directories
 			echo "❌ Error: BACKUP_DIR not defined in tokens.env"; exit 1; \
 		fi; \
 		mkdir -p "$$BACKUP_DIR"; \
-		zip -qr "$$BACKUP_DIR/datasmith.bckp" raw_datasets results analysis; \
+		zip -qr "$$BACKUP_DIR/datasmith.bckp" artifacts; \
 		cp -f cache.db "$$BACKUP_DIR/datasmith.cache.bckp"; \
 	'
 
