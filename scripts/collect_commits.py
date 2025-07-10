@@ -1,9 +1,12 @@
 import argparse
-import sys
 
 import pandas as pd
 
 from datasmith.execution.collect_commits import search_commits
+from datasmith.logging_config import configure_logging
+
+# Configure logging for the script
+logger = configure_logging()
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,7 +44,7 @@ if __name__ == "__main__":
     idx = 0
     all_commits = []
     for repo_name, url in zip(repo_names, urls):
-        sys.stderr.write(f"Collecting commits for {url} (repo_name: {repo_name})\n")
+        logger.info("Collecting commits for %s (repo_name: %s)", url, repo_name)
         commits = search_commits(
             repo_name=repo_name,
             query=args.query,

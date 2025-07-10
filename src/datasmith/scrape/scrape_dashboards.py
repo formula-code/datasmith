@@ -10,7 +10,10 @@ import pandas as pd
 from tqdm import tqdm
 
 from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.logging_config import get_logger
 from datasmith.scrape.utils import dl_and_open
+
+logger = get_logger("scrape.scrape_dashboards")
 
 
 def make_graph_dir(param_dict: dict, all_keys: list, *, quote: bool) -> str:
@@ -58,7 +61,7 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
     index_src = join_path("index.json")
     index_path = dl_and_open(index_src, html_dir, base=base_url, force=force)
     if not index_path:
-        print(f"Failed to read index.json from {base_url}")
+        logger.error("Failed to read index.json from %s", base_url)
         return None
     with open(index_path, encoding="utf-8") as fh:
         index_data = json.load(fh)
@@ -80,8 +83,8 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
             try:
                 with open(local, encoding="utf-8") as fh:
                     data = json.load(fh)
-            except json.JSONDecodeError as e:
-                print(f"Failed to decode {local}: {e}")
+            except json.JSONDecodeError:
+                logger.exception("Failed to decode %s", local)
                 continue
             df = pd.DataFrame(data, columns=["revision", "time"])
             df["hash"] = df["revision"].astype(str).map(index_data["revision_to_hash"])
@@ -91,7 +94,7 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
             frames.append(df)
 
     all_benchmarks = pd.concat(frames, ignore_index=True)
-    print(f"Collected {len(all_benchmarks):,} rows from {len(frames):,} benchmark files.")
+    logger.info("Collected %s rows from %s benchmark files.", f"{len(all_benchmarks):,}", f"{len(frames):,}")
 
     all_summaries = []
     for summary_url in tqdm(summaries, desc="summaries"):
@@ -101,8 +104,8 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
         try:
             with open(summary_pth, encoding="utf-8") as f:
                 data = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"Failed to decode {summary_pth}: {e}")
+        except json.JSONDecodeError:
+            logger.exception("Failed to decode %s", summary_pth)
             continue
         benchmark_name = os.path.basename(summary_pth).replace(".json", "")
         df = pd.DataFrame(data, columns=["revision", "time"])

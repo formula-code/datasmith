@@ -1,8 +1,9 @@
-import logging
 import os
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from datasmith.logging_config import configure_logging
+
+# Configure logging with the centralized configuration
+logger = configure_logging()
 
 
 def setup_environment() -> None:

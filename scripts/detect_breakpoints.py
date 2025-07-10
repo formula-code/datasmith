@@ -3,8 +3,12 @@ from pathlib import Path
 
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.detection.detect_breakpoints import detect_all_breakpoints
+from datasmith.logging_config import configure_logging
 from datasmith.scrape.build_reports import breakpoints_scrape_comments
 from datasmith.scrape.code_coverage import generate_coverage_dataframe
+
+# Configure logging for the script
+logger = configure_logging()
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,7 +69,7 @@ def main() -> None:  # pragma: no cover - CLI glue
     summary_df = collection.summaries
     breakpoints = detect_all_breakpoints(summary_df, method=args.method).dropna(subset=["hash"])
     collection.breakpoints = breakpoints
-    print(f"Found {len(breakpoints):,} potential downward shifts.")
+    logger.info("Found %s potential downward shifts.", f"{len(breakpoints):,}")
 
     if args.compute_coverage:
         coverage_df = generate_coverage_dataframe(
@@ -75,8 +79,8 @@ def main() -> None:  # pragma: no cover - CLI glue
         )
         collection.coverage = coverage_df
 
-    if args.build_reports:
-        print("Building GitHub commit reports and merged dataframe ...", flush=True)
+    if args.build_reports and args.compute_coverage:
+        logger.info("Building GitHub commit reports and merged dataframe ...")
         new_breakpoints_df, comments_df = breakpoints_scrape_comments(
             breakpoints_df=breakpoints,
             coverage_df=coverage_df,
@@ -87,7 +91,7 @@ def main() -> None:  # pragma: no cover - CLI glue
 
     # Save the collection.
     collection.save(dataset_path.parent / "breakpoints.fc.pkl")
-    print(f"Enriched breakpoints saved to '{dataset_path.parent / 'breakpoints.fc.pkl'}'.")
+    logger.info("Enriched breakpoints saved to '%s'.", dataset_path.parent / "breakpoints.fc.pkl")
 
 
 if __name__ == "__main__":

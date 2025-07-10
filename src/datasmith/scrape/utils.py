@@ -1,27 +1,30 @@
 import re
 import shutil
-import sys
 import time
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
 import requests
 
+from datasmith.logging_config import get_logger
 from datasmith.utils import cache_completion
+
+logger = get_logger("scrape.utils")
 
 SEARCH_URL = "https://api.github.com/search/code"
 
 
 def polite_sleep(seconds: float) -> None:
+    from datasmith.logging_config import progress_logger
+
     until = time.time() + seconds
     while True:
         remaining = until - time.time()
         if remaining <= 0:
             break
-        sys.stderr.write(f"\r⏳  Waiting {remaining:4.0f} s …")
-        sys.stderr.flush()
+        progress_logger.update_progress(f"⏳  Waiting {remaining:4.0f} s …")
         time.sleep(min(remaining, 1))
-    sys.stderr.write("\r\033[K")
+    progress_logger.finish_progress()
 
 
 _HEX = re.compile(r"[0-9a-fA-F]{7,40}$")

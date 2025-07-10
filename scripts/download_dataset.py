@@ -4,7 +4,11 @@ from pathlib import Path
 import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.logging_config import configure_logging
 from datasmith.scrape.scrape_dashboards import make_benchmark_from_html
+
+# Configure logging for the script
+logger = configure_logging()
 
 
 def parse_args() -> argparse.Namespace:
@@ -18,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
     dashboards = pd.read_json(args.dashboards, lines=True)
 
@@ -28,10 +32,13 @@ def main():
             base_url=row["url"], html_dir=row["output_dir"]
         )
         dashboard_collection.save(path=out_path)
-        print(
-            f"Saved {len(dashboard_collection.benchmarks):,} benchmark rows and {len(dashboard_collection.summaries):,} summary rows -> {out_path}"
+        logger.info(
+            "Saved %s benchmark rows and %s summary rows -> %s",
+            f"{len(dashboard_collection.benchmarks):,}",
+            f"{len(dashboard_collection.summaries):,}",
+            out_path,
         )
-        print(f"Data downloaded to {row['output_dir']}")
+        logger.info("Data downloaded to %s", row["output_dir"])
 
 
 if __name__ == "__main__":

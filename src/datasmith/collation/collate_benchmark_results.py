@@ -9,6 +9,10 @@ from asv.config import Config  # type: ignore[import-untyped]
 from asv.util import write_json  # type: ignore[import-untyped]
 from git import Repo
 
+from datasmith.logging_config import get_logger
+
+logger = get_logger("collation.collate_benchmark_results")
+
 
 def _get_all_commits_dict(all_commits_df: pd.DataFrame) -> dict:
     """Return a dict mapping commit_sha to metadata."""
@@ -172,9 +176,9 @@ def publish_repo(
     # Clone or reuse the repository
     if repo_local_dir.exists():
         if skip_if_present:
-            print(f"Repository {repo_local_dir} already exists - reusing.")
+            logger.info("Repository %s already exists - reusing.", repo_local_dir)
         else:
-            print(f"Removing {repo_local_dir} for a fresh clone…")
+            logger.info("Removing %s for a fresh clone…", repo_local_dir)
             shutil.rmtree(repo_local_dir)
             Repo.clone_from(repo_url, repo_local_dir)
     else:

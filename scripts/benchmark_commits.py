@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import math
 import os
 from pathlib import Path
@@ -86,12 +85,6 @@ def main() -> None:
     # Create the results and logs directories if they don't exist
     Path(f"{output_dir}/results").mkdir(parents=True, exist_ok=True)
     Path(f"{output_dir}/logs").mkdir(parents=True, exist_ok=True)
-
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)-8s %(message)s",
-        level=logging.INFO,
-        datefmt="%H:%M:%S",
-    )
 
     client = get_docker_client()
 

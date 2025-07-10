@@ -1,13 +1,15 @@
 import csv
 import random
-import sys
 import time
 from collections.abc import Generator
 
 import requests
 
+from datasmith.logging_config import get_logger
 from datasmith.scrape.utils import SEARCH_URL
 from datasmith.utils import _build_headers, _request_with_backoff
+
+logger = get_logger("scrape.detect_dashboards")
 
 
 def search_pages(
@@ -52,8 +54,8 @@ def search_pages(
 
 
 def scrape_github(query: str, outfile: str, search_args: dict) -> None:
-    sys.stderr.write(f"🔍  Query: “{query}”\n")
-    sys.stderr.write(f"Writing unique repos to {outfile}\n")
+    logger.info("🔍  Query: %s", query)
+    logger.info("Writing unique repos to %s", outfile)
 
     with open(outfile, "w", newline="", encoding="utf-8") as fp:
         writer = csv.writer(fp)
@@ -71,6 +73,6 @@ def scrape_github(query: str, outfile: str, search_args: dict) -> None:
         ):
             writer.writerow([repo])
             if count % 50 == 0:
-                sys.stderr.write(f"{count} repositories so far …\n")
+                logger.info("%s repositories so far …", count)
 
-    sys.stderr.write(f"✅  Finished: {count} repos saved.\n")
+    logger.info("✅  Finished: %s repos saved.", count)

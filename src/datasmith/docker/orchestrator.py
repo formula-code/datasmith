@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 import docker
 from docker.errors import DockerException, ImageNotFound
+
+from datasmith.logging_config import get_logger
+
+logger = get_logger("docker.orchestrator")
 
 
 def get_docker_client() -> docker.DockerClient:
@@ -22,10 +25,10 @@ def ensure_image(client: docker.DockerClient, image_name: str, repo_url: str, do
     """Ensure IMAGE exists locally, optionally pulling it."""
     try:
         client.images.get(image_name)
-        logging.info("Docker image '%s' found locally.", image_name)
+        logger.info("Docker image '%s' found locally.", image_name)
     except ImageNotFound as exc:
         if repo_url:
-            logging.info("Docker image '%s' not found locally, building it with REPO_URL=%s", image_name, repo_url)
+            logger.info("Docker image '%s' not found locally, building it with REPO_URL=%s", image_name, repo_url)
             try:
                 client.images.build(
                     path=docker_dir,
@@ -45,7 +48,7 @@ def ensure_image(client: docker.DockerClient, image_name: str, repo_url: str, do
 async def run_container(
     client: docker.DockerClient,
     idx: int,
-    cores: str | Sequence[int],  # ← was “core: int”
+    cores: str | Sequence[int],
     commit_sha: str,
     asv_conf_path: str,
     image: str,
@@ -71,10 +74,10 @@ async def run_container(
 
     def _launch() -> int:
         container_name = f"asv_{idx}_{commit_sha[:7]}"
-        logging.debug("docker run name=%s cpuset=%s env=%s", container_name, cpuset, env)
+        logger.debug("docker run name=%s cpuset=%s env=%s", container_name, cpuset, env)
 
         # Log the exact command a human could copy-paste
-        logging.info(
+        logger.info(
             "$ docker run --rm --name %s -e COMMIT_SHA=%s -e ASV_CONF_PATH=%s -e ASV_ARGS='%s' --cpuset-cpus %s %s",
             container_name,
             commit_sha,
@@ -102,9 +105,9 @@ async def run_container(
             with log_file.open("a") as f:
                 f.write(line.decode())
 
-        logging.info("Container %s started, waiting for it to finish…", container_name)
+        logger.info("Container %s started, waiting for it to finish...", container_name)
         result = container.wait()  # blocks until exit
-        logging.info("Container result: %s", result)
+        logger.info("Container result: %s", result)
         return result.get("StatusCode", 1)
 
     # Keep the event loop responsive
@@ -138,7 +141,7 @@ async def orchestrate(
         core_set = await core_pool.get()  # blocks until a free set exists
         cpuset_str = ",".join(map(str, core_set))  # "0,1,2,3"
 
-        logging.info("▶︎ cores=%s sha=%s", cpuset_str, commit_sha)
+        logger.info("▶︎ cores=%s sha=%s", cpuset_str, commit_sha)
         try:
             rc = await run_container(
                 client=client,
@@ -151,7 +154,7 @@ async def orchestrate(
                 output_dir=output_dir,
             )
             status = "OK" if rc == 0 else f"FAIL({rc})"
-            logging.info("■ cores=%s → %s", cpuset_str, status)
+            logger.info("■ cores=%s → %s", cpuset_str, status)
             return rc
         finally:
             # Always release the core set, even on failure
@@ -166,4 +169,4 @@ async def orchestrate(
     failures = sum(rc != 0 for rc in results)
     if failures:
         sys.exit(f"{failures} container(s) failed")
-    logging.info("All benchmarks finished successfully ✔")
+    logger.info("All benchmarks finished successfully ✔")

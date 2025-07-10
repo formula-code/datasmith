@@ -7,6 +7,10 @@ import numpy as np
 import pandas as pd
 import ruptures as rpt  # type: ignore[import-untyped]
 
+from datasmith.logging_config import get_logger
+
+logger = get_logger("detection.detect_breakpoints")
+
 
 def get_breakpoints(df: pd.DataFrame) -> list[dict] | None:
     """Return a list of significant downward shifts for **one** benchmark."""
@@ -40,8 +44,8 @@ def get_breakpoints_asv(df: pd.DataFrame) -> list[dict] | None:
     if "time_str" in df.columns:
         y_sigma = df["time_std"].to_numpy(dtype=float)
     else:
-        print("Warning: No time_std column found, using None for sigma.")
-        print("Robutstness of the detection may be reduced.")
+        logger.warning("No time_std column found, using None for sigma.")
+        logger.warning("Robustness of the detection may be reduced.")
         y_sigma = None
 
     _, _, regression_pos = asv.step_detect.detect_regressions(

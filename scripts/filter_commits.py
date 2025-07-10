@@ -10,6 +10,10 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from datasmith.execution.utils import _get_commit_info, find_file_in_tree
+from datasmith.logging_config import configure_logging
+
+# Configure logging for the script
+logger = configure_logging()
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,7 +76,7 @@ def has_core_file(files_changed: str) -> bool:
             continue
         if not NON_CORE_PATTERNS.search(path):
             # As soon as we find one path that is NOT caught by the
-            # non-core pattern, we know the commit touched “core” code.
+            # non-core pattern, we know the commit touched "core" code.
             return True
     return False
 
@@ -94,7 +98,7 @@ def main() -> None:
     if benchmarks.empty:
         # Nothing to do. create empty output to keep downstream happy.
         Path(args.output_pth).write_text("", encoding="utf-8")
-        print("No repositories with asv.conf.json found. Exiting.")
+        logger.warning("No repositories with asv.conf.json found. Exiting.")
         return
 
     with open(args.merged_commits_pth, encoding="utf-8") as f:
@@ -123,7 +127,7 @@ def main() -> None:
     # commits.to_csv(out_path, index=False)
     commits.to_json(out_path, orient="records", lines=True, index=False)
 
-    print(f"✔ Wrote {len(commits):,} rows → {out_path}")
+    logger.info(f"✔ Wrote {len(commits):,} rows → {out_path}")
 
 
 if __name__ == "__main__":

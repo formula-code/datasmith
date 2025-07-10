@@ -4,9 +4,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.collation.collate_benchmark_results import aggregate_benchmark_runs, publish_repo
+from datasmith.logging_config import configure_logging
 from datasmith.scrape.scrape_dashboards import make_benchmark_from_html
+
+# Configure logging for the script
+logger = configure_logging()
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
     # Load results from the specified directory
     all_commits = []
@@ -61,7 +64,7 @@ def main():
             for f in (args.output_dir / "runs" / repo_path).glob("*/*.json")
         )
         if not contains_jsons:
-            print(f"Warning: No benchmark results found for {repo_path}. Skipping dashboard creation.")
+            logger.warning(f"No benchmark results found for {repo_path}. Skipping dashboard creation.")
             continue
         repo_url = f"https://github.com/{stat['metadata']['repo_name']}.git"
         publish_repo(
@@ -73,17 +76,24 @@ def main():
         )
         # make a dashboard for the repo
         out_path = (args.output_dir / "html" / repo_path / "dashboard.fc.pkl").resolve()
-        dashboard_collection: BenchmarkCollection = make_benchmark_from_html(
+        dashboard_collection = make_benchmark_from_html(
             base_url=str((args.output_dir / "html" / repo_path).resolve()),
             html_dir=str((args.output_dir / "html" / repo_path).resolve()),
             force=False,
         )
+        if not dashboard_collection:
+            logger.warning("No dashboard collection generated for %s. Skipping.", repo_path)
+            continue
         dashboard_collection.save(path=out_path)
-        print(
-            f"Saved {len(dashboard_collection.benchmarks):,} benchmark rows and {len(dashboard_collection.summaries):,} summary rows -> {out_path}"
+        logger.info(
+            "Saved %s benchmark rows and %s summary rows -> %s",
+            f"{len(dashboard_collection.benchmarks):,}",
+            f"{len(dashboard_collection.summaries):,}",
+            out_path,
         )
 
-    print(f"Benchmark results aggregated and saved to {(args.output_dir / 'html').resolve()}.")
+    logger.info("Benchmark results aggregated and saved to %s.", (args.output_dir / "html").resolve())
+    return None
 
 
 if __name__ == "__main__":

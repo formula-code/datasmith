@@ -1,11 +1,9 @@
 import functools
-import logging
 import os
 import pickle
 import random
 import re
 import sqlite3
-import sys
 import threading
 import time
 import typing
@@ -20,7 +18,7 @@ from datasmith import logger
 LIST_UA = sua.get_list(shuffle=True, force_cached=True)
 CACHE_LOCATION = os.getenv("CACHE_LOCATION")
 if not CACHE_LOCATION:
-    print("⚠️  Warning: CACHE_LOCATION environment variable not set. Using default 'cache.db'.")
+    logger.warning("CACHE_LOCATION environment variable not set. Using default 'cache.db'.")
     CACHE_LOCATION = "cache.db"
 
 
@@ -31,7 +29,7 @@ _session = requests.Session()
 
 def _build_github_headers() -> dict[str, str]:
     if "GH_TOKEN" not in os.environ:
-        sys.stderr.write("⚠️  Warning: No GH_TOKEN environment variable found. Rate limits may apply.\n")
+        logger.warning("No GH_TOKEN environment variable found. Rate limits may apply.")
     token = os.environ.get("GH_TOKEN", None)
     return {
         "Accept": "application/vnd.github+json",
@@ -45,7 +43,7 @@ def _build_codecov_headers() -> dict[str, str]:
     Build headers for Codecov API requests.
     """
     if "CODECOV_TOKEN" not in os.environ:
-        sys.stderr.write("⚠️  Warning: No CODECOV_TOKEN environment variable found. Rate limits may apply.\n")
+        logger.warning("No CODECOV_TOKEN environment variable found. Rate limits may apply.")
     token = os.environ.get("CODECOV_TOKEN", None)
     return {
         "Accept": "application/json",
@@ -58,10 +56,6 @@ configured_headers = {
     "github": _build_github_headers,
     "codecov": _build_codecov_headers,
 }
-
-
-def configure_logging(level: int = logging.INFO) -> None:
-    logging.basicConfig(level=level)
 
 
 def _build_headers(name: str) -> dict[str, str]:
@@ -266,11 +260,9 @@ def _get_github_metadata(endpoint: str, params: dict[str, str] | None = None) ->
         status = getattr(e.response, "status_code", None)
         if status in (404, 451, 410):
             return None
-        # print(f"Failed to fetch {api_url}: {status} {e}")
         logger.error("Failed to fetch %s: %s %s", api_url, status, e, exc_info=True)
         return None
     except RequestException as e:
-        # print(f"Error fetching {api_url}: {e}")
         logger.error("Error fetching %s: %s", api_url, e, exc_info=True)
         return None
     except RuntimeError as e:
@@ -278,6 +270,93 @@ def _get_github_metadata(endpoint: str, params: dict[str, str] | None = None) ->
         return None
 
     return cast(dict[str, typing.Any], r.json())
+
+
+def _post_with_backoff(
+    url: str,
+    site_name: str,
+    payload: dict[str, typing.Any],
+    *,
+    session: requests.Session = _session,
+    rps: int = 2,
+    base_delay: float = 1.0,
+    max_retries: int = 5,
+    max_backoff: float = 60.0,
+) -> requests.Response:
+    """POST *payload* to *url* with the same resilience features used for REST."""
+    delay = base_delay
+    last_exc: requests.RequestException | None = None
+
+    for _ in range(1, max_retries + 1):
+        # --- client-side throttle ---
+        time.sleep(max(0.0, 1 / rps))
+
+        try:
+            resp = session.post(
+                url,
+                headers=_build_headers(site_name),
+                json=payload,
+                timeout=15,
+            )
+
+            if resp.status_code in (403, 429):
+                # --- primary or secondary rate limit ---
+                remaining = resp.headers.get("X-RateLimit-Remaining", "1")
+                reset_at = resp.headers.get("X-RateLimit-Reset")
+                if remaining == "0" and reset_at:
+                    sleep_for = max(0.0, float(reset_at) - time.time())
+                else:
+                    sleep_for = min(delay, max_backoff)
+                resp.close()
+                time.sleep(sleep_for + random.uniform(0, 1))  # noqa: S311
+                delay *= 2
+                continue
+
+            resp.raise_for_status()
+            return resp  # noqa: TRY300
+
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+            last_exc = exc
+            time.sleep(min(delay, max_backoff) + random.uniform(0, 1))  # noqa: S311
+            delay *= 2
+
+    raise last_exc or RuntimeError("Unknown error calling GitHub GraphQL API")
+
+
+@cache_completion(CACHE_LOCATION, "github_metadata_graphql")
+def _get_github_metadata_graphql(
+    query: str,
+    variables: dict[str, typing.Any] | None = None,
+) -> dict[str, typing.Any] | None:
+    """
+    Execute *query* against the GitHub GraphQL endpoint and return the ``data``
+    block, or *None* on any non-recoverable error.
+    """
+    payload = {"query": query, "variables": variables or {}}
+    try:
+        resp = _post_with_backoff(
+            url="https://api.github.com/graphql",
+            site_name="github",
+            payload=payload,
+        )
+    except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", None)
+        if status in (404, 451, 410):
+            return None
+        logger.error("GraphQL HTTP error %s for query %s", status, query, exc_info=True)
+        return None
+    except requests.RequestException as e:
+        logger.error("GraphQL request error for query %s: %s", query, e, exc_info=True)
+        return None
+    except RuntimeError as e:
+        logger.error("GraphQL runtime error: %s", e, exc_info=True)
+        return None
+
+    data = resp.json()
+    if "errors" in data:  # GraphQL-level errors
+        logger.error("GraphQL errors: %s", data["errors"])
+        return None
+    return typing.cast(dict[str, typing.Any], data.get("data", {}))
 
 
 @cache_completion(CACHE_LOCATION, "codecov_metadata")
@@ -296,7 +375,6 @@ def _get_codecov_metadata(endpoint: str, params: dict[str, str] | None = None) -
         status = getattr(e.response, "status_code", None)
         if status in (404, 451, 410):
             return None
-        # print(f"Failed to fetch {api_url}: {status} {e}")
         logger.error("Failed to fetch %s: %s %s", api_url, status, e, exc_info=True)
         return None
     except RequestException as e:

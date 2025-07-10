@@ -1,6 +1,9 @@
 from requests.exceptions import HTTPError
 
+from datasmith.logging_config import get_logger
 from datasmith.utils import _get_github_metadata
+
+logger = get_logger("execution.utils")
 
 
 def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
@@ -9,8 +12,8 @@ def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
         if commit_info is None:
             # Try to bypass cache if the commit info is not found
             commit_info = _get_github_metadata(endpoint=f"/repos/{repo_name}/commits/{commit_sha}")
-    except HTTPError as e:
-        print(f"Error fetching commit info: {e}")
+    except HTTPError:
+        logger.exception("Error fetching commit info: %s")
         return {
             "sha": commit_sha,
             "date": None,

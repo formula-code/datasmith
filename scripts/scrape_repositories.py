@@ -6,12 +6,15 @@ This file will "search" for "asv.conf.json" using the GitHub API.
 
 import argparse
 import os
-import sys
 
 import pandas as pd
 
+from datasmith.logging_config import configure_logging
 from datasmith.scrape.detect_dashboards import scrape_github
 from datasmith.scrape.filter_dashboards import filter_dashboards
+
+# Configure logging for the script
+logger = configure_logging()
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
     if not os.path.exists(args.outfile):
         scrape_github(
@@ -72,7 +75,7 @@ def main():
             },
         )
     else:
-        sys.stderr.write(f"File {args.outfile} already exists. Skipping scraping.\n")
+        logger.info("File %s already exists. Skipping scraping.", args.outfile)
 
     df = pd.read_csv(args.outfile, header=None, names=["repo_name"])
     df["url"] = df.repo_name.apply(lambda x: f"https://github.com/{x}")
@@ -84,11 +87,11 @@ def main():
         raise ValueError("No dashboards found in the repositories.")  # noqa: TRY003
 
     filtered_df.to_csv(args.filtered_outfile, index=False)
-    sys.stderr.write(f"✅  Filtered dashboards saved to {args.filtered_outfile}\n")
+    logger.info("✅  Filtered dashboards saved to %s", args.filtered_outfile)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        sys.stderr.write("\n⏹️  Interrupted by user.\n")
+        logger.info("⏹️  Interrupted by user.")
