@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
 import re
 import textwrap
 import typing
 import urllib.parse
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -213,21 +211,15 @@ def build_report(commit_url: str) -> str:
     return "\n\n".join(out_parts)
 
 
-def build_reports_and_merge(
-    breakpoints_df: pd.DataFrame,
-    coverage_df: pd.DataFrame,
-    index_json: Path,
-    reports_dir: Path,
-) -> pd.DataFrame:
+def breakpoints_scrape_comments(
+    breakpoints_df: pd.DataFrame, coverage_df: pd.DataFrame, index_data: dict[str, typing.Any]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate GitHub commit reports and return an enriched *merged* DataFrame.
 
     * `coverage_df` **must** exist - it is produced by `--compute-coverage`.
     * Each report is saved as `<reports_dir>/<commit_hash>.md`.
     * The returned DataFrame includes an `n_tokens` column.
     """
-    with open(index_json, encoding="utf-8") as fh:
-        index_data = json.load(fh)
-
     bp = breakpoints_df.copy()
     bp["gt_url"] = bp["gt_hash"].astype(str).map(lambda h: urllib.parse.urljoin(index_data["show_commit_url"], h))
 
@@ -239,17 +231,22 @@ def build_reports_and_merge(
         merged_df = bp.copy()
 
     # ---------------------------------------------------------------- reports
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    reports = []
     encoding = tiktoken.encoding_for_model("gpt-4o-mini")
     url2token: dict[str, int] = {}
     for gt_url in tqdm.tqdm(merged_df.gt_url.unique(), desc="Reports", unit="commit"):
         report = build_report(gt_url)
         commit_hash = urllib.parse.urlparse(gt_url).path.split("/")[-1]
-        report_path = reports_dir / f"{commit_hash}.md"
-        report_path.write_text(report)
-
         n_tokens = len(encoding.encode(report))
+        reports.append({
+            "commit_hash": commit_hash,
+            "report": report,
+            "gt_url": gt_url,
+            "n_tokens": n_tokens,
+        })
+
         url2token[gt_url] = n_tokens
 
     merged_df["n_tokens"] = merged_df["gt_url"].map(url2token)
-    return merged_df
+    reports_df = pd.DataFrame(reports)
+    return merged_df, reports_df

@@ -138,7 +138,7 @@ def publish_repo(
     repo_url: str,
     repo_local_dir: Path,
     asv_conf_path: Path,
-    results_dir: Path,
+    runs_dir: Path,
     html_dir: Path,
     *,
     skip_if_present: bool = True,
@@ -156,7 +156,7 @@ def publish_repo(
         Where the repo should live locally.
     asv_conf_path : pathlib.Path
         Path to the repository's ``asv.conf.json`` on disk.
-    results_dir : pathlib.Path
+    runs_dir : pathlib.Path
         Directory for ASV's benchmark result files.
     html_dir : pathlib.Path
         Directory where ASV should write its HTML report.
@@ -186,7 +186,7 @@ def publish_repo(
 
     asv_conf.update(
         repo=str(repo_local_dir.resolve()),
-        results_dir=str(results_dir.resolve()),
+        results_dir=str(runs_dir.resolve()),  # asv expects this to be called `results_dir`
         html_dir=str(html_dir.resolve()),
     )
 

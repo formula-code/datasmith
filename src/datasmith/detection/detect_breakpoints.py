@@ -21,7 +21,7 @@ def get_breakpoints(df: pd.DataFrame) -> list[dict] | None:
     for end in bkps:
         m1 = y[end - 1]
         m2 = y[end]
-        delta_pct = (m2 - m1) / m1 * 100.0  # negative percentage
+        delta_pct = (m2 - m1) / (m1 + 1e-10) * 100.0  # negative percentage
         if delta_pct < 0:
             results.append({
                 "hash": df["hash"].iloc[end - 1],
@@ -79,9 +79,8 @@ def get_detection_method(method: str) -> typing.Callable:
         raise ValueError(f"Unknown method: {method}. Use 'asv' or 'rbf'.")  # noqa: TRY003
 
 
-def detect_all_breakpoints(summary_csv: str, method: str = "rbf") -> pd.DataFrame:
-    """Detect break-points for every benchmark in *summary_csv*."""
-    summary_df = pd.read_csv(summary_csv, index_col=None).dropna()
+def detect_all_breakpoints(summary_df: pd.DataFrame, method: str = "rbf") -> pd.DataFrame:
+    """Detect break-points for every benchmark in *summary_df*."""
 
     detection_method = get_detection_method(method)
 

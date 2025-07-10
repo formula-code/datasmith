@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
         help="GitHub Search API query string",
     )
     p.add_argument("-o", "--outfile", default="repos.csv", help="Destination CSV file")
+    p.add_argument(
+        "--filtered-outfile",
+        default="repos_filtered.csv",
+        help="Destination CSV file for filtered repositories",
+    )
     p.add_argument("--per-page", type=int, default=100, help="Items per page (max 100)")
     p.add_argument(
         "--max-pages",
@@ -78,9 +83,8 @@ def main():
     if filtered_df.empty:
         raise ValueError("No dashboards found in the repositories.")  # noqa: TRY003
 
-    filtered_outfile = f"{os.path.splitext(args.outfile)[0]}_filtered.csv"
-    filtered_df.to_csv(filtered_outfile, index=False)
-    sys.stderr.write(f"✅  Filtered dashboards saved to {filtered_outfile}\n")
+    filtered_df.to_csv(args.filtered_outfile, index=False)
+    sys.stderr.write(f"✅  Filtered dashboards saved to {args.filtered_outfile}\n")
 
 
 if __name__ == "__main__":

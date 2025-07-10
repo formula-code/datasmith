@@ -8,7 +8,7 @@ def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
         commit_info = _get_github_metadata(endpoint=f"/repos/{repo_name}/commits/{commit_sha}")
         if commit_info is None:
             # Try to bypass cache if the commit info is not found
-            commit_info = _get_github_metadata(endpoint=f"/repos/{repo_name}/commits/{commit_sha}", bypass_cache=True)
+            commit_info = _get_github_metadata(endpoint=f"/repos/{repo_name}/commits/{commit_sha}")
     except HTTPError as e:
         print(f"Error fetching commit info: {e}")
         return {

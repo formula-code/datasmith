@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from datasmith.analysis.analyze_benchmark_results import aggregate_benchmark_runs, publish_repo
-from datasmith.scrape.scrape_dashboards import extract_dashboard_results
+from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.collation.collate_benchmark_results import aggregate_benchmark_runs, publish_repo
+from datasmith.scrape.scrape_dashboards import make_benchmark_from_html
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to the jsonl file containing the commit IDs and associated metadata (e.g. repo_name)",
     )
     parser.add_argument(
-        "--output-dir", type=Path, required=True, help="Path to the directory where merged benchmarks will be saved"
+        "--output-dir", type=Path, required=True, help="Path to the output directory where the results will be saved."
     )
     parser.add_argument(
         "--default-machine-name",
@@ -49,7 +50,7 @@ def main():
 
     # Aggregate benchmark runs and save them to the output directory
     stats = aggregate_benchmark_runs(
-        all_commits_df, args.results_dir, args.output_dir / "results", default_machine_name=args.default_machine_name
+        all_commits_df, args.results_dir, args.output_dir / "runs", default_machine_name=args.default_machine_name
     )
 
     # Run asv publish on the output directory
@@ -57,7 +58,7 @@ def main():
     for repo_path, stat in repos.items():
         contains_jsons = any(
             f.name not in ["machine.json", "asv.conf.json"]
-            for f in (args.output_dir / "results" / repo_path).glob("*/*.json")
+            for f in (args.output_dir / "runs" / repo_path).glob("*/*.json")
         )
         if not contains_jsons:
             print(f"Warning: No benchmark results found for {repo_path}. Skipping dashboard creation.")
@@ -66,16 +67,22 @@ def main():
         publish_repo(
             repo_url=repo_url,
             repo_local_dir=(args.output_dir / "repos" / repo_path).resolve(),
-            asv_conf_path=(args.output_dir / "results" / repo_path / "asv.conf.json").resolve(),
-            results_dir=(args.output_dir / "results" / repo_path).resolve(),
+            asv_conf_path=(args.output_dir / "runs" / repo_path / "asv.conf.json").resolve(),
+            runs_dir=(args.output_dir / "runs" / repo_path).resolve(),
             html_dir=(args.output_dir / "html" / repo_path).resolve(),
         )
         # make a dashboard for the repo
-        extract_dashboard_results(
+        out_path = (args.output_dir / "html" / repo_path / "dashboard.fc.pkl").resolve()
+        dashboard_collection: BenchmarkCollection = make_benchmark_from_html(
             base_url=str((args.output_dir / "html" / repo_path).resolve()),
-            dl_dir=str((args.output_dir / "html" / repo_path).resolve()),
+            html_dir=str((args.output_dir / "html" / repo_path).resolve()),
             force=False,
         )
+        dashboard_collection.save(path=out_path)
+        print(
+            f"Saved {len(dashboard_collection.benchmarks):,} benchmark rows and {len(dashboard_collection.summaries):,} summary rows -> {out_path}"
+        )
+
     print(f"Benchmark results aggregated and saved to {(args.output_dir / 'html').resolve()}.")
 
 

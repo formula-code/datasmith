@@ -1,8 +1,9 @@
 import argparse
 from pathlib import Path
 
+from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.detection.detect_breakpoints import detect_all_breakpoints
-from datasmith.scrape.build_reports import build_reports_and_merge
+from datasmith.scrape.build_reports import breakpoints_scrape_comments
 from datasmith.scrape.code_coverage import generate_coverage_dataframe
 
 
@@ -17,21 +18,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset",
+        type=Path,
         required=True,
-        help=(
-            "A benchmark dashboard directory containing all_summaries.csv, all_benchmarks.csv, and "
-            "index.json (e.g. `downloads/astropy`)"
-        ),
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=None,
-        help="Output directory for breakpoints (default: <dataset>/breakpoints/...)",
-    )
-    parser.add_argument(
-        "--benchmarks-csv",
-        default=None,
-        help="Path to all_benchmarks.csv (defaults to <dataset>/all_benchmarks.csv).",
+        help=("A *.fc.pkl file that contains all the summaries, benchmarks and index.json."),
     )
     parser.add_argument(
         "--compute-core-changes",
@@ -55,18 +44,15 @@ def parse_args() -> argparse.Namespace:
         choices=["asv", "rbf"],
         default="rbf",
         help=(
-            "Method to use for detecting break-points. "
-            "'asv' uses ASV's internal regression detection, while 'rbf' uses rupture's RBF kernel."
+            "Method to use for detecting break-points: "
+            "'asv' = ASV's built-in regression detection, 'rbf' = ruptures RBF kernel."
         ),
     )
 
     parser.add_argument(
         "--build-reports",
         action="store_true",
-        help=(
-            "Generate detailed GitHub commit reports (requires --    "
-            "or an existing coverage.csv, plus github_scraper & tiktoken).",
-        ),
+        help=("Generate detailed GitHub commit reports"),
     )
     return parser.parse_args()
 
@@ -74,50 +60,34 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:  # pragma: no cover - CLI glue
     args = parse_args()
 
-    dataset_dir = Path(args.dataset)
-    summary_csv = dataset_dir / "all_summaries.csv"
-    index_json = dataset_dir / "index.json"
-
-    if not summary_csv.exists():
-        raise FileNotFoundError(summary_csv)
-
-    if not index_json.exists():
-        raise FileNotFoundError(index_json)
-
-    output_dir = Path(args.output_dir) if args.output_dir else dataset_dir / "breakpoints"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"Detecting break-points in '{summary_csv}' ...", flush=True)
-    breakpoints = detect_all_breakpoints(summary_csv, method=args.method).dropna(subset=["hash"])
+    dataset_path = args.dataset.expanduser().resolve()
+    collection = BenchmarkCollection.load(dataset_path)
+    summary_df = collection.summaries
+    breakpoints = detect_all_breakpoints(summary_df, method=args.method).dropna(subset=["hash"])
+    collection.breakpoints = breakpoints
     print(f"Found {len(breakpoints):,} potential downward shifts.")
 
-    cov_csv = output_dir / "coverage.csv"
     if args.compute_coverage:
         coverage_df = generate_coverage_dataframe(
             breakpoints,
-            index_json=str(index_json),
+            index_data=collection.index_data,
             only=args.only,
         )
-        coverage_df.to_csv(cov_csv, index=False)
-        print(f"      Wrote coverage data to '{cov_csv}'.")
+        collection.coverage = coverage_df
 
     if args.build_reports:
         print("Building GitHub commit reports and merged dataframe ...", flush=True)
-        merged_df = build_reports_and_merge(
+        new_breakpoints_df, comments_df = breakpoints_scrape_comments(
             breakpoints_df=breakpoints,
-            coverage_df=None if not args.compute_coverage else coverage_df,
-            index_json=index_json,
-            reports_dir=output_dir / "reports",
+            coverage_df=coverage_df,
+            index_data=collection.index_data,
         )
-        merged_out = output_dir / "merged.csv"
-        merged_df.to_csv(merged_out, index=False)
-        print(f"      Wrote merged data to '{merged_out}'.")
-        print(f"      Wrote reports to '{output_dir / 'reports'}'.")
+        collection.comments = comments_df
+        collection.enriched_breakpoints = new_breakpoints_df
 
-    out_bp = output_dir / "breakpoints.csv"
-    print("Writing breakpoint results ...", flush=True)
-    breakpoints.to_csv(out_bp, index=False)
-    print(f"Done. Break-points saved to '{out_bp}'.")
+    # Save the collection.
+    collection.save(dataset_path.parent / "breakpoints.fc.pkl")
+    print(f"Enriched breakpoints saved to '{dataset_path.parent / 'breakpoints.fc.pkl'}'.")
 
 
 if __name__ == "__main__":

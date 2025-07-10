@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import typing
 import urllib.parse
 from collections.abc import Generator
 
@@ -64,13 +64,11 @@ def _iter_commit_coverage(
 
 def generate_coverage_dataframe(
     breakpoints_df: pd.DataFrame,
-    index_json: str,
+    index_data: dict[str, typing.Any],
     *,
     only: list[str] | None = None,
 ) -> pd.DataFrame:
     """Retrieve per-file coverage numbers for **all** commits referenced."""
-    with open(index_json, encoding="utf-8") as fh:
-        index_data = json.load(fh)
 
     base = index_data["show_commit_url"].rstrip("/")
 

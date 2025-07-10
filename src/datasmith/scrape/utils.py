@@ -2,10 +2,12 @@ import re
 import shutil
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
 import requests
+
+from datasmith.utils import cache_completion
 
 SEARCH_URL = "https://api.github.com/search/code"
 
@@ -20,6 +22,9 @@ def polite_sleep(seconds: float) -> None:
         sys.stderr.flush()
         time.sleep(min(remaining, 1))
     sys.stderr.write("\r\033[K")
+
+
+_HEX = re.compile(r"[0-9a-fA-F]{7,40}$")
 
 
 def _extract_repo_full_name(url: str) -> str | None:
@@ -49,14 +54,35 @@ def _extract_repo_full_name(url: str) -> str | None:
 
 def _parse_commit_url(url: str) -> tuple[str, str, str]:
     """
-    Parse a GitHub commit URL and return the owner, repo, and commit SHA.
+    Return (owner, repo, commit_sha) from a GitHub *commit* URL.
+
+    • Accepts http:// or https://, with or without “www.”
+    • Ignores trailing slashes, query strings, and fragments
+    • Validates that the SHA is 7-40 hexadecimal characters
     """
-    m = re.match(r"https://github\.com/([^/]+)/([^/]+)/commit/([0-9a-f]{7,40})", url)
-    if not m:
+    parsed = urlparse(url.strip())
+
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme!r}")  # noqa: TRY003
+
+    if parsed.hostname not in {"github.com", "www.github.com"}:
+        raise ValueError(f"Not a GitHub URL: {url!r}")  # noqa: TRY003
+
+    path = unquote(parsed.path)
+    parts = [p for p in PurePosixPath(path).parts if p != "/"]
+
+    if len(parts) < 4 or parts[2] != "commit":
         raise ValueError(f"Not a GitHub commit URL: {url!r}")  # noqa: TRY003
-    return m.group(1), m.group(2), m.group(3)
+
+    owner, repo, sha = parts[0], parts[1], parts[3]
+
+    if not _HEX.fullmatch(sha):
+        raise ValueError(f"Invalid commit SHA: {sha!r}")  # noqa: TRY003
+
+    return owner, repo, sha.lower()
 
 
+@cache_completion("debug.db", "dl_and_open")
 def dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = False) -> str | None:
     """
     Fetch *url* into *dl_dir* and return the local filename.

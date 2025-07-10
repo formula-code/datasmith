@@ -1,12 +1,15 @@
+import datetime
 import json
 import os
 import urllib.parse
+from datetime import timezone
 from pathlib import Path
 from typing import Callable
 
 import pandas as pd
 from tqdm import tqdm
 
+from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.scrape.utils import dl_and_open
 
 
@@ -40,7 +43,7 @@ def _make_joiner(base_url: str) -> Callable[..., str]:
     return lambda *parts: str(base_path.joinpath(*parts))
 
 
-def extract_dashboard_results(base_url: str, dl_dir: str, force: bool) -> None:
+def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> BenchmarkCollection | None:
     """
     Extract benchmark metrics from an asv dashboard located either
     online (http/https) *or* on the local filesystem.
@@ -49,14 +52,14 @@ def extract_dashboard_results(base_url: str, dl_dir: str, force: bool) -> None:
     is_remote = bool(parsed.scheme)  # http / https / file → True
     join_path = _make_joiner(base_url)
 
-    dl_dir = os.path.abspath(dl_dir)
-    os.makedirs(dl_dir, exist_ok=True)
+    html_dir = os.path.abspath(html_dir)
+    os.makedirs(html_dir, exist_ok=True)
 
     index_src = join_path("index.json")
-    index_path = dl_and_open(index_src, dl_dir, base=base_url, force=force)
+    index_path = dl_and_open(index_src, html_dir, base=base_url, force=force)
     if not index_path:
         print(f"Failed to read index.json from {base_url}")
-        return
+        return None
     with open(index_path, encoding="utf-8") as fh:
         index_data = json.load(fh)
 
@@ -71,7 +74,7 @@ def extract_dashboard_results(base_url: str, dl_dir: str, force: bool) -> None:
         graph_dir = make_graph_dir(p, all_keys, quote=is_remote)
         for bench in tqdm(benchmarks, desc="benchmarks", leave=False):
             url = join_path(graph_dir, f"{bench}.json")
-            local = dl_and_open(url, dl_dir, base=base_url, force=force)
+            local = dl_and_open(url, html_dir, base=base_url, force=force)
             if local is None:
                 continue
             try:
@@ -92,7 +95,7 @@ def extract_dashboard_results(base_url: str, dl_dir: str, force: bool) -> None:
 
     all_summaries = []
     for summary_url in tqdm(summaries, desc="summaries"):
-        summary_pth = dl_and_open(summary_url, dl_dir, base=base_url, force=force)
+        summary_pth = dl_and_open(summary_url, html_dir, base=base_url, force=force)
         if summary_pth is None:
             continue
         try:
@@ -110,9 +113,13 @@ def extract_dashboard_results(base_url: str, dl_dir: str, force: bool) -> None:
 
     all_summaries_df = pd.concat(all_summaries, ignore_index=True)
 
-    bench_csv = os.path.join(dl_dir, "all_benchmarks.csv")
-    summ_csv = os.path.join(dl_dir, "all_summaries.csv")
-    all_benchmarks.to_csv(bench_csv, index=False)
-    all_summaries_df.to_csv(summ_csv, index=False)
-    print(f"Saved benchmark CSV: {bench_csv}\nSaved summary CSV: {summ_csv}")
-    print(f"Saved {len(all_benchmarks):,} benchmark rows and {len(all_summaries_df):,} summary rows to '{dl_dir}'")
+    collection = BenchmarkCollection(
+        base_url=base_url,
+        collected_at=datetime.datetime.now(timezone.utc),
+        modified_at=datetime.datetime.now(timezone.utc),
+        param_keys=all_keys,
+        index_data=index_data,
+        benchmarks=all_benchmarks,
+        summaries=all_summaries_df,
+    )
+    return collection

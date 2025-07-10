@@ -1,8 +1,10 @@
 import argparse
+from pathlib import Path
 
 import pandas as pd
 
-from datasmith.scrape.scrape_dashboards import extract_dashboard_results
+from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.scrape.scrape_dashboards import make_benchmark_from_html
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,7 +23,14 @@ def main():
     dashboards = pd.read_json(args.dashboards, lines=True)
 
     for _, row in dashboards.iterrows():
-        extract_dashboard_results(base_url=row["url"], dl_dir=row["output_dir"], force=args.force)
+        out_path = Path(row["output_dir"]) / "dashboard.fc.pkl"
+        dashboard_collection: BenchmarkCollection = make_benchmark_from_html(
+            base_url=row["url"], html_dir=row["output_dir"]
+        )
+        dashboard_collection.save(path=out_path)
+        print(
+            f"Saved {len(dashboard_collection.benchmarks):,} benchmark rows and {len(dashboard_collection.summaries):,} summary rows -> {out_path}"
+        )
         print(f"Data downloaded to {row['output_dir']}")
 
 
