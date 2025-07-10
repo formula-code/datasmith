@@ -24,9 +24,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--output",
+        "--output-dir",
         default=None,
-        help="CSV for breakpoint output (default: <dataset>/breakpoints.csv)",
+        help="Output directory for breakpoints (default: <dataset>/breakpoints/...)",
     )
     parser.add_argument(
         "--benchmarks-csv",
@@ -84,7 +84,7 @@ def main() -> None:  # pragma: no cover - CLI glue
     if not index_json.exists():
         raise FileNotFoundError(index_json)
 
-    output_dir = Path(args.output) if args.output else dataset_dir / "breakpoints"
+    output_dir = Path(args.output_dir) if args.output_dir else dataset_dir / "breakpoints"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Detecting break-points in '{summary_csv}' ...", flush=True)

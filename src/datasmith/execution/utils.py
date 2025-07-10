@@ -31,6 +31,8 @@ def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
             "files_changed": "",
         }
 
+    if commit_sha != commit_info["sha"]:
+        raise ValueError("Commit SHA mismatch")  # noqa: TRY003
     return {
         "sha": commit_info["sha"],
         "date": commit_info["commit"]["committer"]["date"],

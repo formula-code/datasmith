@@ -46,7 +46,7 @@ def _update_json(src_path: Path, dest_path: Path) -> None:
     _update_dict(dest_path, data)
 
 
-def _update_machine_jsons(runid: Path, runid_newpath: Path, default_machine_name: str) -> Optional[dict]:
+def _update_jsons(runid: Path, runid_newpath: Path, default_machine_name: str) -> Optional[dict]:
     """Update machine name in machine.json and params['machine'] in other json files."""
     machine_data = None
     old_file_names = [f.name for f in runid.iterdir()]
@@ -73,10 +73,8 @@ def _process_runid_folder(runid: Path, runid_newpath: Path, default_machine_name
     """Copy and update runid folder, handling machine name if needed."""
     machine_data = None
     if default_machine_name is not None:
-        if runid_newpath.exists():
-            shutil.rmtree(runid_newpath)
         runid_newpath.mkdir(parents=True, exist_ok=True)
-        machine_data = _update_machine_jsons(runid, runid_newpath, default_machine_name)
+        machine_data = _update_jsons(runid, runid_newpath, default_machine_name)
     else:
         if runid_newpath.exists():
             shutil.rmtree(runid_newpath)
@@ -108,11 +106,9 @@ def aggregate_benchmark_runs(
         repo_out_dir.mkdir(parents=True, exist_ok=True)
 
         benchmarks_path = commit_pth / "benchmarks.json"
-        if benchmarks_path.exists():
-            _update_json(benchmarks_path, repo_out_dir / "benchmarks.json")
-
         asv_conf_path = commit_pth.parent / "asv.conf.json"
-        if asv_conf_path.exists():
+        if benchmarks_path.exists() and asv_conf_path.exists():
+            _update_json(benchmarks_path, repo_out_dir / "benchmarks.json")
             _update_json(asv_conf_path, repo_out_dir / "asv.conf.json")
         n_runids = 0
         machine_data = None

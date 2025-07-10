@@ -1,7 +1,8 @@
-import os
 import re
+import shutil
 import sys
 import time
+from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -57,28 +58,55 @@ def _parse_commit_url(url: str) -> tuple[str, str, str]:
 
 
 def dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = False) -> str | None:
-    rel_path = url[len(base) :].lstrip("/") if base and url.startswith(base) else urlparse(url).path.lstrip("/")
+    """
+    Fetch *url* into *dl_dir* and return the local filename.
+    Works for
+      • http/https URLs                 (download)
+      • file:// URLs                    (copy)
+      • ordinary filesystem paths       (copy/return)
+    """
+    parsed = urlparse(url)
+    is_http = parsed.scheme in ("http", "https")
+    is_file = parsed.scheme == "file"
+
+    rel_path = url[len(base) :].lstrip("/") if base and url.startswith(base) else parsed.path.lstrip("/")
 
     def clean_component(comp: str) -> str:
         comp = unquote(comp)
         comp = comp.replace(" ", "_").replace("@", "AT")
         comp = comp.replace("(", "").replace(")", "")
-        comp = re.sub(r"[^A-Za-z0-9.\-_/]", "_", comp)
-        return comp
+        return re.sub(r"[^A-Za-z0-9.\-_/]", "_", comp)
 
-    clean_parts = [clean_component(c) for c in rel_path.split("/")]
-    local_path = os.path.join(dl_dir, *clean_parts)
-    local_path = os.path.abspath(local_path)
-    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    clean_parts = [clean_component(p) for p in Path(rel_path).parts]
+    local_path = Path(dl_dir).joinpath(*clean_parts).resolve()
+    local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not os.path.exists(local_path) or force:
-        try:
-            r = requests.get(url, timeout=20)
-            if r.status_code == 404:
+    src_path: Path
+    if is_http:
+        # Always (re-)download when force=True or target missing
+        if force or not local_path.exists():
+            try:
+                r = requests.get(url, timeout=20)
+                if r.status_code == 404:
+                    return None
+                r.raise_for_status()
+                local_path.write_bytes(r.content)
+            except requests.RequestException:
                 return None
-            r.raise_for_status()
-            with open(local_path, "wb") as f:
-                f.write(r.content)
-        except requests.RequestException:
+        return str(local_path)
+
+    elif is_file:
+        src_path = Path(parsed.path)
+
+    else:  # plain local path
+        src_path = Path(url)
+
+    # For file:// and plain local paths we just copy if necessary
+    if not src_path.exists():
+        return None
+    if force or not local_path.exists():
+        try:
+            shutil.copy2(src_path, local_path)
+        except OSError:
             return None
-    return local_path
+    return str(local_path)

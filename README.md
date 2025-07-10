@@ -125,7 +125,7 @@ The `asv_benchmarks_filtered.csv` file contains a subset of the repositories tha
 Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch. We use the `collect_commits.py` script to do this. The `filter_commits.py` script then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes). The script also limits the number of repositories to a maximum of 350 to ensure we don't burden the GitHub API with too many requests. The scripts can be run as follows:
 
 ```bash
-$ python scripts/collect_commits.py --dashboards raw_datasets/asv_benchmarks_filtered.csv --outfile raw_datasets/benchmark_commits_merged.jsonl
+$ python scripts/collect_commits.py --dashboards raw_datasets/asv_benchmarks_filtered.csv --outfile raw_datasets/benchmark_commits_merged.jsonl --max-pages 100
 $ python scripts/filter_commits.py --filtered-benchmarks-pth raw_datasets/asv_benchmarks_filtered.csv --merged-commits-pth raw_datasets/benchmark_commits_merged.jsonl --output-pth raw_datasets/benchmark_commits_filtered.jsonl --max-repos 350 --threads 8 --procs 8
 ```
 ### 5. Benchmark all commits
@@ -150,8 +150,23 @@ Generally, each benchmark takes ~2 minutes to run, so benchmarking 70,000 commit
 ### 6. Analyze benchmark results
 
 ```bash
-$ python scripts/analyze_benchmark_results.py --results-dir benchmark_results/results --output-dir analysis/ --commit-metadata raw_datasets/benchmark_commits_filtered.jsonl
+$ python scripts/analyze_benchmark_results.py --results-dir benchmark_results/results --output-dir analysis/ --commit-metadata raw_datasets/benchmark_commits_filtered.jsonl --default-machine-name "docker"
 ```
+
+### 7. Find breakpoints in benchmark results
+
+
+```bash
+$ python scripts/detect_breakpoints.py --build-reports --method 'rbf' --compute-coverage --dataset analysis/html/scikit-learn_scikit-learn --output-dir analysis/breakpoints/scikit-learn_scikit-learn
+# Saved break-points to 'analysis/breakpoints/scikit-learn_scikit-learn/breakpoints.csv'.
+# Saved reports to 'analysis/breakpoints/scikit-learn_scikit-learn/reports'.
+# Saved merged data to 'analysis/breakpoints/scikit-learn_scikit-learn/merged.csv'.
+
+```
+
+
+### Replication experiment.
+
 
 
 ## TODOs
@@ -161,3 +176,5 @@ $ python scripts/analyze_benchmark_results.py --results-dir benchmark_results/re
 - [X] FormulaCode: Large scale benchmarking for all commits in the dataset
 - [ ] FormulaCode: Parameter tuning for large scale benchmarking scripts.
 - [ ] FormulaCode: `asv` supports profiling the benchmarking function. We should collect such profiling data for all commits in the dataset.
+- [ ] FormulaCode: In `search_commits` replace the endpoint with `"/search/issues?q=type:pr+is:merged+repo:{repo_name}&per_page={per_page}&page={page}&advanced_search=true` endpoint to use each query more efficiently.
+- [ ] FormulaCode: Make an object oriented API for the dataset. Do not rely on a folder structure.
