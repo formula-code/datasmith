@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
+from git import Repo
 from tqdm.auto import tqdm
 
-from datasmith.execution.utils import _get_commit_info, find_file_in_tree
+from datasmith.execution.utils import _get_commit_info_offline, find_file_in_tree
 from datasmith.logging_config import configure_logging
 
 # Configure logging for the script
@@ -37,10 +39,11 @@ def _asv_conf_worker(repo_name: str) -> str | None:
     return find_file_in_tree(repo_name, "asv.conf.json")
 
 
-def _commit_info_worker(arg_tuple) -> dict | None:
+def _commit_info_worker(arg_tuple: tuple[Repo, str]) -> dict | None:
     """Wrapper for ProcessPool: arg_tuple = (repo_name, sha)."""
     repo, sha = arg_tuple
-    return _get_commit_info(repo, sha)
+    # return _get_commit_info(repo, sha)
+    return _get_commit_info_offline(repo, sha)
 
 
 NON_CORE_PATTERNS = re.compile(
@@ -107,19 +110,43 @@ def main() -> None:
     commits = commits.merge(benchmarks, how="right", on="repo_name")
     commits = commits.dropna(subset=["commit_sha"])
 
-    with ProcessPoolExecutor(max_workers=args.procs) as pp:
-        commits["commit_info"] = list(
-            tqdm(
-                pp.map(_commit_info_worker, commits[["repo_name", "commit_sha"]].itertuples(index=False, name=None)),
-                total=len(commits),
-                desc="Fetching commit metadata",
-            )
-        )
+    all_repo_names = set(commits["repo_name"])
 
-    commit_meta = pd.json_normalize(commits.pop("commit_info"))
-    commits = pd.concat([commits, commit_meta], axis=1)
-    commits = commits.dropna(subset=["asv_conf_path", "sha", "date", "message"])
-    commits = commits[commits["files_changed"].apply(has_core_file)].reset_index(drop=True)
+    # download all repos to a temp dir
+    with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
+        all_repos = {}
+        for repo_name in tqdm(all_repo_names, desc="Cloning repos"):
+            repo_name = repo_name.strip("/")
+            owner, name = repo_name.split("/", 1)
+            path = Path(td) / f"{owner}__{name}.git"
+            repo = Repo.clone_from(
+                f"https://github.com/{repo_name}.git",
+                path,
+                bare=True,
+                # multi_options=["--filter=tree:0"],
+                multi_options=["--filter=blob:none"],
+                quiet=True,
+            )
+            all_repos[repo_name] = repo
+
+        commit_info_args: list[tuple[Repo, str]] = []
+        for repo_name, commit_sha in commits[["repo_name", "commit_sha"]].itertuples(index=False, name=None):
+            repo = all_repos[repo_name]
+            commit_info_args.append((repo, commit_sha))
+
+        with ProcessPoolExecutor(max_workers=args.procs) as pp:
+            commits["commit_info"] = list(
+                tqdm(
+                    pp.map(_commit_info_worker, commit_info_args),
+                    total=len(commits),
+                    desc="Fetching commit metadata",
+                )
+            )
+
+        commit_meta = pd.json_normalize(commits.pop("commit_info"))
+        commits = pd.concat([commits, commit_meta], axis=1)
+        commits = commits.dropna(subset=["asv_conf_path", "sha", "date", "message"])
+        commits = commits[commits["files_changed"].apply(has_core_file)].reset_index(drop=True)
 
     out_path = Path(args.output_pth)
     if not out_path.parent.exists():
@@ -127,7 +154,7 @@ def main() -> None:
     # commits.to_csv(out_path, index=False)
     commits.to_json(out_path, orient="records", lines=True, index=False)
 
-    logger.info(f"✔ Wrote {len(commits):,} rows → {out_path}")
+    logger.info("✔ Wrote %s rows → %s", len(commits), out_path)
 
 
 if __name__ == "__main__":
