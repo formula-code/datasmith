@@ -3,6 +3,7 @@ This script builds and validates that each benchmark container can be compiled a
 """
 
 import argparse
+import logging
 from pathlib import Path
 
 from datasmith.benchmark.collection import BenchmarkCollection
@@ -11,8 +12,8 @@ from datasmith.docker.orchestrator import get_docker_client
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
-# logger = configure_logging(stream=open(Path(__file__).with_suffix(".log"), "a"))
-logger = configure_logging()
+# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "a"))
+logger = configure_logging(level=logging.DEBUG)
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,20 +55,26 @@ def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
 
     for (owner, repo), uniq_shas in all_states.items():
-        image_name = f"asv-{owner}-{repo}"
-        docker_ctx = CONTEXT_REGISTRY[image_name] if image_name in CONTEXT_REGISTRY else CONTEXT_REGISTRY["default"]
-
-        docker_ctx.build_container(
-            client=client, image_name=image_name, repo_url=f"https://www.github.com/{owner}/{repo}", force=True
-        )
         for sha in uniq_shas:
+            image_name = f"asv-{owner}-{repo}-{sha}"
+            docker_ctx = CONTEXT_REGISTRY[image_name]
+            docker_ctx.build_container(
+                client=client,
+                image_name=image_name,
+                build_args={
+                    "REPO_URL": f"https://www.github.com/{owner}/{repo}",
+                    "COMMIT_SHA": sha,
+                },
+                force=True,
+            )
             logger.debug(f"Validating {image_name} for commit {sha}")
+            # stop any existing container with the same name
             container = client.containers.run(
                 image=image_name,
                 detach=True,
                 remove=True,
                 name=f"asv-{owner}-{repo}-{sha}",
-                environment={"COMMIT_SHA": sha, "ASV_ARGS": "--bench convolve*"},
+                environment={"ASV_ARGS": "--quick --python=same"},
                 volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
             )
             for line in container.logs(stream=True, follow=True):

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # set -euo pipefail
 
-: "${COMMIT_SHA:?Need to set COMMIT_SHA}"
+# : "${COMMIT_SHA:?Need to set COMMIT_SHA}"
 : "${ASV_ARGS:?Need to set ASV_ARGS}"
 # : "${ASV_CONF_PATH:?Need to set ASV_CONF_PATH}"
 # : "${RECOMMENDED_DEPS:?Need to set RECOMMENDED_DEPS}"
@@ -33,7 +33,7 @@ micromamba activate base
 # 0.5) Tune the container so all CPUs stay at fixed frequency.
 # This requires root; Docker runs as root by default.
 # python -m pyperf system tune || true
-git checkout "${COMMIT_SHA}"
+# git checkout "${COMMIT_SHA}"
 
 ROOT_PATH=${PWD}
 # 2) cd into the folder containing the asv.conf.json
@@ -74,7 +74,7 @@ config.html_dir = str(path / 'html')
 asv.util.write_json('$CONF_NAME', config.__dict__, api_version=config.api_version)
 asv.util.write_json(path / '$CONF_NAME', config.__dict__, api_version=config.api_version)
 "
-    micromamba create -y -n "asv_${version}" -c conda-forge python="$version" git conda mamba "libmambapy<=1.9.9"
+    # micromamba create -y -n "asv_${version}" -c conda-forge python="$version" git conda mamba "libmambapy<=1.9.9"
     micromamba run -n "asv_${version}" pip install git+https://github.com/airspeed-velocity/asv
     # micromamba run -n "asv_${version}" pip install asv
     # micromamba run -n "asv_${version}" pip install -e "${ROOT_PATH}"
