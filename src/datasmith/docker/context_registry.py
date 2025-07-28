@@ -1,3 +1,9 @@
+from datasmith.docker.context import DockerContext
+
+DEFAULT_DOCKER_CONTEXT = DockerContext()
+
+ASTROPY_DOCKER_CONTEXT = DockerContext(
+    dockerfile_data="""
 FROM buildpack-deps:jammy
 
 RUN ["apt-get", "update"]
@@ -31,6 +37,15 @@ WORKDIR /workspace
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-RUN git clone ${REPO_URL} /workspace/repo
+RUN git clone https://github.com/astropy/astropy /workspace/repo
 WORKDIR /workspace/repo
+RUN git clone -b main https://github.com/astropy/astropy-benchmarks.git --single-branch
 ENTRYPOINT ["/entrypoint.sh"]
+""".strip(),
+    entrypoint_data=DEFAULT_DOCKER_CONTEXT.entrypoint_data,
+)
+
+CONTEXT_REGISTRY: dict[str, DockerContext] = {
+    "default": DEFAULT_DOCKER_CONTEXT,
+    "asv-astropy-astropy": ASTROPY_DOCKER_CONTEXT,
+}

@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from datasmith.docker.orchestrator import (
-    ensure_image,
+    build_repo_image,
     get_docker_client,
     orchestrate,
 )
@@ -111,7 +111,7 @@ def main() -> None:
     visited = set()
     for image_name, repo_url in zip(docker_image_names, repo_urls):
         if image_name not in visited:
-            ensure_image(client, image_name, repo_url, docker_dir=str(args.docker_dir))
+            build_repo_image(client, image_name, repo_url, docker_dir=str(args.docker_dir))
             visited.add(image_name)
 
     asyncio.run(

@@ -21,7 +21,7 @@ def get_docker_client() -> docker.DockerClient:
         sys.exit(f"Could not connect to Docker daemon: {exc}")
 
 
-def ensure_image(client: docker.DockerClient, image_name: str, repo_url: str, docker_dir: str) -> None:
+def build_repo_image(client: docker.DockerClient, image_name: str, repo_url: str, docker_dir: str) -> None:
     """Ensure IMAGE exists locally, optionally pulling it."""
     try:
         client.images.get(image_name)
