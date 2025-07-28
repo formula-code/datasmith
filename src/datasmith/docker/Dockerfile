@@ -1,5 +1,8 @@
 FROM buildpack-deps:jammy
 
+RUN ["apt-get", "update"]
+RUN ["apt-get", "install", "-y", "vim"]
+RUN ["apt-get", "install", "-y", "curl", "git", "build-essential"]
 ARG REPO_URL
 
 RUN curl -Ls "https://micromamba.snakepit.net/api/micromamba/linux-64/latest" \

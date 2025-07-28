@@ -111,9 +111,15 @@ def aggregate_benchmark_runs(
 
         benchmarks_path = commit_pth / "benchmarks.json"
         asv_conf_path = commit_pth.parent / "asv.conf.json"
-        if benchmarks_path.exists() and asv_conf_path.exists():
-            _update_json(benchmarks_path, repo_out_dir / "benchmarks.json")
-            _update_json(asv_conf_path, repo_out_dir / "asv.conf.json")
+        if not benchmarks_path.exists() or not asv_conf_path.exists():
+            logger.warning(
+                "Skipping commit %s (%s) because benchmarks.json or asv.conf.json is missing.",
+                commit_id,
+                commit_metadata.get("repo_name", "unknown"),
+            )
+            continue
+        _update_json(benchmarks_path, repo_out_dir / "benchmarks.json")
+        _update_json(asv_conf_path, repo_out_dir / "asv.conf.json")
         n_runids = 0
         machine_data = None
         for runid in commit_pth.iterdir():

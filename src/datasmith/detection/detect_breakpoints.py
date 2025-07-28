@@ -48,8 +48,8 @@ def get_breakpoints_asv(df: pd.DataFrame) -> list[dict] | None:
         logger.warning("Robustness of the detection may be reduced.")
         y_sigma = None
 
-    _, _, regression_pos = asv.step_detect.detect_regressions(
-        asv.step_detect.detect_steps(
+    _, _, regression_pos = asv.step_detect.detect_regressions(  # pyright: ignore[reportAttributeAccessIssue]
+        asv.step_detect.detect_steps(  # pyright: ignore[reportAttributeAccessIssue]
             y=-1 * y,
             w=y_sigma,
         )

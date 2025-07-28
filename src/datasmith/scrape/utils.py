@@ -7,7 +7,6 @@ from urllib.parse import unquote, urlparse
 import requests
 
 from datasmith.logging_config import get_logger
-from datasmith.utils import cache_completion
 
 logger = get_logger("scrape.utils")
 
@@ -85,7 +84,6 @@ def _parse_commit_url(url: str) -> tuple[str, str, str]:
     return owner, repo, sha.lower()
 
 
-@cache_completion("debug.db", "dl_and_open")
 def dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = False) -> str | None:
     """
     Fetch *url* into *dl_dir* and return the local filename.
@@ -98,21 +96,30 @@ def dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = Fa
     is_http = parsed.scheme in ("http", "https")
     is_file = parsed.scheme == "file"
 
+    # ---- derive the URL-relative path, *without* any cleaning ----
     rel_path = url[len(base) :].lstrip("/") if base and url.startswith(base) else parsed.path.lstrip("/")
+    raw_parts = [unquote(p) for p in Path(rel_path).parts]
+    raw_path = Path(dl_dir).joinpath(*raw_parts).resolve()
 
-    def clean_component(comp: str) -> str:
-        comp = unquote(comp)
-        comp = comp.replace(" ", "_").replace("@", "AT")
-        comp = comp.replace("(", "").replace(")", "")
-        return re.sub(r"[^A-Za-z0-9.\-_/]", "_", comp)
+    # ---- if that exact path already exists, use it as-is ----
+    if raw_path.exists():
+        local_path = raw_path
+    else:
 
-    clean_parts = [clean_component(p) for p in Path(rel_path).parts]
-    local_path = Path(dl_dir).joinpath(*clean_parts).resolve()
+        def clean_component(comp: str) -> str:
+            comp = unquote(comp)
+            comp = comp.replace(" ", "_").replace("@", "AT")
+            comp = comp.replace("(", "").replace(")", "")
+            return re.sub(r"[^A-Za-z0-9.\-_/]", "_", comp)
+
+        clean_parts = [clean_component(p) for p in raw_parts]
+        local_path = Path(dl_dir).joinpath(*clean_parts).resolve()
+
+    # make sure the destination directory exists
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    src_path: Path
+    # ---- download/copy the file just like before ----
     if is_http:
-        # Always (re-)download when force=True or target missing
         if force or not local_path.exists():
             try:
                 r = requests.get(url, timeout=20)
@@ -124,13 +131,7 @@ def dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = Fa
                 return None
         return str(local_path)
 
-    elif is_file:
-        src_path = Path(parsed.path)
-
-    else:  # plain local path
-        src_path = Path(url)
-
-    # For file:// and plain local paths we just copy if necessary
+    src_path = Path(parsed.path) if is_file else Path(url)
     if not src_path.exists():
         return None
     if force or not local_path.exists():

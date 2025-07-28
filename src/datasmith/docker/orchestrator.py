@@ -51,6 +51,7 @@ async def run_container(
     cores: str | Sequence[int],
     commit_sha: str,
     asv_conf_path: str,
+    recommended_deps: str,
     image: str,
     asv_args: str,
     output_dir: Path,
@@ -70,6 +71,7 @@ async def run_container(
         "ASV_CONF_PATH": asv_conf_path,
         # asv can take a comma-separated list for --cpu-affinity
         "ASV_ARGS": f"{asv_args} --cpu-affinity {cpuset} --parallel {num_cores}",
+        "RECOMMENDED_DEPS": recommended_deps,
     }
 
     def _launch() -> int:
@@ -78,11 +80,12 @@ async def run_container(
 
         # Log the exact command a human could copy-paste
         logger.info(
-            "$ docker run --rm --name %s -e COMMIT_SHA=%s -e ASV_CONF_PATH=%s -e ASV_ARGS='%s' --cpuset-cpus %s %s",
+            "$ docker run --rm --name %s -e COMMIT_SHA=%s -e ASV_CONF_PATH=%s -e ASV_ARGS='%s' -e RECOMMENDED_DEPS='%s' --cpuset-cpus %s %s",
             container_name,
             commit_sha,
             asv_conf_path,
             env["ASV_ARGS"],
+            env["RECOMMENDED_DEPS"],
             cpuset,
             image,
         )
@@ -117,6 +120,7 @@ async def run_container(
 async def orchestrate(
     commit_shas: Sequence[str],
     asv_conf_paths: Sequence[str],
+    recommended_deps: Sequence[str],
     docker_image_names: Sequence[str],
     asv_args: str,
     max_concurrency: int,
@@ -137,7 +141,7 @@ async def orchestrate(
     for s in core_sets:
         core_pool.put_nowait(s)
 
-    async def worker(idx: int, commit_sha: str, asv_conf_path: str, image: str) -> int:
+    async def worker(idx: int, commit_sha: str, asv_conf_path: str, recommended_deps: str, image: str) -> int:
         core_set = await core_pool.get()  # blocks until a free set exists
         cpuset_str = ",".join(map(str, core_set))  # "0,1,2,3"
 
@@ -149,6 +153,7 @@ async def orchestrate(
                 cores=cpuset_str,
                 commit_sha=commit_sha,
                 asv_conf_path=asv_conf_path,
+                recommended_deps=recommended_deps,
                 image=image,
                 asv_args=asv_args,
                 output_dir=output_dir,
@@ -161,8 +166,10 @@ async def orchestrate(
             core_pool.put_nowait(core_set)
 
     tasks = [
-        asyncio.create_task(worker(i, sha, conf, img))
-        for i, (sha, conf, img) in enumerate(zip(commit_shas, asv_conf_paths, docker_image_names))
+        asyncio.create_task(worker(i, sha, conf, rec_deps, img))
+        for i, (sha, conf, rec_deps, img) in enumerate(
+            zip(commit_shas, asv_conf_paths, recommended_deps, docker_image_names)
+        )
     ]
 
     results = await asyncio.gather(*tasks)
