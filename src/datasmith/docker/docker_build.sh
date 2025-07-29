@@ -13,6 +13,12 @@ cd_asv_json_dir() {
 }
 eval "$(micromamba shell hook --shell=bash)"
 micromamba activate base
+
+apt-get update && \
+    apt-get install -y \
+    ninja-build \
+    cmake
+
 ROOT_PATH=${PWD}
 cd_asv_json_dir || exit 1
 CONF_NAME=$(basename "$(find . -type f -name "asv.*.json" | head -n 1)")
@@ -33,8 +39,9 @@ config.html_dir = str(path / 'html')
 asv.util.write_json('$CONF_NAME', config.__dict__, api_version=config.api_version)
 asv.util.write_json(path / '$CONF_NAME', config.__dict__, api_version=config.api_version)
 "
-    micromamba create -y -n "asv_${version}" -c conda-forge python="$version" git conda mamba "libmambapy<=1.9.9"
+    micromamba create -y -n "asv_${version}" -c conda-forge python="$version" git conda mamba "libmambapy<=1.9.9" numpy scipy cython joblib threadpoolctl pytest compilers
     micromamba run -n "asv_${version}" pip install git+https://github.com/airspeed-velocity/asv
     micromamba run -n "asv_${version}" asv machine --yes --config $CONF_NAME
-    micromamba run -n "asv_${version}" pip install -e .
+    micromamba run -n "asv_${version}" pip install meson-python cython
+    micromamba run -n "asv_${version}" pip install --verbose --no-build-isolation --editable ${ROOT_PATH}
 done

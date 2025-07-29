@@ -14,6 +14,14 @@ logger = get_logger("docker.context")
 
 
 class DockerContext:
+    """
+    A docker context stores all the necessary files to build a docker container
+    for running ASV benchmarks. It includes the Dockerfile, entrypoint script,
+    and a script to build the container.
+
+    This allows customizing the Docker image without needing to modify the Dockerfile directly.
+    """
+
     default_dockerfile_loc = Path(__file__).parent / "Dockerfile"
     default_entrypoint_loc = Path(__file__).parent / "entrypoint.sh"
     default_builder_loc = Path(__file__).parent / "docker_build.sh"
@@ -81,8 +89,8 @@ class DockerContext:
 
         if not image_exists:
             if len(build_args):
-                build_args_str = ", ".join(f"{k}={v}" for k, v in build_args.items())
-                logger.info("Building Docker image '%s' with build args: %s", image_name, build_args_str)
+                build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in build_args.items())
+                logger.info("$ docker build -t %s src/datasmith/docker/ --build-arg %s", image_name, build_args_str)
                 try:
                     client.images.build(
                         fileobj=self.build_tarball_stream(),

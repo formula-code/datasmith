@@ -73,7 +73,7 @@ def main(args: argparse.Namespace) -> None:
                 image=image_name,
                 detach=True,
                 remove=True,
-                name=f"asv-{owner}-{repo}-{sha}",
+                name=f"asv-{owner}-{repo}-{sha}-validation",
                 environment={"ASV_ARGS": "--quick --python=same"},
                 volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
             )

@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
+import logging
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
 
 from datasmith.docker.orchestrator import (
-    build_repo_image,
+    build_repo_sha_image,
     get_docker_client,
     orchestrate,
 )
+from datasmith.logging_config import configure_logging
+from datasmith.scrape.utils import _parse_commit_url
+
+# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log").absolute(), "a"))
+logger = configure_logging(level=logging.DEBUG)
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,9 +64,9 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing the Dockerfile and other necessary files for building the ASV image.",
     )
     parser.add_argument(
-        "--dep-recs",
-        type=Path,
-        help="An optional json file with recommended dependencies for each package. passed as pip install <recommended_deps> before installation.",
+        "--force-rebuild",
+        action="store_true",
+        help="Force rebuild the Docker images even if they already exist.",
     )
     return parser.parse_args()
 
@@ -70,24 +76,8 @@ def main() -> None:
 
     commits = pd.read_json(args.filtered_commits, lines=True)
     commits["repo_name"] = commits["repo_name"].str.lower()
+    commit_urls = ("https://www.github.com/" + commits["repo_name"] + "/commit/" + commits["commit_sha"]).tolist()
 
-    if not args.dep_recs.exists():
-        recommended_deps = {}
-    else:
-        with open(args.dep_recs) as f:
-            recommended_deps = json.load(f)
-
-    commits["dep_recs"] = ""
-    for query, custom_deps in recommended_deps.items():
-        valid_idxs = commits.query(query).index
-        commits.loc[valid_idxs, "dep_recs"] = [custom_deps] * len(valid_idxs)
-
-    repo_urls = ("https://www.github.com/" + commits["repo_name"]).tolist()
-    commit_shas = commits["commit_sha"].tolist()
-    asv_conf_paths = [paths[0] for paths in commits["asv_conf_path"].tolist()]
-    dependency_recs = commits["dep_recs"].tolist()
-    # if repo_name is scikit-learn/scikit-learn -> docker container name is `asv-scikit-learn-scikit-learn`
-    docker_image_names = [f"asv-{repo_url.split('/')[-2]}-{repo_url.split('/')[-1]}" for repo_url in repo_urls]
     max_concurrency = (
         args.max_concurrency if args.max_concurrency != -1 else max(4, math.floor(0.5 * (os.cpu_count() or 1)))
     )
@@ -108,19 +98,28 @@ def main() -> None:
     client = get_docker_client()
 
     # Ensure all required Docker images are available
-    visited = set()
-    for image_name, repo_url in zip(docker_image_names, repo_urls):
-        if image_name not in visited:
-            build_repo_image(client, image_name, repo_url, docker_dir=str(args.docker_dir))
-            visited.add(image_name)
+    all_states = {}
+    for owner, repo, sha in map(_parse_commit_url, commit_urls):
+        if (owner, repo) not in all_states:
+            all_states[(owner, repo)] = {sha}
+        else:
+            all_states[(owner, repo)].add(sha)
+
+    all_states = list(set(map(_parse_commit_url, commit_urls)))
+    docker_image_names = []
+
+    with ThreadPoolExecutor(max_workers=args.num_cores * 4) as pool:
+        futures = [
+            pool.submit(build_repo_sha_image, client, owner, repo, sha, args.force_rebuild)
+            for owner, repo, sha in all_states
+        ]
+        for fut in as_completed(futures):
+            docker_image_names.append(fut.result())
 
     asyncio.run(
         orchestrate(
-            commit_shas=commit_shas,
-            asv_conf_paths=asv_conf_paths,
             docker_image_names=docker_image_names,
             asv_args=asv_args,
-            recommended_deps=dependency_recs,
             max_concurrency=max_concurrency,
             n_cores=n_cores,
             output_dir=args.output_dir.absolute(),

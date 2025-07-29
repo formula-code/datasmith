@@ -8,6 +8,7 @@ from pathlib import Path
 import docker
 from docker.errors import DockerException, ImageNotFound
 
+from datasmith.docker.context_registry import CONTEXT_REGISTRY
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
@@ -45,13 +46,25 @@ def build_repo_image(client: docker.DockerClient, image_name: str, repo_url: str
         raise RuntimeError
 
 
+def build_repo_sha_image(client: docker.DockerClient, owner: str, repo: str, sha: str, force: bool = False) -> str:
+    image_name = f"asv-{owner}-{repo}-{sha}"
+    docker_ctx = CONTEXT_REGISTRY[image_name]
+    docker_ctx.build_container(
+        client=client,
+        image_name=image_name,
+        build_args={
+            "REPO_URL": f"https://www.github.com/{owner}/{repo}",
+            "COMMIT_SHA": sha,
+        },
+        force=force,
+    )
+    return image_name
+
+
 async def run_container(
     client: docker.DockerClient,
     idx: int,
     cores: str | Sequence[int],
-    commit_sha: str,
-    asv_conf_path: str,
-    recommended_deps: str,
     image: str,
     asv_args: str,
     output_dir: Path,
@@ -67,25 +80,18 @@ async def run_container(
     cpuset = ",".join(map(str, cores)) if not isinstance(cores, str) else cores
     num_cores = len(cpuset.split(","))
     env = {
-        "COMMIT_SHA": commit_sha,
-        "ASV_CONF_PATH": asv_conf_path,
-        # asv can take a comma-separated list for --cpu-affinity
         "ASV_ARGS": f"{asv_args} --cpu-affinity {cpuset} --parallel {num_cores}",
-        "RECOMMENDED_DEPS": recommended_deps,
     }
 
     def _launch() -> int:
-        container_name = f"asv_{idx}_{commit_sha[:7]}"
+        container_name = f"{image.split(':')[0]}-{idx:03d}"
         logger.debug("docker run name=%s cpuset=%s env=%s", container_name, cpuset, env)
 
         # Log the exact command a human could copy-paste
         logger.info(
-            "$ docker run --rm --name %s -e COMMIT_SHA=%s -e ASV_CONF_PATH=%s -e ASV_ARGS='%s' -e RECOMMENDED_DEPS='%s' --cpuset-cpus %s %s",
+            "$ docker run --rm --name %s -e ASV_ARGS='%s' --cpuset-cpus %s %s",
             container_name,
-            commit_sha,
-            asv_conf_path,
             env["ASV_ARGS"],
-            env["RECOMMENDED_DEPS"],
             cpuset,
             image,
         )
@@ -118,9 +124,6 @@ async def run_container(
 
 
 async def orchestrate(
-    commit_shas: Sequence[str],
-    asv_conf_paths: Sequence[str],
-    recommended_deps: Sequence[str],
     docker_image_names: Sequence[str],
     asv_args: str,
     max_concurrency: int,
@@ -141,19 +144,16 @@ async def orchestrate(
     for s in core_sets:
         core_pool.put_nowait(s)
 
-    async def worker(idx: int, commit_sha: str, asv_conf_path: str, recommended_deps: str, image: str) -> int:
+    async def worker(idx: int, image: str) -> int:
         core_set = await core_pool.get()  # blocks until a free set exists
         cpuset_str = ",".join(map(str, core_set))  # "0,1,2,3"
 
-        logger.info("▶︎ cores=%s sha=%s", cpuset_str, commit_sha)
+        logger.info("▶︎ cores=%s image=%s", cpuset_str, image)
         try:
             rc = await run_container(
                 client=client,
                 idx=idx,
                 cores=cpuset_str,
-                commit_sha=commit_sha,
-                asv_conf_path=asv_conf_path,
-                recommended_deps=recommended_deps,
                 image=image,
                 asv_args=asv_args,
                 output_dir=output_dir,
@@ -165,12 +165,7 @@ async def orchestrate(
             # Always release the core set, even on failure
             core_pool.put_nowait(core_set)
 
-    tasks = [
-        asyncio.create_task(worker(i, sha, conf, rec_deps, img))
-        for i, (sha, conf, rec_deps, img) in enumerate(
-            zip(commit_shas, asv_conf_paths, recommended_deps, docker_image_names)
-        )
-    ]
+    tasks = [asyncio.create_task(worker(i, img)) for i, img in enumerate(docker_image_names)]
 
     results = await asyncio.gather(*tasks)
     failures = sum(rc != 0 for rc in results)
