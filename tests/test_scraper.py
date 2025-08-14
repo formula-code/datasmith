@@ -272,8 +272,8 @@ class TestRepositoryFiltering:
 
         expected_cols = {"is_accessible", "is_fork", "is_archived", "fork_parent", "forked_at", "watchers", "stars"}
         assert expected_cols.issubset(set(enriched.columns))
-        assert enriched.iloc[0]["is_accessible"] is True
-        assert enriched.iloc[0]["is_fork"] is False
+        assert bool(enriched.iloc[0]["is_accessible"]) is True
+        assert bool(enriched.iloc[0]["is_fork"]) is False
         assert enriched.iloc[0]["stars"] == 500
 
     def test_filter_dashboards_empty_input(self) -> None:
