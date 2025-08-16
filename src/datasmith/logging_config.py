@@ -8,14 +8,14 @@ tracking, and formatted output.
 
 import logging
 import sys
-from typing import Optional
+from typing import Optional, TextIO
 
 
 def configure_logging(
     level: int = logging.INFO,
     format_string: Optional[str] = None,
     date_format: str = "%H:%M:%S",
-    stream: Optional[object] = None,
+    stream: Optional[TextIO] = None,
 ) -> logging.Logger:
     """
     Configure logging for the datasmith package.

@@ -2,7 +2,8 @@ import argparse
 
 import pandas as pd
 
-from datasmith.execution.collect_commits import search_commits
+# from datasmith.execution.collect_commits import search_commits
+from datasmith.execution.collect_commits_offline import search_commits
 from datasmith.logging_config import configure_logging
 
 # Configure logging for the script

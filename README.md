@@ -146,11 +146,12 @@ The scraper can be run using the following command:
 ```bash
 $ python scripts/scrape_repositories.py \
        --outfile artifacts/raw/repos_discovered.csv \
+       --min-stars 500 \
        --filtered-outfile artifacts/raw/repos_valid.csv
 # Writes artifacts/raw/repos_discovered.csv and artifacts/raw/repos_valid.csv
 ```
 
-The `artifacts/raw/repos_valid.csv` file contains a subset of the repositories that aren't forks / reuploads / pass other sanity checks. We found ~700 filtered repositories for this dataset.
+The `artifacts/raw/repos_valid.csv` file contains a subset of the repositories that aren't forks / reuploads / has atleast 500 stars / pass other sanity checks. We found ~700 filtered repositories for this dataset.
 
 
 ### 4. Collect relevant commits for all repositories
@@ -158,7 +159,6 @@ The `artifacts/raw/repos_valid.csv` file contains a subset of the repositories t
 Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch (the top 5000 PRs, sorted by popularity). We use the `collect_commits.py` script to do this. The `filter_commits.py` script then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes). The script also limits the number of repositories to a maximum of 350 to ensure we don't burden the GitHub API with too many requests. The scripts can be run as follows:
 
 ```bash
-# 50 pages * 100 (PRs per page) = 5000 PRs max per repo.
 $ python scripts/collect_commits.py \
        --dashboards artifacts/raw/repos_valid.csv \
        --outfile    artifacts/raw/commits_all.jsonl \

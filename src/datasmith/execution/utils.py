@@ -1,7 +1,10 @@
+from typing import Any
+
+from git import BadName, GitCommandError, Repo
 from requests.exceptions import HTTPError
 
 from datasmith.logging_config import get_logger
-from datasmith.utils import _get_github_metadata
+from datasmith.utils import CACHE_LOCATION, _get_github_metadata, cache_completion
 
 logger = get_logger("execution.utils")
 
@@ -44,6 +47,48 @@ def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
         "total_deletions": commit_info["stats"]["deletions"],
         "total_files_changed": commit_info["stats"]["total"],
         "files_changed": "\n".join([d["filename"] for d in commit_info["files"]]),
+    }
+
+
+@cache_completion(CACHE_LOCATION, "get_commit_info_offline")
+def _get_commit_info_offline(repo: Repo, commit_sha: str) -> dict[str, Any]:
+    """
+    Return commit metadata and diff stats *without* the GitHub REST API.
+
+    The function creates a temporary **treeless** clone
+    (`git clone --filter=tree:0 …`) so it transfers only commit objects.
+    When we later call `commit.stats`, Git will lazily grab just the blobs
+    needed dto compute line-level stats - still far cheaper than an API call.
+    """
+    try:
+        commit = repo.commit(commit_sha)
+
+    except (BadName, ValueError):
+        logger.exception("Maybe commit not found: %s", commit_sha)
+        repo.git.fetch("--no-filter", "--quiet", "origin", commit_sha)
+        commit = repo.commit(commit_sha)  # retry after fetching
+    except GitCommandError:
+        logger.exception("Error fetching commit info: %s", commit_sha)
+        return {
+            "sha": commit_sha,
+            "date": None,
+            "message": None,
+            "total_additions": 0,
+            "total_deletions": 0,
+            "total_files_changed": 0,
+            "files_changed": "",
+        }
+
+    stats = commit.stats
+
+    return {
+        "sha": commit.hexsha,
+        "date": commit.committed_datetime.isoformat(),
+        "message": commit.message,
+        "total_additions": stats.total["insertions"],
+        "total_deletions": stats.total["deletions"],
+        "total_files_changed": stats.total["files"],
+        "files_changed": "\n".join(str(k) for k in stats.files),
     }
 
 

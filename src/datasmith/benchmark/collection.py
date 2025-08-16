@@ -76,8 +76,9 @@ class BenchmarkCollection:
         """
         self.modified_at = datetime.now(timezone.utc)
         path = Path(path)
-        if any(suffix not in [".fc", ".pkl"] for suffix in path.suffixes):
-            path = path.with_suffix(".fc.pkl")
+        # Ensure the filename ends with the exact `.fc.pkl` suffix
+        if not path.name.endswith(".fc.pkl"):
+            path = path.with_name(path.name + ".fc.pkl")
         with open(path, "wb") as fh:
             pickle.dump(self, fh, protocol=pickle.HIGHEST_PROTOCOL)
         return path

@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
         default=0.3,
         help="Random extra delay (0-JITTER's) after each call",
     )
+    p.add_argument("--min-stars", type=int, default=500, help="Minimum number of stars to consider a repository")
     return p.parse_args()
 
 
@@ -83,6 +84,7 @@ def main() -> None:
     filtered_df = filter_dashboards(df, url_col="url")
     # remove airspeed-velocity/asv
     filtered_df = filtered_df[filtered_df.repo_name != "airspeed-velocity/asv"]
+    filtered_df = filtered_df[filtered_df.stars >= args.min_stars]
     if filtered_df.empty:
         raise ValueError("No dashboards found in the repositories.")  # noqa: TRY003
 
