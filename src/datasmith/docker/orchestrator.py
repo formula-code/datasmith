@@ -67,6 +67,7 @@ async def run_container(
     cores: str | Sequence[int],
     image: str,
     asv_args: str,
+    machine_args: dict[str, str],
     output_dir: Path,
 ) -> int:
     """
@@ -79,8 +80,13 @@ async def run_container(
     # Normalise to the cpuset string Docker expects
     cpuset = ",".join(map(str, cores)) if not isinstance(cores, str) else cores
     num_cores = len(cpuset.split(","))
+    sha = image.split(":")[0].split("-")[-1]  # Extract the commit SHA from the image name
+    if "machine" not in machine_args:
+        raise ValueError("machine_args must contain a 'machine' key")  # noqa: TRY003
+    machine_args["machine"] = sha
     env = {
-        "ASV_ARGS": f"{asv_args} --cpu-affinity {cpuset} --parallel {num_cores}",
+        "ASV_ARGS": f"{asv_args} --cpu-affinity {cpuset} --parallel {num_cores} --set-commit-hash {sha} --machine {sha}",
+        "ASV_MACHINE_ARGS": " ".join([f"--{k} '{v}'" for k, v in machine_args.items()]),
     }
 
     def _launch() -> int:
@@ -89,9 +95,10 @@ async def run_container(
 
         # Log the exact command a human could copy-paste
         logger.info(
-            "$ docker run --rm --name %s -e ASV_ARGS='%s' --cpuset-cpus %s %s",
+            "$ docker run --rm --name %s -e ASV_ARGS='%s' -e ASV_MACHINE_ARGS='%s' --cpuset-cpus %s %s",
             container_name,
             env["ASV_ARGS"],
+            env["ASV_MACHINE_ARGS"],
             cpuset,
             image,
         )
@@ -126,6 +133,7 @@ async def run_container(
 async def orchestrate(
     docker_image_names: Sequence[str],
     asv_args: str,
+    machine_args: dict[str, str],
     max_concurrency: int,
     n_cores: int,
     output_dir: Path,
@@ -156,6 +164,7 @@ async def orchestrate(
                 cores=cpuset_str,
                 image=image,
                 asv_args=asv_args,
+                machine_args=machine_args,
                 output_dir=output_dir,
             )
             status = "OK" if rc == 0 else f"FAIL({rc})"
@@ -171,4 +180,4 @@ async def orchestrate(
     failures = sum(rc != 0 for rc in results)
     if failures:
         sys.exit(f"{failures} container(s) failed")
-    logger.info("All benchmarks finished successfully ✔")
+    logger.info("All benchmarks finished")

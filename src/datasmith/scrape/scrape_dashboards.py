@@ -77,7 +77,7 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
     for p in tqdm(param_sets, desc="machines"):
         # graph_dir = make_graph_dir(p, all_keys, quote=is_remote)
         for bench in tqdm(benchmarks, desc="benchmarks", leave=False):
-            bench_url = asv.graph.Graph.get_file_path(params=p, benchmark_name=f"{bench}.json")
+            bench_url = asv.graph.Graph.get_file_path(params=p, benchmark_name=f"{bench}.json")  # pyright: ignore[reportAttributeAccessIssue]
             full_url = join_path(base_url, bench_url)
             local = dl_and_open(full_url, html_dir, base=base_url, force=force)
             if local is None:

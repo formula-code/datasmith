@@ -195,4 +195,4 @@ cython_debug/
 
 tokens.env
 benchmark_results/
-artifacts/
+scratch/artifacts/

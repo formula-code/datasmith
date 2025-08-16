@@ -96,12 +96,10 @@ def dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = Fa
     is_http = parsed.scheme in ("http", "https")
     is_file = parsed.scheme == "file"
 
-    # ---- derive the URL-relative path, *without* any cleaning ----
     rel_path = url[len(base) :].lstrip("/") if base and url.startswith(base) else parsed.path.lstrip("/")
     raw_parts = [unquote(p) for p in Path(rel_path).parts]
     raw_path = Path(dl_dir).joinpath(*raw_parts).resolve()
 
-    # ---- if that exact path already exists, use it as-is ----
     if raw_path.exists():
         local_path = raw_path
     else:
@@ -115,10 +113,8 @@ def dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = Fa
         clean_parts = [clean_component(p) for p in raw_parts]
         local_path = Path(dl_dir).joinpath(*clean_parts).resolve()
 
-    # make sure the destination directory exists
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # ---- download/copy the file just like before ----
     if is_http:
         if force or not local_path.exists():
             try:

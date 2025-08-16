@@ -22,7 +22,7 @@ FormulaCode is designed to benchmark the capabilities of large language models (
 ## Data layout
 The general layout of the artifacts is as follows:
 ```bash
-artifacts/
+scratch/artifacts
 ├── raw/                        # Raw downloads & lists produced by scripts
 │   ├── downloads/              # Per‑repo dashboard archives
 │   ├── online_dashboards.jsonl # Updated config for dashboard scraper
@@ -61,7 +61,7 @@ $ cat tokens.env
 GH_TOKEN=github_pat_???
 COVERALLS_TOKEN=XdK???
 CODECOV_TOKEN=54c6???
-CACHE_LOCATION=/home/???/formulacode/datasmith/artifacts/cache.db
+CACHE_LOCATION=/home/???/formulacode/datasmith/scratch/artifacts/cache.db
 BACKUP_DIR=/home/???/formulacode/backup/
 ```
 
@@ -74,30 +74,30 @@ FormulaCode Lite is a small dataset of 5 repositories with ~440 performance impr
 
 ### Scrape online dashboards
 
-Each of these repositories has a publicly accessible perpetually updating dashboard (e.g. Astropy's dashboard lives [here](https://spacetelescope.github.io/bench/astropy-benchmarks)) that tracks the performance of each commit against various benchmarks. These dashboards were manually curated and placed in a file called `artifacts/raw/online_dashboards.jsonl`.
+Each of these repositories has a publicly accessible perpetually updating dashboard (e.g. Astropy's dashboard lives [here](https://spacetelescope.github.io/bench/astropy-benchmarks)) that tracks the performance of each commit against various benchmarks. These dashboards were manually curated and placed in a file called `scratch/artifacts/raw/online_dashboards.jsonl`.
 
 ```json
-{"url": "https://pv.github.io/scipy-bench/", "output_dir": "artifacts/raw/downloads/scipy"}
-{"url": "https://pandas-dev.github.io/asv-runner/", "output_dir": "artifacts/raw/downloads/pandas"}
-{"url": "https://scikit-learn.org/scikit-learn-benchmarks/", "output_dir": "artifacts/raw/downloads/sklearn"}
-{"url": "https://spacetelescope.github.io/bench/astropy-benchmarks/", "output_dir": "artifacts/raw/downloads/astropy"}
-{"url": "https://pv.github.io/numpy-bench/", "output_dir": "artifacts/raw/downloads/numpy"}
+{"url": "https://asv-runner.github.io/asv-collection/pandas/", "output_dir": "artifacts/processed/downloads/pandas"}
+{"url": "https://pv.github.io/scipy-bench/", "output_dir": "artifacts/processed/downloads/scipy"}
+{"url": "https://scikit-learn.org/scikit-learn-benchmarks/", "output_dir": "artifacts/processed/downloads/sklearn"}
+{"url": "https://spacetelescope.github.io/bench/astropy-benchmarks/", "output_dir": "artifacts/processed/downloads/astropy"}
+{"url": "https://pv.github.io/numpy-bench/", "output_dir": "artifacts/processed/downloads/numpy"}
 ```
 As all these dashboards have the same structure, we developed an ethical scraper that can scrape these dashboards and download the performance data in a structured format. The scraper is invoked using `scripts/download_dataset.py` and can be run as follows:
 
 ```bash
 $ python scripts/download_dataset.py \
        --force \
-       --dashboards artifacts/raw/online_dashboards.jsonl
+       --dashboards scratch/artifacts/raw/online_dashboards.jsonl
 # machines: 100%|██████████████████████████████████████| 7/7 [00:56<00:00,  8.05s/it]
 # Collected 46,143 rows from 805 benchmark files.
 # summaries: 100%|█████████████████████████████████| 115/115 [00:09<00:00, 12.56it/s]
-# Saved 46,143 benchmark rows and 22,577 summary rows -> /home/???/formulacode/datasmith/artifacts/raw/downloads/sklearn/dashboard.fc.pkl
-# Data downloaded to artifacts/raw/downloads/sklearn
+# Saved 46,143 benchmark rows and 22,577 summary rows -> /home/???/formulacode/datasmith/scratch/artifacts/processed/downloads/sklearn/dashboard.fc.pkl
+# Data downloaded to scratch/artifacts/processed/downloads/sklearn
 # ...
 ```
 
-This should create a directory called `artifacts/raw/downloads` that contains the downloaded data for each repository. The data is stored in a structured format that can be easily processed later. More information about the format is available in `datasmith/benchmark/collection.py`.
+This should create a directory called `scratch/artifacts/processed/downloads` that contains the downloaded data for each repository. The data is stored in a structured format that can be easily processed later. More information about the format is available in `datasmith/benchmark/collection.py`.
 
 
 ### 2. Detect performance improving commits
@@ -113,12 +113,12 @@ $ python scripts/detect_breakpoints.py \
        --build-reports \
        --method rbf \
        --compute-coverage \
-       --dataset artifacts/raw/downloads/astropy/dashboard.fc.pkl
+       --dataset scratch/artifacts/processed/downloads/astropy/dashboard.fc.pkl
 # Found 1,085 potential downward shifts.
 # Codecov: 100%|███████████████████████████████| 119/119 [08:50<00:00,  4.46s/commit]
 # Building GitHub commit reports and merged dataframe ...
 # Reports: 100%|█████████████████████████████████| 40/40 [02:55<00:00,  4.38s/commit]
-# Enriched breakpoints saved to '/home/???/formulacode/datasmith/artifacts/raw/downloads/astropy/breakpoints.fc.pkl'.
+# Enriched breakpoints saved to '/home/???/formulacode/datasmith/scratch/artifacts/processed/downloads/astropy/breakpoints.fc.pkl'.
 ```
 
 The `breakpoints.fc.pkl` collection contains all the information about the detected performance improving commits, a markdown report for each commit with useful hints for the optimizer, and a merged CSV file that contains the performance data for all commits in the repository. These files can then be used in the evaluation harness for benchmarking the performance of an optimizer `[@TODO:link formula-code/evaluation-harness]`.
@@ -145,13 +145,13 @@ To run the script, you need to have a GitHub token with `repo` and `read:org` pe
 The scraper can be run using the following command:
 ```bash
 $ python scripts/scrape_repositories.py \
-       --outfile artifacts/raw/repos_discovered.csv \
+       --outfile scratch/artifacts/processed/repos_discovered.csv \
        --min-stars 500 \
-       --filtered-outfile artifacts/raw/repos_valid.csv
-# Writes artifacts/raw/repos_discovered.csv and artifacts/raw/repos_valid.csv
+       --filtered-outfile scratch/artifacts/processed/repos_valid.csv
+# Writes scratch/artifacts/processed/repos_discovered.csv and scratch/artifacts/processed/repos_valid.csv
 ```
 
-The `artifacts/raw/repos_valid.csv` file contains a subset of the repositories that aren't forks / reuploads / has atleast 500 stars / pass other sanity checks. We found ~700 filtered repositories for this dataset.
+The `scratch/artifacts/processed/repos_valid.csv` file contains a subset of the repositories that aren't forks / reuploads / has atleast 500 stars / pass other sanity checks. We found ~700 filtered repositories for this dataset.
 
 
 ### 4. Collect relevant commits for all repositories
@@ -160,13 +160,13 @@ Given the list of repositories, we find the subset of commits that have already 
 
 ```bash
 $ python scripts/collect_commits.py \
-       --dashboards artifacts/raw/repos_valid.csv \
-       --outfile    artifacts/raw/commits_all.jsonl \
+       --dashboards scratch/artifacts/raw/repos_valid.csv \
+       --outfile    scratch/artifacts/raw/commits_all.jsonl \
        --max-pages  50
 $ python scripts/filter_commits.py \
-       --filtered-benchmarks-pth artifacts/raw/repos_valid.csv \
-       --merged-commits-pth     artifacts/raw/commits_all.jsonl \
-       --output-pth             artifacts/raw/commits_filtered.jsonl \
+       --filtered-benchmarks-pth scratch/artifacts/raw/repos_valid.csv \
+       --merged-commits-pth     scratch/artifacts/raw/commits_all.jsonl \
+       --output-pth             scratch/artifacts/raw/commits_filtered.jsonl \
        --max-repos 350 \
        --threads   8   \
        --procs     8
@@ -188,15 +188,15 @@ The `dependency_recommendations.json` file is a dictionary that contains recomme
 (sudo) $ sudo python -m pyperf system tune
 # in userspace:
 $ python scripts/benchmark_commits.py \
-       --filtered-commits artifacts/raw/commits_filtered.jsonl \
-       --dep-recs artifacts/raw/dependency_recommendations.json \
+       --filtered-commits scratch/artifacts/raw/commits_filtered.jsonl \
+       --dep-recs scratch/artifacts/raw/dependency_recommendations.json \
        --max-concurrency 30 \
        --num-cores       2  \
        --asv-args "--interleave-rounds --append-samples -a rounds=2 -a repeat=2" \
-       --output-dir      artifacts/benchmark_results/
+       --output-dir      scratch/artifacts/benchmark_results/
 ```
 
-Generally, each benchmark takes ~2 minutes to run, so benchmarking 70,000 commits on 16 dedicated 4-core machines takes around 6 days. The script will create a directory called `artifacts/benchmark_results/` that contains the results of the benchmarks for each commit. The results are stored in a structured format that can be easily processed later.
+Generally, each benchmark takes ~2 minutes to run, so benchmarking 70,000 commits on 16 dedicated 4-core machines takes around 6 days. The script will create a directory called `scratch/artifacts/benchmark_results/` that contains the results of the benchmarks for each commit. The results are stored in a structured format that can be easily processed later.
 
 ### 6. Collate benchmark results
 
@@ -204,9 +204,9 @@ This step aggregates the benchmark results and generates the `*.fc.pkl` file. Th
 
 ```bash
 $ python scripts/collate_benchmark_results.py \
-       --results-dir     artifacts/benchmark_results/results \
-       --output-dir      artifacts/benchmark_results/published/ \
-       --commit-metadata artifacts/raw/commits_filtered.jsonl \
+       --results-dir     scratch/artifacts/benchmark_results/results \
+       --output-dir      scratch/artifacts/benchmark_results/published/ \
+       --commit-metadata scratch/artifacts/raw/commits_filtered.jsonl \
        --default-machine-name "docker"
 # machines: 100%|██████████████████████████████████████████████| 1/1 [00:00<00:00,  1.53it/s]
 # Collected 53,705 rows from 115 benchmark files.
@@ -217,7 +217,7 @@ $ python scripts/detect_breakpoints.py \
        --build-reports \
        --method rbf \
        --compute-coverage \
-       --dataset artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/dashboard.fc.pkl
+       --dataset scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/dashboard.fc.pkl
 # ...
 ```
 
@@ -229,9 +229,9 @@ How closely do our benchmarked metrics match the original performance improvemen
 
 ```bash
 $ python scripts/replication_experiment.py \
-       --dataset1 artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/breakpoints.fc.pkl \
-       --dataset2 artifacts/raw/downloads/sklearn/breakpoints.fc.pkl \
-       --output-dir artifacts/replication/
+       --dataset1 scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/breakpoints.fc.pkl \
+       --dataset2 scratch/artifacts/raw/downloads/sklearn/breakpoints.fc.pkl \
+       --output-dir scratch/artifacts/replication/
 ```
 ### Pipeline flowchart
 

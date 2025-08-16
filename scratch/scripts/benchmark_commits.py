@@ -8,6 +8,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import asv
 import pandas as pd
 
 from datasmith.docker.orchestrator import (
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--asv-args",
         type=str,
-        default="--quick",
+        default="--append-samples -a rounds=2 -a repeat=2 --python=same",
         help="Additional arguments to pass to the asv command inside the container.",
     )
     parser.add_argument(
@@ -116,10 +117,13 @@ def main() -> None:
         for fut in as_completed(futures):
             docker_image_names.append(fut.result())
 
+    machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
+    machine_args["num_cpu"] = str(args.num_cores)
     asyncio.run(
         orchestrate(
             docker_image_names=docker_image_names,
             asv_args=asv_args,
+            machine_args=machine_args,
             max_concurrency=max_concurrency,
             n_cores=n_cores,
             output_dir=args.output_dir.absolute(),
