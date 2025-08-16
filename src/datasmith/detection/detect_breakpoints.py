@@ -92,12 +92,10 @@ def detect_all_breakpoints(summary_df: pd.DataFrame, method: str = "rbf") -> pd.
     if missing := needed - set(summary_df.columns):
         raise ValueError(str(missing))
 
-    breakpoints: pd.DataFrame = (
-        summary_df.groupby("benchmark", sort=False)
-        .apply(detection_method)
-        .dropna()
-        .explode()
-        .apply(pd.Series)
-        .reset_index(drop=True)
-    )
+    detected = summary_df.groupby("benchmark", sort=False).apply(detection_method, include_groups=False).dropna()
+
+    if detected.empty:
+        return pd.DataFrame()
+
+    breakpoints: pd.DataFrame = detected.explode().apply(pd.Series).reset_index(drop=True)
     return breakpoints

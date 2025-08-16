@@ -95,7 +95,7 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
             df["date"] = df["revision"].astype(str).map(index_data["revision_to_date"])
             frames.append(df)
 
-    all_benchmarks = pd.concat(frames, ignore_index=True)
+    all_benchmarks = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     logger.info("Collected %s rows from %s benchmark files.", f"{len(all_benchmarks):,}", f"{len(frames):,}")
 
     all_summaries = []
@@ -116,7 +116,7 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
         df["benchmark"] = benchmark_name
         all_summaries.append(df)
 
-    all_summaries_df = pd.concat(all_summaries, ignore_index=True)
+    all_summaries_df = pd.concat(all_summaries, ignore_index=True) if all_summaries else pd.DataFrame()
 
     collection = BenchmarkCollection(
         base_url=base_url,
