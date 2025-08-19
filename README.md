@@ -86,7 +86,7 @@ Each of these repositories has a publicly accessible perpetually updating dashbo
 As all these dashboards have the same structure, we developed an ethical scraper that can scrape these dashboards and download the performance data in a structured format. The scraper is invoked using `scripts/download_dataset.py` and can be run as follows:
 
 ```bash
-$ python scripts/download_dataset.py \
+$ python scratch/scripts/download_dataset.py \
        --force \
        --dashboards scratch/artifacts/raw/online_dashboards.jsonl
 # machines: 100%|██████████████████████████████████████| 7/7 [00:56<00:00,  8.05s/it]
@@ -109,7 +109,7 @@ To detect performance improving commits, we provide two methods:
 Either method can be used by passing `--method 'asv'` or `--method 'rbf'` to the script. The `rupture` method is enabled by default as we might not have mean + standard deviation data for all commits in the dataset (that is required by `asv.step_detect`).
 
 ```bash
-$ python scripts/detect_breakpoints.py \
+$ python scratch/scripts/detect_breakpoints.py \
        --build-reports \
        --method rbf \
        --compute-coverage \
@@ -144,7 +144,7 @@ To run the script, you need to have a GitHub token with `repo` and `read:org` pe
 
 The scraper can be run using the following command:
 ```bash
-$ python scripts/scrape_repositories.py \
+$ python scratch/scripts/scrape_repositories.py \
        --outfile scratch/artifacts/processed/repos_discovered.csv \
        --min-stars 500 \
        --filtered-outfile scratch/artifacts/processed/repos_valid.csv
@@ -159,14 +159,14 @@ The `scratch/artifacts/processed/repos_valid.csv` file contains a subset of the 
 Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch (the top 5000 PRs, sorted by popularity). We use the `collect_commits.py` script to do this. The `filter_commits.py` script then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes). The script also limits the number of repositories to a maximum of 350 to ensure we don't burden the GitHub API with too many requests. The scripts can be run as follows:
 
 ```bash
-$ python scripts/collect_commits.py \
-       --dashboards scratch/artifacts/raw/repos_valid.csv \
-       --outfile    scratch/artifacts/raw/commits_all.jsonl \
+$ python scratch/scripts/collect_commits.py \
+       --dashboards scratch/artifacts/raw/repos_valid_sm.csv \
+       --outfile    scratch/artifacts/raw/commits_all_sm.jsonl \
        --max-pages  50
-$ python scripts/filter_commits.py \
-       --filtered-benchmarks-pth scratch/artifacts/raw/repos_valid.csv \
-       --merged-commits-pth     scratch/artifacts/raw/commits_all.jsonl \
-       --output-pth             scratch/artifacts/raw/commits_filtered.jsonl \
+$ python scratch/scripts/filter_commits.py \
+       --filtered-benchmarks-pth scratch/artifacts/raw/repos_valid_sm.csv \
+       --merged-commits-pth     scratch/artifacts/raw/commits_all_sm.jsonl \
+       --output-pth             scratch/artifacts/raw/commits_filtered_sm.jsonl \
        --max-repos 350 \
        --threads   8   \
        --procs     8
@@ -187,13 +187,12 @@ The `dependency_recommendations.json` file is a dictionary that contains recomme
 (sudo) $ export OMP_NUM_THREADS=1
 (sudo) $ sudo python -m pyperf system tune
 # in userspace:
-$ python scripts/benchmark_commits.py \
-       --filtered-commits scratch/artifacts/raw/commits_filtered.jsonl \
-       --dep-recs scratch/artifacts/raw/dependency_recommendations.json \
+$ python scratch/scripts/benchmark_commits.py \
+       --filtered-commits scratch/artifacts/raw/commits_filtered_sm.jsonl \
        --max-concurrency 30 \
        --num-cores       2  \
        --asv-args "--interleave-rounds --append-samples -a rounds=2 -a repeat=2" \
-       --output-dir      scratch/artifacts/benchmark_results/
+       --output-dir      scratch/artifacts/benchmark_results_sm/
 ```
 
 Generally, each benchmark takes ~2 minutes to run, so benchmarking 70,000 commits on 16 dedicated 4-core machines takes around 6 days. The script will create a directory called `scratch/artifacts/benchmark_results/` that contains the results of the benchmarks for each commit. The results are stored in a structured format that can be easily processed later.
@@ -203,7 +202,7 @@ Generally, each benchmark takes ~2 minutes to run, so benchmarking 70,000 commit
 This step aggregates the benchmark results and generates the `*.fc.pkl` file. The `detect_breakpoints.py` script can then be used unchanged to detect performance improving commits. The script can be run as follows:
 
 ```bash
-$ python scripts/collate_benchmark_results.py \
+$ python scratch/scripts/collate_benchmark_results.py \
        --results-dir     scratch/artifacts/benchmark_results/results \
        --output-dir      scratch/artifacts/benchmark_results/published/ \
        --commit-metadata scratch/artifacts/raw/commits_filtered.jsonl \
@@ -213,11 +212,15 @@ $ python scripts/collate_benchmark_results.py \
 # summaries: 100%|████████████████████████████████████████| 115/115 [00:00<00:00, 234.43it/s]
 # Saved 53,705 benchmark rows and 35,765 summary rows -> /home/???/formulacode/datasmith/benchmark_results/published/html/scikit-learn_scikit-learn/dashboard.fc.pkl
 # Benchmark results aggregated and saved to /home/???/formulacode/datasmith/benchmark_results/published/html.
-$ python scripts/detect_breakpoints.py \
+$ python scratch/scripts/detect_breakpoints.py \
        --build-reports \
        --method rbf \
        --compute-coverage \
        --dataset scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/dashboard.fc.pkl
+
+$ python scratch/scripts/validate_containers.py \
+       --dashboard scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/dashboard.fc.pkl \
+       --output-dir scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/containers/
 # ...
 ```
 
@@ -228,7 +231,7 @@ The generated `breakpoints.fc.pkl` file contains all the information about the d
 How closely do our benchmarked metrics match the original performance improvements? We can answer this question by running the `scripts/replication_experiment.py` script. This script takes in two `breakpoints.fc.pkl` files, ensures that they point to the same repository, finds the common set of commits, and then computes the correlation between the performance improvements in the two datasets as well as some basic statistics and plots about the performance improvements. The script can be run as follows:
 
 ```bash
-$ python scripts/replication_experiment.py \
+$ python scratch/scripts/replication_experiment.py \
        --dataset1 scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/breakpoints.fc.pkl \
        --dataset2 scratch/artifacts/raw/downloads/sklearn/breakpoints.fc.pkl \
        --output-dir scratch/artifacts/replication/

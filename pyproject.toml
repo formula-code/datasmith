@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
     "asv",
     "docker",
+    "dspy>=2.6.27",
     "gitpython",
     "numpy",
     "pandas",
@@ -134,3 +135,15 @@ skip_empty = true
 [tool.coverage.run]
 branch = true
 source = ["src"]
+
+[[tool.mypy.overrides]]
+module = "dspy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "datasmith.agents.perf_judge"
+disable_error_code = ["no-any-unimported"]
+
+[[tool.mypy.overrides]]
+module = "datasmith.execution.utils"
+disallow_untyped_defs = false

@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _asv_conf_worker(repo_name: str) -> str | None:
+def _asv_conf_worker(repo_name: str) -> list[str] | None:
     """Locate asv.conf.json inside a repo (wrapper for ThreadPool)."""
     return find_file_in_tree(repo_name, "asv.conf.json")
 
@@ -111,11 +111,6 @@ def main() -> None:
     commits = commits.dropna(subset=["commit_sha"])
 
     all_repo_names = set(commits["repo_name"])
-    import IPython
-
-    IPython.embed(
-        header="I need to figure out why the filter function is taking out commits that seem to have gt info available"
-    )  # For debugging purposes, remove in production
 
     # download all repos to a temp dir
     with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
@@ -131,7 +126,10 @@ def main() -> None:
                 # multi_options=["--filter=tree:0"],
                 multi_options=["--filter=blob:none"],
                 quiet=True,
+                allow_unsafe_options=True,
+                allow_unsafe_protocols=True,
             )
+            logger.debug("Cloned repo %s to %s", repo_name, path)
             all_repos[repo_name] = repo
 
         commit_info_args: list[tuple[Repo, str]] = []
@@ -148,16 +146,26 @@ def main() -> None:
                 )
             )
 
-        commit_meta = pd.json_normalize(commits.pop("commit_info"))
-        commits = pd.concat([commits, commit_meta], axis=1)
-        commits = commits.dropna(subset=["asv_conf_path", "sha", "date", "message"])
-        commits = commits[commits["files_changed"].apply(has_core_file)].reset_index(drop=True)
+        commit_meta = pd.json_normalize(commits.pop("commit_info"))  # pyright: ignore[reportArgumentType]
+        commits_merged = commits.merge(
+            commit_meta,
+            how="left",
+            left_on=["commit_sha"],
+            right_on=["sha"],
+        )
+        commits_merged = commits_merged.dropna(subset=["asv_conf_path", "sha", "date", "message"])
+        assert len(commits_merged) == len(commits), "Merge should not change the number of rows"  # noqa: S101
+        commits_merged = commits_merged[commits_merged["files_changed"].apply(has_core_file)].reset_index(drop=True)
+
+        for k, repo in all_repos.items():
+            repo.close()
+            logger.debug("Closed repo %s", k)
 
     out_path = Path(args.output_pth)
     if not out_path.parent.exists():
         out_path.parent.mkdir(parents=True, exist_ok=True)
     # commits.to_csv(out_path, index=False)
-    commits.to_json(out_path, orient="records", lines=True, index=False)
+    commits_merged.to_json(out_path, orient="records", lines=True, index=False)
 
     logger.info("✔ Wrote %s rows → %s", len(commits), out_path)
 

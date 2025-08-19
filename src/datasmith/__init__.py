@@ -1,5 +1,6 @@
 import os
 
+from datasmith.agents.config import configure_agent_backends
 from datasmith.logging_config import configure_logging
 
 # Configure logging with the centralized configuration
@@ -14,6 +15,9 @@ def setup_environment() -> None:
         os.environ.update(tokens)
     else:
         logger.warning("No tokens.env file found. Skipping environment variable setup.")
+
+    # Initialize agent backends
+    configure_agent_backends()
 
 
 setup_environment()

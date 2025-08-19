@@ -28,15 +28,36 @@ class ContextRegistry:
         logger.debug(f"Registered Docker context: {key}")
 
     def get(self, key: str) -> DockerContext:
-        """Retrieve a Docker context by key."""
-        if key in self.registry:
-            return self.registry[key]
-        # for asv-owner-repo-sha, check if asv-owner-repo exists.
-        logger.debug(f"Context '{key}' not found in registry. Searching for a matching context.")
-        owner_repo_key = key.rsplit("-", 1)[0]
-        if owner_repo_key in self.registry:
-            logger.debug(f"Found context '{owner_repo_key}' for key '{key}'.")
-            return self.registry[owner_repo_key]
+        """
+        Retrieve a Docker context by key using hierarchical matching.
+        "asv-astropy-astropy-14134" should query these queries in-order:
+            "asv-astropy-astropy-14134"
+            "asv-astropy-astropy"
+        """
+        # Build candidate keys in the required order, deduplicated while preserving order.
+        candidates = [key]
+
+        if "-" in key:
+            # e.g., "asv-owner-repo-sha" -> "asv-owner-repo"
+            owner_repo_key = key.rsplit("-", 1)[0]
+            candidates.append(owner_repo_key)
+
+        # Preserve order but remove duplicates
+        seen = set()
+        ordered_candidates = []
+        for c in candidates:
+            if c not in seen:
+                ordered_candidates.append(c)
+                seen.add(c)
+
+        # Try each candidate in order
+        for candidate in ordered_candidates:
+            if candidate in self.registry:
+                if candidate == key:
+                    logger.debug(f"Found exact context for key '{key}'.")
+                else:
+                    logger.debug(f"Found fallback context '{candidate}' for key '{key}'.")
+                return self.registry[candidate]
 
         logger.info(f"No context found for key '{key}'. Using default context.")
         return self.registry["default"]
