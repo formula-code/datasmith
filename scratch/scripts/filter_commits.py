@@ -4,7 +4,7 @@ import argparse
 import json
 import re
 import tempfile
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -114,8 +114,8 @@ def main() -> None:
 
     # download all repos to a temp dir
     with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
-        all_repos = {}
-        for repo_name in tqdm(all_repo_names, desc="Cloning repos"):
+
+        def clone_repo(repo_name: str) -> tuple[str, Repo]:
             repo_name = repo_name.strip("/")
             owner, name = repo_name.split("/", 1)
             path = Path(td) / f"{owner}__{name}.git"
@@ -123,14 +123,19 @@ def main() -> None:
                 f"https://github.com/{repo_name}.git",
                 path,
                 bare=True,
-                # multi_options=["--filter=tree:0"],
-                multi_options=["--filter=blob:none"],
                 quiet=True,
                 allow_unsafe_options=True,
                 allow_unsafe_protocols=True,
             )
             logger.debug("Cloned repo %s to %s", repo_name, path)
-            all_repos[repo_name] = repo
+            return repo_name, repo
+
+        all_repos = {}
+        with ThreadPoolExecutor(max_workers=args.threads) as tp:
+            futures = {tp.submit(clone_repo, repo_name): repo_name for repo_name in all_repo_names}
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Cloning repos"):
+                repo_name, repo = f.result()
+                all_repos[repo_name] = repo
 
         commit_info_args: list[tuple[Repo, str]] = []
         for repo_name, commit_sha in commits[["repo_name", "commit_sha"]].itertuples(index=False, name=None):

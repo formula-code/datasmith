@@ -14,11 +14,6 @@ cd_asv_json_dir() {
 eval "$(micromamba shell hook --shell=bash)"
 micromamba activate base
 
-apt-get update && \
-    apt-get install -y \
-    ninja-build \
-    cmake
-
 ROOT_PATH=${PWD}
 cd_asv_json_dir || exit 1
 CONF_NAME=$(basename "$(find . -type f -name "asv.*.json" | head -n 1)")

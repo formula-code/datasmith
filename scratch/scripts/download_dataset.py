@@ -36,7 +36,7 @@ def process_dashboard(row, force: bool) -> tuple[Path, BenchmarkCollection]:
         base_url=row["url"], html_dir=row["output_dir"], force=force
     )
     if dashboard_collection is None:
-        raise ValueError(f"Failed to create benchmark collection from {row['url']}")  # noqa: TRY003
+        raise ValueError(f"Failed to create benchmark collection from {row['url']}")
     dashboard_collection.save(path=out_path)
     return out_path, dashboard_collection
 

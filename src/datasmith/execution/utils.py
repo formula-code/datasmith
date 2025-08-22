@@ -1,7 +1,7 @@
 import re
 from typing import Any
 
-from git import BadName, GitCommandError, Repo
+from git import BadName, Commit, GitCommandError, Repo
 from requests.exceptions import HTTPError
 
 from datasmith.logging_config import get_logger
@@ -136,7 +136,7 @@ def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
         }
 
     if commit_sha != commit_info["sha"]:
-        raise ValueError("Commit SHA mismatch")  # noqa: TRY003
+        raise ValueError("Commit SHA mismatch")
     return {
         "sha": commit_info["sha"],
         "date": commit_info["commit"]["committer"]["date"],
@@ -146,6 +146,10 @@ def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
         "total_files_changed": commit_info["stats"]["total"],
         "files_changed": "\n".join([d["filename"] for d in commit_info["files"]]),
     }
+
+
+def has_asv(repo: Repo, c: Commit) -> bool:
+    return any(obj.type == "blob" and obj.name == "asv.conf.json" for obj in c.tree.traverse())  # type: ignore[union-attr]
 
 
 @cache_completion(CACHE_LOCATION, "get_commit_info_offline")
@@ -158,6 +162,17 @@ def _get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache=True) -> 
     When we later call `commit.stats`, Git will lazily grab just the blobs
     needed dto compute line-level stats - still far cheaper than an API call.
     """
+    default_bad = {
+        "sha": commit_sha,
+        "date": None,
+        "message": None,
+        "total_additions": 0,
+        "total_deletions": 0,
+        "total_files_changed": 0,
+        "files_changed": "",
+        "patch": "",
+        "has_asv": False,
+    }
     try:
         commit = repo.commit(commit_sha)
     except (BadName, ValueError):
@@ -166,16 +181,7 @@ def _get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache=True) -> 
         commit = repo.commit(commit_sha)  # retry after fetching
     except GitCommandError:
         logger.exception("Error fetching commit info: %s", commit_sha)
-        return {
-            "sha": commit_sha,
-            "date": None,
-            "message": None,
-            "total_additions": 0,
-            "total_deletions": 0,
-            "total_files_changed": 0,
-            "files_changed": "",
-            "patch": "",
-        }
+        return default_bad
 
     stats = commit.stats
 
@@ -195,6 +201,7 @@ def _get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache=True) -> 
         "total_files_changed": stats.total["files"],
         "files_changed": "\n".join(str(k) for k in stats.files),
         "patch": patch,
+        "has_asv": has_asv(repo, commit),
     }
 
 
@@ -206,10 +213,10 @@ def find_file_in_tree(repo: str, filename: str, branch: str | None = None) -> li
             if len(repo_info) == 1:
                 repo_info = repo_info[0]  # pyright: ignore[reportArgumentType]
             else:
-                raise ValueError(f"Expected one repo info object, got {len(repo_info)}")  # noqa: TRY003
+                raise ValueError(f"Expected one repo info object, got {len(repo_info)}")
         branch = repo_info.get("default_branch")  # pyright: ignore[reportOptionalMemberAccess]
         if not branch:
-            raise ValueError("Could not determine the default branch for this repository")  # noqa: TRY003
+            raise ValueError("Could not determine the default branch for this repository")
 
     r = _get_github_metadata(endpoint=f"/repos/{repo}/git/refs/heads/{branch}")
     if isinstance(r, list):

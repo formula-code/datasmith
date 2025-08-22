@@ -60,7 +60,7 @@ configured_headers = {
 
 def _build_headers(name: str) -> dict[str, str]:
     if name not in configured_headers:
-        raise ValueError(f"Unknown header type: {name}. Available types: {', '.join(configured_headers.keys())}")  # noqa: TRY003
+        raise ValueError(f"Unknown header type: {name}. Available types: {', '.join(configured_headers.keys())}")
 
     return configured_headers[name]()
 
@@ -76,7 +76,7 @@ def cache_completion(db_loc: str, table_name: str = "cache"):
     """
     # Validate table_name to avoid SQL-injection risks
     if not re.match(r"^\w+$", table_name):
-        raise ValueError("table_name must be alphanumeric/underscore only")  # noqa: TRY003
+        raise ValueError("table_name must be alphanumeric/underscore only")
 
     def decorator(func):
         @functools.wraps(func)
@@ -235,7 +235,7 @@ def prepare_url(base_url: str, params: dict[str, str] | None = None) -> str:
     r = requests.Request("GET", base_url, params=params)
     prepared = r.prepare()
     if prepared.url is None:
-        raise ValueError(f"Invalid URL: {base_url} with params {params}")  # noqa: TRY003
+        raise ValueError(f"Invalid URL: {base_url} with params {params}")
     return prepared.url
 
 

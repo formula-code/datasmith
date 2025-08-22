@@ -65,21 +65,21 @@ def _parse_commit_url(url: str) -> tuple[str, str, str]:
     parsed = urlparse(url.strip())
 
     if parsed.scheme not in {"http", "https"}:
-        raise ValueError(f"Unsupported URL scheme: {parsed.scheme!r}")  # noqa: TRY003
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme!r}")
 
     if parsed.hostname not in {"github.com", "www.github.com"}:
-        raise ValueError(f"Not a GitHub URL: {url!r}")  # noqa: TRY003
+        raise ValueError(f"Not a GitHub URL: {url!r}")
 
     path = unquote(parsed.path)
     parts = [p for p in PurePosixPath(path).parts if p != "/"]
 
     if len(parts) < 4 or parts[2] != "commit":
-        raise ValueError(f"Not a GitHub commit URL: {url!r}")  # noqa: TRY003
+        raise ValueError(f"Not a GitHub commit URL: {url!r}")
 
     owner, repo, sha = parts[0], parts[1], parts[3]
 
     if not _HEX.fullmatch(sha):
-        raise ValueError(f"Invalid commit SHA: {sha!r}")  # noqa: TRY003
+        raise ValueError(f"Invalid commit SHA: {sha!r}")
 
     return owner, repo, sha.lower()
 

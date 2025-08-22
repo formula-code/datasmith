@@ -75,7 +75,7 @@ def generate_coverage_dataframe(
     if base == "#" and (commit_urls is not None) and (index_data["project_url"] in commit_urls):
         base = commit_urls[index_data["project_url"]]
     elif base == "#":
-        raise ValueError(  # noqa: TRY003
+        raise ValueError(
             f"Base URL '{base}' is not set and {index_data['project_url']} is not in commit_urls. Please provide a valid base URL."
         )
 

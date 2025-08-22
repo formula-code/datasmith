@@ -4,7 +4,7 @@ ARG REPO_URL
 ARG COMMIT_SHA
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl git build-essential jq && \
+        curl git build-essential jq cmake ninja-build && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
@@ -30,6 +30,7 @@ RUN chmod +x /entrypoint.sh
 
 RUN git clone ${REPO_URL} /workspace/repo
 WORKDIR /workspace/repo
+RUN git checkout ${COMMIT_SHA}
 
 COPY docker_build.sh /workspace/repo/docker_build.sh
 RUN chmod +x /workspace/repo/docker_build.sh

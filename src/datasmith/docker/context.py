@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import sys
 import tarfile
 from pathlib import Path
 
@@ -85,6 +84,7 @@ class DockerContext:
             else:
                 logger.info("Docker image '%s' found locally.", image_name)
         except ImageNotFound:
+            logger.info("Docker image '%s' not found locally. Building new image.", image_name)
             pass  # Image doesn't exist or was removed, proceed to build
 
         if not image_exists:
@@ -98,10 +98,70 @@ class DockerContext:
                         tag=image_name,
                         buildargs=build_args,
                     )
-                except DockerException as exc:
-                    sys.exit(f"Failed to build image {image_name}: {exc}")
+                except DockerException:
+                    logger.exception("Failed to build Docker image '%s'", image_name)
             else:
-                raise RuntimeError(f"Docker image '{image_name}' not found and no REPO_URL provided for build.")  # noqa: TRY003
+                raise RuntimeError(f"Docker image '{image_name}' not found and no REPO_URL provided for build.")
 
         if not client.images.get(image_name):
-            raise RuntimeError(f"Image '{image_name}' failed to build and is not found.")  # noqa: TRY003
+            raise RuntimeError(f"Image '{image_name}' failed to build and is not found.")
+
+
+class ContextRegistry:
+    """Registry for Docker contexts to avoid rebuilding the same context multiple times."""
+
+    def __init__(self, registry: dict[str, DockerContext] | None = None, default_context: DockerContext | None = None):
+        if registry is None:
+            registry = {}
+        self.registry = registry
+
+        if "default" not in self.registry:
+            if default_context is None:
+                default_context = DockerContext()
+            self.registry["default"] = default_context
+            logger.debug("Default Docker context initialized.")
+
+    def register(self, key: str, context: DockerContext) -> None:
+        """Register a new Docker context."""
+        if key in self.registry:
+            logger.warning(f"Context '{key}' is already registered, overwriting.")
+        self.registry[key] = context
+        logger.debug(f"Registered Docker context: {key}")
+
+    def get(self, key: str) -> DockerContext:
+        """
+        Retrieve a Docker context by key using hierarchical matching.
+        "asv-astropy-astropy-14134" should query these queries in-order:
+            "asv-astropy-astropy-14134"
+            "asv-astropy-astropy"
+        """
+        # Build candidate keys in the required order, deduplicated while preserving order.
+        candidates = [key]
+
+        if "-" in key:
+            # e.g., "asv-owner-repo-sha" -> "asv-owner-repo"
+            owner_repo_key = key.rsplit("-", 1)[0]
+            candidates.append(owner_repo_key)
+
+        # Preserve order but remove duplicates
+        seen = set()
+        ordered_candidates = []
+        for c in candidates:
+            if c not in seen:
+                ordered_candidates.append(c)
+                seen.add(c)
+
+        # Try each candidate in order
+        for candidate in ordered_candidates:
+            if candidate in self.registry:
+                if candidate == key:
+                    logger.debug(f"Found exact context for key '{key}'.")
+                else:
+                    logger.debug(f"Found fallback context '{candidate}' for key '{key}'.")
+                return self.registry[candidate]
+
+        logger.info(f"No context found for key '{key}'. Using default context.")
+        return self.registry["default"]
+
+    def __getitem__(self, key: str) -> DockerContext:
+        return self.get(key)

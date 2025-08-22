@@ -5,6 +5,7 @@ import asyncio
 import logging
 import math
 import os
+import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -17,9 +18,8 @@ from datasmith.docker.orchestrator import (
     orchestrate,
 )
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.utils import _parse_commit_url
 
-# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log").absolute(), "a"))
+# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))
 logger = configure_logging(level=logging.DEBUG)
 
 
@@ -72,12 +72,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def process_commits(commits_pth: Path) -> list[tuple[str, str, str]]:
+    commits = pd.read_json(commits_pth, lines=True)
+    all_states = {}
+    for _, row in commits.iterrows():
+        repo_name = row["repo_name"]
+        sha = row["commit_sha"]
+        has_asv = row.get("has_asv", True)
+        if not has_asv and "scikit-learn" not in repo_name:
+            logger.warning(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
+            continue
+        owner, repo = repo_name.split("/")
+        if (owner, repo) not in all_states:
+            all_states[(owner, repo)] = {(sha)}
+        else:
+            all_states[(owner, repo)].add(sha)
+
+    all_states_list = [(owner, repo, sha) for (owner, repo), shas in all_states.items() for sha in shas]
+
+    return all_states_list
+
+
 def main() -> None:
     args = parse_args()
 
-    commits = pd.read_json(args.filtered_commits, lines=True)
-    commits["repo_name"] = commits["repo_name"].str.lower()
-    commit_urls = ("https://www.github.com/" + commits["repo_name"] + "/commit/" + commits["commit_sha"]).tolist()
+    all_states = process_commits(args.filtered_commits)
 
     max_concurrency = (
         args.max_concurrency if args.max_concurrency != -1 else max(4, math.floor(0.5 * (os.cpu_count() or 1)))
@@ -99,14 +118,6 @@ def main() -> None:
     client = get_docker_client()
 
     # Ensure all required Docker images are available
-    all_states = {}
-    for owner, repo, sha in map(_parse_commit_url, commit_urls):
-        if (owner, repo) not in all_states:
-            all_states[(owner, repo)] = {sha}
-        else:
-            all_states[(owner, repo)].add(sha)
-
-    all_states = list(set(map(_parse_commit_url, commit_urls)))
     docker_image_names = []
 
     with ThreadPoolExecutor(max_workers=args.num_cores * 4) as pool:
@@ -119,7 +130,7 @@ def main() -> None:
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     machine_args["num_cpu"] = str(args.num_cores)
-    asyncio.run(
+    files_by_image: dict[str, dict[str, str]] = asyncio.run(
         orchestrate(
             docker_image_names=docker_image_names,
             asv_args=asv_args,
@@ -130,6 +141,16 @@ def main() -> None:
             client=client,
         )
     )
+    # save the files by image as a pickle file.
+    with open(output_dir / "files_by_image.pkl", "wb") as f:
+        pickle.dump(files_by_image, f)
+
+    # save the files by image as a JSON file
+    output_file = output_dir / "benchmark_results.json"
+    with open(output_file, "w") as f:
+        pd.DataFrame.from_dict(files_by_image, orient="index").to_json(f, orient="records", lines=True)
+
+    logger.info("Benchmark results saved to %s", output_file)
 
 
 if __name__ == "__main__":

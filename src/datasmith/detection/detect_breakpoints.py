@@ -80,7 +80,7 @@ def get_detection_method(method: str) -> typing.Callable:
     elif method == "rbf":
         return get_breakpoints
     else:
-        raise ValueError(f"Unknown method: {method}. Use 'asv' or 'rbf'.")  # noqa: TRY003
+        raise ValueError(f"Unknown method: {method}. Use 'asv' or 'rbf'.")
 
 
 def detect_all_breakpoints(summary_df: pd.DataFrame, method: str = "rbf") -> pd.DataFrame:

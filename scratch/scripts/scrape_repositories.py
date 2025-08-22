@@ -86,7 +86,7 @@ def main() -> None:
     filtered_df = filtered_df[filtered_df.repo_name != "airspeed-velocity/asv"]
     filtered_df = filtered_df[filtered_df.stars >= args.min_stars]
     if filtered_df.empty:
-        raise ValueError("No dashboards found in the repositories.")  # noqa: TRY003
+        raise ValueError("No dashboards found in the repositories.")
 
     filtered_df.to_csv(args.filtered_outfile, index=False)
     logger.info("✅  Filtered dashboards saved to %s", args.filtered_outfile)

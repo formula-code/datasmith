@@ -3,16 +3,19 @@ This script builds and validates that each benchmark container can be compiled a
 """
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
+import asv
+import pandas as pd
+
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.docker.context_registry import CONTEXT_REGISTRY
-from datasmith.docker.orchestrator import get_docker_client
+from datasmith.docker.orchestrator import get_docker_client, log_container_output
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
-# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "a"))
 logger = configure_logging(level=logging.DEBUG)
 
 
@@ -25,8 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dashboard",
         type=Path,
-        required=True,
-        help="Path to the dashboard containing the benchmarks.",
+        help="Path to the dashboard containing the benchmarks. Either --dashboard or --commits must be provided.",
+    )
+    parser.add_argument(
+        "--commits",
+        type=Path,
+        help="Path to a JSONL file containing commit information. Either --dashboard or --commits must be provided.",
     )
     parser.add_argument(
         "--docker-dir",
@@ -43,52 +50,128 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main(args: argparse.Namespace) -> None:
-    dashboard = BenchmarkCollection.load(args.dashboard)
-    all_states = {}
-    for owner, repo, sha in dashboard.enriched_breakpoints.url.apply(_parse_commit_url):
-        if (owner, repo) not in all_states:
-            all_states[(owner, repo)] = {sha}
-        else:
-            all_states[(owner, repo)].add(sha)
+def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
+    if args.dashboard:
+        dashboard = BenchmarkCollection.load(args.dashboard)
+        all_states = {}
+        for owner, repo, sha in dashboard.enriched_breakpoints.url.apply(_parse_commit_url):
+            if (owner, repo) not in all_states:
+                all_states[(owner, repo)] = {sha}
+            else:
+                all_states[(owner, repo)].add(sha)
+    elif args.commits:
+        commits = pd.read_json(args.commits, lines=True)
+        all_states = {}
+        for _, row in commits.iterrows():
+            repo_name = row["repo_name"]
+            sha = row["commit_sha"]
+            has_asv = row.get("has_asv", True)
+            if not has_asv and "scikit-learn" not in repo_name:
+                logger.warning(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
+                continue
+            owner, repo = repo_name.split("/")
+            if (owner, repo) not in all_states:
+                all_states[(owner, repo)] = {(sha)}
+            else:
+                all_states[(owner, repo)].add(sha)
+        all_states.pop(("scikit-learn", "scikit-learn"))  # already validated.
+    else:
+        raise ValueError("Either --dashboard or --commits must be provided.")
+    return all_states
 
+
+def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
 
-    for (owner, repo), uniq_shas in all_states.items():
-        for sha in uniq_shas:
-            image_name = f"asv-{owner}-{repo}-{sha}"
-            docker_ctx = CONTEXT_REGISTRY[image_name]
-            docker_ctx.build_container(
-                client=client,
-                image_name=image_name,
-                build_args={
-                    "REPO_URL": f"https://www.github.com/{owner}/{repo}",
-                    "COMMIT_SHA": sha,
-                },
-                force=True,
-            )
-            logger.debug(f"Validating {image_name} for commit {sha}")
-            # stop any existing container with the same name
-            container = client.containers.run(
-                image=image_name,
-                detach=True,
-                remove=True,
-                name=f"asv-{owner}-{repo}-{sha}-validation",
-                environment={"ASV_ARGS": "--quick --python=same"},
-                volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
-            )
-            for line in container.logs(stream=True, follow=True):
-                logger.info(line.decode().strip())
+    all_states = process_inputs(args)
 
-            result = container.wait()
-            if result.get("StatusCode", 1) != 0:
-                logger.error(
-                    f"Container {image_name} for commit {sha} failed with status code {result.get('StatusCode', 1)}"
+    machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
+    all_files_by_image = {}
+    errors = []
+    error_fmt = (
+        "$ docker build -t {image_name} src/datasmith/docker/ --build-arg REPO_URL={repo_url} --build-arg COMMIT_SHA={commit_sha}"
+        + "\n$ docker run --rm -v $(pwd)/output:/output {image_name} asv run --quick --python=same --set-commit-hash={commit_sha}"
+    )
+    for (owner, repo), uniq_shas in all_states.items():
+        print("SMALL SCALE TESTING", owner, repo, len(uniq_shas), "ONLY 5")
+        for sha in list(uniq_shas)[:5]:
+            image_name = f"asv-{owner}-{repo}-{sha}".lower()
+            docker_ctx = CONTEXT_REGISTRY[image_name]
+            try:
+                docker_ctx.build_container(
+                    client=client,
+                    image_name=image_name,
+                    build_args={
+                        "REPO_URL": f"https://www.github.com/{owner}/{repo}",
+                        "COMMIT_SHA": sha,
+                    },
+                    force=True,
                 )
-            else:
-                logger.info(f"Container {image_name} for commit {sha} completed successfully.")
+                logger.debug(f"Validating {image_name} for commit {sha}")
+                # stop any existing container with the same name
+                machine_args["machine"] = sha
+                container = client.containers.run(
+                    image=image_name,
+                    detach=True,
+                    name=f"asv-{owner}-{repo}-{sha}-validation",
+                    environment={
+                        "ASV_ARGS": f"--quick --python=same --set-commit-hash={sha}",
+                        "ASV_MACHINE_ARGS": " ".join([f"--{k} '{v}'" for k, v in machine_args.items()]),
+                    },
+                    volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
+                )
+                for line in container.logs(stream=True, follow=True):
+                    logger.info(line.decode().strip())
+
+                result = container.wait()
+                if result.get("StatusCode", 1) != 0:
+                    logger.error(
+                        f"Container {image_name} for commit {sha} failed with status code {result.get('StatusCode', 1)}"
+                    )
+                    errors.append(
+                        error_fmt.format(
+                            image_name=image_name,
+                            repo_url=f"https://www.github.com/{owner}/{repo}",
+                            commit_sha=sha,
+                        )
+                    )
+                    files = log_container_output(container, archive="/output")
+                else:
+                    logger.info(f"Container {image_name} for commit {sha} completed successfully.")
+                    files = log_container_output(container, archive="/output")
+                    print(f"{image_name} completed successfully")
+                all_files_by_image[image_name] = files
+            except Exception:
+                logger.exception(f"Error validating {image_name} for commit {sha}")
+                errors.append(
+                    error_fmt.format(
+                        image_name=image_name,
+                        repo_url=f"https://www.github.com/{owner}/{repo}",
+                        commit_sha=sha,
+                    )
+                )
+                continue
 
     logger.info("All containers validated successfully.")
+    # save errors to a file
+    if errors:
+        with open(args.output_dir / "errors.txt", "w") as f:
+            for error in errors:
+                f.write(f"{error}\n")
+        logger.error(f"Errors occurred during validation. See {args.output_dir / 'errors.txt'} for details.")
+    else:
+        logger.info("No errors occurred during validation.")
+    # remove all containers
+    for container in client.containers.list(all=True):
+        if container.name.startswith("asv-"):
+            logger.info(f"Removing container {container.name}")
+            container.remove(force=True)
+
+    # save all-files as a json file
+    with open(args.output_dir / "all_files_by_image.json", "w") as f:
+        json.dump(all_files_by_image, f, indent=4)
+
+    logger.info("Results saved to %s", args.output_dir / "all_files_by_image.json")
 
 
 if __name__ == "__main__":

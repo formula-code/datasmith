@@ -17,6 +17,10 @@ cd_asv_json_dir() {
 }
 
 eval "$(micromamba shell hook --shell=bash)"
+
+pip install "cython<3"
+bash maintainer/install_all.sh develop
+
 micromamba activate base
 ROOT_PATH=${PWD}
 cd_asv_json_dir || exit 1
@@ -44,7 +48,6 @@ config.html_dir = str(path / 'html')
 asv.util.write_json('$CONF_NAME', config.__dict__, api_version=config.api_version)
 asv.util.write_json(path / '$CONF_NAME', config.__dict__, api_version=config.api_version)
 "
-    micromamba run -n "asv_${version}" pip install git+https://github.com/airspeed-velocity/asv
     micromamba run -n "asv_${version}" asv machine --yes --config $CONF_NAME ${ASV_MACHINE_ARGS}
     micromamba run -n "asv_${version}" asv run --show-stderr ${ASV_ARGS} --config $CONF_NAME
 done
