@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -10,7 +11,7 @@ import pandas as pd
 
 from datasmith.agents.context_synthesis import agent_build_and_validate
 from datasmith.benchmark.collection import BenchmarkCollection
-from datasmith.docker.context_registry import CONTEXT_REGISTRY
+from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client
 from datasmith.docker.validation import Task, _err_lock
 from datasmith.logging_config import configure_logging
@@ -58,15 +59,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
+def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float]]]:
     if args.dashboard:
         dashboard = BenchmarkCollection.load(args.dashboard)
         all_states = {}
         for owner, repo, sha in dashboard.enriched_breakpoints.url.apply(_parse_commit_url):
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = {sha}
+                all_states[(owner, repo)] = {(sha, 0.0)}
             else:
-                all_states[(owner, repo)].add(sha)
+                all_states[(owner, repo)].add((sha, 0.0))
     elif args.commits:
         commits = pd.read_json(args.commits, lines=True)
         all_states = {}
@@ -78,10 +79,13 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
                 logger.warning(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
                 continue
             owner, repo = repo_name.split("/")
+            commit_date_unix: float = (
+                0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
+            )
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = {(sha)}
+                all_states[(owner, repo)] = [(sha, commit_date_unix)]
             else:
-                all_states[(owner, repo)].add(sha)
+                all_states[(owner, repo)].append((sha, commit_date_unix))
     else:
         raise ValueError("Either --dashboard or --commits must be provided.")
     return all_states
@@ -90,13 +94,14 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
 def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
     all_states = process_inputs(args)
+    context_registry = ContextRegistry.load_from_file(path=Path("scratch/context_registry.json"))
 
     # Prepare tasks
     tasks: list[Task] = []
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
-        for sha in limited:
-            tasks.append(Task(owner, repo, sha))
+        for sha, date in limited:
+            tasks.append(Task(owner, repo, sha, commit_date=date))
 
     (args.output_dir / "results").mkdir(parents=True, exist_ok=True)
     # reset outputs
@@ -113,7 +118,12 @@ def main(args: argparse.Namespace) -> None:
     if args.max_workers < 1:
         for t in tasks:
             res = agent_build_and_validate(
-                task=t, args=args, client=client, machine_defaults=machine_defaults, max_attempts=args.max_attempts
+                task=t,
+                args=args,
+                client=client,
+                context_registry=context_registry,
+                machine_defaults=machine_defaults,
+                max_attempts=args.max_attempts,
             )
             results.append(res)
             with _err_lock, open(args.output_dir / "results.jsonl", "a") as jf:
@@ -128,6 +138,7 @@ def main(args: argparse.Namespace) -> None:
                     client=client,
                     machine_defaults=machine_defaults,
                     max_attempts=args.max_attempts,
+                    context_registry=context_registry,
                 )
                 for t in tasks
             ]
@@ -139,9 +150,8 @@ def main(args: argparse.Namespace) -> None:
 
                 if res["ok"]:
                     logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
-                    # Add to CONTEXT_REGISTRY
-                    with CONTEXT_REGISTRY.get_lock():
-                        CONTEXT_REGISTRY.save_to_file(path=Path("scratch/context_registry.json"))
+                    with context_registry.get_lock():
+                        context_registry.save_to_file(path=Path("scratch/context_registry.json"))
 
     # Rollup (minimal, quick to read)
     rollup = {

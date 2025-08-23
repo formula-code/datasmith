@@ -9,6 +9,7 @@ import asv
 import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client
 from datasmith.docker.validation import Task, _err_lock, validate_one
 from datasmith.logging_config import configure_logging
@@ -88,6 +89,7 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
 def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
     all_states = process_inputs(args)
+    context_registry = ContextRegistry.load_from_file(path=Path("scratch/context_registry.json"))
 
     # Prepare tasks
     tasks: list[Task] = []
@@ -110,7 +112,7 @@ def main(args: argparse.Namespace) -> None:
     results: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-        futures = [ex.submit(validate_one, t, args, client, machine_defaults) for t in tasks]
+        futures = [ex.submit(validate_one, t, args, client, context_registry, machine_defaults) for t in tasks]
         for fut in as_completed(futures):
             rec = fut.result()
             results.append(rec)

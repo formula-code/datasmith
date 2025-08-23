@@ -10,7 +10,7 @@ import asv
 import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
-from datasmith.docker.context_registry import CONTEXT_REGISTRY
+from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client, log_container_output
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
@@ -83,6 +83,7 @@ def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
 
     all_states = process_inputs(args)
+    context_registry = ContextRegistry.load_from_file(path=Path("scratch/context_registry.json"))
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     all_files_by_image = {}
@@ -93,8 +94,8 @@ def main(args: argparse.Namespace) -> None:
     )
     for (owner, repo), uniq_shas in all_states.items():
         for sha in list(uniq_shas):
-            image_name = f"asv-{owner}-{repo}-{sha}".lower()
-            docker_ctx = CONTEXT_REGISTRY[image_name]
+            image_name = f"asv/{owner}/{repo}/{sha}".lower()
+            docker_ctx = context_registry[image_name]
             try:
                 docker_ctx.build_container(
                     client=client,
@@ -111,7 +112,7 @@ def main(args: argparse.Namespace) -> None:
                 container = client.containers.run(
                     image=image_name,
                     detach=True,
-                    name=f"asv-{owner}-{repo}-{sha}-validation",
+                    name=f"asv/{owner}/{repo}/{sha}",
                     environment={
                         "ASV_ARGS": f"--quick --python=same --set-commit-hash={sha}",
                         "ASV_MACHINE_ARGS": " ".join([f"--{k} '{v}'" for k, v in machine_args.items()]),

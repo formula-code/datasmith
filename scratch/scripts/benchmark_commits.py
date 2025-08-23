@@ -12,6 +12,7 @@ from pathlib import Path
 import asv
 import pandas as pd
 
+from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import (
     build_repo_sha_image,
     get_docker_client,
@@ -97,6 +98,7 @@ def main() -> None:
     args = parse_args()
 
     all_states = process_commits(args.filtered_commits)
+    context_registry = ContextRegistry.load_from_file(path=Path("scratch/context_registry.json"))
 
     max_concurrency = (
         args.max_concurrency if args.max_concurrency != -1 else max(4, math.floor(0.5 * (os.cpu_count() or 1)))
@@ -122,7 +124,7 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=args.num_cores * 4) as pool:
         futures = [
-            pool.submit(build_repo_sha_image, client, owner, repo, sha, args.force_rebuild)
+            pool.submit(build_repo_sha_image, client, context_registry, owner, repo, sha, args.force_rebuild)
             for owner, repo, sha in all_states
         ]
         for fut in as_completed(futures):

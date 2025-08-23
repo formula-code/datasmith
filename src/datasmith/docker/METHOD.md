@@ -11,14 +11,12 @@
 
 4. Add the new docker_build.sh to the context registry. e.g.:
     ```python
-    CONTEXT_REGISTRY.register(
-        "asv-scikit-learn-scikit-learn",
+    context_registry.register(
+        "asv/scikit-learn/scikit-learn",
         DockerContext(
             building_data="""#!/usr/bin/env bash
     (The rest of the modified docker_build.sh script is omitted for brevity)
-    """.strip(),
-            dockerfile_data=CONTEXT_REGISTRY["default"].dockerfile_data,
-            entrypoint_data=CONTEXT_REGISTRY["default"].entrypoint_data,
+    """.strip()
         ),
     )
     ```

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import io
 import json
 import tarfile
@@ -14,6 +15,7 @@ from typing import Any
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound
 
+from datasmith.execution.utils import _get_commit_info
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.context")
@@ -28,6 +30,14 @@ class BuildResult:
     duration_s: float
     stderr_tail: str  # tail of error-ish build logs
     stdout_tail: str  # tail of normal build stream (may help triage)
+
+
+@dataclass(frozen=True)
+class Task:
+    owner: str
+    repo: str
+    sha: str | None = None
+    commit_date: float = 0.0
 
 
 class DockerContext:
@@ -269,16 +279,16 @@ class DockerContext:
         default files via the DockerContext __init__ (which accepts None).
         """
         return cls(
-            building_data=data.get("building_data"),
             dockerfile_data=data.get("dockerfile_data"),
             entrypoint_data=data.get("entrypoint_data"),
+            building_data=data.get("building_data"),
         )
 
 
 class ContextRegistry:
     """Registry for Docker contexts to avoid rebuilding the same context multiple times."""
 
-    def __init__(self, registry: dict[str, DockerContext] | None = None, default_context: DockerContext | None = None):
+    def __init__(self, registry: dict[Task, DockerContext] | None = None, default_context: DockerContext | None = None):
         if registry is None:
             registry = {}
         self.registry = registry
@@ -287,56 +297,139 @@ class ContextRegistry:
         if "default" not in self.registry:
             if default_context is None:
                 default_context = DockerContext()
-            self.registry["default"] = default_context
+            self.registry[Task(owner="default", repo="default", sha=None)] = default_context
             logger.debug("Default Docker context initialized.")
 
     def get_lock(self) -> threading.Lock:
         return self._lock
 
-    def register(self, key: str, context: DockerContext) -> None:
+    def parse_key(self, key: str) -> Task:
+        """Parse a string key into a Task object."""
+        if not key.startswith("asv/") and not key.startswith("asv/default"):
+            raise ValueError("Key must start with 'asv/' or 'asv/default'")
+
+        # Special "default" handling: e.g. "asv/default-<repo>"
+        if key.startswith("asv/default"):
+            parts = key.split("-")
+            repo = parts[-1] if len(parts) > 2 else "default"
+            return Task(owner="default", repo=repo, sha=None)
+
+        parts = key.split("/")
+        if parts[0] != "asv" or not (3 <= len(parts) <= 4):
+            raise ValueError("Key must be in the format 'asv/owner/repo' or 'asv/owner/repo/sha'")
+        owner, repo = parts[1], parts[2]
+        sha = None if len(parts) != 4 else parts[3]
+        # Compute commit date if we have a sha; otherwise 0.0
+        date_unix = 0.0
+        if sha:
+            try:
+                logger.debug(f"Fetching commit info for {owner}/{repo}@{sha}")
+                commit_info = _get_commit_info(f"{owner}/{repo}", sha)
+                date_iso = commit_info["date"]
+                date_unix = datetime.datetime.fromisoformat(date_iso.replace("Z", "+00:00")).timestamp()
+            except Exception as exc:
+                logger.warning("Failed to fetch commit info for %s/%s@%s: %s", owner, repo, sha, exc)
+                date_unix = 0.0
+
+        return Task(owner=owner, repo=repo, sha=sha, commit_date=date_unix)
+
+    def register(self, key: str | Task, context: DockerContext) -> None:
         """Register a new Docker context."""
+        if isinstance(key, str):
+            key = self.parse_key(key)
         if key in self.registry:
             logger.warning(f"Context '{key}' is already registered, overwriting.")
         self.registry[key] = context
         logger.debug(f"Registered Docker context: {key}")
 
-    def get(self, key: str) -> DockerContext:
+    def get(self, key: str | Task) -> DockerContext:
         """
         Retrieve a Docker context by key using hierarchical matching.
-        "asv-astropy-astropy-14134" should query these queries in-order:
-            "asv-astropy-astropy-14134"
-            "asv-astropy-astropy"
+        "asv/astropy/astropy/14134" should query these queries in-order:
+            "asv/astropy/astropy/14134"
+            "asv/astropy/astropy"
         """
-        # Build candidate keys in the required order, deduplicated while preserving order.
-        candidates = [key]
+        if isinstance(key, str):
+            key = self.parse_key(key)
 
-        if "-" in key:
-            # e.g., "asv-owner-repo-sha" -> "asv-owner-repo"
-            owner_repo_key = key.rsplit("-", 1)[0]
-            candidates.append(owner_repo_key)
-
-        # Preserve order but remove duplicates
-        seen = set()
-        ordered_candidates = []
-        for c in candidates:
-            if c not in seen:
-                ordered_candidates.append(c)
-                seen.add(c)
-
-        # Try each candidate in order
-        for candidate in ordered_candidates:
-            if candidate in self.registry:
-                if candidate == key:
-                    logger.debug(f"Found exact context for key '{key}'.")
-                else:
-                    logger.debug(f"Found fallback context '{candidate}' for key '{key}'.")
-                return self.registry[candidate]
-
+        if key.sha is not None and key in self.registry:
+            logger.debug(f"Found exact context for key '{key}'.")
+            return self.registry[key]
+        elif Task(owner=key.owner, repo=key.repo, sha=None) in self.registry:
+            candidate = Task(owner=key.owner, repo=key.repo, sha=None)
+            logger.debug(f"Found fallback context '{candidate}' for key '{key}'.")
+            return self.registry[candidate]
         logger.info(f"No context found for key '{key}'. Using default context.")
-        return self.registry["default"]
+        return self.registry[Task(owner="default", repo="default", sha=None)]
+
+    def get_similar(self, key: str | Task) -> list[tuple[Task, DockerContext]]:  # noqa: C901
+        """
+        Retrieve a list of Docker contexts by key using hierarchical matching.
+        "asv/astropy/astropy/14134" should return contexts for these queries in-order:
+            1) "asv/astropy/astropy/14134" (exact match, if present)
+            2) Any others starting with "asv/astropy/astropy/" (e.g., "asv/astropy/astropy/abcdef")
+                sorted by abs(key.commit_date / candidate.commit_date) if key.commit_date is not None else alphabetically
+            3) "asv/astropy/astropy"      (owner/repo base, if present)
+        Keys like "asv/astropy/otherrepo*" or "asv/otherowner/*" must NOT match.
+        """
+        if isinstance(key, str):
+            key = self.parse_key(key)
+
+        results: list[tuple[Task, DockerContext]] = []
+        seen: set[Task] = set()
+
+        # 1) Exact match first (if present)
+        if key in self.registry:
+            results.append((key, self.registry[key]))
+            seen.add(key)
+
+        # 2) Other shas for the same owner/repo
+        candidates: list[tuple[Task, DockerContext]] = []
+        for t, ctx in self.registry.items():
+            if t in seen:
+                continue
+            if t.owner == key.owner and t.repo == key.repo and t.sha is not None:
+                candidates.append((t, ctx))
+
+        # Sort candidates:
+        # - By commit-date proximity if key has a (sha, commit_date)
+        # - Otherwise alphabetically by sha
+        has_valid_commit_date = getattr(key, "sha", None) is not None and getattr(key, "commit_date", None) is not None
+
+        if has_valid_commit_date:
+
+            def _sort(item: tuple[Task, DockerContext]) -> tuple[float, str]:
+                t, _ = item
+                cand_cd = getattr(t, "commit_date", None)
+                # Missing commit_date gets sorted to the end.
+                if cand_cd is None:
+                    return (float("inf"), str(t.sha))
+                try:
+                    return (abs(key.commit_date - cand_cd), str(t.sha))
+                except Exception:
+                    return (float("inf"), str(t.sha))
+
+            candidates.sort(key=_sort)
+        else:
+            candidates.sort(key=lambda item: str(item[0].sha))
+
+        for t, ctx in candidates:
+            if t not in seen:
+                results.append((t, ctx))
+                seen.add(t)
+
+        # 3) Base owner/repo (sha=None) at the end, if present and not already added
+        base = Task(owner=key.owner, repo=key.repo, sha=None)
+        if base in self.registry and base not in seen:
+            results.append((base, self.registry[base]))
+
+        return results
 
     def __getitem__(self, key: str) -> DockerContext:
         return self.get(key)
+
+    def __setitem__(self, key: str, context: DockerContext) -> None:
+        self.register(key, context)
 
     def save_to_file(self, path: Path) -> None:
         dat = self.serialize(pretty=True)
@@ -357,7 +450,7 @@ class ContextRegistry:
         with self._lock:
             payload = {
                 "version": 1,
-                "contexts": {k: v.to_dict() for k, v in self.registry.items()},
+                "contexts": {repr(k): v.to_dict() for k, v in self.registry.items()},
             }
         return json.dumps(payload, indent=2 if pretty else None, sort_keys=pretty)
 
@@ -369,10 +462,10 @@ class ContextRegistry:
         """
         data = json.loads(payload)
         raw = data.get("contexts", {})
-        registry: dict[str, DockerContext] = {k: DockerContext.from_dict(v) for k, v in raw.items()}
+        registry: dict[Task, DockerContext] = {eval(k): DockerContext.from_dict(v) for k, v in raw.items()}  # noqa: S307
 
-        # Ensure 'default' exists (your code expects it).
+        # Ensure 'default' exists:
         if "default" not in registry:
-            registry["default"] = DockerContext()
+            registry[Task(owner="default", repo="default", sha=None)] = DockerContext()
 
         return cls(registry=registry)

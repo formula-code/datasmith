@@ -5,26 +5,17 @@ import contextlib
 import logging
 import shlex
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 
 import docker
 from docker.models.containers import Container
 
-from datasmith.docker.context import BuildResult
-from datasmith.docker.context_registry import CONTEXT_REGISTRY
+from datasmith.docker.context import BuildResult, ContextRegistry, Task
 from datasmith.docker.orchestrator import log_container_output
 
 logger = logging.getLogger(__name__)
 
 _err_lock = threading.Lock()
-
-
-@dataclass(frozen=True)
-class Task:
-    owner: str
-    repo: str
-    sha: str
 
 
 def format_cmds(image_name: str, owner: str, repo: str, sha: str, out_dir: Path) -> tuple[str, str]:
@@ -89,14 +80,21 @@ def wait_container_with_timeout(container: Container, timeout_s: int) -> tuple[i
         return None, True
 
 
-def validate_one(task: Task, args: argparse.Namespace, client: docker.DockerClient, machine_defaults: dict) -> dict:
+def validate_one(
+    task: Task,
+    args: argparse.Namespace,
+    client: docker.DockerClient,
+    context_registry: ContextRegistry,
+    machine_defaults: dict,
+) -> dict:
     """
     Build via Docker SDK streaming (with timeout), then run container (with timeout).
     Emits errors immediately on failure (build or run).
     Returns a structured dict for JSONL summarization.
     """
-    image_name = f"asv-{task.owner}-{task.repo}-{task.sha}".lower()
-    docker_ctx = CONTEXT_REGISTRY[image_name]
+    assert task.sha is not None, "Task.sha must be set"  # noqa: S101
+    image_name = f"asv/{task.owner}/{task.repo}/{task.sha}".lower()
+    docker_ctx = context_registry[image_name]
 
     build_cmd, run_cmd = format_cmds(image_name, task.owner, task.repo, task.sha, args.output_dir)
 
@@ -150,7 +148,7 @@ def validate_one(task: Task, args: argparse.Namespace, client: docker.DockerClie
         container = client.containers.run(
             image=image_name,
             detach=True,
-            name=f"{image_name}-validation",
+            name=f"{image_name.replace('/', '-')}-validation",
             environment=env,
             volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
         )

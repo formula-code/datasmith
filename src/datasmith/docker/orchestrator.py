@@ -12,7 +12,7 @@ import docker
 from docker.errors import DockerException, ImageNotFound
 from docker.models.containers import Container
 
-from datasmith.docker.context_registry import CONTEXT_REGISTRY
+from datasmith.docker.context import ContextRegistry
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
@@ -50,9 +50,11 @@ def build_repo_image(client: docker.DockerClient, image_name: str, repo_url: str
         raise RuntimeError
 
 
-def build_repo_sha_image(client: docker.DockerClient, owner: str, repo: str, sha: str, force: bool = False) -> str:
-    image_name = f"asv-{owner}-{repo}-{sha}"
-    docker_ctx = CONTEXT_REGISTRY[image_name]
+def build_repo_sha_image(
+    client: docker.DockerClient, context_registry: ContextRegistry, owner: str, repo: str, sha: str, force: bool = False
+) -> str:
+    image_name = f"asv/{owner}/{repo}/{sha}"
+    docker_ctx = context_registry[image_name]
     docker_ctx.build_container(
         client=client,
         image_name=image_name,

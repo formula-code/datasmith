@@ -236,4 +236,3 @@ class PerfClassifier(dspy.Module):
 #     return (tp - 3*fn) - 0.5*fp
 # tele = BootstrapFewShot(metric=recall_weighted_metric, max_bootstrapped_demos=6, max_labeled_demos=6)
 # optimized = tele.compile(PerfClassifier(), trainset=train)  # returns an optimized program
-# import IPython; IPython.embed(header="perf_judge.py: debugging")
