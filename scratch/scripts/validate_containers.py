@@ -4,7 +4,6 @@ This script builds and validates that each benchmark container can be compiled a
 
 import argparse
 import json
-import logging
 from pathlib import Path
 
 import asv
@@ -16,7 +15,8 @@ from datasmith.docker.orchestrator import get_docker_client, log_container_outpu
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
-logger = configure_logging(level=logging.DEBUG)
+logger = configure_logging()
+# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +66,7 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
             repo_name = row["repo_name"]
             sha = row["commit_sha"]
             has_asv = row.get("has_asv", True)
-            if not has_asv and "scikit-learn" not in repo_name:
+            if not has_asv:
                 logger.warning(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
                 continue
             owner, repo = repo_name.split("/")
@@ -74,7 +74,6 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
                 all_states[(owner, repo)] = {(sha)}
             else:
                 all_states[(owner, repo)].add(sha)
-        all_states.pop(("scikit-learn", "scikit-learn"))  # already validated.
     else:
         raise ValueError("Either --dashboard or --commits must be provided.")
     return all_states
@@ -93,8 +92,7 @@ def main(args: argparse.Namespace) -> None:
         + "\n$ docker run --rm -v $(pwd)/output:/output {image_name} asv run --quick --python=same --set-commit-hash={commit_sha}"
     )
     for (owner, repo), uniq_shas in all_states.items():
-        print("SMALL SCALE TESTING", owner, repo, len(uniq_shas), "ONLY 5")
-        for sha in list(uniq_shas)[:5]:
+        for sha in list(uniq_shas):
             image_name = f"asv-{owner}-{repo}-{sha}".lower()
             docker_ctx = CONTEXT_REGISTRY[image_name]
             try:
@@ -136,12 +134,14 @@ def main(args: argparse.Namespace) -> None:
                         )
                     )
                     files = log_container_output(container, archive="/output")
+                    print(f"{image_name} completed failed with status code {result.get('StatusCode', 1)}")
                 else:
                     logger.info(f"Container {image_name} for commit {sha} completed successfully.")
                     files = log_container_output(container, archive="/output")
                     print(f"{image_name} completed successfully")
                 all_files_by_image[image_name] = files
             except Exception:
+                print(f"{image_name} for commit {sha} failed to build or run.")
                 logger.exception(f"Error validating {image_name} for commit {sha}")
                 errors.append(
                     error_fmt.format(

@@ -142,8 +142,12 @@ module = "dspy.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "datasmith.agents.perf_judge"
-disable_error_code = ["no-any-unimported"]
+module = "asv.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "datasmith.agents.*"
+disable_error_code = ["no-any-unimported", "import-untyped"]
 
 [[tool.mypy.overrides]]
 module = "datasmith.execution.utils"

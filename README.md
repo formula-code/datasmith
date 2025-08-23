@@ -160,13 +160,13 @@ Given the list of repositories, we find the subset of commits that have already 
 
 ```bash
 $ python scratch/scripts/collect_commits.py \
-       --dashboards scratch/artifacts/raw/repos_valid_sm.csv \
-       --outfile    scratch/artifacts/raw/commits_all_sm.jsonl \
+       --dashboards scratch/artifacts/raw/repos_valid.csv \
+       --outfile    scratch/artifacts/raw/commits_all.jsonl \
        --max-pages  50
 $ python scratch/scripts/filter_commits.py \
-       --filtered-benchmarks-pth scratch/artifacts/raw/repos_valid_sm.csv \
-       --merged-commits-pth     scratch/artifacts/raw/commits_all_sm.jsonl \
-       --output-pth             scratch/artifacts/raw/commits_filtered_sm.jsonl \
+       --filtered-benchmarks-pth scratch/artifacts/raw/repos_valid.csv \
+       --merged-commits-pth     scratch/artifacts/raw/commits_all.jsonl \
+       --output-pth             scratch/artifacts/raw/commits_filtered.jsonl \
        --max-repos 350 \
        --threads   8   \
        --procs     8

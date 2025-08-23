@@ -79,7 +79,7 @@ def process_commits(commits_pth: Path) -> list[tuple[str, str, str]]:
         repo_name = row["repo_name"]
         sha = row["commit_sha"]
         has_asv = row.get("has_asv", True)
-        if not has_asv and "scikit-learn" not in repo_name:
+        if not has_asv:
             logger.warning(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
             continue
         owner, repo = repo_name.split("/")
