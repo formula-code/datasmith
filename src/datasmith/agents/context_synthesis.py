@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import logging
 import pickle
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,11 +15,6 @@ from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
 from datasmith.docker.validation import Task, validate_one
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler(stream=sys.stdout)
-handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
-logger.addHandler(handler)
-
 configure_agent_backends()
 
 
@@ -184,6 +178,14 @@ def build_once_with_context(
     pull: bool = False,
 ) -> BuildResult:
     logger.info("build_once_with_context: registering context key=%s", image_name)
+    logger.debug(
+        "build_once_with_context: build args: REPO_URL=%s, COMMIT_SHA=%s, timeout_s=%s, tail_chars=%s, pull=%s",
+        repo_url,
+        sha,
+        timeout_s,
+        tail_chars,
+        pull,
+    )
     res = context.build_container_streaming(
         client=client,
         image_name=image_name,
@@ -193,6 +195,15 @@ def build_once_with_context(
         tail_chars=tail_chars,
         pull=pull,
     )
+    logger.info(
+        "build_once_with_context: result ok=%s rc=%s duration=%.1fs (stderr_tail_len=%d, stdout_tail_len=%d)",
+        res.ok,
+        res.rc,
+        res.duration_s,
+        len(res.stderr_tail or ""),
+        len(res.stdout_tail or ""),
+    )
+    logger.debug("build_once_with_context: stderr_tail preview: %s", _preview(res.stderr_tail, 240))
     return res
 
 
@@ -294,8 +305,6 @@ def agent_build_and_validate(
             # Save final pickle and then run full validation using your pipeline
             final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
             _save_pickle(ctx, final_pickle)
-            context_registry.save_to_file(Path("scratch/context_registry.json"))
-
             logger.info("agent_build_and_validate: build succeeded; starting validation run")
             result = validate_one(task, args, client, context_registry, machine_defaults)
             logger.info(

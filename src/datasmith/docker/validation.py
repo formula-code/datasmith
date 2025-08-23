@@ -80,7 +80,95 @@ def wait_container_with_timeout(container: Container, timeout_s: int) -> tuple[i
         return None, True
 
 
-def validate_one(
+def _handle_build_error(
+    task: Task,
+    build_cmd: str,
+    run_cmd: str,
+    build_res: BuildResult,
+    args: argparse.Namespace,
+    image_name: str,
+    build_stage: str,
+) -> dict:
+    msg = f"$ {build_cmd}\n$ {run_cmd}\n[build FAILED rc={build_res.rc} in {build_res.duration_s:.1f}s]"
+    if build_res.stderr_tail:
+        msg += f"\n---- build stderr tail ----\n{build_res.stderr_tail}"
+    append_error_line(args.output_dir / "errors.txt", msg)
+    logger.error(msg)
+    return {
+        "owner": task.owner,
+        "repo": task.repo,
+        "sha": task.sha,
+        "image_name": image_name,
+        "stage": build_stage,
+        "ok": False,
+        "rc": build_res.rc,
+        "duration_s": build_res.duration_s,
+        "cmd_build": build_cmd,
+        "cmd_run": run_cmd,
+        "stderr_tail": build_res.stderr_tail,
+        "stdout_tail": build_res.stdout_tail,
+        "files": [],
+    }
+
+
+def _handle_run_error(
+    task: Task,
+    build_cmd: str,
+    run_cmd: str,
+    rc: int,
+    logs_tail: str,
+    args: argparse.Namespace,
+    image_name: str,
+    run_stage: str,
+    build_stage: str,
+    files: dict[str, str],
+) -> dict:
+    msg = f"$ {build_cmd}\n$ {run_cmd}\n[run FAILED rc={rc} in (<= {args.run_timeout}s)]"
+    if logs_tail:
+        msg += f"\n---- run logs tail ----\n{logs_tail}"
+    append_error_line(args.output_dir / "errors.txt", msg)
+    logger.error(msg)
+    return {
+        "owner": task.owner,
+        "repo": task.repo,
+        "sha": task.sha,
+        "image_name": image_name,
+        "stage": f"{run_stage}+{build_stage}",
+        "ok": False,
+        "rc": rc,
+        "duration_s": None,
+        "cmd_build": build_cmd,
+        "cmd_run": run_cmd,
+        "stderr_tail": logs_tail,
+        "stdout_tail": "",
+        "files": files,
+    }
+
+
+def _handle_run_exception(
+    task: Task, build_cmd: str, run_cmd: str, args: argparse.Namespace, image_name: str, build_stage: str
+) -> dict:
+    logger.exception("%s failed to run.", image_name)
+    msg = f"$ {build_cmd}\n$ {run_cmd}\n[run FAILED: exception during start]"
+    append_error_line(args.output_dir / "errors.txt", msg)
+    return {
+        "owner": task.owner,
+        "repo": task.repo,
+        "sha": task.sha,
+        "image_name": image_name,
+        "stage": f"run-exception+{build_stage}",
+        "ok": False,
+        "rc": 1,
+        "duration_s": None,
+        "cmd_build": build_cmd,
+        "cmd_run": run_cmd,
+        "stderr_tail": "",
+        "stdout_tail": "",
+        "files": [],
+    }
+
+
+def validate_one(  # noqa: C901
     task: Task,
     args: argparse.Namespace,
     client: docker.DockerClient,
@@ -110,28 +198,15 @@ def validate_one(
         tail_chars=args.tail_chars,
         pull=False,
     )
+    if build_res.rc == 124:
+        build_stage = "build-timeout"
+    elif build_res.rc != 0:
+        build_stage = "build-failed"
+    else:
+        build_stage = "build-ok"
 
     if not build_res.ok:
-        msg = f"$ {build_cmd}\n$ {run_cmd}\n[build FAILED rc={build_res.rc} in {build_res.duration_s:.1f}s]"
-        if build_res.stderr_tail:
-            msg += f"\n---- build stderr tail ----\n{build_res.stderr_tail}"
-        append_error_line(args.output_dir / "errors.txt", msg)
-        logger.error(msg)
-        return {
-            "owner": task.owner,
-            "repo": task.repo,
-            "sha": task.sha,
-            "image_name": image_name,
-            "stage": "build",
-            "ok": False,
-            "rc": build_res.rc,
-            "duration_s": build_res.duration_s,
-            "cmd_build": build_cmd,
-            "cmd_run": run_cmd,
-            "stderr_tail": build_res.stderr_tail,
-            "stdout_tail": build_res.stdout_tail,
-            "files": [],
-        }
+        return _handle_build_error(task, build_cmd, run_cmd, build_res, args, image_name, build_stage)
 
     # --- RUN ---
     # prepare env (clone default Machine args and set machine=sha)
@@ -172,19 +247,27 @@ def validate_one(
             logger.exception("Failed to archive output for %s", image_name)
 
         ok = rc == 0
+
+        # set stage to "run-{failed/ok/timeout}" + "build-{failed/ok/timeout}" for clarity
+        run_stage = "run"
+        if timed_out:
+            run_stage += "-timeout"
+        elif not ok:
+            run_stage += "-failed"
+        else:
+            run_stage += "-ok"
+
         if not ok:
-            msg = f"$ {build_cmd}\n$ {run_cmd}\n[run FAILED rc={rc} in (<= {args.run_timeout}s)]"
-            if logs_tail:
-                msg += f"\n---- run logs tail ----\n{logs_tail}"
-            append_error_line(args.output_dir / "errors.txt", msg)
-            logger.error(msg)
+            return _handle_run_error(
+                task, build_cmd, run_cmd, rc, logs_tail, args, image_name, run_stage, build_stage, files
+            )
 
         return {  # noqa: TRY300
             "owner": task.owner,
             "repo": task.repo,
             "sha": task.sha,
             "image_name": image_name,
-            "stage": "run" if ok else "run-failed",
+            "stage": f"{run_stage}+{build_stage}",
             "ok": ok,
             "rc": rc,
             "duration_s": None,
@@ -195,24 +278,7 @@ def validate_one(
             "files": files,
         }
     except Exception:
-        logger.exception("%s failed to run.", image_name)
-        msg = f"$ {build_cmd}\n$ {run_cmd}\n[run FAILED: exception during start]"
-        append_error_line(args.output_dir / "errors.txt", msg)
-        return {
-            "owner": task.owner,
-            "repo": task.repo,
-            "sha": task.sha,
-            "image_name": image_name,
-            "stage": "run-exception",
-            "ok": False,
-            "rc": 1,
-            "duration_s": None,
-            "cmd_build": build_cmd,
-            "cmd_run": run_cmd,
-            "stderr_tail": "",
-            "stdout_tail": "",
-            "files": [],
-        }
+        return _handle_run_exception(task, build_cmd, run_cmd, args, image_name, build_stage)
     finally:
         # best-effort cleanup
         with contextlib.suppress(Exception):

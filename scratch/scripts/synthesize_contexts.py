@@ -128,6 +128,10 @@ def main(args: argparse.Namespace) -> None:
             results.append(res)
             with _err_lock, open(args.output_dir / "results.jsonl", "a") as jf:
                 jf.write(json.dumps(res) + "\n")
+
+            if int(res["rc"]) != 1:
+                logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
+                context_registry.save_to_file(path=Path("scratch/context_registry.json"))
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
             futures = [
@@ -148,10 +152,9 @@ def main(args: argparse.Namespace) -> None:
                 with _err_lock, open(args.output_dir / "results.jsonl", "a") as jf:
                     jf.write(json.dumps(res) + "\n")
 
-                if res["ok"]:
+                if int(res["rc"]) != 1:
                     logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
-                    with context_registry.get_lock():
-                        context_registry.save_to_file(path=Path("scratch/context_registry.json"))
+                    context_registry.save_to_file(path=Path("scratch/context_registry.json"))
 
     # Rollup (minimal, quick to read)
     rollup = {

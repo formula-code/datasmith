@@ -433,7 +433,8 @@ class ContextRegistry:
 
     def save_to_file(self, path: Path) -> None:
         dat = self.serialize(pretty=True)
-        path.write_text(dat)
+        with self._lock:
+            path.write_text(dat)
         logger.info("Context registry saved to %s", path)
 
     @classmethod
