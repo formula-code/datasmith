@@ -18,7 +18,7 @@ from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
 logger = configure_logging()
-# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))
+# logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))
 
 
 def parse_args() -> argparse.Namespace:

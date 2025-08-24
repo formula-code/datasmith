@@ -327,6 +327,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cached-property"
+version = "2.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/4b/3d870836119dbe9a5e3c9a61af8cc1a8b69d75aea564572e385882d5aefb/cached_property-2.0.1.tar.gz", hash = "sha256:484d617105e3ee0e4f1f58725e72a8ef9e93deee462222dbd51cd91230897641", size = 10574, upload-time = "2024-10-25T15:43:55.667Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/0e/7d8225aab3bc1a0f5811f8e1b557aa034ac04bdf641925b30d3caf586b28/cached_property-2.0.1-py3-none-any.whl", hash = "sha256:f617d70ab1100b7bcf6e42228f9ddcb78c676ffa167278d9f730d1c2fba69ccb", size = 7428, upload-time = "2024-10-25T15:43:54.711Z" },
+]
+
+[[package]]
 name = "cachetools"
 version = "6.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -958,6 +967,7 @@ dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
     { name = "numpy", version = "2.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pandas" },
+    { name = "portkey-ai" },
     { name = "requests" },
     { name = "ruptures" },
     { name = "simple-useragent" },
@@ -999,6 +1009,7 @@ requires-dist = [
     { name = "gitpython" },
     { name = "numpy" },
     { name = "pandas" },
+    { name = "portkey-ai", specifier = ">=1.14.3" },
     { name = "requests" },
     { name = "ruptures" },
     { name = "simple-useragent" },
@@ -3246,6 +3257,27 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "portkey-ai"
+version = "1.14.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "cached-property" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "tqdm" },
+    { name = "types-requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/eb/e2/96c00bacad299e4a117b1e13d35641eca8b3719dd1748dbb663b40061bb0/portkey_ai-1.14.3.tar.gz", hash = "sha256:4ab119aab5f1956bec31832c8ed09752ad8d5fe19ba32bbff08465456bc1e35d", size = 438978, upload-time = "2025-07-27T16:13:22.096Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/c0/1c3bb9aff997153a29b568af798f08d373220c8cb6d947f4c320f2165e73/portkey_ai-1.14.3-py3-none-any.whl", hash = "sha256:11b5d60f458f1bf5c50988171e4b88560222a70d5830490e7e847159b4bcdadf", size = 873441, upload-time = "2025-07-27T16:13:20.715Z" },
 ]
 
 [[package]]

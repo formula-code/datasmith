@@ -24,6 +24,7 @@ dependencies = [
     "gitpython",
     "numpy",
     "pandas",
+    "portkey-ai>=1.14.3",
     "requests",
     "ruptures",
     "simple-useragent",
