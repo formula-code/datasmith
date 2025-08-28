@@ -34,7 +34,8 @@ def _ts_to_iso(ts: float | int | None) -> str:
 
 
 class BuildScriptSynthesis(dspy.Signature):
-    """Draft a bash script (building_data) to build & install a Python repo inside micromamba envs
+    """
+    Draft a bash script (docker_build.sh) to build & install a Python repo inside micromamba envs
     discovered via asv.*.json. The script MUST be idempotent and safe to run in Docker.
     Respect this template:
       - discover and cd into the dir containing asv.*.json
@@ -43,6 +44,7 @@ class BuildScriptSynthesis(dspy.Signature):
           * ensure asv + build tooling
           * then perform project install (editable or wheel) with best-guess flags
       - no user prompts, all non-interactive
+      - Do not surround with ```bash ... ```. Return raw bash script.
     """
 
     # Inputs
@@ -58,11 +60,15 @@ class BuildScriptSynthesis(dspy.Signature):
     failure_more = dspy.InputField(
         desc="Describes where the failure occured. E.g. 'N/A', 'build failed', 'asv run failed'."
     )
-    last_building_data = dspy.InputField(desc="Previous building_data script; empty on attempt #1.")
-    expected_template = dspy.InputField(desc="Stable outer template; only BUILD STEPS may be customized.")
+    last_docker_build_script = dspy.InputField(desc="Previous docker_build.sh script.")
+    expected_template = dspy.InputField(desc="Stable outer template..")
 
     # Output
-    building_data = dspy.OutputField(desc="Final executable bash script with only the BUILD STEPS region customized.")
+    error_summary = dspy.OutputField(desc="A brief summary of the last build failure, and possible causes.")
+    resolution_steps = dspy.OutputField(desc="Concrete steps to resolve the failure.")
+    docker_build_script = dspy.OutputField(
+        desc="Final executable bash script that successfully builds the project from source."
+    )
 
 
 class BuildScriptProgram(dspy.Module):
@@ -78,7 +84,7 @@ class BuildScriptProgram(dspy.Module):
         stderr_logs: str,
         stdout_logs: str,
         failure_more: str,
-        last_building_data: str,
+        last_docker_build_script: str,
         expected_template: str,
     ) -> str:
         logger.info(
@@ -87,7 +93,7 @@ class BuildScriptProgram(dspy.Module):
             sha,
             len(stderr_logs or ""),
             len(stdout_logs or ""),
-            bool(last_building_data),
+            bool(last_docker_build_script),
             failure_more,
         )
         out = self.predict(
@@ -97,15 +103,17 @@ class BuildScriptProgram(dspy.Module):
             stderr_logs=stderr_logs or "",
             stdout_logs=stdout_logs or "",
             failure_more=failure_more or "N/A",
-            last_building_data=last_building_data or "",
+            last_docker_build_script=last_docker_build_script or "",
             expected_template=expected_template,
         )
         # Safety belt: ensure the required fixed template anchors are present.
-        script = out.building_data.strip()  # pyright: ignore[reportAttributeAccessIssue]
+        script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
         logger.debug("DSPy: candidate script preview: %s", _preview(script, 240))
         must_haves = ["cd_asv_json_dir()", "micromamba", "for version in $python_versions; do"]
         ok_template = all(m in script for m in must_haves)
-        if not ok_template:
+        must_not_haves = ["```", "import IPython", "from IPython", "exit(", "sys.exit("]
+        no_bad = all(m not in script for m in must_not_haves)
+        if (not ok_template) or (not no_bad):
             logger.warning("DSPy: template anchors missing; falling back to provided template")
             script = expected_template
         logger.info("DSPy: finalized script length=%d", len(script))
@@ -158,7 +166,7 @@ def synthesize_script(
         stderr_logs=stderr_tail or "",
         stdout_logs=stdout_tail or "",
         failure_more=failure_more or "N/A",
-        last_building_data=last_script or "",
+        last_docker_build_script=last_script or "",
         expected_template=building_template,
     )
     script = str(script)

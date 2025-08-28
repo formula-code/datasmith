@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import logging
 import math
 import os
 import pickle
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import asv
 import pandas as pd
 
+from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import (
     build_repo_sha_image,
     get_docker_client,
     orchestrate,
 )
+from datasmith.docker.validation import BuildResult, Task
 from datasmith.logging_config import configure_logging
+from datasmith.scrape.utils import _parse_commit_url
 
 # logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))
 logger = configure_logging(level=logging.DEBUG)
@@ -30,10 +35,15 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--filtered-commits",
+        "--commits",
         type=Path,
         required=True,
         help="Path to a jsonl containing a pandas dataframe with commit_ids, repo_name, and the relative asv_conf_location.",
+    )
+    parser.add_argument(
+        "--dashboard",
+        type=Path,
+        help="Path to the dashboard containing the benchmarks. Either --dashboard or --commits must be provided.",
     )
     parser.add_argument(
         "--max-concurrency",
@@ -70,35 +80,70 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force rebuild the Docker images even if they already exist.",
     )
+    parser.add_argument(
+        "--context-registry",
+        type=Path,
+        help="Path to the context registry JSON file.",
+    )
+    parser.add_argument(
+        "--limit-per-repo",
+        type=int,
+        default=-1,
+        help="Cap SHAs per repo (keeps your small-scale test). -1 = no limit.",
+    )
     return parser.parse_args()
 
 
-def process_commits(commits_pth: Path) -> list[tuple[str, str, str]]:
-    commits = pd.read_json(commits_pth, lines=True)
-    all_states = {}
-    for _, row in commits.iterrows():
-        repo_name = row["repo_name"]
-        sha = row["commit_sha"]
-        has_asv = row.get("has_asv", True)
-        if not has_asv:
-            logger.warning(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
-            continue
-        owner, repo = repo_name.split("/")
-        if (owner, repo) not in all_states:
-            all_states[(owner, repo)] = {(sha)}
-        else:
-            all_states[(owner, repo)].add(sha)
+def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float]]]:
+    if args.dashboard:
+        dashboard = BenchmarkCollection.load(args.dashboard)
+        all_states = {}
+        for owner, repo, sha in dashboard.enriched_breakpoints.url.apply(_parse_commit_url):
+            owner = owner.lower()
+            repo = repo.lower()
+            sha = sha.lower()
+            if (owner, repo) not in all_states:
+                all_states[(owner, repo)] = {(sha, 0.0)}
+            else:
+                all_states[(owner, repo)].add((sha, 0.0))
+    elif args.commits:
+        commits = pd.read_json(args.commits, lines=True)
+        all_states = {}
+        for _, row in commits.iterrows():
+            repo_name = row["repo_name"]
+            sha = row["commit_sha"]
+            has_asv = row.get("has_asv", True)
+            if not has_asv:
+                logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
+                continue
+            owner, repo = repo_name.split("/")
+            commit_date_unix: float = (
+                0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
+            )
+            if (owner, repo) not in all_states:
+                all_states[(owner, repo)] = [(sha, commit_date_unix)]
+            else:
+                all_states[(owner, repo)].append((sha, commit_date_unix))
+    else:
+        raise ValueError("Either --dashboard or --commits must be provided.")
+    return all_states
 
-    all_states_list = [(owner, repo, sha) for (owner, repo), shas in all_states.items() for sha in shas]
 
-    return all_states_list
+def main(args: argparse.Namespace) -> None:
+    client = get_docker_client()
+    all_states = process_inputs(args)
+    context_registry = ContextRegistry.load_from_file(path=args.context_registry)
 
-
-def main() -> None:
-    args = parse_args()
-
-    all_states = process_commits(args.filtered_commits)
-    context_registry = ContextRegistry.load_from_file(path=Path("scratch/context_registry.json"))
+    # Prepare tasks
+    tasks: list[Task] = []
+    for (owner, repo), uniq in all_states.items():
+        limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
+        for sha, date in limited:
+            task = Task(owner, repo, sha, commit_date=date)
+            if task in context_registry:
+                tasks.append(task)
+            else:
+                logger.debug(f"main: skipping {task} as not in context registry")
 
     max_concurrency = (
         args.max_concurrency if args.max_concurrency != -1 else max(4, math.floor(0.5 * (os.cpu_count() or 1)))
@@ -111,30 +156,58 @@ def main() -> None:
         raise ValueError()
 
     n_cores = args.num_cores
-    output_dir = Path(args.output_dir).absolute()
+    output_dir = args.output_dir.absolute()
+    # remove the folders first.
+    shutil.rmtree(output_dir / "results", ignore_errors=True)
+    shutil.rmtree(output_dir / "logs", ignore_errors=True)
 
-    # Create the results and logs directories if they don't exist
-    Path(f"{output_dir}/results").mkdir(parents=True, exist_ok=True)
-    Path(f"{output_dir}/logs").mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "results").mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "logs").mkdir(parents=True, exist_ok=True)
 
-    client = get_docker_client()
+    machine_defaults: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
+    machine_defaults = {
+        k: str(v.replace(" ", "_").replace("'", "").replace('"', "")) for k, v in machine_defaults.items()
+    }
+    logger.debug("main: machine_defaults keys=%d", len(machine_defaults))
 
-    # Ensure all required Docker images are available
-    docker_image_names = []
+    builds: list[BuildResult] = []
+    if args.max_concurrency < 1:
+        for t in tasks:
+            build_res: BuildResult = build_repo_sha_image(
+                client=client,
+                context_registry=context_registry,
+                task=t,
+                force=args.force_rebuild,
+            )
+            builds.append(build_res)
+    else:
+        with ThreadPoolExecutor(max_workers=args.max_concurrency) as pool:
+            futures = [
+                pool.submit(
+                    build_repo_sha_image,
+                    client,
+                    context_registry,
+                    task,
+                    args.force_rebuild,
+                )
+                for task in tasks
+            ]
+            for fut in as_completed(futures):
+                builds.append(fut.result())
 
-    with ThreadPoolExecutor(max_workers=args.num_cores * 4) as pool:
-        futures = [
-            pool.submit(build_repo_sha_image, client, context_registry, owner, repo, sha, args.force_rebuild)
-            for owner, repo, sha in all_states
-        ]
-        for fut in as_completed(futures):
-            docker_image_names.append(fut.result())
+    successful_builds = [b for b in builds if b.rc != 1]
+
+    logger.info("Running benchmarks for %d images", len(successful_builds))
+    logger.info("Failed builds for %d images", len(builds) - len(successful_builds))
+    for b in builds:
+        if b.rc == 1:
+            logger.warning("Build failed for %s", b.image_name)
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     machine_args["num_cpu"] = str(args.num_cores)
     files_by_image: dict[str, dict[str, str]] = asyncio.run(
         orchestrate(
-            docker_image_names=docker_image_names,
+            docker_image_names=[b.image_name for b in successful_builds],
             asv_args=asv_args,
             machine_args=machine_args,
             max_concurrency=max_concurrency,
@@ -156,4 +229,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(args)

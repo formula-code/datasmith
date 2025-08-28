@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import datetime
 import io
 import json
@@ -141,7 +142,8 @@ class DockerContext:
         build_args: dict[str, str],
         *,
         force: bool = False,
-        timeout_s: int = 20 * 60,
+        delete_img: bool = False,
+        timeout_s: float = float("inf"),
         tail_chars: int = 4000,
         pull: bool = False,
     ) -> BuildResult:
@@ -151,118 +153,129 @@ class DockerContext:
         report immediately).
         """
         t0 = time.time()
-
-        # Fast path: respect existing image when not forcing
         try:
-            img = client.images.get(image_name)
-            if force:
-                logger.info("Force rebuild requested. Removing '%s'.", image_name)
-                client.images.remove(image=img.id, force=True)
+            # Fast path: respect existing image when not forcing
+            try:
+                img = client.images.get(image_name)
+                if force:
+                    logger.info("Force rebuild requested. Removing '%s'.", image_name)
+                    with contextlib.suppress(Exception):
+                        client.images.remove(image=img.id, force=True)
+                else:
+                    logger.info("Docker image '%s' found locally (skip build).", image_name)
+                    return BuildResult(
+                        ok=True,
+                        image_name=image_name,
+                        image_id=img.id,
+                        rc=0,
+                        duration_s=time.time() - t0,
+                        stderr_tail="",
+                        stdout_tail="",
+                    )
+            except ImageNotFound:
+                logger.info("Docker image '%s' not found locally. Building.", image_name)
+
+            # Streamed build via low-level API for better control
+            tar_stream = self.build_tarball_stream()
+            stdout_buf: deque[str] = deque(maxlen=2000)  # chunk-tail buffers
+            stderr_buf: deque[str] = deque(maxlen=2000)
+
+            # Pretty log line for transparency
+            if build_args:
+                build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in build_args.items())
+                logger.info("$ docker build -t %s . --build-arg %s", image_name, build_args_str)
             else:
-                logger.info("Docker image '%s' found locally (skip build).", image_name)
+                logger.info("$ docker build -t %s .", image_name)
+
+            try:
+                stream = client.api.build(
+                    fileobj=tar_stream,
+                    custom_context=True,
+                    tag=image_name,
+                    buildargs=build_args,
+                    decode=True,
+                    rm=True,
+                    pull=pull,
+                )
+            except DockerException:
+                logger.exception("Failed to initiate build for '%s'", image_name)
                 return BuildResult(
-                    ok=True,
+                    ok=False,
                     image_name=image_name,
-                    image_id=img.id,
-                    rc=0,
+                    image_id=None,
+                    rc=1,
                     duration_s=time.time() - t0,
                     stderr_tail="",
                     stdout_tail="",
                 )
-        except ImageNotFound:
-            logger.info("Docker image '%s' not found locally. Building.", image_name)
 
-        # Streamed build via low-level API for better control
-        tar_stream = self.build_tarball_stream()
-        stdout_buf: deque[str] = deque(maxlen=2000)  # chunk-tail buffers
-        stderr_buf: deque[str] = deque(maxlen=2000)
+            error_seen = None
+            try:
+                for chunk in stream:
+                    # Time check first
+                    if time.time() - t0 > timeout_s:
+                        error_seen = "[TIMEOUT]"
+                        break
 
-        # Pretty log line for transparency
-        if build_args:
-            build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in build_args.items())
-            logger.info("$ docker build -t %s . --build-arg %s", image_name, build_args_str)
-        else:
-            logger.info("$ docker build -t %s .", image_name)
+                    # Typical keys: 'stream', 'status', 'error', 'errorDetail'
+                    if chunk.get("stream"):
+                        s = str(chunk["stream"])
+                        if s:
+                            stdout_buf.append(s)
+                    if "status" in chunk and chunk.get("progressDetail"):
+                        # Status lines (pulling base layers, etc.)—treat as stdout
+                        s = str(chunk.get("status", ""))
+                        if s:
+                            stdout_buf.append(s + "\n")
+                    if "error" in chunk or "errorDetail" in chunk:
+                        error_seen = (chunk.get("error") or str(chunk.get("errorDetail", ""))).strip()
+                        if error_seen:
+                            # also track in stderr tail
+                            stderr_buf.append(error_seen + "\n")
+                        break
+            except APIError:
+                logger.exception("Build stream APIError for '%s'", image_name)
+                error_seen = "APIError during build"
 
-        try:
-            stream = client.api.build(
-                fileobj=tar_stream,
-                custom_context=True,
-                tag=image_name,
-                buildargs=build_args,
-                decode=True,
-                rm=True,
-                pull=pull,
-            )
-        except DockerException:
-            logger.exception("Failed to initiate build for '%s'", image_name)
+            duration = time.time() - t0
+
+            # Success path: ensure image exists
+            if not error_seen:
+                try:
+                    img = client.images.get(image_name)
+                    return BuildResult(
+                        ok=True,
+                        image_name=image_name,
+                        image_id=img.id,
+                        rc=0,
+                        duration_s=duration,
+                        stderr_tail="".join(stderr_buf)[-tail_chars:],
+                        stdout_tail="".join(stdout_buf)[-tail_chars:],
+                    )
+                except ImageNotFound:
+                    error_seen = "Build completed but image not found"
+
+            # Failure
+            rc = 124 if error_seen == "[TIMEOUT]" else 1
             return BuildResult(
                 ok=False,
                 image_name=image_name,
                 image_id=None,
-                rc=1,
-                duration_s=time.time() - t0,
-                stderr_tail="",
-                stdout_tail="",
+                rc=rc,
+                duration_s=duration,
+                stderr_tail="".join(stderr_buf)[-tail_chars:] or (error_seen or "")[-tail_chars:],
+                stdout_tail="".join(stdout_buf)[-tail_chars:],
             )
-
-        error_seen = None
-        try:
-            for chunk in stream:
-                # Time check first
-                if time.time() - t0 > timeout_s:
-                    error_seen = "[TIMEOUT]"
-                    break
-
-                # Typical keys: 'stream', 'status', 'error', 'errorDetail'
-                if chunk.get("stream"):
-                    s = str(chunk["stream"])
-                    if s:
-                        stdout_buf.append(s)
-                if "status" in chunk and chunk.get("progressDetail"):
-                    # Status lines (pulling base layers, etc.)—treat as stdout
-                    s = str(chunk.get("status", ""))
-                    if s:
-                        stdout_buf.append(s + "\n")
-                if "error" in chunk or "errorDetail" in chunk:
-                    error_seen = (chunk.get("error") or str(chunk.get("errorDetail", ""))).strip()
-                    if error_seen:
-                        # also track in stderr tail
-                        stderr_buf.append(error_seen + "\n")
-                    break
-        except APIError:
-            logger.exception("Build stream APIError for '%s'", image_name)
-            error_seen = "APIError during build"
-
-        duration = time.time() - t0
-
-        # Success path: ensure image exists
-        if not error_seen:
-            try:
-                img = client.images.get(image_name)
-                return BuildResult(
-                    ok=True,
-                    image_name=image_name,
-                    image_id=img.id,
-                    rc=0,
-                    duration_s=duration,
-                    stderr_tail="".join(stderr_buf)[-tail_chars:],
-                    stdout_tail="".join(stdout_buf)[-tail_chars:],
-                )
-            except ImageNotFound:
-                error_seen = "Build completed but image not found"
-
-        # Failure
-        rc = 124 if error_seen == "[TIMEOUT]" else 1
-        return BuildResult(
-            ok=False,
-            image_name=image_name,
-            image_id=None,
-            rc=rc,
-            duration_s=duration,
-            stderr_tail="".join(stderr_buf)[-tail_chars:] or (error_seen or "")[-tail_chars:],
-            stdout_tail="".join(stdout_buf)[-tail_chars:],
-        )
+        finally:
+            if delete_img:
+                try:
+                    img = client.images.get(image_name)
+                    logger.debug("Deleting image '%s' after build.", image_name)
+                    client.images.remove(image=img.id, force=True)
+                except ImageNotFound:
+                    pass
+                except DockerException:
+                    logger.exception("Failed to delete image '%s' after build.", image_name)
 
     def to_dict(self) -> dict[str, str]:
         """Return a JSON-serializable mapping of this context's contents."""
@@ -430,6 +443,11 @@ class ContextRegistry:
 
     def __setitem__(self, key: str, context: DockerContext) -> None:
         self.register(key, context)
+
+    def __contains__(self, key: str | Task) -> bool:
+        if isinstance(key, str):
+            key = self.parse_key(key)
+        return key in self.registry
 
     def save_to_file(self, path: Path) -> None:
         dat = self.serialize(pretty=True)

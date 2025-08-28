@@ -17,7 +17,7 @@ from datasmith.docker.validation import Task, _err_lock
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
-logger = configure_logging()
+logger = configure_logging(level=10)
 # logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))
 
 
@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit-per-repo", type=int, default=5, help="Cap SHAs per repo (keeps your small-scale test). -1 = no limit."
     )
+    parser.add_argument(
+        "--context-registry",
+        type=Path,
+        help="Path to the context registry JSON file.",
+    )
     return parser.parse_args()
 
 
@@ -76,7 +81,7 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             sha = row["commit_sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
-                logger.warning(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
+                logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
                 continue
             owner, repo = repo_name.split("/")
             commit_date_unix: float = (
@@ -91,17 +96,28 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
     return all_states
 
 
+def prepare_tasks(
+    all_states: dict[tuple[str, str], set[tuple[str, float]]], limit_per_repo: int, context_registry: ContextRegistry
+) -> list[Task]:
+    tasks: list[Task] = []
+    for (owner, repo), uniq in all_states.items():
+        limited = list(uniq)[: max(0, limit_per_repo)] if limit_per_repo > 0 else list(uniq)
+        for sha, date in limited:
+            task = Task(owner, repo, sha, commit_date=date)
+            if task not in context_registry:
+                tasks.append(task)
+            else:
+                logger.debug(f"prepare_tasks: skipping {task} as already in context registry")
+    return tasks
+
+
 def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
     all_states = process_inputs(args)
-    context_registry = ContextRegistry.load_from_file(path=Path("scratch/context_registry.json"))
+    context_registry = ContextRegistry.load_from_file(path=args.context_registry)
 
     # Prepare tasks
-    tasks: list[Task] = []
-    for (owner, repo), uniq in all_states.items():
-        limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
-        for sha, date in limited:
-            tasks.append(Task(owner, repo, sha, commit_date=date))
+    tasks = prepare_tasks(all_states, args.limit_per_repo, context_registry)
 
     (args.output_dir / "results").mkdir(parents=True, exist_ok=True)
     # reset outputs
@@ -131,7 +147,7 @@ def main(args: argparse.Namespace) -> None:
 
             if int(res["rc"]) != 1:
                 logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
-                context_registry.save_to_file(path=Path("scratch/context_registry.json"))
+                context_registry.save_to_file(path=args.context_registry)
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
             futures = [
@@ -154,7 +170,7 @@ def main(args: argparse.Namespace) -> None:
 
                 if int(res["rc"]) != 1:
                     logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
-                    context_registry.save_to_file(path=Path("scratch/context_registry.json"))
+                    context_registry.save_to_file(path=args.context_registry)
 
     # Rollup (minimal, quick to read)
     rollup = {

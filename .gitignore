@@ -196,3 +196,7 @@ cython_debug/
 tokens.env
 benchmark_results/
 scratch/artifacts/
+output
+
+# Database files
+*.db

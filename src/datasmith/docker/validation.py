@@ -281,6 +281,8 @@ def validate_one(  # noqa: C901
         return _handle_run_exception(task, build_cmd, run_cmd, args, image_name, build_stage)
     finally:
         # best-effort cleanup
-        with contextlib.suppress(Exception):
+        try:
             if container:
                 container.remove(force=True)
+        except Exception:
+            logger.exception("Failed to remove container for %s", image_name)

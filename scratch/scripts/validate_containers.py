@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
         default=Path("output"),
         help="Directory where the results will be stored.",
     )
+    parser.add_argument(
+        "--context-registry",
+        type=Path,
+        help="Path to the context registry JSON file.",
+    )
     return parser.parse_args()
 
 
@@ -83,7 +88,7 @@ def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
 
     all_states = process_inputs(args)
-    context_registry = ContextRegistry.load_from_file(path=Path("scratch/context_registry.json"))
+    context_registry = ContextRegistry.load_from_file(path=args.context_registry)
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     all_files_by_image = {}

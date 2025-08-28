@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -53,18 +54,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit-per-repo", type=int, default=5, help="Cap SHAs per repo (keeps your small-scale test). -1 = no limit."
     )
+    parser.add_argument(
+        "--context-registry",
+        type=Path,
+        help="Path to the context registry JSON file.",
+    )
     return parser.parse_args()
 
 
-def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
+def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float]]]:
     if args.dashboard:
         dashboard = BenchmarkCollection.load(args.dashboard)
         all_states = {}
         for owner, repo, sha in dashboard.enriched_breakpoints.url.apply(_parse_commit_url):
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = {sha}
+                all_states[(owner, repo)] = {(sha, 0.0)}
             else:
-                all_states[(owner, repo)].add(sha)
+                all_states[(owner, repo)].add((sha, 0.0))
     elif args.commits:
         commits = pd.read_json(args.commits, lines=True)
         all_states = {}
@@ -73,13 +79,16 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
             sha = row["commit_sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
-                logger.warning(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
+                logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
                 continue
             owner, repo = repo_name.split("/")
+            commit_date_unix: float = (
+                0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
+            )
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = {(sha)}
+                all_states[(owner, repo)] = [(sha, commit_date_unix)]
             else:
-                all_states[(owner, repo)].add(sha)
+                all_states[(owner, repo)].append((sha, commit_date_unix))
     else:
         raise ValueError("Either --dashboard or --commits must be provided.")
     return all_states
@@ -89,14 +98,17 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[str]]:
 def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
     all_states = process_inputs(args)
-    context_registry = ContextRegistry.load_from_file(path=Path("scratch/context_registry.json"))
-
+    context_registry = ContextRegistry.load_from_file(path=args.context_registry)
     # Prepare tasks
     tasks: list[Task] = []
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
-        for sha in limited:
-            tasks.append(Task(owner, repo, sha))
+        for sha, date in limited:
+            task = Task(owner, repo, sha, commit_date=float(date))
+            if task in context_registry:
+                tasks.append(task)
+            else:
+                logger.debug(f"main: skipping {task} not in context registry")
 
     (args.output_dir / "results").mkdir(parents=True, exist_ok=True)
     # reset outputs
@@ -111,13 +123,21 @@ def main(args: argparse.Namespace) -> None:
     logger.info("Starting parallel validation of %d tasks with %d workers", len(tasks), args.max_workers)
     results: list[dict] = []
 
-    with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-        futures = [ex.submit(validate_one, t, args, client, context_registry, machine_defaults) for t in tasks]
-        for fut in as_completed(futures):
-            rec = fut.result()
+    if args.max_workers < 1:
+        for t in tasks:
+            rec = validate_one(t, args, client, context_registry, machine_defaults)
             results.append(rec)
-            with _err_lock, open(args.output_dir / "failures.jsonl", "a") as jf:
+            with _err_lock, open(args.output_dir / "logs.jsonl", "a") as jf:
                 jf.write(json.dumps(rec) + "\n")
+        return
+    else:
+        with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
+            futures = [ex.submit(validate_one, t, args, client, context_registry, machine_defaults) for t in tasks]
+            for fut in as_completed(futures):
+                rec = fut.result()
+                results.append(rec)
+                with _err_lock, open(args.output_dir / "logs.jsonl", "a") as jf:
+                    jf.write(json.dumps(rec) + "\n")
 
     # Rollup (minimal, quick to read)
     rollup = {

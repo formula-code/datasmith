@@ -12,7 +12,7 @@ import docker
 from docker.errors import DockerException, ImageNotFound
 from docker.models.containers import Container
 
-from datasmith.docker.context import ContextRegistry
+from datasmith.docker.context import BuildResult, ContextRegistry, Task
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
@@ -51,20 +51,23 @@ def build_repo_image(client: docker.DockerClient, image_name: str, repo_url: str
 
 
 def build_repo_sha_image(
-    client: docker.DockerClient, context_registry: ContextRegistry, owner: str, repo: str, sha: str, force: bool = False
-) -> str:
-    image_name = f"asv/{owner}/{repo}/{sha}"
+    client: docker.DockerClient, context_registry: ContextRegistry, task: Task, force: bool = False
+) -> BuildResult:
+    assert task.sha is not None, "Task.sha must be set"  # noqa: S101
+    image_name = f"asv/{task.owner}/{task.repo}/{task.sha}".lower()
     docker_ctx = context_registry[image_name]
-    docker_ctx.build_container(
+    build_res: BuildResult = docker_ctx.build_container_streaming(
         client=client,
         image_name=image_name,
         build_args={
-            "REPO_URL": f"https://www.github.com/{owner}/{repo}",
-            "COMMIT_SHA": sha,
+            "REPO_URL": f"https://www.github.com/{task.owner}/{task.repo}",
+            "COMMIT_SHA": task.sha,
         },
         force=force,
+        tail_chars=10_000,
+        pull=False,
     )
-    return image_name
+    return build_res
 
 
 async def run_container(
@@ -86,28 +89,24 @@ async def run_container(
     # Normalise to the cpuset string Docker expects
     cpuset = ",".join(map(str, cores)) if not isinstance(cores, str) else cores
     num_cores = len(cpuset.split(","))
-    sha = image.split(":")[0].split("-")[-1]  # Extract the commit SHA from the image name
+
+    sha = image.split(":")[0].split("/")[-1]  # Extract the commit SHA from the image name
     if "machine" not in machine_args:
         raise ValueError("machine_args must contain a 'machine' key")
     machine_args["machine"] = sha
     env = {
         "ASV_ARGS": f"{asv_args} --cpu-affinity {cpuset} --parallel {num_cores} --set-commit-hash={sha} --machine={sha}",
-        "ASV_MACHINE_ARGS": " ".join([f"--{k} '{v}'" for k, v in machine_args.items()]),
+        "ASV_MACHINE": machine_args.get("machine", ""),
+        "ASV_OS": machine_args.get("os", ""),
+        "ASV_NUM_CPU": machine_args.get("num_cpu", "1"),
+        "ASV_ARCH": machine_args.get("arch", ""),
+        "ASV_CPU": machine_args.get("cpu", ""),
+        "ASV_RAM": machine_args.get("ram", ""),
     }
 
     def _launch() -> tuple[int, dict[str, str]]:
-        container_name = f"{image.split(':')[0]}-{idx:03d}"
+        container_name = f"{image.split(':')[0].replace('/', '-')}-{idx:03d}"
         logger.debug("docker run name=%s cpuset=%s env=%s", container_name, cpuset, env)
-
-        # Log the exact command a human could copy-paste
-        logger.info(
-            "$ docker run --rm --name %s -e ASV_ARGS='%s' -e ASV_MACHINE_ARGS='%s' --cpuset-cpus %s %s",
-            container_name,
-            env["ASV_ARGS"],
-            env["ASV_MACHINE_ARGS"],
-            cpuset,
-            image,
-        )
 
         # Start the container on the specified CPUs
         container = client.containers.run(

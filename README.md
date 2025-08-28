@@ -170,6 +170,29 @@ $ python scratch/scripts/filter_commits.py \
        --max-repos 350 \
        --threads   8   \
        --procs     8
+
+# Build contexts for all commits. Each context is a (repo, commit) pair with an associated build_env.sh script to install dependencies. Some reasons a context might fail to build (and get filtered out):
+# 1. Commit couldn't be checked out
+# 2. Commit didn't have an asv.conf.json file
+# 3. We could not build the asv environment for the commit.
+# 4. We could not run a quick asv run to ensure that the benchmarks run.
+$ python scratch/scripts/synthesize_contexts.py \
+       --commits scratch/artifacts/raw/commits_filtered.jsonl \
+       --output-dir scratch/artifacts/results_synthesis_oth/ \
+       --context-registry scratch/context_registry_updated.json \
+       --max-workers 32 \
+       --limit-per-repo -1 \
+       --max-attempts 5
+
+# This should create a file called scratch/context_registry.json with all the contexts + build.sh scripts to build those contexts.
+
+# Verify that the contexts can be built and the benchmarks can be run.
+$ python scratch/scripts/parallel_validate_containers.py \
+       --commits scratch/artifacts/raw/commits_filtered.jsonl \
+       --output-dir scratch/artifacts/results_verification/ \
+       --context-registry scratch/context_registry.json \
+       --max-workers 32 \
+       --limit-per-repo -1
 ```
 ### 5. Benchmark all commits
 
@@ -189,6 +212,7 @@ The `dependency_recommendations.json` file is a dictionary that contains recomme
 # in userspace:
 $ python scratch/scripts/benchmark_commits.py \
        --filtered-commits scratch/artifacts/raw/commits_filtered_sm.jsonl \
+       --context-registry  scratch/context_registry.json \
        --max-concurrency 30 \
        --num-cores       2  \
        --asv-args "--interleave-rounds --append-samples -a rounds=2 -a repeat=2" \

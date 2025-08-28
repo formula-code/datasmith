@@ -16,7 +16,10 @@ def configure_agent_backends() -> None:
         api_key = "unused-by-portkey"
         model = os.getenv("PORTKEY_MODEL_NAME", "@anthropic/claude-3-5-sonnet-latest")
         backend_url = PORTKEY_GATEWAY_URL
-        kwargs["headers"] = {"x-portkey-api-key": portkey_api_key}
+        kwargs["headers"] = {
+            "x-portkey-api-key": portkey_api_key,
+            "x-portkey-provider": model.split("/")[0].lstrip("@"),
+        }
         kwargs["custom_llm_provider"] = "openai"
     elif anthropic_api_key := os.getenv("ANTHROPIC_API_KEY"):
         api_key = anthropic_api_key
