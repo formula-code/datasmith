@@ -6,20 +6,20 @@ install: ## Install the virtual environment and install the pre-commit hooks
 
 .PHONY: backup
 backup: ## Create a backup of the datasets, results, and analysis directories
-	@echo "Creating backup archive"
+	@echo "Syncing backup mirror with rsync"
 	@/usr/bin/env bash -euo pipefail -c '\
 		if [ ! -f tokens.env ]; then \
 			echo "❌ Error: tokens.env file not found"; exit 1; \
 		fi; \
-		BACKUP_DIR=$$(grep -E "^BACKUP_DIR=" tokens.env | head -n1 | cut -d "=" -f2-); \
+		BACKUP_DIR=$$(awk -F= '"'"'/^BACKUP_DIR=/{print $$2; exit}'"'"' tokens.env); \
 		if [ -z "$$BACKUP_DIR" ]; then \
 			echo "❌ Error: BACKUP_DIR not defined in tokens.env"; exit 1; \
 		fi; \
-		mkdir -p "$$BACKUP_DIR"; \
-		zip -qr "$$BACKUP_DIR/datasmith.bckp" scratch/artifacts/benchmark_results scratch/artifacts/raw; \
-		cp -f scratch/artifacts/cache.db "$$BACKUP_DIR/datasmith.cache.bckp"; \
+		DEST="$$BACKUP_DIR/datasmith.mirror"; \
+		mkdir -p "$$DEST"; \
+		rsync -a --delete --human-readable --info=stats1 \
+			scratch/ "$$DEST/scratch/"; \
 	'
-
 .PHONY: check
 check: ## Run code quality tools.
 	@echo "Checking lock file consistency with 'pyproject.toml'"
