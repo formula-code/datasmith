@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from asv.commands.publish import Publish  # type: ignore[import-untyped]
-from asv.config import Config  # type: ignore[import-untyped]
-from asv.util import write_json  # type: ignore[import-untyped]
+from asv.commands.publish import Publish
+from asv.config import Config
+from asv.util import write_json
 from git import Repo
 
 from datasmith.logging_config import get_logger

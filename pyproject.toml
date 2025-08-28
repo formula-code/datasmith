@@ -25,6 +25,7 @@ dependencies = [
     "numpy",
     "pandas",
     "portkey-ai>=1.14.3",
+    "python-dotenv>=1.1.1",
     "requests",
     "ruptures",
     "simple-useragent",

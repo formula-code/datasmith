@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing
 
-import asv  # type: ignore[import-untyped]
+import asv
 import numpy as np
 import pandas as pd
 import ruptures as rpt  # type: ignore[import-untyped]

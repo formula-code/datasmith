@@ -6,7 +6,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Callable
 
-import asv  # type: ignore[import-untyped]
+import asv
 import pandas as pd
 from tqdm import tqdm
 
