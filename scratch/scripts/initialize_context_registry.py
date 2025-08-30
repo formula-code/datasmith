@@ -406,4 +406,4 @@ done
 #     ),
 # )
 
-CONTEXT_REGISTRY.save_to_file(Path("scratch/context_registry.json"))
+CONTEXT_REGISTRY.save_to_file(Path("scratch/context_registry_init.json"))

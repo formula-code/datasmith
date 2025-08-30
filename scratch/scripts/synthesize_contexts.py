@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory where the results will be stored.",
     )
     parser.add_argument("--max-workers", type=int, default=8, help="Max parallel builds/runs.")
+    parser.add_argument("--max-steps", type=int, default=5, help="Number of ReACT steps to use.")
     parser.add_argument("--max-attempts", type=int, default=3, help="Max attempts per task (build+run).")
     parser.add_argument("--build-timeout", type=int, default=20 * 60, help="Seconds before aborting a docker build.")
     parser.add_argument("--run-timeout", type=int, default=15 * 60, help="Seconds before aborting asv run.")

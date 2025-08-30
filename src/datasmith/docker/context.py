@@ -39,6 +39,7 @@ class Task:
     repo: str
     sha: str | None = None
     commit_date: float = 0.0
+    kind: str = "asv"
 
 
 class DockerContext:
@@ -53,25 +54,34 @@ class DockerContext:
     default_dockerfile_loc = Path(__file__).parent / "Dockerfile"
     default_entrypoint_loc = Path(__file__).parent / "entrypoint.sh"
     default_builder_loc = Path(__file__).parent / "docker_build.sh"
+    default_probe_loc = Path(__file__).parent / "probe_build.sh"
     dockerfile_data: str
     entrypoint_data: str
     building_data: str
+    probing_data: str
 
     def __init__(
-        self, building_data: str | None = None, dockerfile_data: str | None = None, entrypoint_data: str | None = None
-    ):
+        self,
+        building_data: str | None = None,
+        dockerfile_data: str | None = None,
+        entrypoint_data: str | None = None,
+        probing_data: str | None = None,
+    ) -> None:
         if building_data is None:
             building_data = self.default_builder_loc.read_text()
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
         if entrypoint_data is None:
             entrypoint_data = self.default_entrypoint_loc.read_text()
+        if probing_data is None:
+            probing_data = self.default_probe_loc.read_text()
 
         self.building_data = building_data
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
+        self.probing_data = probing_data
 
-    def build_tarball_stream(self) -> io.BytesIO:
+    def build_tarball_stream(self, probe: bool = False) -> io.BytesIO:
         tar_stream = io.BytesIO()
         with tarfile.open(fileobj=tar_stream, mode="w") as tar:
             # Add Dockerfile
@@ -88,7 +98,7 @@ class DockerContext:
             tar.addfile(entrypoint_info, io.BytesIO(entrypoint_data))
 
             # Add docker_build.sh
-            building_data = self.building_data.encode("utf-8")
+            building_data = self.probing_data.encode("utf-8") if probe else self.building_data.encode("utf-8")
             builder_info = tarfile.TarInfo(name="docker_build.sh")
             builder_info.size = len(building_data)
             builder_info.mode = 0o755  # Make it executable
@@ -99,7 +109,12 @@ class DockerContext:
         return tar_stream
 
     def build_container(
-        self, client: docker.DockerClient, image_name: str, build_args: dict[str, str], force: bool = False
+        self,
+        client: docker.DockerClient,
+        image_name: str,
+        build_args: dict[str, str],
+        force: bool = False,
+        probe: bool = False,
     ) -> None:
         """Builds the Docker image if it does not exist or if force is True."""
         image_exists = False
@@ -122,7 +137,7 @@ class DockerContext:
                 logger.info("$ docker build -t %s src/datasmith/docker/ --build-arg %s", image_name, build_args_str)
                 try:
                     client.images.build(
-                        fileobj=self.build_tarball_stream(),
+                        fileobj=self.build_tarball_stream(probe=probe),
                         custom_context=True,
                         tag=image_name,
                         buildargs=build_args,
@@ -140,6 +155,7 @@ class DockerContext:
         client: docker.DockerClient,
         image_name: str,
         build_args: dict[str, str],
+        probe: bool = False,
         *,
         force: bool = False,
         delete_img: bool = False,
@@ -176,7 +192,7 @@ class DockerContext:
                 logger.info("Docker image '%s' not found locally. Building.", image_name)
 
             # Streamed build via low-level API for better control
-            tar_stream = self.build_tarball_stream()
+            tar_stream = self.build_tarball_stream(probe=probe)
             stdout_buf: deque[str] = deque(maxlen=2000)  # chunk-tail buffers
             stderr_buf: deque[str] = deque(maxlen=2000)
 
@@ -307,32 +323,47 @@ class ContextRegistry:
         self.registry = registry
         self._lock = threading.Lock()
 
-        if "default" not in self.registry:
-            if default_context is None:
-                default_context = DockerContext()
-            self.registry[Task(owner="default", repo="default", sha=None)] = default_context
-            logger.debug("Default Docker context initialized.")
+        if default_context is None:
+            default_context = DockerContext()
+
+        # ensure a default context for BOTH namespaces
+        for k in ("asv", "asvprobe"):
+            t = Task(owner="default", repo="default", sha=None, kind=k)
+            if t not in self.registry:
+                self.registry[t] = default_context
+        logger.debug("Default Docker contexts initialized (asv + asvprobe).")
+
+    def get_default(self, kind: str = "asv") -> tuple[Task, DockerContext]:
+        task = Task(owner="default", repo="default", sha=None, kind=kind)
+        return task, self.registry[task]
 
     def get_lock(self) -> threading.Lock:
         return self._lock
 
     def parse_key(self, key: str) -> Task:
-        """Parse a string key into a Task object."""
-        if not key.startswith("asv/") and not key.startswith("asv/default"):
-            raise ValueError("Key must start with 'asv/' or 'asv/default'")
+        """Parse a string key into a Task object (now preserving 'asv' vs 'asvprobe')."""
+        if not (
+            key.startswith("asv/")
+            or key.startswith("asv/default")
+            or key.startswith("asvprobe/")
+            or key.startswith("asvprobe/default")
+        ):
+            raise ValueError("Key must start with 'asv/' or 'asv/default' or 'asvprobe/' or 'asvprobe/default'")
 
-        # Special "default" handling: e.g. "asv/default-<repo>"
-        if key.startswith("asv/default"):
+        # Handle defaults like "asv/default-<repo>" and "asvprobe/default-<repo>"
+        if key.startswith("asv/default") or key.startswith("asvprobe/default"):
+            kind = "asvprobe" if key.startswith("asvprobe/") else "asv"
             parts = key.split("-")
             repo = parts[-1] if len(parts) > 2 else "default"
-            return Task(owner="default", repo=repo, sha=None)
+            return Task(owner="default", repo=repo, sha=None, commit_date=0.0, kind=kind)
 
         parts = key.split("/")
-        if parts[0] != "asv" or not (3 <= len(parts) <= 4):
-            raise ValueError("Key must be in the format 'asv/owner/repo' or 'asv/owner/repo/sha'")
-        owner, repo = parts[1], parts[2]
+        if parts[0] not in ("asv", "asvprobe") or not (3 <= len(parts) <= 4):
+            raise ValueError("Key must be 'asv/owner/repo[/sha]' or 'asvprobe/owner/repo[/sha]'")
+
+        kind, owner, repo = parts[0], parts[1], parts[2]
         sha = None if len(parts) != 4 else parts[3]
-        # Compute commit date if we have a sha; otherwise 0.0
+
         date_unix = 0.0
         if sha:
             try:
@@ -344,7 +375,7 @@ class ContextRegistry:
                 logger.warning("Failed to fetch commit info for %s/%s@%s: %s", owner, repo, sha, exc)
                 date_unix = 0.0
 
-        return Task(owner=owner, repo=repo, sha=sha, commit_date=date_unix)
+        return Task(owner=owner, repo=repo, sha=sha, commit_date=date_unix, kind=kind)
 
     def register(self, key: str | Task, context: DockerContext) -> None:
         """Register a new Docker context."""
@@ -365,15 +396,19 @@ class ContextRegistry:
         if isinstance(key, str):
             key = self.parse_key(key)
 
+        # exact match first
         if key.sha is not None and key in self.registry:
             logger.debug(f"Found exact context for key '{key}'.")
             return self.registry[key]
-        elif Task(owner=key.owner, repo=key.repo, sha=None) in self.registry:
-            candidate = Task(owner=key.owner, repo=key.repo, sha=None)
-            logger.debug(f"Found fallback context '{candidate}' for key '{key}'.")
-            return self.registry[candidate]
-        logger.info(f"No context found for key '{key}'. Using default context.")
-        return self.registry[Task(owner="default", repo="default", sha=None)]
+
+        # owner/repo base (same namespace!)
+        base = Task(owner=key.owner, repo=key.repo, sha=None, kind=key.kind)
+        if base in self.registry:
+            logger.debug(f"Found fallback context '{base}' for key '{key}'.")
+            return self.registry[base]
+
+        logger.info(f"No context found for key '{key}'. Using default context for namespace '{key.kind}'.")
+        return self.registry[Task(owner="default", repo="default", sha=None, kind=key.kind)]
 
     def get_similar(self, key: str | Task) -> list[tuple[Task, DockerContext]]:  # noqa: C901
         """
@@ -391,30 +426,25 @@ class ContextRegistry:
         results: list[tuple[Task, DockerContext]] = []
         seen: set[Task] = set()
 
-        # 1) Exact match first (if present)
+        # 1) Exact match (if present)
         if key in self.registry:
             results.append((key, self.registry[key]))
             seen.add(key)
 
-        # 2) Other shas for the same owner/repo
+        # 2) Other SHAs for same owner/repo *in the same namespace*
         candidates: list[tuple[Task, DockerContext]] = []
         for t, ctx in self.registry.items():
             if t in seen:
                 continue
-            if t.owner == key.owner and t.repo == key.repo and t.sha is not None:
+            if t.kind == key.kind and t.owner == key.owner and t.repo == key.repo and t.sha is not None:
                 candidates.append((t, ctx))
 
-        # Sort candidates:
-        # - By commit-date proximity if key has a (sha, commit_date)
-        # - Otherwise alphabetically by sha
         has_valid_commit_date = getattr(key, "sha", None) is not None and getattr(key, "commit_date", None) is not None
-
         if has_valid_commit_date:
 
             def _sort(item: tuple[Task, DockerContext]) -> tuple[float, str]:
                 t, _ = item
                 cand_cd = getattr(t, "commit_date", None)
-                # Missing commit_date gets sorted to the end.
                 if cand_cd is None:
                     return (float("inf"), str(t.sha))
                 try:
@@ -431,8 +461,8 @@ class ContextRegistry:
                 results.append((t, ctx))
                 seen.add(t)
 
-        # 3) Base owner/repo (sha=None) at the end, if present and not already added
-        base = Task(owner=key.owner, repo=key.repo, sha=None)
+        # 3) Base owner/repo for the same namespace
+        base = Task(owner=key.owner, repo=key.repo, sha=None, kind=key.kind)
         if base in self.registry and base not in seen:
             results.append((base, self.registry[base]))
 
