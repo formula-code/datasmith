@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import docker
+from docker.errors import APIError, NotFound
 from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
@@ -59,17 +60,42 @@ class PersistentContainer:
         if self.container is not None:
             return
         # Make the entrypoint /bin/bash to ensure we have a shell for exec.
-        self.container = self.client.containers.run(
-            self.image,
-            command=["trap : TERM INT; while :; do sleep 2147483647; done"],
-            name=self.name,
-            working_dir=self.workdir,
-            environment=self.env,
-            stdin_open=False,
-            tty=False,
-            detach=True,
-            entrypoint=["/bin/bash", "-lc"],
-        )
+        # if this command fails due to a docker.errors.APIError, then rerun the command after stopping the docker
+        # container with the same name (if it exists)
+        try:
+            self.container = self.client.containers.run(
+                self.image,
+                command=["trap : TERM INT; while :; do sleep 2147483647; done"],
+                name=self.name,
+                working_dir=self.workdir,
+                environment=self.env,
+                stdin_open=False,
+                tty=False,
+                detach=True,
+                entrypoint=["/bin/bash", "-lc"],
+            )
+        except APIError as e:
+            if "Conflict" in str(e) and self.name:
+                logger.warning("Container name conflict, trying to remove existing container %s.", self.name)
+                try:
+                    old_container = self.client.containers.get(self.name)
+                    old_container.stop(timeout=3)
+                    old_container.remove(force=True)
+                except NotFound:
+                    pass
+                self.container = self.client.containers.run(
+                    self.image,
+                    command=["trap : TERM INT; while :; do sleep 2147483647; done"],
+                    name=self.name,
+                    working_dir=self.workdir,
+                    environment=self.env,
+                    stdin_open=False,
+                    tty=False,
+                    detach=True,
+                    entrypoint=["/bin/bash", "-lc"],
+                )
+            else:
+                raise
         if self.container is None:
             logger.warning("Failed to start container from image %s", self.image)
             return
@@ -330,3 +356,16 @@ class PersistentContainer:
             "stderr": res.stderr[-2000:],
             "rc": 0 if ok else 1,
         }
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
+    client = docker.from_env()
+    img_name = "asvprobe/textualize/rich/1de94713811101702b8fcf283c64d1a5de5a8213"
+    pc = PersistentContainer(
+        client, img_name, name=img_name.replace("/", "-").replace(":", "-"), workdir="/workspace/repo"
+    )
+    import IPython
+
+    IPython.embed()
+    pc.stop()

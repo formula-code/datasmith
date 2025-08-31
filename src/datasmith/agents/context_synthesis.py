@@ -186,10 +186,11 @@ class BuildScriptProgram(dspy.Module):
 
             messages_log += f"\n\n# Step [{step_idx + 1}/{max_steps}]\n# Action: {action}\n# Input: {action_input}\n# Observation:\n{observation[:4000]}"
 
-            # If model already emitted a script, prefer it
-            if (out.docker_build_script or "").strip():  # pyright: ignore[reportAttributeAccessIssue]
-                iter_script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
-                break
+            # Don't prefer build_script until model is completely done with it.
+            # # If model already emitted a script, prefer it
+            # if (out.docker_build_script or "").strip():  # pyright: ignore[reportAttributeAccessIssue]
+            #     iter_script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
+            #     break
 
         # out = self.predict(
         #     owner_repo=owner_repo,
@@ -338,7 +339,11 @@ def agent_build_and_validate(
         default_building_data = most_similar_ctx.building_data
     else:
         _, most_similar_ctx = context_registry.get_default()
-        default_building_data = context_registry["asv/default/default"].building_data
+        default_building_data = context_registry["asvprobe/default/default"].building_data
+
+    import IPython
+
+    IPython.embed()
 
     logger.info(
         "agent_build_and_validate: start for %s/%s@%s (max_attempts=%d)", task.owner, task.repo, task.sha, max_attempts
