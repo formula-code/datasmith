@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--context-registry",
         type=Path,
+        required=True,
         help="Path to the context registry JSON file.",
     )
     return parser.parse_args()
@@ -115,7 +116,13 @@ def prepare_tasks(
 def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
     all_states = process_inputs(args)
-    context_registry = ContextRegistry.load_from_file(path=args.context_registry)
+    if not args.context_registry.exists():
+        logger.warning("main: context registry file %s does not exist; starting fresh", args.context_registry)
+    context_registry = (
+        ContextRegistry.load_from_file(path=args.context_registry)
+        if args.context_registry.exists()
+        else ContextRegistry()
+    )
 
     # Prepare tasks
     tasks = prepare_tasks(all_states, args.limit_per_repo, context_registry)

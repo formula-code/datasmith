@@ -348,24 +348,13 @@ class PersistentContainer:
             if line.startswith("IMPORTED::"):
                 succeeded = line.split("::", 2)[1]
                 break
+        stdout_snip = (res.stdout[:1000] + "..." + res.stdout[-1000:]) if len(res.stdout) > 2000 else res.stdout
+        stderr_snip = (res.stderr[:1000] + "..." + res.stderr[-1000:]) if len(res.stderr) > 2000 else res.stderr
         return {
             "ok": ok,
             "tried": candidates,
             "succeeded": succeeded,
-            "stdout": res.stdout[-2000:],
-            "stderr": res.stderr[-2000:],
+            "stdout": stdout_snip,
+            "stderr": stderr_snip,
             "rc": 0 if ok else 1,
         }
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    client = docker.from_env()
-    img_name = "asvprobe/textualize/rich/1de94713811101702b8fcf283c64d1a5de5a8213"
-    pc = PersistentContainer(
-        client, img_name, name=img_name.replace("/", "-").replace(":", "-"), workdir="/workspace/repo"
-    )
-    import IPython
-
-    IPython.embed()
-    pc.stop()

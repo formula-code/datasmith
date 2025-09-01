@@ -4,6 +4,7 @@ import contextlib
 import datetime
 import io
 import json
+import re
 import tarfile
 import threading
 import time
@@ -11,7 +12,7 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound
@@ -39,7 +40,59 @@ class Task:
     repo: str
     sha: str | None = None
     commit_date: float = 0.0
-    kind: str = "asv"
+    tag: str = "pkg"  # 'pkg' (env + package) or 'env' (env-only)
+
+    @staticmethod
+    def _sanitize_component(s: str) -> str:
+        """
+        Sanitize a component for Docker image/container naming:
+        - lowercase
+        - keep only [a-z0-9._-]
+        - collapse invalid runs to '-'
+        - strip leading/trailing separators
+        """
+        s = s.lower()
+        s = re.sub(r"[^a-z0-9._-]+", "-", s)
+        s = s.strip("._-")
+        return s or "unknown"
+
+    def with_tag(self, tag: str) -> Task:
+        """Return a new Task with the given tag."""
+        if tag not in {"env", "pkg"}:
+            raise ValueError(f"Tag must be either 'env' or 'pkg', got '{tag}'.")
+        return Task(owner=self.owner, repo=self.repo, sha=self.sha, commit_date=self.commit_date, tag=tag)
+
+    def get_image_name(self) -> str:
+        """Return the Docker image name for this task (repo:tag)."""
+        assert self.tag in {"env", "pkg"}, "Tag must be either 'env' or 'pkg'."  # noqa: S101
+
+        owner = self._sanitize_component(self.owner)
+        repo = self._sanitize_component(self.repo)
+        sha_part = f"-{self._sanitize_component(self.sha)}" if self.sha else ""
+
+        # New scheme: "owner-repo[-sha]:{tag}"
+        image_repo = f"{owner}-{repo}{sha_part}"
+        return f"{image_repo}:{self.tag}"
+
+    def get_container_name(self) -> str:
+        """Return a suitable (deterministic) Docker container name for this task."""
+        assert self.tag in {"env", "pkg"}, "Tag must be either 'env' or 'pkg'."  # noqa: S101
+
+        owner = self._sanitize_component(self.owner)
+        repo = self._sanitize_component(self.repo)
+        sha_part = f"-{self._sanitize_component(self.sha)}" if self.sha else ""
+        tag_part = f"-{self._sanitize_component(self.tag)}"
+
+        # Container names cannot contain ':'; allowed: [a-zA-Z0-9][a-zA-Z0-9_.-]
+        # We keep it lowercase and deterministic.
+        name = f"{owner}-{repo}{sha_part}{tag_part}"
+
+        # Ensure starts with an alphanumeric character
+        if not re.match(r"^[a-z0-9]", name):
+            name = f"c-{name}"
+
+        # Be conservative on length (Docker allows long names, but trim to 128 chars)
+        return name[:128]
 
 
 class DockerContext:
@@ -53,33 +106,33 @@ class DockerContext:
 
     default_dockerfile_loc = Path(__file__).parent / "Dockerfile"
     default_entrypoint_loc = Path(__file__).parent / "entrypoint.sh"
-    default_builder_loc = Path(__file__).parent / "docker_build.sh"
-    default_probe_loc = Path(__file__).parent / "probe_build.sh"
+    default_docker_build_env_loc = Path(__file__).parent / "docker_build_env.sh"
+    default_docker_build_pkg_loc = Path(__file__).parent / "docker_build_pkg.sh"
     dockerfile_data: str
     entrypoint_data: str
+    env_building_data: str
     building_data: str
-    probing_data: str
 
     def __init__(
         self,
         building_data: str | None = None,
         dockerfile_data: str | None = None,
         entrypoint_data: str | None = None,
-        probing_data: str | None = None,
+        env_building_data: str | None = None,
     ) -> None:
-        if building_data is None:
-            building_data = self.default_builder_loc.read_text()
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
         if entrypoint_data is None:
             entrypoint_data = self.default_entrypoint_loc.read_text()
-        if probing_data is None:
-            probing_data = self.default_probe_loc.read_text()
+        if env_building_data is None:
+            env_building_data = self.default_docker_build_env_loc.read_text()
+        if building_data is None:
+            building_data = self.default_docker_build_pkg_loc.read_text()
 
-        self.building_data = building_data
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
-        self.probing_data = probing_data
+        self.env_building_data = env_building_data
+        self.building_data = building_data
 
     def build_tarball_stream(self, probe: bool = False) -> io.BytesIO:
         tar_stream = io.BytesIO()
@@ -97,16 +150,30 @@ class DockerContext:
             entrypoint_info.mode = 0o755  # Make it executable
             tar.addfile(entrypoint_info, io.BytesIO(entrypoint_data))
 
-            # Add docker_build.sh
-            building_data = self.probing_data.encode("utf-8") if probe else self.building_data.encode("utf-8")
-            builder_info = tarfile.TarInfo(name="docker_build.sh")
-            builder_info.size = len(building_data)
-            builder_info.mode = 0o755  # Make it executable
-            tar.addfile(builder_info, io.BytesIO(building_data))
+            # Add docker_build_env.sh
+            env_building_data = self.env_building_data.encode("utf-8")
+            env_building_info = tarfile.TarInfo(name="docker_build_env.sh")
+            env_building_info.size = len(env_building_data)
+            env_building_info.mode = 0o755  # Make it executable
+            tar.addfile(env_building_info, io.BytesIO(env_building_data))
+
+            if not probe:
+                # Add docker_build_pkg.sh
+                building_data = self.building_data.encode("utf-8")
+                building_info = tarfile.TarInfo(name="docker_build_pkg.sh")
+                building_info.size = len(building_data)
+                building_info.mode = 0o755  # Make it executable
+                tar.addfile(building_info, io.BytesIO(building_data))
 
         # Reset the stream position to the beginning
         tar_stream.seek(0)
         return tar_stream
+
+    def process_image_name(self, image_name: str) -> tuple[str, str]:
+        """Split image name into (repo, target). Target is required."""
+        assert ":" in image_name and image_name.rsplit(":", 1)[1], "Image name must include a ':target' suffix."  # noqa: S101
+        repo, target = image_name.rsplit(":", 1)
+        return repo, target
 
     def build_container(
         self,
@@ -117,6 +184,7 @@ class DockerContext:
         probe: bool = False,
     ) -> None:
         """Builds the Docker image if it does not exist or if force is True."""
+        _, target = self.process_image_name(image_name)
         image_exists = False
         try:
             image = client.images.get(image_name)
@@ -141,6 +209,7 @@ class DockerContext:
                         custom_context=True,
                         tag=image_name,
                         buildargs=build_args,
+                        target=target,
                     )
                 except DockerException:
                     logger.exception("Failed to build Docker image '%s'", image_name)
@@ -168,6 +237,7 @@ class DockerContext:
         Returns a BuildResult and does NOT raise for typical failures (so callers can
         report immediately).
         """
+        _, target = self.process_image_name(image_name)
         t0 = time.time()
         try:
             # Fast path: respect existing image when not forcing
@@ -212,6 +282,7 @@ class DockerContext:
                     decode=True,
                     rm=True,
                     pull=pull,
+                    target=target,
                 )
             except DockerException:
                 logger.exception("Failed to initiate build for '%s'", image_name)
@@ -299,6 +370,7 @@ class DockerContext:
             "dockerfile_data": self.dockerfile_data,
             "entrypoint_data": self.entrypoint_data,
             "building_data": self.building_data,
+            "env_building_data": self.env_building_data,
         }
 
     @classmethod
@@ -310,12 +382,20 @@ class DockerContext:
         return cls(
             dockerfile_data=data.get("dockerfile_data"),
             entrypoint_data=data.get("entrypoint_data"),
-            building_data=data.get("building_data"),
+            building_data=data.get("building_data", None),
+            env_building_data=data.get("env_building_data", None),
         )
 
 
 class ContextRegistry:
-    """Registry for Docker contexts to avoid rebuilding the same context multiple times."""
+    """Registry for Docker contexts keyed by owner/repo[/sha], independent of tag.
+
+    Input key format (required): "owner/repo[/sha]:{tag}", where {tag} ∈ {"env","pkg"}.
+    The `tag` is validated and preserved on returned `Task`s, but **ignored for storage**;
+    all contexts are stored under a canonical key with tag='pkg'.
+    """
+
+    VALID_TAGS: ClassVar[set[str]] = {"env", "pkg"}
 
     def __init__(self, registry: dict[Task, DockerContext] | None = None, default_context: DockerContext | None = None):
         if registry is None:
@@ -326,43 +406,54 @@ class ContextRegistry:
         if default_context is None:
             default_context = DockerContext()
 
-        # ensure a default context for BOTH namespaces
-        for k in ("asv", "asvprobe"):
-            t = Task(owner="default", repo="default", sha=None, kind=k)
-            if t not in self.registry:
-                self.registry[t] = default_context
-        logger.debug("Default Docker contexts initialized (asv + asvprobe).")
+        # Single default context (canonicalized to tag='pkg')
+        default_task_canonical = Task(owner="default", repo="default", sha=None, tag="pkg")
+        if default_task_canonical not in self.registry:
+            self.registry[default_task_canonical] = default_context
+        logger.debug("Default Docker context initialized (single canonical context).")
 
-    def get_default(self, kind: str = "asv") -> tuple[Task, DockerContext]:
-        task = Task(owner="default", repo="default", sha=None, kind=kind)
-        return task, self.registry[task]
+    @staticmethod
+    def _canonicalize(task: Task) -> Task:
+        """Return a copy of Task with tag='pkg' for registry keying."""
+        if task.tag == "pkg":
+            return task
+        return task.with_tag("pkg")
+
+    def _canonicalize_from_key(self, key: str | Task) -> Task:
+        """Parse if needed, then canonicalize to tag='pkg' for dict keying."""
+        t = self.parse_key(key) if isinstance(key, str) else key
+        return self._canonicalize(t)
+
+    def get_default(self, tag: str = "pkg") -> tuple[Task, DockerContext]:
+        if tag not in self.VALID_TAGS:
+            raise ValueError(f"Unknown tag '{tag}'. Valid tags: {sorted(self.VALID_TAGS)}")
+        # lookup under canonical default; return Task with requested tag
+        user_task = Task(owner="default", repo="default", sha=None, tag=tag)
+        canonical = self._canonicalize(user_task)
+        return user_task, self.registry[canonical]
 
     def get_lock(self) -> threading.Lock:
         return self._lock
 
-    def parse_key(self, key: str) -> Task:
-        """Parse a string key into a Task object (now preserving 'asv' vs 'asvprobe')."""
-        if not (
-            key.startswith("asv/")
-            or key.startswith("asv/default")
-            or key.startswith("asvprobe/")
-            or key.startswith("asvprobe/default")
-        ):
-            raise ValueError("Key must start with 'asv/' or 'asv/default' or 'asvprobe/' or 'asvprobe/default'")
+    def parse_key(self, key: str | Task) -> Task:
+        """Parse 'owner/repo[/sha]:{tag}' into a Task. Tag is required and validated."""
+        if isinstance(key, Task):
+            return key  # already parsed
 
-        # Handle defaults like "asv/default-<repo>" and "asvprobe/default-<repo>"
-        if key.startswith("asv/default") or key.startswith("asvprobe/default"):
-            kind = "asvprobe" if key.startswith("asvprobe/") else "asv"
-            parts = key.split("-")
-            repo = parts[-1] if len(parts) > 2 else "default"
-            return Task(owner="default", repo=repo, sha=None, commit_date=0.0, kind=kind)
+        # Hard assertion per request: all keys MUST include a ':tag'
+        assert ":" in key and key.rsplit(":", 1)[1], "All keys must include a ':tag' suffix (e.g., ':env' or ':pkg')."  # noqa: S101
 
-        parts = key.split("/")
-        if parts[0] not in ("asv", "asvprobe") or not (3 <= len(parts) <= 4):
-            raise ValueError("Key must be 'asv/owner/repo[/sha]' or 'asvprobe/owner/repo[/sha]'")
+        prefix, tag = key.rsplit(":", 1)
+        tag = tag.strip()
+        if tag not in self.VALID_TAGS:
+            raise ValueError(f"Unknown tag '{tag}'. Valid tags: {sorted(self.VALID_TAGS)}")
 
-        kind, owner, repo = parts[0], parts[1], parts[2]
-        sha = None if len(parts) != 4 else parts[3]
+        parts = prefix.split("/")
+        if not (2 <= len(parts) <= 3):
+            raise ValueError("Key must be 'owner/repo[:tag]' or 'owner/repo/sha[:tag]'")
+
+        owner, repo = parts[0], parts[1]
+        sha = None if len(parts) != 3 else parts[2]
 
         date_unix = 0.0
         if sha:
@@ -375,71 +466,89 @@ class ContextRegistry:
                 logger.warning("Failed to fetch commit info for %s/%s@%s: %s", owner, repo, sha, exc)
                 date_unix = 0.0
 
-        return Task(owner=owner, repo=repo, sha=sha, commit_date=date_unix, kind=kind)
+        return Task(owner=owner, repo=repo, sha=sha, commit_date=date_unix, tag=tag)
 
     def register(self, key: str | Task, context: DockerContext) -> None:
-        """Register a new Docker context."""
-        if isinstance(key, str):
-            key = self.parse_key(key)
-        if key in self.registry:
-            logger.warning(f"Context '{key}' is already registered, overwriting.")
-        self.registry[key] = context
-        logger.debug(f"Registered Docker context: {key}")
+        """Register a new Docker context. Stored under canonical (tag='pkg')."""
+        t = self.parse_key(key) if isinstance(key, str) else key
+        canonical = self._canonicalize(t)
+        if canonical in self.registry:
+            logger.warning(f"Context '{canonical}' is already registered, overwriting.")
+
+        # if the tag is "env" and we already have a "pkg" version, warn the user
+        # and instead of changing the context completely, overwrite all files
+        # except the building_data (which is pkg-specific)
+        if t.tag == "env" and canonical in self.registry:
+            existing = self.registry[canonical]
+            context = DockerContext(
+                dockerfile_data=context.dockerfile_data,
+                entrypoint_data=context.entrypoint_data,
+                env_building_data=context.env_building_data,
+                building_data=existing.building_data,
+            )
+            logger.warning(
+                f"Registering 'env' context for '{canonical}' which already has a 'pkg' version; preserving 'pkg' building_data."
+            )
+        self.registry[canonical] = context
+        logger.debug(f"Registered Docker context under canonical key: {canonical}")
 
     def get(self, key: str | Task) -> DockerContext:
         """
-        Retrieve a Docker context by key using hierarchical matching.
-        "asv/astropy/astropy/14134" should query these queries in-order:
-            "asv/astropy/astropy/14134"
-            "asv/astropy/astropy"
+        Retrieve a Docker context by key using hierarchical matching (tag-insensitive).
+        'owner/repo/sha:tag' queries in-order:
+            1) owner/repo/sha (canonical key, tag='pkg')
+            2) owner/repo     (canonical key, tag='pkg')
+            3) default        (canonical key, tag='pkg')
         """
-        if isinstance(key, str):
-            key = self.parse_key(key)
+        # Keep the user's tag but look up under canonical keys
+        user_task = self.parse_key(key) if isinstance(key, str) else key
+        canonical = self._canonicalize(user_task)
 
-        # exact match first
-        if key.sha is not None and key in self.registry:
-            logger.debug(f"Found exact context for key '{key}'.")
-            return self.registry[key]
+        # exact match first (canonical)
+        if canonical.sha is not None and canonical in self.registry:
+            logger.debug(f"Found exact context for key '{user_task}' via '{canonical}'.")
+            return self.registry[canonical]
 
-        # owner/repo base (same namespace!)
-        base = Task(owner=key.owner, repo=key.repo, sha=None, kind=key.kind)
+        # owner/repo base (canonical)
+        base = Task(owner=canonical.owner, repo=canonical.repo, sha=None, tag="pkg")
         if base in self.registry:
-            logger.debug(f"Found fallback context '{base}' for key '{key}'.")
+            logger.debug(f"Found fallback context '{base}' for key '{user_task}'.")
             return self.registry[base]
 
-        logger.info(f"No context found for key '{key}'. Using default context for namespace '{key.kind}'.")
-        return self.registry[Task(owner="default", repo="default", sha=None, kind=key.kind)]
+        logger.info(f"No context found for key '{user_task}'. Using default context.")
+        return self.registry[Task(owner="default", repo="default", sha=None, tag="pkg")]
 
     def get_similar(self, key: str | Task) -> list[tuple[Task, DockerContext]]:  # noqa: C901
         """
-        Retrieve a list of Docker contexts by key using hierarchical matching.
-        "asv/astropy/astropy/14134" should return contexts for these queries in-order:
-            1) "asv/astropy/astropy/14134" (exact match, if present)
-            2) Any others starting with "asv/astropy/astropy/" (e.g., "asv/astropy/astropy/abcdef")
-                sorted by abs(key.commit_date / candidate.commit_date) if key.commit_date is not None else alphabetically
-            3) "asv/astropy/astropy"      (owner/repo base, if present)
-        Keys like "asv/astropy/otherrepo*" or "asv/otherowner/*" must NOT match.
+        Retrieve contexts similar to a key, constrained to SAME owner/repo (tag-insensitive).
+        Order:
+          1) exact match (if present)  — returned Task uses the caller's tag
+          2) other SHAs for owner/repo — returned Tasks use the caller's tag
+             sorted by |commit_date diff| if available, else by SHA
+          3) base owner/repo           — returned Task uses the caller's tag
         """
-        if isinstance(key, str):
-            key = self.parse_key(key)
+        user_task = self.parse_key(key) if isinstance(key, str) else key
+        canonical = self._canonicalize(user_task)
 
         results: list[tuple[Task, DockerContext]] = []
-        seen: set[Task] = set()
+        seen_canonical: set[Task] = set()
 
         # 1) Exact match (if present)
-        if key in self.registry:
-            results.append((key, self.registry[key]))
-            seen.add(key)
+        if canonical in self.registry:
+            results.append((canonical.with_tag(user_task.tag), self.registry[canonical]))
+            seen_canonical.add(canonical)
 
-        # 2) Other SHAs for same owner/repo *in the same namespace*
+        # 2) Other SHAs for same owner/repo (canonical keys in registry)
         candidates: list[tuple[Task, DockerContext]] = []
         for t, ctx in self.registry.items():
-            if t in seen:
+            if t in seen_canonical:
                 continue
-            if t.kind == key.kind and t.owner == key.owner and t.repo == key.repo and t.sha is not None:
+            if t.owner == canonical.owner and t.repo == canonical.repo and t.sha is not None:
                 candidates.append((t, ctx))
 
-        has_valid_commit_date = getattr(key, "sha", None) is not None and getattr(key, "commit_date", None) is not None
+        has_valid_commit_date = (
+            getattr(canonical, "sha", None) is not None and getattr(canonical, "commit_date", None) is not None
+        )
         if has_valid_commit_date:
 
             def _sort(item: tuple[Task, DockerContext]) -> tuple[float, str]:
@@ -448,7 +557,7 @@ class ContextRegistry:
                 if cand_cd is None:
                     return (float("inf"), str(t.sha))
                 try:
-                    return (abs(key.commit_date - cand_cd), str(t.sha))
+                    return (abs(canonical.commit_date - cand_cd), str(t.sha))
                 except Exception:
                     return (float("inf"), str(t.sha))
 
@@ -457,14 +566,15 @@ class ContextRegistry:
             candidates.sort(key=lambda item: str(item[0].sha))
 
         for t, ctx in candidates:
-            if t not in seen:
-                results.append((t, ctx))
-                seen.add(t)
+            if t not in seen_canonical:
+                # Present with the user's tag for downstream execution behavior
+                results.append((t.with_tag(user_task.tag), ctx))
+                seen_canonical.add(t)
 
-        # 3) Base owner/repo for the same namespace
-        base = Task(owner=key.owner, repo=key.repo, sha=None, kind=key.kind)
-        if base in self.registry and base not in seen:
-            results.append((base, self.registry[base]))
+        # 3) Base owner/repo
+        base = Task(owner=canonical.owner, repo=canonical.repo, sha=None, tag="pkg")
+        if base in self.registry and base not in seen_canonical:
+            results.append((base.with_tag(user_task.tag), self.registry[base]))
 
         return results
 
@@ -475,9 +585,8 @@ class ContextRegistry:
         self.register(key, context)
 
     def __contains__(self, key: str | Task) -> bool:
-        if isinstance(key, str):
-            key = self.parse_key(key)
-        return key in self.registry
+        canonical = self._canonicalize_from_key(key)
+        return canonical in self.registry
 
     def save_to_file(self, path: Path) -> None:
         dat = self.serialize(pretty=True)
@@ -492,13 +601,12 @@ class ContextRegistry:
 
     def serialize(self, *, pretty: bool = False) -> str:
         """
-        Serialize the registry (including the 'default' context) to a JSON string.
-        The thread lock itself is not serialized; a fresh lock will be created
-        when deserializing.
+        Serialize the registry (including the canonical 'default' context) to a JSON string.
+        The thread lock itself is not serialized; a fresh lock will be created when deserializing.
         """
         with self._lock:
             payload = {
-                "version": 1,
+                "version": 2,  # bumped: tag-insensitive storage
                 "contexts": {repr(k): v.to_dict() for k, v in self.registry.items()},
             }
         return json.dumps(payload, indent=2 if pretty else None, sort_keys=pretty)
@@ -507,14 +615,31 @@ class ContextRegistry:
     def deserialize(cls, payload: str) -> ContextRegistry:
         """
         Reconstruct a ContextRegistry from a JSON string produced by `serialize`.
-        Ensures a 'default' context exists even if it wasn't present in the payload.
+        Ensures a canonical 'default' context exists.
         """
         data = json.loads(payload)
         raw = data.get("contexts", {})
         registry: dict[Task, DockerContext] = {eval(k): DockerContext.from_dict(v) for k, v in raw.items()}  # noqa: S307
 
-        # Ensure 'default' exists:
-        if "default" not in registry:
-            registry[Task(owner="default", repo="default", sha=None)] = DockerContext()
+        # Ensure canonical default exists
+        default_task_canonical = Task(owner="default", repo="default", sha=None, tag="pkg")
+        if default_task_canonical not in registry:
+            registry[default_task_canonical] = DockerContext()
+
+        # Normalize any accidentally stored 'env' keys to canonical 'pkg'
+        # (in case old payloads had per-tag entries)
+        to_move: list[tuple[Task, DockerContext]] = []
+        for t, ctx in list(registry.items()):
+            if t.tag != "pkg":
+                to_move.append((t, ctx))
+        if to_move:
+            logger.warning(
+                "ContextRegistry.deserialize: Found %d non-canonical entries with tag!='pkg'; normalizing to tag='pkg'.",
+                len(to_move),
+            )
+        for t, ctx in to_move:
+            del registry[t]
+            canonical = Task(owner=t.owner, repo=t.repo, sha=t.sha, commit_date=t.commit_date, tag="pkg")
+            registry[canonical] = ctx
 
         return cls(registry=registry)

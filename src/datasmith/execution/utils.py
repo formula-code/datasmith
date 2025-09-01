@@ -152,6 +152,24 @@ def has_asv(repo: Repo, c: Commit) -> bool:
     return any(obj.type == "blob" and obj.name == "asv.conf.json" for obj in c.tree.traverse())  # type: ignore[union-attr]
 
 
+def get_change_summary(commit: Commit) -> str:
+    """
+    Generate a summary of changes made in the commit.
+    This should be a fast operation.
+    The summary should be a markdown table of the files changed, lines added, lines removed, and total changes.
+    """
+    stats = commit.stats
+    summary_lines = [
+        "| File | Lines Added | Lines Removed | Total Changes |",
+        "|------|-------------|----------------|----------------|",
+    ]
+    for file_path, file_stats in stats.files.items():
+        summary_lines.append(
+            f"| {file_path} | {file_stats['insertions']} | {file_stats['deletions']} | {file_stats['lines']} |"
+        )
+    return "\n".join(summary_lines)
+
+
 @cache_completion(CACHE_LOCATION, "get_commit_info_offline")
 def _get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache=True) -> dict[str, Any]:
     """
@@ -172,6 +190,7 @@ def _get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache=True) -> 
         "files_changed": "",
         "patch": "",
         "has_asv": False,
+        "file_change_summary": "",
     }
     try:
         commit = repo.commit(commit_sha)
@@ -202,6 +221,7 @@ def _get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache=True) -> 
         "files_changed": "\n".join(str(k) for k in stats.files),
         "patch": patch,
         "has_asv": has_asv(repo, commit),
+        "file_change_summary": get_change_summary(commit),
     }
 
 

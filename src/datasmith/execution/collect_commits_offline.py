@@ -8,12 +8,14 @@ import tempfile
 import urllib.parse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
+from typing import Callable
 
 from git import GitCommandError, Repo
 from tqdm.auto import tqdm
 
 from datasmith import logger
 from datasmith.agents.perf_judge import PerfClassifier
+from datasmith.execution.utils import get_change_summary
 from datasmith.utils import CACHE_LOCATION, cache_completion
 
 _PR_MERGE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -21,6 +23,10 @@ _PR_MERGE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Merge pull request #(\d+)\b"),
     # squash-merge style "... (#[0-9]+)" on the last line
     re.compile(r"\(#(\d+)\)"),
+    # Refers to an issue/PR number. GH-{number}
+    re.compile(r"(?:\b|GH-)(\d+)\b"),
+    # Has a hashtag followed by a number. #123
+    re.compile(r"#(\d+)\b"),
 )
 
 
@@ -44,7 +50,133 @@ def _is_pr_merge(message: str) -> bool:
     return any(p.search(message) for p in _PR_MERGE_PATTERNS)
 
 
-def find_parent_commits(repo_name: str, commits: list[str]) -> list[str]:
+def find_tagged_commits(repo: Repo) -> list[str]:
+    merge_shas: set[str] = set()
+    for tag in repo.tags:
+        if tag.commit.hexsha not in merge_shas:
+            merge_shas.add(tag.commit.hexsha)
+
+    logger.debug(f"Collected {len(merge_shas)} commits from {repo.working_dir}.")
+    return sorted(merge_shas)
+
+
+def find_parent_commits(repo: Repo, commits: list[str], add_first: bool = False) -> list[str]:
+    parent_commits = set()
+    for commit_sha in commits:
+        try:
+            commit = repo.commit(commit_sha)
+            # Add parent commits if they exist
+            parents = commit.parents
+            if add_first and len(parents):
+                # only keep the first parent.
+                parents = [parents[0]]
+
+            for parent in parents:
+                parent_commits.add(parent.hexsha)
+        except Exception as e:
+            logger.warning(f"Could not find commit {commit_sha} in {repo.working_dir}: {e}")
+
+    logger.debug(f"Collected {len(parent_commits)} parent commits from {repo.working_dir}.")
+    return sorted(parent_commits)
+
+
+def collect_commits(repo: Repo) -> list[str]:
+    """
+    Collect all commit SHAs from the given bare repository.
+    """
+    branch = _default_branch(repo)
+    ref_to_walk = f"origin/{branch}"
+    commits = [c.hexsha for c in repo.iter_commits(ref_to_walk)]
+    tagged_commits = find_tagged_commits(repo)
+    parent_commits = find_parent_commits(repo, commits + tagged_commits, add_first=True)
+
+    return sorted(set(commits + tagged_commits + parent_commits))
+
+
+def _parallel_classify(
+    commits: list[tuple[str, str | bytes, str]],
+    process_commit_tuple: Callable[[tuple[str, str | bytes, str]], str | None],
+    repo_name: str,
+    n_workers: int,
+) -> set[str]:
+    merge_shas: set[str] = set()
+    max_workers = n_workers
+    window = max_workers * 4
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        pbar = tqdm(
+            total=len(commits),
+            desc=f"Walking {repo_name} commits",
+            unit="commit",
+            file=sys.stdout,
+            miniters=1,
+            mininterval=0.1,
+        )
+
+        it = iter(commits)
+        pending = set()
+
+        for _ in range(min(window, len(commits))):
+            pending.add(ex.submit(process_commit_tuple, next(it)))
+
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+
+            for fut in done:
+                try:
+                    sha = fut.result()
+                    if sha:
+                        merge_shas.add(sha)
+                except Exception:
+                    logger.exception("Worker failed")
+                finally:
+                    pbar.update(1)
+
+                with contextlib.suppress(StopIteration):
+                    pending.add(ex.submit(process_commit_tuple, next(it)))
+
+        pbar.close()
+
+    logger.info(f"Collected {len(merge_shas)} commits from {repo_name}.")
+    return merge_shas
+
+
+def batch_classify_commits(
+    perf_classifier: PerfClassifier, repo_name: str, commits: list[tuple[str, str | bytes, str]], n_workers: int
+) -> set[str]:
+    def process_commit_tuple(t: tuple[str, str | bytes, str]) -> str | None:
+        hexsha, message, changes_summary = t
+        full_msg = message.strip()
+
+        if not _is_pr_merge(str(full_msg)):
+            logger.debug(f"Skipping commit {hexsha}:{full_msg!s} as it is not a PR merge.")
+            return None
+
+        full_msg = re.sub(r"\nSigned-off-by:.*", "", str(full_msg)).replace("\n\n", "\n").strip()
+        if len(full_msg.split()) > 2048:
+            full_msg = " ".join(full_msg.split()[:2048]) + "..."
+
+        is_perf, agent_trace = perf_classifier.get_response(message=str(full_msg), file_change_summary=changes_summary)
+        if not is_perf:
+            logger.debug(f"Skipping commit {hexsha} as it is not a performance commit.")
+            logger.debug(f"Agent trace: {agent_trace}")
+            return None
+
+        return hexsha
+
+    if n_workers < 0:
+        merge_shas: set[str] = set()
+        for t in tqdm(commits, desc=f"Walking {repo_name} commits", unit="commit", file=sys.stdout):
+            sha = process_commit_tuple(t)
+            if sha:
+                merge_shas.add(sha)
+        logger.info(f"Collected {len(merge_shas)} commits from {repo_name}.")
+        return merge_shas
+    else:
+        return _parallel_classify(commits, process_commit_tuple, repo_name, n_workers)
+
+
+def find_parent_releases(repo_name: str, commits: list[str]) -> list[str]:
     """
     Return a list of commit SHAs that are parent commits of the given commits,
     **without** calling any GitHub API endpoints.
@@ -74,18 +206,7 @@ def find_parent_commits(repo_name: str, commits: list[str]) -> list[str]:
                 return []
             raise
 
-        parent_commits = set()
-        for commit_sha in commits:
-            try:
-                commit = repo.commit(commit_sha)
-                # Add parent commits if they exist
-                for parent in commit.parents:
-                    parent_commits.add(parent.hexsha)
-            except Exception as e:
-                logger.warning(f"Could not find commit {commit_sha} in {repo_name}: {e}")
-
-        logger.info(f"Collected {len(parent_commits)} parent commits from {repo_name}.")
-        return sorted(parent_commits)
+        return find_parent_commits(repo, commits)
 
 
 def find_tagged_releases(repo_name: str) -> list[str]:
@@ -118,18 +239,11 @@ def find_tagged_releases(repo_name: str) -> list[str]:
                 return []
             raise
 
-        merge_shas: set[str] = set()
-        for tag in repo.tags:
-            if tag.commit.hexsha not in merge_shas:
-                merge_shas.add(tag.commit.hexsha)
-
-        logger.info(f"Collected {len(merge_shas)} commits from {repo_name}.")
-
-        return sorted(merge_shas)
+        return find_tagged_commits(repo)
 
 
 @cache_completion(CACHE_LOCATION, "find_perf_commits")
-def find_perf_commits(  # noqa: C901
+def find_perf_commits(
     repo_name: str,
     query: str,
     max_pages: int = 100,  # ignored (kept for compatibility)
@@ -184,69 +298,6 @@ def find_perf_commits(  # noqa: C901
         branch = base_branch or _default_branch(repo)
         ref_to_walk = f"origin/{branch}"
 
-        commits = [(c.hexsha, c.message) for c in repo.iter_commits(ref_to_walk)]
-
-        def process_commit_tuple(t: tuple[str, str | bytes]) -> str | None:
-            hexsha, message = t
-            full_msg = message.strip()
-
-            if not _is_pr_merge(str(full_msg)):
-                logger.debug(f"Skipping commit {hexsha} as it is not a PR merge.")
-                return None
-
-            full_msg = re.sub(r"\nSigned-off-by:.*", "", str(full_msg)).replace("\n\n", "\n").strip()
-            if len(full_msg.split()) > 2048:
-                full_msg = " ".join(full_msg.split()[:2048]) + "..."
-
-            is_perf, agent_trace = perf_classifier.get_response(message=str(full_msg))
-            if not is_perf:
-                logger.debug(f"Skipping commit {hexsha} as it is not a performance commit.")
-                logger.debug(f"Agent trace: {agent_trace}")
-                return None
-
-            return hexsha
-
-        merge_shas: set[str] = set()
-        max_workers = n_workers
-        # keep a small multiple of workers in-flight; adjust if you want more buffering
-        window = max_workers * 4
-
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            pbar = tqdm(
-                total=len(commits),
-                desc=f"Walking {repo_name} commits",
-                unit="commit",
-                file=sys.stdout,
-                miniters=1,
-                mininterval=0.1,
-            )
-
-            it = iter(commits)
-            pending = set()
-
-            # prime the window
-            for _ in range(min(window, len(commits))):
-                pending.add(ex.submit(process_commit_tuple, next(it)))
-
-            while pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-
-                for fut in done:
-                    try:
-                        sha = fut.result()
-                        if sha:
-                            merge_shas.add(sha)
-                    except Exception:
-                        # don't let one bad task kill the progress loop
-                        logger.exception("Worker failed")
-                    finally:
-                        pbar.update(1)
-
-                    # backfill one task for each completed, keeping the window steady
-                    with contextlib.suppress(StopIteration):
-                        pending.add(ex.submit(process_commit_tuple, next(it)))
-
-            pbar.close()
-
-        logger.info(f"Collected {len(merge_shas)} commits from {repo_name}.")
+        commits = [(c.hexsha, c.message, get_change_summary(c)) for c in repo.iter_commits(ref_to_walk)]
+        merge_shas = batch_classify_commits(perf_classifier, repo_name, commits, n_workers)
         return sorted(merge_shas)
