@@ -100,7 +100,7 @@ for version in $TARGET_VERSIONS; do
 
   # Health checks (import + compiled extension probe; optional pytest smoke with RUN_PYTEST_SMOKE=1)
   log "Running smoke checks"
-  micromamba run -n "$ENV_NAME" asv_smokecheck.py --import-name \"$IMP\" --repo-root \"$REPO_ROOT\" ${RUN_PYTEST_SMOKE:+--pytest-smoke}
+  micromamba run -n "$ENV_NAME" asv_smokecheck.py --import-name $IMP --repo-root $REPO_ROOT ${RUN_PYTEST_SMOKE:+--pytest-smoke}
 
   echo "::import_name=${IMP}::env=${ENV_NAME}"
 done
