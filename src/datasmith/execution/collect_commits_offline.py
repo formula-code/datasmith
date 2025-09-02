@@ -5,18 +5,16 @@ import os
 import re
 import sys
 import tempfile
-import urllib.parse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Callable
 
-from git import GitCommandError, Repo
+from git import Commit, GitCommandError, Repo
 from tqdm.auto import tqdm
 
 from datasmith import logger
 from datasmith.agents.perf_judge import PerfClassifier
 from datasmith.execution.utils import get_change_summary
-from datasmith.utils import CACHE_LOCATION, cache_completion
 
 _PR_MERGE_PATTERNS: tuple[re.Pattern[str], ...] = (
     # standard "Merge pull request #123 ..."
@@ -80,7 +78,7 @@ def find_parent_commits(repo: Repo, commits: list[str], add_first: bool = False)
     return sorted(parent_commits)
 
 
-def collect_commits(repo: Repo) -> list[str]:
+def collect_commits(repo: Repo) -> list[tuple[str, str]]:
     """
     Collect all commit SHAs from the given bare repository.
     """
@@ -88,9 +86,17 @@ def collect_commits(repo: Repo) -> list[str]:
     ref_to_walk = f"origin/{branch}"
     commits = [c.hexsha for c in repo.iter_commits(ref_to_walk)]
     tagged_commits = find_tagged_commits(repo)
-    parent_commits = find_parent_commits(repo, commits + tagged_commits, add_first=True)
+    # parent_commits = find_parent_commits(repo, commits + tagged_commits, add_first=True)
 
-    return sorted(set(commits + tagged_commits + parent_commits))
+    all_commits = []
+    for c in commits:
+        all_commits.append(("commit", c))
+    for c in tagged_commits:
+        all_commits.append(("tag", c))
+    # for c in parent_commits:
+    #     all_commits.append(("parent", c))
+
+    return all_commits
 
 
 def _parallel_classify(
@@ -176,7 +182,7 @@ def batch_classify_commits(
         return _parallel_classify(commits, process_commit_tuple, repo_name, n_workers)
 
 
-def find_parent_releases(repo_name: str, commits: list[str]) -> list[str]:
+def find_parent_releases(repo_name: str, commits: list[str], add_first: bool = False) -> list[str]:
     """
     Return a list of commit SHAs that are parent commits of the given commits,
     **without** calling any GitHub API endpoints.
@@ -206,7 +212,7 @@ def find_parent_releases(repo_name: str, commits: list[str]) -> list[str]:
                 return []
             raise
 
-        return find_parent_commits(repo, commits)
+        return find_parent_commits(repo, commits, add_first=add_first)
 
 
 def find_tagged_releases(repo_name: str) -> list[str]:
@@ -242,12 +248,9 @@ def find_tagged_releases(repo_name: str) -> list[str]:
         return find_tagged_commits(repo)
 
 
-@cache_completion(CACHE_LOCATION, "find_perf_commits")
 def find_perf_commits(
     repo_name: str,
-    query: str,
-    max_pages: int = 100,  # ignored (kept for compatibility)
-    per_page: int = 100,  # ignored (kept for compatibility)
+    n_workers: int = -1,
 ) -> list[str]:
     """
     Return a list of commit SHAs that closed pull requests, **without**
@@ -260,32 +263,16 @@ def find_perf_commits(
     The only element of *query* we still honour is `base=<branch>`.
     Uses an AI Agent to find performance-related commits.
     """
-    qs = urllib.parse.parse_qs(query, keep_blank_values=True)
-    base_branch: str | None = qs.get("base", [None])[0]
-    n_workers = qs.get("n_workers", [1])[0]
-    n_workers = int(n_workers) if isinstance(n_workers, str) else 1
-
     perf_classifier = PerfClassifier()
 
     with tempfile.TemporaryDirectory(prefix="gh-history-") as workdir:
-        workdir_path = Path(workdir)
+        workdir_path = Path(workdir).absolute()
         url = f"https://github.com/{repo_name}.git"
 
-        # Clone *just* the commit / tree metadata (no blobs).
-        clone_kwargs: dict = {
-            "multi_options": ["--filter=tree:0"],
-            "no_checkout": True,
-        }
-        if base_branch:
-            clone_kwargs["branch"] = base_branch
-
-        # ignore if repo is not public
         try:
             repo = Repo.clone_from(
                 url,
                 workdir_path,
-                env={"GIT_TERMINAL_PROMPT": "0", **os.environ},
-                **clone_kwargs,
             )
         except GitCommandError as e:
             if e.status == 128:
@@ -295,9 +282,28 @@ def find_perf_commits(
             raise
 
         # Figure out which ref to walk.
-        branch = base_branch or _default_branch(repo)
+        branch = _default_branch(repo)
         ref_to_walk = f"origin/{branch}"
+        try:
+            repo.git.rev_parse(ref_to_walk, verify=True)
+        except Exception as e:
+            raise RuntimeError(f"Cannot resolve ref {ref_to_walk}: {e}") from e
 
-        commits = [(c.hexsha, c.message, get_change_summary(c)) for c in repo.iter_commits(ref_to_walk)]
-        merge_shas = batch_classify_commits(perf_classifier, repo_name, commits, n_workers)
+        commits = list(repo.iter_commits(ref_to_walk))
+        # commits = [c for c in commits if has_asv(repo, c)]
+
+        summary_info: dict[Commit, str] = {}
+
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            # compute get_change_simmary in parallel
+            futures = {ex.submit(get_change_summary, c): c for c in commits}
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Computing change summaries"):
+                c = futures[f]
+                try:
+                    summary_info[c] = f.result()
+                except Exception:
+                    logger.exception("Failed to compute change summary for commit %s", c.hexsha)
+                    summary_info[c] = ""
+        commit_tuples = [(c.hexsha, c.message, summary_info[c]) for c in commits]
+        merge_shas = batch_classify_commits(perf_classifier, repo_name, commit_tuples, n_workers)
         return sorted(merge_shas)
