@@ -130,6 +130,8 @@ def main() -> None:
             logger.debug("Cloned repo %s to %s", repo_name, path)
             return repo_name, repo
 
+        commit2kind = {}
+        commit2repo = {}
         all_repos = {}
         commit_info_args: list[tuple[Repo, str]] = []
         with ThreadPoolExecutor(max_workers=args.threads) as tp:
@@ -137,34 +139,46 @@ def main() -> None:
             for f in tqdm(as_completed(futures), total=len(futures), desc="Cloning repos"):
                 repo_name, repo = f.result()
                 all_repos[repo_name] = repo
-                commit_shas = collect_commits(repo)
-                for commit_sha in commit_shas:
+                kind_commit_shas = collect_commits(repo)
+                for kind, commit_sha in kind_commit_shas:
                     commit_info_args.append((repo, commit_sha))
+                    commit2kind[commit_sha] = kind
+                    commit2repo[commit_sha] = repo_name
 
-        with ProcessPoolExecutor(max_workers=args.procs) as pp:
+        if args.procs < 0:
+            # sequential
             commit_info = list(
                 tqdm(
-                    pp.map(_commit_info_worker, commit_info_args),
+                    map(_commit_info_worker, commit_info_args),
                     total=len(commit_info_args),
                     desc="Fetching commit metadata",
                 )
             )
-
-        commits_meta = pd.json_normalize(commit_info)  # pyright: ignore[reportArgumentType]
-        commits_meta = commits_meta[commits_meta["has_asv"]]  # Take out all commits that don't have asv installed.
-        # import IPython; IPython.embed()
-
-        commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
+        else:
+            with ProcessPoolExecutor(max_workers=args.procs) as pp:
+                commit_info = list(
+                    tqdm(
+                        pp.map(_commit_info_worker, commit_info_args),
+                        total=len(commit_info_args),
+                        desc="Fetching commit metadata",
+                    )
+                )
 
         for k, repo in all_repos.items():
             repo.close()
             logger.debug("Closed repo %s", k)
 
+    commits_meta = pd.json_normalize(commit_info)  # pyright: ignore[reportArgumentType]
+    commits_meta = commits_meta[commits_meta["has_asv"]]  # Take out all commits that don't have asv installed.
+    commits_meta["kind"] = commits_meta["sha"].map(commit2kind)
+    commits_meta["repo_name"]
+
+    commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
+    commits_merged["repo_name"] = commits_merged["sha"].map(commit2repo)
+
     out_path = Path(args.output_pth)
     if not out_path.parent.exists():
         out_path.parent.mkdir(parents=True, exist_ok=True)
-    # commits.to_csv(out_path, index=False)
-    # commits_merged.to_json(out_path, orient="records", lines=True, index=False)
     # save as a parquet file
     commits_merged.to_parquet(out_path, index=False)
 

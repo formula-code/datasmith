@@ -9,6 +9,7 @@ from pathlib import Path
 import asv
 import pandas as pd
 
+from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.context_synthesis import agent_build_and_validate
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.docker.context import ContextRegistry
@@ -16,6 +17,8 @@ from datasmith.docker.orchestrator import get_docker_client
 from datasmith.docker.validation import Task, _err_lock
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
+
+configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 
 logger = configure_logging(level=10)
 # logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))
@@ -76,11 +79,13 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             else:
                 all_states[(owner, repo)].add((sha, 0.0))
     elif args.commits:
-        commits = pd.read_json(args.commits, lines=True)
+        commits = (
+            pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
+        )
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]
-            sha = row["commit_sha"]
+            sha = row["sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
                 logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")

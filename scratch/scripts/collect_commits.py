@@ -51,12 +51,10 @@ if __name__ == "__main__":
         logger.info("Collecting commits for %s (repo_name: %s)", url, repo_name)
         perf_commits = find_perf_commits(
             repo_name=repo_name,
-            query=args.query,
-            max_pages=args.max_pages,
-            per_page=args.per_page,
+            n_workers=-1,
         )
         tagged_commits = find_tagged_releases(repo_name=repo_name)
-        # parent_commits = find_parent_releases(repo_name=repo_name, commits=perf_commits + tagged_commits)
+        # parent_commits = find_parent_commits(repo_name=repo_name, commits=perf_commits + tagged_commits)
         commits = list(set(perf_commits + tagged_commits))
         for i, commit in enumerate(commits, 1):
             commit_id = f"{repo_name}_{i}"
