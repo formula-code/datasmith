@@ -330,6 +330,7 @@ class DockerContext:
             if not error_seen:
                 try:
                     img = client.images.get(image_name)
+                    logger.info("Build completed successfully for '%s' in %.1f sec.", image_name, duration)
                     return BuildResult(
                         ok=True,
                         image_name=image_name,
@@ -344,6 +345,13 @@ class DockerContext:
 
             # Failure
             rc = 124 if error_seen == "[TIMEOUT]" else 1
+            logger.error(
+                "Build failed for '%s' in %.1f sec: [%s][%s]",
+                image_name,
+                duration,
+                error_seen or "unknown",
+                "".join(stdout_buf)[-100:] if stdout_buf else "",
+            )
             return BuildResult(
                 ok=False,
                 image_name=image_name,
