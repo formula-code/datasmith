@@ -171,7 +171,7 @@ def get_change_summary(commit: Commit) -> str:
 
 
 @cache_completion(CACHE_LOCATION, "get_commit_info_offline")
-def _get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache=True) -> dict[str, Any]:
+def _get_commit_info_offline(repo: Repo, commit_sha: str) -> dict[str, Any]:
     """
     Return commit metadata and diff stats *without* the GitHub REST API.
 
