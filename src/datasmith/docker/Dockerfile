@@ -1,8 +1,16 @@
-FROM buildpack-deps:jammy
+# syntax=docker/dockerfile:1.7
+
+FROM buildpack-deps:jammy AS base
 
 ARG REPO_URL
+ARG COMMIT_SHA
 
-RUN curl -Ls "https://micromamba.snakepit.net/api/micromamba/linux-64/latest" \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl git build-essential jq cmake ninja-build && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
       | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
 
 ENV MAMBA_ROOT_PREFIX=/opt/conda \
@@ -13,21 +21,38 @@ ENV MAMBA_ROOT_PREFIX=/opt/conda \
     OMP_NUM_THREADS=1
 
 RUN micromamba install -y -p $MAMBA_ROOT_PREFIX -c conda-forge \
-       python=3.10 \
-       git \
-       asv \
-       pyperf \
-       libmambapy \
-       mamba \
-       conda \
-    && micromamba clean --all --yes
+        python=3.10 \
+        git asv pyperf mamba conda libmambapy jq && \
+    micromamba clean --all --yes
 
-RUN mkdir /workspace /output
+RUN mkdir -p /workspace /output
 WORKDIR /workspace
 
+FROM base AS env
+ARG REPO_URL
+ARG COMMIT_SHA
+
+# Entrypoint is inherited by pkg
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-RUN git clone ${REPO_URL} /workspace/repo
-WORKDIR /workspace/repo
 ENTRYPOINT ["/entrypoint.sh"]
+
+RUN git clone "$REPO_URL" /workspace/repo
+WORKDIR /workspace/repo
+RUN git checkout "$COMMIT_SHA"
+LABEL vcs.url="$REPO_URL" vcs.ref="$COMMIT_SHA"
+
+# ---- ENV STAGE: create envs, persist vars, install smoke tool ----
+COPY docker_build_env.sh /workspace/repo/docker_build_env.sh
+RUN chmod +x /workspace/repo/docker_build_env.sh && \
+    /workspace/repo/docker_build_env.sh
+
+
+FROM env AS pkg
+
+# ---- PKG STAGE: build+test the package for each ASV Python ----
+COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh
+RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
+    /workspace/repo/docker_build_pkg.sh
+# If you want to restrict to one version at build time, replace with:
+# RUN PY_VERSION=3.10 /workspace/repo/docker_build_pkg.sh

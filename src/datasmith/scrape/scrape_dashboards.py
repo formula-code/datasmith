@@ -6,6 +6,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Callable
 
+import asv
 import pandas as pd
 from tqdm import tqdm
 
@@ -16,15 +17,15 @@ from datasmith.scrape.utils import dl_and_open
 logger = get_logger("scrape.scrape_dashboards")
 
 
-def make_graph_dir(param_dict: dict, all_keys: list, *, quote: bool) -> str:
-    parts = []
-    for k in all_keys:
-        v = param_dict.get(k)
-        seg = f"{k}-{v}" if v not in ("", None) else k
-        if quote:
-            seg = urllib.parse.quote(seg, safe="()-")
-        parts.append(seg)
-    return "graphs/" + "/".join(parts) + "/"
+# def make_graph_dir(param_dict: dict, all_keys: list, *, quote: bool) -> str:
+#     parts = []
+#     for k in all_keys:
+#         v = param_dict.get(k)
+#         seg = f"{k}-{v}" if v not in ("", None) else k
+#         if quote:
+#             seg = urllib.parse.quote(seg, safe="()-")
+#         parts.append(seg)
+#     return "graphs/" + "/".join(parts) + "/"
 
 
 def _make_joiner(base_url: str) -> Callable[..., str]:
@@ -51,8 +52,8 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
     Extract benchmark metrics from an asv dashboard located either
     online (http/https) *or* on the local filesystem.
     """
-    parsed = urllib.parse.urlparse(base_url)
-    is_remote = bool(parsed.scheme)  # http / https / file → True
+    # parsed = urllib.parse.urlparse(base_url)
+    # is_remote = bool(parsed.scheme)  # http / https / file → True
     join_path = _make_joiner(base_url)
 
     html_dir = os.path.abspath(html_dir)
@@ -74,10 +75,11 @@ def make_benchmark_from_html(base_url: str, html_dir: str, force: bool) -> Bench
 
     frames = []
     for p in tqdm(param_sets, desc="machines"):
-        graph_dir = make_graph_dir(p, all_keys, quote=is_remote)
+        # graph_dir = make_graph_dir(p, all_keys, quote=is_remote)
         for bench in tqdm(benchmarks, desc="benchmarks", leave=False):
-            url = join_path(graph_dir, f"{bench}.json")
-            local = dl_and_open(url, html_dir, base=base_url, force=force)
+            bench_url = asv.graph.Graph.get_file_path(params=p, benchmark_name=f"{bench}.json")  # pyright: ignore[reportAttributeAccessIssue]
+            full_url = join_path(base_url, bench_url)
+            local = dl_and_open(full_url, html_dir, base=base_url, force=force)
             if local is None:
                 continue
             try:

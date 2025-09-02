@@ -109,7 +109,7 @@ def filter_dashboards(df: pd.DataFrame, url_col: str = "repo_name", *, show_prog
     """
     enriched = enrich_repos(df, url_col=url_col, show_progress=show_progress)
     if not len(enriched):
-        raise ValueError("Dataframe empty")  # noqa: TRY003
+        raise ValueError("Dataframe empty")
     return (
         enriched[
             (enriched["is_accessible"].fillna(False))

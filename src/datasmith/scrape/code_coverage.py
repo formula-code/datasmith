@@ -66,11 +66,18 @@ def generate_coverage_dataframe(
     breakpoints_df: pd.DataFrame,
     index_data: dict[str, typing.Any],
     *,
+    commit_urls: dict[str, str] | None = None,
     only: list[str] | None = None,
 ) -> pd.DataFrame:
     """Retrieve per-file coverage numbers for **all** commits referenced."""
 
     base = index_data["show_commit_url"].rstrip("/")
+    if base == "#" and (commit_urls is not None) and (index_data["project_url"] in commit_urls):
+        base = commit_urls[index_data["project_url"]]
+    elif base == "#":
+        raise ValueError(
+            f"Base URL '{base}' is not set and {index_data['project_url']} is not in commit_urls. Please provide a valid base URL."
+        )
 
     # Include both ground-truth and observed hashes if present
     url_cols = [c for c in breakpoints_df.columns if c.endswith("hash")]
@@ -83,7 +90,7 @@ def generate_coverage_dataframe(
     seen: set[str] = set()
     filtered = []
     for typ, u in all_urls:
-        if u not in seen:
+        if u not in seen and len(u):
             seen.add(u)
             filtered.append((typ, u))
 

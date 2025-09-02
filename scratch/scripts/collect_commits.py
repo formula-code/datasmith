@@ -2,11 +2,14 @@ import argparse
 
 import pandas as pd
 
-# from datasmith.execution.collect_commits import search_commits
-from datasmith.execution.collect_commits_offline import search_commits
+from datasmith.execution.collect_commits_offline import find_perf_commits, find_tagged_releases
 from datasmith.logging_config import configure_logging
 
-# Configure logging for the script
+# from datasmith.execution.collect_commits import search_commits
+# logger = configure_logging(
+#     level=logging.DEBUG,
+#     stream=open(__file__ + ".log", "a"),
+# )
 logger = configure_logging()
 
 
@@ -16,9 +19,9 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--dashboards",
+        "--repos",
         required=True,
-        help="Location of the dashboards csv that has a column `url` with GitHub repository URLs",
+        help="Location of the repos csv that has a column `url` with GitHub repository URLs",
     )
     p.add_argument(
         "--outfile",
@@ -38,20 +41,21 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    dashboards = pd.read_csv(args.dashboards)
-    urls = dashboards["url"]
-    repo_names = dashboards["repo_name"]
+    repos = pd.read_csv(args.repos)
+    urls = repos["url"]
+    repo_names = repos["repo_name"]
 
     idx = 0
     all_commits = []
     for repo_name, url in zip(repo_names, urls):
         logger.info("Collecting commits for %s (repo_name: %s)", url, repo_name)
-        commits = search_commits(
+        perf_commits = find_perf_commits(
             repo_name=repo_name,
-            query=args.query,
-            max_pages=args.max_pages,
-            per_page=args.per_page,
+            n_workers=-1,
         )
+        tagged_commits = find_tagged_releases(repo_name=repo_name)
+        # parent_commits = find_parent_commits(repo_name=repo_name, commits=perf_commits + tagged_commits)
+        commits = list(set(perf_commits + tagged_commits))
         for i, commit in enumerate(commits, 1):
             commit_id = f"{repo_name}_{i}"
             all_commits.append({
@@ -66,3 +70,4 @@ if __name__ == "__main__":
     with open(args.outfile, "w", encoding="utf-8") as f:
         for commit in all_commits:
             f.write(f"{commit}\n")
+    logger.info("Collected %d commits from %d repositories", len(all_commits), len(urls))

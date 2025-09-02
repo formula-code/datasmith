@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing
 
-import asv  # type: ignore[import-untyped]
+import asv
 import numpy as np
 import pandas as pd
 import ruptures as rpt  # type: ignore[import-untyped]
@@ -48,8 +48,8 @@ def get_breakpoints_asv(df: pd.DataFrame) -> list[dict] | None:
         logger.warning("Robustness of the detection may be reduced.")
         y_sigma = None
 
-    _, _, regression_pos = asv.step_detect.detect_regressions(
-        asv.step_detect.detect_steps(
+    _, _, regression_pos = asv.step_detect.detect_regressions(  # pyright: ignore[reportAttributeAccessIssue]
+        asv.step_detect.detect_steps(  # pyright: ignore[reportAttributeAccessIssue]
             y=-1 * y,
             w=y_sigma,
         )
@@ -80,7 +80,7 @@ def get_detection_method(method: str) -> typing.Callable:
     elif method == "rbf":
         return get_breakpoints
     else:
-        raise ValueError(f"Unknown method: {method}. Use 'asv' or 'rbf'.")  # noqa: TRY003
+        raise ValueError(f"Unknown method: {method}. Use 'asv' or 'rbf'.")
 
 
 def detect_all_breakpoints(summary_df: pd.DataFrame, method: str = "rbf") -> pd.DataFrame:

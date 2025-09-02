@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 from datasmith.benchmark.collection import BenchmarkCollection
@@ -42,6 +43,15 @@ def parse_args() -> argparse.Namespace:
         metavar="PAT",
         help="Restrict coverage queries to files whose paths contain PAT (repeatable).",
     )
+    parser.add_argument(
+        "--commit-urls-location",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a JSON file containing default commit URLs when show_commit_url is '#'. "
+            "If not provided, the script will not resolve '#' commit URLs and throw an error."
+        ),
+    )
 
     parser.add_argument(
         "--method",
@@ -64,6 +74,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:  # pragma: no cover - CLI glue
     args = parse_args()
 
+    if args.commit_urls_location is not None:
+        with open(args.commit_urls_location) as f:
+            commit_urls_dict = json.load(f)
+    else:
+        commit_urls_dict = None
+
     dataset_path = args.dataset.expanduser().resolve()
     collection = BenchmarkCollection.load(dataset_path)
     summary_df = collection.summaries
@@ -75,19 +91,19 @@ def main() -> None:  # pragma: no cover - CLI glue
         coverage_df = generate_coverage_dataframe(
             breakpoints,
             index_data=collection.index_data,
+            commit_urls=commit_urls_dict,
             only=args.only,
         )
         collection.coverage = coverage_df
-
-    if args.build_reports and args.compute_coverage:
-        logger.info("Building GitHub commit reports and merged dataframe ...")
-        new_breakpoints_df, comments_df = breakpoints_scrape_comments(
-            breakpoints_df=breakpoints,
-            coverage_df=coverage_df,
-            index_data=collection.index_data,
-        )
-        collection.comments = comments_df
-        collection.enriched_breakpoints = new_breakpoints_df
+        if args.build_reports:
+            logger.info("Building GitHub commit reports and merged dataframe ...")
+            new_breakpoints_df, comments_df = breakpoints_scrape_comments(
+                breakpoints_df=breakpoints,
+                coverage_df=coverage_df,
+                index_data=collection.index_data,
+            )
+            collection.comments = comments_df
+            collection.enriched_breakpoints = new_breakpoints_df
 
     # Save the collection.
     collection.save(dataset_path.parent / "breakpoints.fc.pkl")

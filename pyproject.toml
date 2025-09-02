@@ -14,15 +14,17 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     "asv",
     "docker",
+    "dspy>=2.6.27",
     "gitpython",
     "numpy",
     "pandas",
+    "portkey-ai>=1.14.3",
+    "python-dotenv>=1.1.1",
     "requests",
     "ruptures",
     "simple-useragent",
@@ -124,6 +126,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
+"*.py" = ["TRY003"]
 
 [tool.ruff.format]
 preview = true
@@ -134,3 +137,19 @@ skip_empty = true
 [tool.coverage.run]
 branch = true
 source = ["src"]
+
+[[tool.mypy.overrides]]
+module = "dspy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "asv.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "datasmith.agents.*"
+disable_error_code = ["no-any-unimported", "import-untyped"]
+
+[[tool.mypy.overrides]]
+module = "datasmith.execution.utils"
+disallow_untyped_defs = false

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import tempfile
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from git import Repo
 from tqdm.auto import tqdm
 
+from datasmith.execution.collect_commits_offline import collect_commits
 from datasmith.execution.utils import _get_commit_info_offline, find_file_in_tree
 from datasmith.logging_config import configure_logging
 
@@ -22,7 +23,6 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Filter commits for ASV benchmarks (fast version).")
 
     p.add_argument("--filtered-benchmarks-pth", required=True, help="Path to the filtered benchmarks CSV file.")
-    p.add_argument("--merged-commits-pth", required=True, help="Path to the merged commits JSONL file.")
     p.add_argument("--output-pth", required=True, help="Path to save the filtered commits CSV file.")
     p.add_argument(
         "--max-repos", type=int, default=150, help="Maximum number of repositories (sorted by stars) to consider."
@@ -34,12 +34,12 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _asv_conf_worker(repo_name: str) -> str | None:
+def _asv_conf_worker(repo_name: str) -> list[str] | None:
     """Locate asv.conf.json inside a repo (wrapper for ThreadPool)."""
     return find_file_in_tree(repo_name, "asv.conf.json")
 
 
-def _commit_info_worker(arg_tuple: tuple[Repo, str]) -> dict | None:
+def _commit_info_worker(arg_tuple: tuple[Repo, str]) -> dict[str, Any] | None:
     """Wrapper for ProcessPool: arg_tuple = (repo_name, sha)."""
     repo, sha = arg_tuple
     # return _get_commit_info(repo, sha)
@@ -104,57 +104,85 @@ def main() -> None:
         logger.warning("No repositories with asv.conf.json found. Exiting.")
         return
 
-    with open(args.merged_commits_pth, encoding="utf-8") as f:
-        commits = pd.DataFrame([json.loads(line.strip().replace("'", '"').replace("None", "null")) for line in f])
+    # with open(args.merged_commits_pth, encoding="utf-8") as f:
+    #     commits = pd.DataFrame([json.loads(line.strip().replace("'", '"').replace("None", "null")) for line in f])
 
-    commits = commits.merge(benchmarks, how="right", on="repo_name")
-    commits = commits.dropna(subset=["commit_sha"])
+    # commits = commits.merge(benchmarks, how="right", on="repo_name")
+    # commits = commits.dropna(subset=["commit_sha"])
 
-    all_repo_names = set(commits["repo_name"])
+    # all_repo_names = set(commits["repo_name"])
+    all_repo_names = set(benchmarks["repo_name"])
 
     # download all repos to a temp dir
     with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
-        all_repos = {}
-        for repo_name in tqdm(all_repo_names, desc="Cloning repos"):
+
+        def clone_repo(repo_name: str) -> tuple[str, Repo]:
             repo_name = repo_name.strip("/")
             owner, name = repo_name.split("/", 1)
             path = Path(td) / f"{owner}__{name}.git"
             repo = Repo.clone_from(
                 f"https://github.com/{repo_name}.git",
                 path,
-                bare=True,
-                # multi_options=["--filter=tree:0"],
-                multi_options=["--filter=blob:none"],
                 quiet=True,
+                allow_unsafe_options=True,
+                allow_unsafe_protocols=True,
             )
-            all_repos[repo_name] = repo
+            logger.debug("Cloned repo %s to %s", repo_name, path)
+            return repo_name, repo
 
+        commit2kind = {}
+        commit2repo = {}
+        all_repos = {}
         commit_info_args: list[tuple[Repo, str]] = []
-        for repo_name, commit_sha in commits[["repo_name", "commit_sha"]].itertuples(index=False, name=None):
-            repo = all_repos[repo_name]
-            commit_info_args.append((repo, commit_sha))
+        with ThreadPoolExecutor(max_workers=args.threads) as tp:
+            futures = {tp.submit(clone_repo, repo_name): repo_name for repo_name in all_repo_names}
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Cloning repos"):
+                repo_name, repo = f.result()
+                all_repos[repo_name] = repo
+                kind_commit_shas = collect_commits(repo)
+                for kind, commit_sha in kind_commit_shas:
+                    commit_info_args.append((repo, commit_sha))
+                    commit2kind[commit_sha] = kind
+                    commit2repo[commit_sha] = repo_name
 
-        with ProcessPoolExecutor(max_workers=args.procs) as pp:
-            commits["commit_info"] = list(
+        if args.procs < 0:
+            # sequential
+            commit_info = list(
                 tqdm(
-                    pp.map(_commit_info_worker, commit_info_args),
-                    total=len(commits),
+                    map(_commit_info_worker, commit_info_args),
+                    total=len(commit_info_args),
                     desc="Fetching commit metadata",
                 )
             )
+        else:
+            with ProcessPoolExecutor(max_workers=args.procs) as pp:
+                commit_info = list(
+                    tqdm(
+                        pp.map(_commit_info_worker, commit_info_args),
+                        total=len(commit_info_args),
+                        desc="Fetching commit metadata",
+                    )
+                )
 
-        commit_meta = pd.json_normalize(commits.pop("commit_info"))
-        commits = pd.concat([commits, commit_meta], axis=1)
-        commits = commits.dropna(subset=["asv_conf_path", "sha", "date", "message"])
-        commits = commits[commits["files_changed"].apply(has_core_file)].reset_index(drop=True)
+        for k, repo in all_repos.items():
+            repo.close()
+            logger.debug("Closed repo %s", k)
+
+    commits_meta = pd.json_normalize(commit_info)  # pyright: ignore[reportArgumentType]
+    commits_meta = commits_meta[commits_meta["has_asv"]]  # Take out all commits that don't have asv installed.
+    commits_meta["kind"] = commits_meta["sha"].map(commit2kind)
+    commits_meta["repo_name"]
+
+    commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
+    commits_merged["repo_name"] = commits_merged["sha"].map(commit2repo)
 
     out_path = Path(args.output_pth)
     if not out_path.parent.exists():
         out_path.parent.mkdir(parents=True, exist_ok=True)
-    # commits.to_csv(out_path, index=False)
-    commits.to_json(out_path, orient="records", lines=True, index=False)
+    # save as a parquet file
+    commits_merged.to_parquet(out_path, index=False)
 
-    logger.info("✔ Wrote %s rows → %s", len(commits), out_path)
+    logger.info("✔ Wrote %s rows → %s", len(commits_merged), out_path)
 
 
 if __name__ == "__main__":
