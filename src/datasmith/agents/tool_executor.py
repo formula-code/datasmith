@@ -58,6 +58,22 @@ class ContainerToolExecutor:
                 observation = self.exec_read_file(action_input)
             elif action == "try_import":
                 observation = self.exec_try_import(action_input)
+            elif action == "exec_arbitrary":
+                # careful, this is arbitrary code execution!
+                cmd = action_input.strip().split("\n")[0][:200]
+                if not cmd:
+                    observation = "[exec_arbitrary] missing command"
+                else:
+                    res = self._pc.exec(cmd, timeout_s=30)
+                    stdout_snip = (
+                        (res.stdout[:1000] + "..." + res.stdout[-1000:]) if len(res.stdout) > 2000 else res.stdout
+                    )
+                    stderr_snip = (
+                        (res.stderr[:1000] + "..." + res.stderr[-1000:]) if len(res.stderr) > 2000 else res.stderr
+                    )
+                    observation = (
+                        f"[exec_arbitrary] rc={res.rc}\n--- STDOUT ---\n{stdout_snip}\n--- STDERR ---\n{stderr_snip}"
+                    )
             else:
                 observation = f"[noop] Unknown action '{action}'"
         except Exception as e:

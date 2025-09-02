@@ -92,11 +92,13 @@ class JudgeSignature(dspy.Signature):
     - Startup/import time reductions, memory reductions, fewer allocations, less I/O, fewer syscalls.
     - Fixing a **speed regression** or a change whose *intent* is “speed up”.
     - Behavior changes **explicitly** framed as speeding things up (e.g., “non-blocking requests (speed-up …)”).
+    - New feature geared towards performance with test cases.
 
     ### Do **NOT** count (label **NO**) unless the message clearly states product runtime gets faster:
-    - Test/bench/ASV/perf-test changes; thresholds; CI; coverage; Makefile/tox/pre-commit; refactors “for tests”.
-    - Merges, version bumps, housekeeping (“tidy”), or ambiguous “attempt to fix perf tests”.
+    - Purely Test/bench/ASV/perf-test changes; thresholds; CI; coverage; Makefile/tox/pre-commit; refactors “for tests”.
+    - Purely  merges, version bumps, housekeeping (“tidy”), or ambiguous “attempt to fix perf tests”.
     - Pure UX frequency changes with “no measurable reduction in speed”.
+    - Pure documentation changes.
 
     ### Tie-breaker (recall-first)
     If ambiguous but plausibly about product/runtime performance, prefer **YES**. Only choose **NO** when it clearly applies solely to tests/infra or non-runtime concerns.
@@ -113,6 +115,10 @@ class JudgeSignature(dspy.Signature):
     """
 
     message = dspy.InputField(desc="A single commit message string.")
+    file_change_summary = dspy.InputField(
+        desc="A markdown table summarizing all the files changed in the commit along with lines added/removed.",
+        default="",
+    )
     debug_json = dspy.OutputField(
         desc="JSON dump of the model's internal state, useful for debugging.",
         default=None,
@@ -124,8 +130,8 @@ class LLMJudge(dspy.Module):
         super().__init__()
         self.predict = dspy.Predict(JudgeSignature)
 
-    def forward(self, message: str) -> dspy.Prediction:
-        prediction = self.predict(message=message)
+    def forward(self, message: str, file_change_summary: str) -> dspy.Prediction:
+        prediction = self.predict(message=message, file_change_summary=file_change_summary)
         out: str = prediction.get("debug_json", None)  # pyright: ignore[reportAttributeAccessIssue]
         try:
             data = json.loads(out)
@@ -153,43 +159,43 @@ class PerfClassifier(dspy.Module):
         super().__init__()
         self.judge = LLMJudge()
 
-    def forward(self, message: str) -> dspy.Prediction:
-        prior_label, prior_conf, prior_flags = heuristic_prior(message)
-        if prior_label is True and prior_conf >= 55:
-            result = {
-                "label": "YES",
-                "reason": "Positive performance cues in message.",
-                "confidence": prior_conf,
-                "flags": prior_flags,
-            }
-            return dspy.Prediction(json=json.dumps(result))
+    def forward(self, message: str, file_change_summary: str = "") -> dspy.Prediction:
+        # prior_label, prior_conf, prior_flags = heuristic_prior(message)
+        # if prior_label is True and prior_conf >= 55:
+        #     result = {
+        #         "label": "YES",
+        #         "reason": "Positive performance cues in message.",
+        #         "confidence": prior_conf,
+        #         "flags": prior_flags,
+        #     }
+        #     return dspy.Prediction(json=json.dumps(result))
 
         # Ask LLM judge
-        judged = json.loads(self.judge(message=message).json)  # pyright: ignore[reportAttributeAccessIssue]
+        judged = json.loads(self.judge(message=message, file_change_summary=file_change_summary).json)  # pyright: ignore[reportAttributeAccessIssue]
 
-        tests_only = "tests-only" in prior_flags or "tests-only" in judged.get("flags", [])
+        tests_only = "tests-only" in judged.get("flags", [])
         if judged["label"] == "YES":
             return dspy.Prediction(json=json.dumps(judged))
-        if prior_label is True and not tests_only:
-            judged["label"] = "YES"
-            judged["reason"] = "Recall-first override: positive perf hints."
-            judged["confidence"] = max(judged["confidence"], 60)
-            judged["flags"] = list(dict.fromkeys(judged.get("flags", []) + prior_flags + ["ambiguous"]))
-            return dspy.Prediction(json=json.dumps(judged))
+        # if prior_label is True and not tests_only:
+        #     judged["label"] = "YES"
+        #     judged["reason"] = "Recall-first override: positive perf hints."
+        #     judged["confidence"] = max(judged["confidence"], 60)
+        #     judged["flags"] = list(dict.fromkeys(judged.get("flags", []) + prior_flags + ["ambiguous"]))
+        #     return dspy.Prediction(json=json.dumps(judged))
 
         # Otherwise respect NO (or explicit tests-only)
         if tests_only:
             judged["label"] = "NO"
             judged["reason"] = "Tests/bench/infra-only message."
-            judged["confidence"] = max(judged["confidence"], prior_conf, 70)
-            judged["flags"] = list(dict.fromkeys(judged.get("flags", []) + prior_flags + ["infra"]))
+            judged["confidence"] = max(judged["confidence"], 70)
+            judged["flags"] = list(dict.fromkeys([*judged.get("flags", []), "infra"]))
         return dspy.Prediction(json=json.dumps(judged))
 
-    def get_response(self, message: str) -> tuple[bool, str]:
+    def get_response(self, message: str, file_change_summary: str = "") -> tuple[bool, str]:
         """
         Get the label for a commit message.
         """
-        json_str = self(message=message).json  # pyright: ignore[reportAttributeAccessIssue]
+        json_str = self(message=message, file_change_summary=file_change_summary).json  # pyright: ignore[reportAttributeAccessIssue]
         response = json.loads(json_str)
         return (response["label"] == "YES", json_str)
 

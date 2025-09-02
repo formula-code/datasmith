@@ -19,9 +19,9 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--dashboards",
+        "--repos",
         required=True,
-        help="Location of the dashboards csv that has a column `url` with GitHub repository URLs",
+        help="Location of the repos csv that has a column `url` with GitHub repository URLs",
     )
     p.add_argument(
         "--outfile",
@@ -41,9 +41,9 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    dashboards = pd.read_csv(args.dashboards)
-    urls = dashboards["url"]
-    repo_names = dashboards["repo_name"]
+    repos = pd.read_csv(args.repos)
+    urls = repos["url"]
+    repo_names = repos["repo_name"]
 
     idx = 0
     all_commits = []
@@ -51,9 +51,7 @@ if __name__ == "__main__":
         logger.info("Collecting commits for %s (repo_name: %s)", url, repo_name)
         perf_commits = find_perf_commits(
             repo_name=repo_name,
-            query=args.query,
-            max_pages=args.max_pages,
-            per_page=args.per_page,
+            n_workers=-1,
         )
         tagged_commits = find_tagged_releases(repo_name=repo_name)
         # parent_commits = find_parent_commits(repo_name=repo_name, commits=perf_commits + tagged_commits)

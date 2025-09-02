@@ -223,7 +223,10 @@ def _request_with_backoff(
 
 def get_db_connection(db_loc: str) -> tuple[sqlite3.Cursor, sqlite3.Connection]:
     """Get a SQLite database connection and cursor."""
-    conn = sqlite3.connect(db_loc)
+    conn = sqlite3.connect(db_loc, timeout=30, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL;")  # enables readers during writes
+    conn.execute("PRAGMA synchronous=NORMAL;")  # good balance of safety/speed
+    conn.execute("PRAGMA busy_timeout=30000;")  # wait up to 30s if locked
     c = conn.cursor()
     return c, conn
 

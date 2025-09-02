@@ -145,13 +145,13 @@ To run the script, you need to have a GitHub token with `repo` and `read:org` pe
 The scraper can be run using the following command:
 ```bash
 $ python scratch/scripts/scrape_repositories.py \
-       --outfile scratch/artifacts/processed/repos_discovered.csv \
-       --min-stars 500 \
-       --filtered-outfile scratch/artifacts/processed/repos_valid.csv
+       --outfile scratch/artifacts/pipeflush/repos_discovered.csv \
+       --min-stars 100 \
+       --filtered-outfile scratch/artifacts/pipeflush/repos_valid.csv
 # Writes scratch/artifacts/processed/repos_discovered.csv and scratch/artifacts/processed/repos_valid.csv
 ```
 
-The `scratch/artifacts/processed/repos_valid.csv` file contains a subset of the repositories that aren't forks / reuploads / has atleast 500 stars / pass other sanity checks. We found ~700 filtered repositories for this dataset.
+The `scratch/artifacts/processed/repos_valid.csv` file contains a subset of the repositories that aren't forks / reuploads / has atleast {min-stars} stars / pass other sanity checks. We found ~700 filtered repositories for this dataset.
 
 
 ### 4. Collect relevant commits for all repositories
@@ -159,40 +159,52 @@ The `scratch/artifacts/processed/repos_valid.csv` file contains a subset of the 
 Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch (the top 5000 PRs, sorted by popularity). We use the `collect_commits.py` script to do this. The `filter_commits.py` script then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes). The script also limits the number of repositories to a maximum of 350 to ensure we don't burden the GitHub API with too many requests. The scripts can be run as follows:
 
 ```bash
-$ python scratch/scripts/collect_commits.py \
-       --dashboards scratch/artifacts/raw/repos_valid.csv \
-       --outfile    scratch/artifacts/raw/commits_all.jsonl \
-       --max-pages  50
-$ python scratch/scripts/filter_commits.py \
-       --filtered-benchmarks-pth scratch/artifacts/raw/repos_valid.csv \
-       --merged-commits-pth     scratch/artifacts/raw/commits_all.jsonl \
-       --output-pth             scratch/artifacts/raw/commits_filtered.jsonl \
-       --max-repos 350 \
-       --threads   8   \
-       --procs     8
+# $ python scratch/scripts/collect_commits.py \
+#        --dashboards scratch/artifacts/raw/repos_valid.csv \
+#        --outfile    scratch/artifacts/raw/commits_all.jsonl \
+#        --max-pages  50
 
-# Build contexts for all commits. Each context is a (repo, commit) pair with an associated build_env.sh script to install dependencies. Some reasons a context might fail to build (and get filtered out):
-# 1. Commit couldn't be checked out
-# 2. Commit didn't have an asv.conf.json file
-# 3. We could not build the asv environment for the commit.
-# 4. We could not run a quick asv run to ensure that the benchmarks run.
+# Needs to be a parquet file because the filtered commits are often very large.
+$ python scratch/scripts/collect_and_filter_commits.py \
+       --filtered-benchmarks-pth scratch/artifacts/pipeflush/repos_valid.csv \
+       --output-pth scratch/artifacts/pipeflush/commits_filtered.parquet \
+       --max-repos 350 \
+       --threads   32 \
+       --procs     32
+
+$ python scratch/scripts/collect_perf_commits.py \
+       --commits  scratch/artifacts/pipeflush/commits_filtered.parquet \
+       --outfile    scratch/artifacts/pipeflush/commits_perfonly.jsonl \
+       --max-workers 16
+```
+
+
+__Build contexts for all commits__. Each context is a (repo, commit) pair with an associated build_env.sh script to install dependencies. Some reasons a context might fail to build (and get filtered out):
+
+1. Commit couldn't be checked out
+2. Commit didn't have an asv.conf.json file
+3. We could not build the asv environment for the commit.
+4. We could not run a quick asv run to ensure that the benchmarks run.
+
+```bash
 $ python scratch/scripts/synthesize_contexts.py \
-       --commits scratch/artifacts/raw/commits_filtered.jsonl \
-       --output-dir scratch/artifacts/results_synthesis_oth/ \
-       --context-registry scratch/context_registry_updated.json \
+       --commits scratch/artifacts/pipeflush/commits_perfonly.parquet \
+       --output-dir scratch/artifacts/pipeflush/results_synthesis/ \
+       --context-registry scratch/artifacts/pipeflush/context_registry.json \
        --max-workers 32 \
-       --limit-per-repo -1 \
-       --max-attempts 5
+       --limit-per-repo 2 \
+       --max-attempts 3 \
+       --max-steps 10
 
 # This should create a file called scratch/context_registry.json with all the contexts + build.sh scripts to build those contexts.
 
 # Verify that the contexts can be built and the benchmarks can be run.
 $ python scratch/scripts/parallel_validate_containers.py \
-       --commits scratch/artifacts/raw/commits_filtered.jsonl \
-       --output-dir scratch/artifacts/results_verification/ \
+       --commits scratch/artifacts/pipeflush/commits_perfonly.parquet \
+       --output-dir scratch/artifacts/pipeflush/results_verification/ \
        --context-registry scratch/context_registry.json \
        --max-workers 32 \
-       --limit-per-repo -1
+       --limit-per-repo 2
 ```
 ### 5. Benchmark all commits
 
@@ -215,7 +227,7 @@ $ python scratch/scripts/benchmark_commits.py \
        --context-registry  scratch/context_registry.json \
        --max-concurrency 30 \
        --num-cores       2  \
-       --asv-args "--interleave-rounds --append-samples -a rounds=2 -a repeat=2" \
+       --asv-args "--python=same --append-samples -a rounds=2 -a repeat=2" \
        --output-dir      scratch/artifacts/benchmark_results_sm/
 ```
 

@@ -181,14 +181,13 @@ def validate_one(  # noqa: C901
     Returns a structured dict for JSONL summarization.
     """
     assert task.sha is not None, "Task.sha must be set"  # noqa: S101
-    image_name = f"asv/{task.owner}/{task.repo}/{task.sha}".lower()
-    docker_ctx = context_registry[image_name]
+    docker_ctx = context_registry[task.get_image_name()]
 
-    build_cmd, run_cmd = format_cmds(image_name, task.owner, task.repo, task.sha, args.output_dir)
+    build_cmd, run_cmd = format_cmds(task.get_image_name(), task.owner, task.repo, task.sha, args.output_dir)
 
     build_res: BuildResult = docker_ctx.build_container_streaming(
         client=client,
-        image_name=image_name,
+        image_name=task.get_image_name(),
         build_args={
             "REPO_URL": f"https://www.github.com/{task.owner}/{task.repo}",
             "COMMIT_SHA": task.sha,
@@ -206,7 +205,7 @@ def validate_one(  # noqa: C901
         build_stage = "build-ok"
 
     if not build_res.ok:
-        return _handle_build_error(task, build_cmd, run_cmd, build_res, args, image_name, build_stage)
+        return _handle_build_error(task, build_cmd, run_cmd, build_res, args, task.get_image_name(), build_stage)
 
     # --- RUN ---
     # prepare env (clone default Machine args and set machine=sha)
@@ -221,9 +220,9 @@ def validate_one(  # noqa: C901
     files = {}
     try:
         container = client.containers.run(
-            image=image_name,
+            image=task.get_image_name(),
             detach=True,
-            name=f"{image_name.replace('/', '-')}-validation",
+            name=task.get_container_name(),
             environment=env,
             volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
         )
@@ -244,7 +243,7 @@ def validate_one(  # noqa: C901
         try:
             files = log_container_output(container, archive="/output")
         except Exception:
-            logger.exception("Failed to archive output for %s", image_name)
+            logger.exception("Failed to archive output for %s", task.get_image_name())
 
         ok = rc == 0
 
@@ -259,14 +258,14 @@ def validate_one(  # noqa: C901
 
         if not ok:
             return _handle_run_error(
-                task, build_cmd, run_cmd, rc, logs_tail, args, image_name, run_stage, build_stage, files
+                task, build_cmd, run_cmd, rc, logs_tail, args, task.get_image_name(), run_stage, build_stage, files
             )
 
-        return {  # noqa: TRY300
+        return {
             "owner": task.owner,
             "repo": task.repo,
             "sha": task.sha,
-            "image_name": image_name,
+            "image_name": task.get_image_name(),
             "stage": f"{run_stage}+{build_stage}",
             "ok": ok,
             "rc": rc,
@@ -278,11 +277,11 @@ def validate_one(  # noqa: C901
             "files": files,
         }
     except Exception:
-        return _handle_run_exception(task, build_cmd, run_cmd, args, image_name, build_stage)
+        return _handle_run_exception(task, build_cmd, run_cmd, args, task.get_image_name(), build_stage)
     finally:
         # best-effort cleanup
         try:
             if container:
                 container.remove(force=True)
         except Exception:
-            logger.exception("Failed to remove container for %s", image_name)
+            logger.exception("Failed to remove container for %s", task.get_image_name())

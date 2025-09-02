@@ -72,7 +72,9 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             else:
                 all_states[(owner, repo)].add((sha, 0.0))
     elif args.commits:
-        commits = pd.read_json(args.commits, lines=True)
+        commits = (
+            pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
+        )
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]
