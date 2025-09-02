@@ -79,7 +79,7 @@ class PersistentContainer:
                 logger.warning("Container name conflict, trying to remove existing container %s.", self.name)
                 try:
                     old_container = self.client.containers.get(self.name)
-                    old_container.stop(timeout=3)
+                    old_container.stop(timeout=60)
                     old_container.remove(force=True)
                 except NotFound:
                     pass
