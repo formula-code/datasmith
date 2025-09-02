@@ -10,13 +10,11 @@ from pathlib import Path
 import docker
 import dspy
 
-from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.tool_executor import ContainerToolExecutor
 from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
 from datasmith.docker.validation import Task, validate_one
 
 logger = logging.getLogger(__name__)
-configure_agent_backends()
 
 
 def _preview(s: str, n: int = 160) -> str:
