@@ -9,6 +9,7 @@ from pathlib import Path
 
 import docker
 import dspy
+from docker.errors import NotFound
 
 from datasmith.agents.tool_executor import ContainerToolExecutor
 from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
@@ -604,3 +605,14 @@ def agent_build_and_validate(  # noqa: C901
         }
     finally:
         tool_exec.shutdown()
+        # remove any containers that were built.
+        try:
+            cont = client.containers.get(task.with_tag("env").get_container_name())
+            cont.remove(force=True)
+        except NotFound:
+            pass
+        try:
+            cont = client.containers.get(task.with_tag("pkg").get_container_name())
+            cont.remove(force=True)
+        except NotFound:
+            pass
