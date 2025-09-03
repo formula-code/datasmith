@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# backup_under_3GB.sh
+# Copies files < 3 GiB from SOURCE to DEST/DD-MM-YY-HH-MM, preserving tree structure.
+
+set -Eeuo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [-n] <SOURCE_DIR> <DEST_DIR>
+
+  -n, --dry-run   Show what would be copied without making changes
+
+Creates a timestamped folder (DD-MM-YY-HH-MM) inside DEST_DIR and copies all
+regular files smaller than 3 GiB from SOURCE_DIR into it, preserving directories.
+
+Examples:
+  $(basename "$0") /data/projects /backups
+  $(basename "$0") -n ~/Documents /Volumes/Backups
+EOF
+}
+
+# --- Parse args ---
+DRY_RUN=0
+if [[ $# -lt 2 ]]; then
+  if [[ "${1:-}" == "-n" || "${1:-}" == "--dry-run" ]]; then
+    echo "Error: missing SOURCE_DIR and DEST_DIR."
+  fi
+  usage; exit 1
+fi
+
+if [[ "${1:-}" == "-n" || "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=1
+  shift
+fi
+
+SRC=${1:?}; DEST=${2:?}
+
+# --- Preconditions ---
+if ! command -v rsync >/dev/null 2>&1; then
+  echo "Error: 'rsync' is required but not found in PATH." >&2
+  exit 2
+fi
+
+if [[ ! -d "$SRC" ]]; then
+  echo "Error: SOURCE_DIR '$SRC' does not exist or is not a directory." >&2
+  exit 3
+fi
+
+mkdir -p "$DEST"
+
+# --- Config ---
+# 3 GiB in bytes (3 * 1024^3); rsync --max-size accepts raw bytes.
+MAX_SIZE_BYTES=3221225472
+STAMP=$(date +%d-%m-%y-%H-%M)
+TARGET="$DEST/$STAMP"
+
+mkdir -p "$TARGET"
+
+# --- Do the backup ---
+# We want: preserve structure, copy only files < 3 GiB, include dirs & symlinks.
+# Strategy: build list of eligible files with find (portable byte-size test) and feed to rsync.
+# Using relative paths to preserve tree cleanly.
+echo "Starting backup:"
+echo "  Source:      $SRC"
+echo "  Destination: $TARGET"
+echo "  Max size:    < 3 GiB"
+[[ $DRY_RUN -eq 1 ]] && echo "  Mode:        DRY RUN"
+
+# Find prints NUL-separated relative file paths for files smaller than 3 GiB.
+# The 'c' suffix makes the size check in bytes and is portable (BSD/GNU find).
+# Rsync copies only the provided files and recreates the directory tree under $TARGET.
+(
+  cd "$SRC"
+  find . -type f -size -"${MAX_SIZE_BYTES}"c -print0
+) | rsync -a --from0 --files-from=- "$SRC"/ "$TARGET"/ \
+    --max-size="$MAX_SIZE_BYTES" \
+    $([[ $DRY_RUN -eq 1 ]] && printf %s "--dry-run --itemize-changes") \
+    --human-readable
+
+# Optional: write a simple manifest for traceability
+{
+  echo "Backup timestamp: $STAMP"
+  echo "Source: $SRC"
+  echo "Destination: $TARGET"
+  echo "Max file size: < 3 GiB"
+  echo "Command: $(basename "$0") $([[ $DRY_RUN -eq 1 ]] && echo -n "--dry-run " )\"$SRC\" \"$DEST\""
+  echo "File count:"
+  find "$TARGET" -type f | wc -l
+} > "$TARGET/backup_manifest.txt"
+
+echo "Backup complete: $TARGET"
