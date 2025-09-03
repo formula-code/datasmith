@@ -59,6 +59,22 @@ export IMPORT_NAME="${import_name}"
 EOF
 }
 
+# Append install-related variables (extras/specs) so the follow-up script can use them.
+append_install_vars() {
+    local extras_all="$1"
+    local setuppy_cmd="$2"
+
+    mkdir -p /etc/asv_env
+    printf "%s\n" "$extras_all" > /etc/asv_env/extras_all
+    printf "%s\n" "$setuppy_cmd" > /etc/asv_env/setuppy_cmd
+
+    # Export for future shells
+    cat >>/etc/profile.d/asv_build_vars.sh <<EOF
+export ALL_EXTRAS="${extras_all}"
+export SAVED_SETUPPY_CMD="${setuppy_cmd}"
+EOF
+}
+
 # -------- Install a reusable smoke-check CLI --------
 install_smokecheck() {
     cat >/usr/local/bin/asv_smokecheck.py <<'PY'
@@ -493,6 +509,120 @@ PY
 
 install_detect_import_name
 
+install_detect_extras() {
+    cat >/usr/local/bin/detect_extras <<'PY'
+#!/usr/bin/env python
+"""
+Emit space-separated extras discovered in a repo.
+Sources:
+ - pyproject.toml -> [project.optional-dependencies] / [tool.poetry.extras]
+ - setup.cfg -> [options.extras_require]
+ - setup.py -> via `egg_info` then parse *.egg-info/{PKG-INFO,requires.txt}
+"""
+import argparse, pathlib, sys, subprocess, configparser, re
+try:
+    import tomllib as toml
+except Exception:
+    try:
+        import tomli as toml
+    except Exception:
+        toml = None
+
+def read_pyproject(root: pathlib.Path):
+    p = root / "pyproject.toml"
+    if toml and p.exists():
+        try:
+            return toml.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def read_setup_cfg(root: pathlib.Path):
+    p = root / "setup.cfg"
+    cp = configparser.ConfigParser()
+    if p.exists():
+        try:
+            cp.read(p, encoding="utf-8")
+        except Exception:
+            pass
+    return cp
+
+def extras_from_pyproject(pyproject):
+    names = set()
+    proj = (pyproject.get("project", {}) or {})
+    opt = proj.get("optional-dependencies", {}) or {}
+    names.update(opt.keys())
+    poetry = ((pyproject.get("tool", {}) or {}).get("poetry", {}) or {}).get("extras", {}) or {}
+    names.update(poetry.keys())
+    return names
+
+def extras_from_setup_cfg(setup_cfg):
+    names = set()
+    sec = "options.extras_require"
+    if setup_cfg.has_section(sec):
+        names.update(setup_cfg.options(sec))
+    return names
+
+def ensure_egg_info(root: pathlib.Path):
+    if (root / "setup.py").exists():
+        try:
+            subprocess.run([sys.executable, "setup.py", "-q", "egg_info"],
+                           cwd=root, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+def extras_from_egg_info(root: pathlib.Path):
+    names=set()
+    for ei in root.glob("*.egg-info"):
+        pkgi = ei / "PKG-INFO"
+        if pkgi.exists():
+            try:
+                for line in pkgi.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if line.startswith("Provides-Extra:"):
+                        names.add(line.split(":",1)[1].strip())
+            except Exception:
+                pass
+        req = ei / "requires.txt"
+        if req.exists():
+            try:
+                for line in req.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    m = re.match(r"^\[(.+)\]$", line.strip())
+                    if m:
+                        names.add(m.group(1).strip())
+            except Exception:
+                pass
+    return names
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo-root", default=".")
+    args = ap.parse_args()
+    root = pathlib.Path(args.repo_root).resolve()
+
+    pyproject = read_pyproject(root)
+    setup_cfg = read_setup_cfg(root)
+
+    names = set()
+    names |= extras_from_pyproject(pyproject)
+    names |= extras_from_setup_cfg(setup_cfg)
+
+    if (root / "setup.py").exists():
+        ensure_egg_info(root)
+        names |= extras_from_egg_info(root)
+
+    # Print space-separated (sorted) list; empty output if none
+    if names:
+        print(" ".join(sorted(names)))
+    else:
+        print("", end="")
+
+if __name__ == "__main__":
+    main()
+PY
+    chmod +x /usr/local/bin/detect_extras
+}
+install_detect_extras
+
 # -------- Script body --------
 
 install_profile_helpers
@@ -502,14 +632,13 @@ source /etc/profile.d/asv_utils.sh
 # Ensure base micromamba is active for introspecting ASV config
 micromamba activate base
 
-install_detect_import_name
-install_smokecheck
+# Minimal tools in base to parse metadata (pyproject & egg-info)
+micromamba install -y -n base -c conda-forge python tomli setuptools >/dev/null
 
 IMPORT_NAME="$(detect_import_name || true)"
 if [[ -z "$IMPORT_NAME" ]]; then
     echo "WARN: Could not determine import name; the pkg stage will fall back to local detection."
 fi
-
 
 # Move into the directory that contains asv.*.json
 cd_asv_json_dir || { echo "No 'asv.*.json' file found." >&2; exit 1; }
@@ -527,10 +656,19 @@ micromamba install -y -n base -c conda-forge tomli >/dev/null
 PY_VERSIONS=$(python - <<PY
 import asv
 cfg = asv.config.Config.load("$CONF_NAME")
+# remove any python less than 3.7 (ASV dropped support for 3.6+ in v0.5)
+cfg.pythons = [v for v in cfg.pythons if tuple(map(int, v.split('.'))) >= (3,7)]
 print(" ".join(cfg.pythons))
 PY
 )
 
+# If none found, throw a noticeable error and exit
+if [[ -z "$PY_VERSIONS" ]]; then
+    echo "No Satisfying PY_VERSIONS found in $CONF_NAME" >&2
+    # echo asv config for debugging
+    cat "$CONF_NAME" >&2
+    exit 1
+fi
 
 
 # Create the per-version envs with common build deps & ASV
@@ -543,7 +681,7 @@ for version in $PY_VERSIONS; do
 
     # Generic toolchain useful for many compiled projects (installed once here)
     micromamba install -y -n "$ENV_NAME" -c conda-forge \
-        pip git conda mamba libmambapy \
+        pip git conda mamba "libmambapy<2" \
         numpy scipy cython joblib threadpoolctl pytest \
         compilers meson-python cmake ninja pkg-config tomli
 
@@ -552,8 +690,13 @@ for version in $PY_VERSIONS; do
     micromamba run -n "$ENV_NAME" bash -lc "pip install --no-cache-dir git+https://github.com/airspeed-velocity/asv"
 done
 
-# Persist variables
+# Persist base variables
 write_build_vars "$PY_VERSIONS" "${IMPORT_NAME:-}"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+ALL_EXTRAS="$(detect_extras --repo-root "$REPO_ROOT" 2>/dev/null | tr -s ' ' | tr ' ' ',')"
 
+
+SETUPPY_CMD="develop"
+append_install_vars "${ALL_EXTRAS}" "${SETUPPY_CMD}"
 
 echo "Environment setup complete."

@@ -208,7 +208,7 @@ class DockerContext:
                         fileobj=self.build_tarball_stream(probe=probe),
                         custom_context=True,
                         tag=image_name,
-                        buildargs=build_args,
+                        buildargs={**build_args, "BUILDKIT_INLINE_CACHE": "1"},
                         target=target,
                     )
                 except DockerException:
@@ -278,7 +278,7 @@ class DockerContext:
                     fileobj=tar_stream,
                     custom_context=True,
                     tag=image_name,
-                    buildargs=build_args,
+                    buildargs={**build_args, "BUILDKIT_INLINE_CACHE": "1"},
                     decode=True,
                     rm=True,
                     pull=pull,

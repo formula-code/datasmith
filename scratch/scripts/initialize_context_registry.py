@@ -23,6 +23,7 @@ CONTEXT_REGISTRY = ContextRegistry(default_context=DockerContext())
 # ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 # REPO_ROOT="$ROOT_PATH"
 # TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+# EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 # if [[ -z "${TARGET_VERSIONS}" ]]; then
 #   echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
 #   exit 1
@@ -109,8 +110,11 @@ CONTEXT_REGISTRY = ContextRegistry(default_context=DockerContext())
 #   micromamba run -n "$ENV_NAME" pip install -e . scipy matplotlib
 
 #   # Editable install (no build isolation preferrably). Toolchain lives in the env already.
+#   # $EXTRAS is an optional argument to install all discovered extra dependencies.
+#   # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
+#   # In case setup.py is used, no need to append $EXTRAS.
 #   log "Editable install with --no-build-isolation"
-#   PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+#   PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
 
 #   # Health checks (import + compiled extension probe; optional pytest smoke with RUN_PYTEST_SMOKE=1)
 #   log "Running smoke checks"
@@ -141,6 +145,7 @@ eval "$(micromamba shell hook --shell=bash)"
 ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
 TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 if [[ -z "${TARGET_VERSIONS}" ]]; then
   echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
   exit 1
@@ -226,8 +231,11 @@ for version in $TARGET_VERSIONS; do
   micromamba run -n "$ENV_NAME" pip install meson-python cython
 
   # Editable install (no build isolation preferrably). Toolchain lives in the env already.
+  # $EXTRAS is an optional argument to install all discovered extra dependencies.
+  # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
+  # In case setup.py is used, no need to append $EXTRAS.
   log "Editable install with --no-build-isolation"
-  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
 
   # Health checks (import + compiled extension probe; optional pytest smoke with RUN_PYTEST_SMOKE=1)
   log "Running smoke checks"
@@ -258,6 +266,7 @@ eval "$(micromamba shell hook --shell=bash)"
 ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
 TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 if [[ -z "${TARGET_VERSIONS}" ]]; then
   echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
   exit 1
@@ -344,8 +353,11 @@ for version in $TARGET_VERSIONS; do
   export CFLAGS="${CFLAGS:-} -Wno-error=incompatible-pointer-types"
 
   # Editable install (no build isolation preferrably). Toolchain lives in the env already.
+  # $EXTRAS is an optional argument to install all discovered extra dependencies.
+  # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
+  # In case setup.py is used, no need to append $EXTRAS.
   log "Editable install with --no-build-isolation"
-  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
 
   # Health checks (import + compiled extension probe; optional pytest smoke with RUN_PYTEST_SMOKE=1)
   log "Running smoke checks"
@@ -377,6 +389,7 @@ eval "$(micromamba shell hook --shell=bash)"
 ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
 TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 if [[ -z "${TARGET_VERSIONS}" ]]; then
   echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
   exit 1
@@ -469,8 +482,11 @@ for version in $TARGET_VERSIONS; do
   micromamba run -n "$ENV_NAME" python "${ROOT_PATH}/build_lib.py"
 
   # Editable install (no build isolation preferrably). Toolchain lives in the env already.
+  # $EXTRAS is an optional argument to install all discovered extra dependencies.
+  # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
+  # In case setup.py is used, no need to append $EXTRAS.
   log "Editable install with --no-build-isolation"
-  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
 
   # Health checks (import + compiled extension probe; optional pytest smoke with RUN_PYTEST_SMOKE=1)
   log "Running smoke checks"
@@ -503,6 +519,7 @@ eval "$(micromamba shell hook --shell=bash)"
 ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
 TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 if [[ -z "${TARGET_VERSIONS}" ]]; then
   echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
   exit 1
@@ -590,8 +607,11 @@ for version in $TARGET_VERSIONS; do
   fi
 
   # Editable install (no build isolation preferrably). Toolchain lives in the env already.
+  # $EXTRAS is an optional argument to install all discovered extra dependencies.
+  # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
+  # In case setup.py is used, no need to append $EXTRAS.
   log "Editable install with --no-build-isolation"
-  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
 
   # Health checks (import + compiled extension probe; optional pytest smoke with RUN_PYTEST_SMOKE=1)
   log "Running smoke checks"
@@ -624,6 +644,7 @@ log "All builds complete ✅"
 # ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 # REPO_ROOT="$ROOT_PATH"
 # TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+# EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 # if [[ -z "${TARGET_VERSIONS}" ]]; then
 #   echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
 #   exit 1
@@ -715,8 +736,11 @@ log "All builds complete ✅"
 #     cd "$working_dir" || exit 1
 #   else
 #     # Editable install (no build isolation preferrably). Toolchain lives in the env already.
+#     # $EXTRAS is an optional argument to install all discovered extra dependencies.
+#     # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
+#     # In case setup.py is used, no need to append $EXTRAS.
 #     log "Editable install with --no-build-isolation"
-#     PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+#     PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
 #   fi
 
 
@@ -734,60 +758,60 @@ log "All builds complete ✅"
 # )
 
 
-# if __name__ == "__main__":
-#     from pathlib import Path
+if __name__ == "__main__":
+    from pathlib import Path
 
-#     CONTEXT_REGISTRY.save_to_file(Path("scratch/context_registry_init.json"))
-#     # for each context, build an image with the context.
-#     import docker
+    CONTEXT_REGISTRY.save_to_file(Path("scratch/context_registry_init.json"))
+    # # for each context, build an image with the context.
+    # import docker
 
-#     from datasmith.docker.context import ContextRegistry, DockerContext, Task
+    # from datasmith.docker.context import ContextRegistry, DockerContext, Task
 
-#     client = docker.from_env()
+    # client = docker.from_env()
 
-#     import concurrent.futures
+    # import concurrent.futures
 
-#     fails = dict()
+    # fails = dict()
 
-#     def build_context(task_context):
-#         task, context = task_context
-#         if not task.sha:
-#             import requests
+    # def build_context(task_context):
+    #     task, context = task_context
+    #     if not task.sha:
+    #         import requests
 
-#             resp = requests.get(f"https://api.github.com/repos/{task.owner}/{task.repo}")
-#             resp.raise_for_status()
-#             commit_sha = resp.json().get("default_branch", "main")
-#             task = Task(owner=task.owner, repo=task.repo, sha=commit_sha, tag=task.tag)
-#         print(f"Building image for {task.get_image_name()} at {task.sha}")
-#         res = context.build_container_streaming(
-#             client=client,
-#             image_name=task.get_image_name(),
-#             build_args={
-#                 "REPO_URL": f"https://www.github.com/{task.owner}/{task.repo}",
-#                 "COMMIT_SHA": task.sha,  # pyright: ignore[reportArgumentType]
-#             },
-#             force=True,
-#             timeout_s=1200,
-#             pull=True,
-#         )
-#         return (task, res)
+    #         resp = requests.get(f"https://api.github.com/repos/{task.owner}/{task.repo}")
+    #         resp.raise_for_status()
+    #         commit_sha = resp.json().get("default_branch", "main")
+    #         task = Task(owner=task.owner, repo=task.repo, sha=commit_sha, tag=task.tag)
+    #     print(f"Building image for {task.get_image_name()} at {task.sha}")
+    #     res = context.build_container_streaming(
+    #         client=client,
+    #         image_name=task.get_image_name(),
+    #         build_args={
+    #             "REPO_URL": f"https://www.github.com/{task.owner}/{task.repo}",
+    #             "COMMIT_SHA": task.sha,  # pyright: ignore[reportArgumentType]
+    #         },
+    #         force=True,
+    #         timeout_s=1200,
+    #         pull=True,
+    #     )
+    #     return (task, res)
 
-#     with concurrent.futures.ProcessPoolExecutor() as executor:
-#         futures = {executor.submit(build_context, item): item[0] for item in CONTEXT_REGISTRY.registry.items()}
-#         for future in concurrent.futures.as_completed(futures):
-#             task = futures[future]
-#             try:
-#                 task, res = future.result()
-#                 if res.ok:
-#                     print(f"Built image {task.get_image_name()} successfully")
-#                 else:
-#                     print(f"Failed to build image {task.get_image_name()}")
-#                     fails[task] = res
-#             except Exception as exc:
-#                 print(f"Exception building image {task.get_image_name()}: {exc}")
-#                 fails[task] = exc
+    # with concurrent.futures.ProcessPoolExecutor() as executor:
+    #     futures = {executor.submit(build_context, item): item[0] for item in CONTEXT_REGISTRY.registry.items()}
+    #     for future in concurrent.futures.as_completed(futures):
+    #         task = futures[future]
+    #         try:
+    #             task, res = future.result()
+    #             if res.ok:
+    #                 print(f"Built image {task.get_image_name()} successfully")
+    #             else:
+    #                 print(f"Failed to build image {task.get_image_name()}")
+    #                 fails[task] = res
+    #         except Exception as exc:
+    #             print(f"Exception building image {task.get_image_name()}: {exc}")
+    #             fails[task] = exc
 
-#     if fails:
-#         import IPython
+    # if fails:
+    #     import IPython
 
-#         IPython.embed()
+    #     IPython.embed()

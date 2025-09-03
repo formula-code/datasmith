@@ -21,7 +21,7 @@ from datasmith.scrape.utils import _parse_commit_url
 configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 
 logger = configure_logging(level=10)
-# logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))
+# logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".tiny.log"), "w"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,12 +178,12 @@ def main(args: argparse.Namespace) -> None:
             for fut in as_completed(futures):
                 res = fut.result()
                 results.append(res)
-                with _err_lock, open(args.output_dir / "results.jsonl", "a") as jf:
-                    jf.write(json.dumps(res) + "\n")
-
                 if int(res["rc"]) != 1:
                     logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
                     context_registry.save_to_file(path=args.context_registry)
+
+                with _err_lock, open(args.output_dir / "results.jsonl", "a") as jf:
+                    jf.write(json.dumps(res) + "\n")
 
     # Rollup (minimal, quick to read)
     rollup = {
