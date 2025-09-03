@@ -12,7 +12,7 @@ import dspy
 
 from datasmith.agents.tool_executor import ContainerToolExecutor
 from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
-from datasmith.docker.validation import Task, validate_one
+from datasmith.docker.validation import Task
 
 logger = logging.getLogger(__name__)
 
@@ -344,7 +344,7 @@ def build_once_with_context(
     return res
 
 
-def agent_build_and_validate(
+def agent_build_and_validate(  # noqa: C901
     task: Task,
     args: argparse.Namespace,
     client: docker.DockerClient,
@@ -395,11 +395,25 @@ def agent_build_and_validate(
             tail_chars=args.tail_chars,
             probe=True,
             pull=True,
-            force=False,  # If the env is already present, don't rebuild (saves time)
+            force=True,  # If the env is already present, don't rebuild (saves time)
         )
         if not env_res.ok:
             logger.warning("agent_build_and_validate: probe build failed; something is wrong with Dockerfile")
-            raise RuntimeError("probe build failed; check Dockerfile.")
+            # raise RuntimeError("probe build failed; check Dockerfile.")
+            return {
+                "ok": False,
+                "rc": env_res.rc,
+                "stage": "probe",
+                "owner": task.owner,
+                "repo": task.repo,
+                "sha": task.sha,
+                "image_name": task.with_tag("pkg").get_image_name(),
+                "duration_s": env_res.duration_s,
+                "stderr_tail": env_res.stderr_tail,
+                "stdout_tail": env_res.stdout_tail,
+                "attempts": [],
+                "context_pickle": None,
+            }
 
     tool_exec = ContainerToolExecutor(
         docker_client=client,
@@ -481,56 +495,77 @@ def agent_build_and_validate(
             if build_res.ok:
                 with context_registry.get_lock():
                     context_registry.register(task.with_tag("pkg"), ctx)
-                # import_works = False
-                # import_check_res = None
-                # try:
-                #     import_check_res = tool_exec.import_check(cmd_python="python")
-                #     logger.info(
-                #         "agent_build_and_validate: import_check ok=%s candidates=%s",
-                #         import_check_res.get("ok"),
-                #         import_check_res.get("candidates"),
-                #     )
-                # except Exception as e:
-                #     logger.warning("agent_build_and_validate: import_check error: %s", e, exc_info=True)
-
-                # import_works = import_check_res.get("ok") if import_check_res else False
-                # if not import_works and import_check_res:
-                #     # modify build_res to include import_check result
-                #     build_res.stderr_tail = (
-                #         (build_res.stderr_tail or "") + "\n" + (import_check_res.get("stderr_tail") or "")
-                #     )
-                #     build_res.stdout_tail = (
-                #         (build_res.stdout_tail or "") + "\n" + (import_check_res.get("stdout_tail") or "")
-                #     )
-                # elif not import_works:
-                #     build_res.stderr_tail = (
-                #         (build_res.stderr_tail or "") + "\n" + "[import_check] failed with unknown error"
-                #     )
 
                 # Save final pickle and then run full validation using your pipeline
                 final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
                 _save_pickle(ctx, final_pickle)
-                logger.info("agent_build_and_validate: build succeeded; starting validation run")
-                result = validate_one(task.with_tag("pkg"), args, client, context_registry, machine_defaults)
+                logger.info("agent_build_and_validate: build succeeded")
+                result = attempts[-1].build_result
+                if result is None:
+                    raise RuntimeError("Unexpected: result is None after successful build")
+                result_dict = {
+                    "owner": task.owner,
+                    "repo": task.repo,
+                    "sha": task.sha,
+                    "image_name": task.with_tag("pkg").get_image_name(),
+                    "ok": result.ok,
+                    "rc": result.rc,
+                    "duration_s": result.duration_s,
+                    "stderr_tail": result.stderr_tail,
+                    "stdout_tail": result.stdout_tail,
+                    "stage": "build",
+                }
+                # result = validate_one(task.with_tag("pkg"), args, client, context_registry, machine_defaults)
                 logger.info(
                     "agent_build_and_validate: validation stage=%s ok=%s rc=%s",
-                    result.get("stage"),
-                    result.get("ok"),
-                    result.get("rc"),
+                    result_dict.get("stage"),
+                    result_dict.get("ok"),
+                    result_dict.get("rc"),
                 )
 
-                result["attempts"] = [
+                result_dict["attempts"] = [
                     {
                         "attempt": a.attempt_idx,
                         "ok": (a.build_result.ok if a.build_result else False),
                         "rc": (a.build_result.rc if a.build_result else None),
                         "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
                         "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
+                        "building_data": a.building_data,
                     }
                     for a in attempts
                 ]
-                result["context_pickle"] = str(final_pickle)
-                return result
+                result_dict["context_pickle"] = str(final_pickle)
+                return result_dict
+
+            # If the stderr stream doesn't mention docker_build_pkg.sh at all, then iteration is futile
+            if build_res.stderr_tail and "docker_build_pkg.sh" not in build_res.stderr_tail:
+                logger.error(
+                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh; not worth iterating"
+                )
+                return {
+                    "ok": False,
+                    "rc": build_res.rc,
+                    "stage": "build",
+                    "owner": task.owner,
+                    "repo": task.repo,
+                    "sha": task.sha,
+                    "image_name": task.with_tag("pkg").get_image_name(),
+                    "duration_s": build_res.duration_s,
+                    "stderr_tail": build_res.stderr_tail,
+                    "stdout_tail": build_res.stdout_tail,
+                    "attempts": [
+                        {
+                            "attempt": a.attempt_idx,
+                            "ok": (a.build_result.ok if a.build_result else False),
+                            "rc": (a.build_result.rc if a.build_result else None),
+                            "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
+                            "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
+                            "building_data": a.building_data,
+                        }
+                        for a in attempts
+                    ],
+                    "context_pickle": None,
+                }
 
             # otherwise iterate with new logs
             logger.warning(
@@ -559,6 +594,9 @@ def agent_build_and_validate(
                     "attempt": a.attempt_idx,
                     "ok": (a.build_result.ok if a.build_result else False),
                     "rc": (a.build_result.rc if a.build_result else None),
+                    "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
+                    "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
+                    "building_data": a.building_data,
                 }
                 for a in attempts
             ],

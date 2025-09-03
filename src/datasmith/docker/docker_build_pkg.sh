@@ -10,6 +10,7 @@ source /etc/profile.d/asv_build_vars.sh || true
 ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
 TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 if [[ -z "${TARGET_VERSIONS}" ]]; then
   echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
   exit 1
@@ -90,17 +91,21 @@ for version in $TARGET_VERSIONS; do
   # -----------------------------
 
   # Install some generic packages needed for building/testing.
-  micromamba install -y -n "$ENV_NAME" -c conda-forge pip git conda mamba libmambapy \
-        numpy scipy cython joblib threadpoolctl pytest \
+  # Libmambapy must be < 2 avoid issues running airspeed-velocity.
+  micromamba install -y -n "$ENV_NAME" -c conda-forge pip git conda mamba "libmambapy<=1.9.9" \
+        numpy scipy cython joblib fakeredis threadpoolctl pytest \
         compilers meson-python cmake ninja pkg-config tomli
 
   # Editable install (no build isolation preferrably). Toolchain lives in the env already.
+  # $EXTRAS is an optional argument to install all discovered extra dependencies.
+  # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
+  # In case setup.py is used, no need to append $EXTRAS.
   log "Editable install with --no-build-isolation"
-  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
 
   # Health checks (import + compiled extension probe; optional pytest smoke with RUN_PYTEST_SMOKE=1)
   log "Running smoke checks"
-  micromamba run -n "$ENV_NAME" asv_smokecheck.py --import-name $IMP --repo-root $REPO_ROOT ${RUN_PYTEST_SMOKE:+--pytest-smoke}
+  micromamba run -n "$ENV_NAME" asv_smokecheck.py --import-name "$IMP" --repo-root "$REPO_ROOT" ${RUN_PYTEST_SMOKE:+--pytest-smoke}
 
   echo "::import_name=${IMP}::env=${ENV_NAME}"
 done

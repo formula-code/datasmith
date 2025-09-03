@@ -219,6 +219,7 @@ def validate_one(  # noqa: C901
     container = None
     files = {}
     try:
+        logger.debug("validate_one: running container %s", task.get_container_name())
         container = client.containers.run(
             image=task.get_image_name(),
             detach=True,
