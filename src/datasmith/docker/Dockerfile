@@ -7,7 +7,7 @@ ARG COMMIT_SHA
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl git build-essential jq cmake ninja-build && \
+        jq cmake ninja-build && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
@@ -22,7 +22,7 @@ ENV MAMBA_ROOT_PREFIX=/opt/conda \
 
 RUN micromamba install -y -p $MAMBA_ROOT_PREFIX -c conda-forge \
         python=3.10 \
-        git asv pyperf mamba conda libmambapy jq && \
+        git asv pyperf mamba conda libmambapy && \
     micromamba clean --all --yes
 
 RUN mkdir -p /workspace /output
