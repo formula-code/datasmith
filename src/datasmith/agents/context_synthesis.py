@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 def remove_containers_by_label(client: docker.DockerClient, run_id: str) -> None:
-    for c in client.containers.list(all=True, filters={"label": f"datasmith.run={run_id}"}):
-        with contextlib.suppress(NotFound):
+    with contextlib.suppress(NotFound):
+        for c in client.containers.list(all=True, filters={"label": f"datasmith.run={run_id}"}):
             c.remove(force=True)
 
 
