@@ -47,6 +47,7 @@ class PersistentContainer:
         workdir: str | None = None,
         env: dict | None = None,
         keepalive_cmd: str | None = None,
+        run_labels: dict[str, str] | None = None,
     ) -> None:
         self.client = client
         self.image = image
@@ -55,6 +56,7 @@ class PersistentContainer:
         self.env = env or {}
         self.keepalive_cmd = keepalive_cmd or _DEFAULT_KEEPALIVE_CMD
         self.container: Container | None = None
+        self.run_labels = run_labels or {}
 
     def start(self) -> None:
         if self.container is not None:
@@ -73,6 +75,8 @@ class PersistentContainer:
                 tty=False,
                 detach=True,
                 entrypoint=["/bin/bash", "-lc"],
+                labels=self.run_labels,
+                auto_remove=True,  # auto-remove on stop
             )
         except APIError as e:
             if "Conflict" in str(e) and self.name:
@@ -83,6 +87,8 @@ class PersistentContainer:
                     old_container.remove(force=True)
                 except NotFound:
                     pass
+                except APIError:
+                    logger.exception("Failed to remove existing container %s, cannot continue.", self.name)
                 self.container = self.client.containers.run(
                     self.image,
                     command=["trap : TERM INT; while :; do sleep 2147483647; done"],
@@ -93,6 +99,8 @@ class PersistentContainer:
                     tty=False,
                     detach=True,
                     entrypoint=["/bin/bash", "-lc"],
+                    labels=self.run_labels,
+                    auto_remove=True,  # auto-remove on stop
                 )
             else:
                 raise
@@ -108,7 +116,7 @@ class PersistentContainer:
         if not self.container:
             return
         try:
-            self.container.stop(timeout=3)
+            self.container.stop(timeout=30)
         finally:
             try:
                 self.container.remove(force=True)

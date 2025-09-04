@@ -20,4 +20,4 @@ def update_cr_entrypoint(cr: ContextRegistry):
 if __name__ == "__main__":
     cr = ContextRegistry.load_from_file(Path("scratch/artifacts/pipeflush/tiny/context_registry.json"))
     new_cr = update_cr_entrypoint(cr)
-    new_cr.save_to_file(Path("scratch/artifacts/pipeflush/context_registry.json"))
+    new_cr.save_to_file(Path("scratch/artifacts/pipeflush/tiny/context_registry.json"))

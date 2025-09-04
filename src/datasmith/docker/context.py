@@ -224,6 +224,7 @@ class DockerContext:
         client: docker.DockerClient,
         image_name: str,
         build_args: dict[str, str],
+        run_labels: dict[str, str] | None = None,
         probe: bool = False,
         *,
         force: bool = False,
@@ -237,6 +238,7 @@ class DockerContext:
         Returns a BuildResult and does NOT raise for typical failures (so callers can
         report immediately).
         """
+        run_labels = run_labels if run_labels else {}
         _, target = self.process_image_name(image_name)
         t0 = time.time()
         try:
@@ -283,6 +285,7 @@ class DockerContext:
                     rm=True,
                     pull=pull,
                     target=target,
+                    labels=run_labels,
                 )
             except DockerException:
                 logger.exception("Failed to initiate build for '%s'", image_name)

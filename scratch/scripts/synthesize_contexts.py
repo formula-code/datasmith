@@ -20,8 +20,8 @@ from datasmith.scrape.utils import _parse_commit_url
 
 configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 
-logger = configure_logging(level=10)
-# logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".tiny.log"), "w"))
+# logger = configure_logging(level=10)
+logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".tiny.log"), "w"))  # noqa: SIM115
 
 
 def parse_args() -> argparse.Namespace:

@@ -1,21 +1,52 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import pickle
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import docker
 import dspy
-from docker.errors import NotFound
+from docker.errors import APIError, ImageNotFound, NotFound
 
 from datasmith.agents.tool_executor import ContainerToolExecutor
 from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
 from datasmith.docker.validation import Task
 
 logger = logging.getLogger(__name__)
+
+
+def remove_containers_by_label(client: docker.DockerClient, run_id: str) -> None:
+    for c in client.containers.list(all=True, filters={"label": f"datasmith.run={run_id}"}):
+        with contextlib.suppress(NotFound):
+            c.remove(force=True)
+
+
+def remove_images_by_label(client: docker.DockerClient, run_id: str) -> None:
+    # List is cheap and does not contend. Remove by ID avoids tag races.
+    imgs = client.images.list(filters={"label": f"datasmith.run={run_id}"})
+    for img in imgs:
+        try:
+            client.images.remove(img.id, force=True, noprune=False)
+        except (ImageNotFound, NotFound):
+            pass
+        except APIError as e:
+            # 409 conflict: still in use by a live container; skip
+            if getattr(e, "status_code", None) != 409:
+                # Optional: log at DEBUG
+                pass
+
+
+def gen_run_labels(t: Task, runid: str) -> dict[str, str]:
+    return {
+        "datasmith.run": runid,
+        "datasmith.task": f"{t.owner}/{t.repo}",
+        "datasmith.sha": t.sha if t.sha else "unknown",
+    }
 
 
 def _preview(s: str, n: int = 160) -> str:
@@ -309,6 +340,7 @@ def build_once_with_context(
     *,
     timeout_s: int,
     tail_chars: int,
+    run_labels: dict[str, str],
     probe: bool = False,
     pull: bool = False,
     force: bool = True,
@@ -332,6 +364,7 @@ def build_once_with_context(
         timeout_s=timeout_s,
         tail_chars=tail_chars,
         pull=pull,
+        run_labels=run_labels,
     )
     logger.info(
         "build_once_with_context: result ok=%s rc=%s duration=%.1fs (stderr_tail_len=%d, stdout_tail_len=%d)",
@@ -357,6 +390,7 @@ def agent_build_and_validate(  # noqa: C901
     Main entry: iteratively synthesize build script, build, and validate via your validate_one.
     Saves attempt pickles and final pickle on success.
     """
+    run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
     assert task.sha is not None, "task.sha must be set"  # noqa: S101
     default_building_template = context_registry.get_default(tag="env")[1].building_data
     if len(similar_contexts := context_registry.get_similar(task.with_tag("env"))) > 0:
@@ -397,6 +431,7 @@ def agent_build_and_validate(  # noqa: C901
             probe=True,
             pull=True,
             force=True,  # If the env is already present, don't rebuild (saves time)
+            run_labels=run_labels,
         )
         if not env_res.ok:
             logger.warning("agent_build_and_validate: probe build failed; something is wrong with Dockerfile")
@@ -421,6 +456,7 @@ def agent_build_and_validate(  # noqa: C901
         image_name=task.with_tag("env").get_image_name(),
         container_name=task.with_tag("env").get_container_name(),
         workdir="/workspace/repo/",
+        run_labels=run_labels,
     )
 
     try:
@@ -490,6 +526,7 @@ def agent_build_and_validate(  # noqa: C901
                 timeout_s=args.build_timeout,
                 tail_chars=args.tail_chars * 2,
                 force=True,  # Always rebuild package image to pick up new script
+                run_labels=run_labels,
             )
             attempts.append(AttemptRecord(attempt_idx=i, building_data=script, build_result=build_res))
 
@@ -604,15 +641,27 @@ def agent_build_and_validate(  # noqa: C901
             "files": [],
         }
     finally:
-        tool_exec.shutdown()
-        # remove any containers that were built.
+        with contextlib.suppress(Exception):
+            tool_exec.shutdown()
+
+        run_id = run_labels.get("datasmith.run", "unknown")
+        remove_containers_by_label(client, run_id)
+        for name in [
+            task.with_tag("env").get_container_name(),
+            task.with_tag("pkg").get_container_name(),
+            f"{task.with_tag('env').get_container_name()}-{run_id[:8]}",
+            f"{task.with_tag('pkg').get_container_name()}-{run_id[:8]}",
+        ]:
+            with contextlib.suppress(Exception, NotFound):
+                c = client.containers.get(name)
+                c.remove(force=True)
+
+        remove_images_by_label(client, run_id)
+        for tag in [task.with_tag("env").get_image_name(), task.with_tag("pkg").get_image_name()]:
+            with contextlib.suppress(NotFound, ImageNotFound):
+                client.images.remove(tag, force=True, noprune=False)
+
         try:
-            cont = client.containers.get(task.with_tag("env").get_container_name())
-            cont.remove(force=True)
-        except NotFound:
-            pass
-        try:
-            cont = client.containers.get(task.with_tag("pkg").get_container_name())
-            cont.remove(force=True)
-        except NotFound:
-            pass
+            client.images.prune(filters={"dangling": True})
+        except Exception:
+            logger.exception("image prune failed")

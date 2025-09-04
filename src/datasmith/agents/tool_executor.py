@@ -22,6 +22,7 @@ class ContainerToolExecutor:
     container_name: str | None = None
     workdir: str | None = None
     env: dict | None = None
+    run_labels: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         self._pc = PersistentContainer(
@@ -30,6 +31,7 @@ class ContainerToolExecutor:
             name=self.container_name,
             workdir=self.workdir,
             env=self.env,
+            run_labels=self.run_labels,
         )
         self._pc.start()
         self._repo_root = self._pc.find_repo_root()
