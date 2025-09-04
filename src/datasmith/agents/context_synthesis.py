@@ -21,24 +21,25 @@ logger = logging.getLogger(__name__)
 
 
 def remove_containers_by_label(client: docker.DockerClient, run_id: str) -> None:
-    with contextlib.suppress(NotFound):
+    with contextlib.suppress(Exception):
         for c in client.containers.list(all=True, filters={"label": f"datasmith.run={run_id}"}):
             c.remove(force=True)
 
 
 def remove_images_by_label(client: docker.DockerClient, run_id: str) -> None:
     # List is cheap and does not contend. Remove by ID avoids tag races.
-    imgs = client.images.list(filters={"label": f"datasmith.run={run_id}"})
-    for img in imgs:
-        try:
-            client.images.remove(img.id, force=True, noprune=False)
-        except (ImageNotFound, NotFound):
-            pass
-        except APIError as e:
-            # 409 conflict: still in use by a live container; skip
-            if getattr(e, "status_code", None) != 409:
-                # Optional: log at DEBUG
+    with contextlib.suppress(Exception):
+        imgs = client.images.list(filters={"label": f"datasmith.run={run_id}"})
+        for img in imgs:
+            try:
+                client.images.remove(img.id, force=True, noprune=False)
+            except (ImageNotFound, NotFound):
                 pass
+            except APIError as e:
+                # 409 conflict: still in use by a live container; skip
+                if getattr(e, "status_code", None) != 409:
+                    # Optional: log at DEBUG
+                    pass
 
 
 def gen_run_labels(t: Task, runid: str) -> dict[str, str]:
