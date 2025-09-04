@@ -8,25 +8,24 @@ import math
 import os
 import pickle
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 from pathlib import Path
 
 import asv
 import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
-from datasmith.docker.context import ContextRegistry
+from datasmith.docker.context import ContextRegistry, DockerContext, Task
 from datasmith.docker.orchestrator import (
-    build_repo_sha_image,
     get_docker_client,
     orchestrate,
 )
-from datasmith.docker.validation import BuildResult, Task
+from datasmith.execution.collect_commits_offline import find_parent_releases
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
-# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))
-logger = configure_logging(level=logging.DEBUG)
+logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
+# logger = configure_logging(level=logging.DEBUG)
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,11 +106,13 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             else:
                 all_states[(owner, repo)].add((sha, 0.0))
     elif args.commits:
-        commits = pd.read_json(args.commits, lines=True)
+        commits = (
+            pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
+        )
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]
-            sha = row["commit_sha"]
+            sha = row["sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
                 logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
@@ -135,15 +136,29 @@ def main(args: argparse.Namespace) -> None:
     context_registry = ContextRegistry.load_from_file(path=args.context_registry)
 
     # Prepare tasks
-    tasks: list[Task] = []
+    tasks: list[tuple[Task, DockerContext]] = []
+    repo_commit_pairs = defaultdict(list)
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
         for sha, date in limited:
             task = Task(owner, repo, sha, commit_date=date)
             if task in context_registry:
-                tasks.append(task)
+                tasks.append((task, context_registry.get(task)))
+                repo_commit_pairs[f"{owner}/{repo}"].append(task)
+                # also add the parent commit.
             else:
                 logger.debug(f"main: skipping {task} as not in context registry")
+
+    # get all parent commits and add them as tasks as well.
+    for repo_name, tsks in repo_commit_pairs.items():
+        owner, repo = repo_name.split("/")
+        shas = [t.sha for t in tsks]
+        parent_commits = find_parent_releases(repo_name, shas, add_first=True, incl_datetime=True)
+        for i, (parent_sha, date) in enumerate(parent_commits):
+            parent_task = Task(owner=owner, repo=repo, sha=parent_sha, commit_date=date)  # pyright: ignore[reportArgumentType]
+            # use the child context.
+            ctx = context_registry.get(tsks[i])
+            tasks.append((parent_task, ctx))
 
     max_concurrency = (
         args.max_concurrency if args.max_concurrency != -1 else max(4, math.floor(0.5 * (os.cpu_count() or 1)))
@@ -170,44 +185,44 @@ def main(args: argparse.Namespace) -> None:
     }
     logger.debug("main: machine_defaults keys=%d", len(machine_defaults))
 
-    builds: list[BuildResult] = []
-    if args.max_concurrency < 1:
-        for t in tasks:
-            build_res: BuildResult = build_repo_sha_image(
-                client=client,
-                context_registry=context_registry,
-                task=t,
-                force=args.force_rebuild,
-            )
-            builds.append(build_res)
-    else:
-        with ThreadPoolExecutor(max_workers=args.max_concurrency) as pool:
-            futures = [
-                pool.submit(
-                    build_repo_sha_image,
-                    client,
-                    context_registry,
-                    task,
-                    args.force_rebuild,
-                )
-                for task in tasks
-            ]
-            for fut in as_completed(futures):
-                builds.append(fut.result())
+    # builds: list[BuildResult] = []
+    # if args.max_concurrency < 1:
+    #     for t in tasks:
+    #         build_res: BuildResult = build_repo_sha_image(
+    #             client=client,
+    #             context_registry=context_registry,
+    #             task=t,
+    #             force=args.force_rebuild,
+    #         )
+    #         builds.append(build_res)
+    # else:
+    #     with ThreadPoolExecutor(max_workers=args.max_concurrency) as pool:
+    #         futures = [
+    #             pool.submit(
+    #                 build_repo_sha_image,
+    #                 client,
+    #                 context_registry,
+    #                 task,
+    #                 args.force_rebuild,
+    #             )
+    #             for task in tasks
+    #         ]
+    #         for fut in as_completed(futures):
+    #             builds.append(fut.result())
 
-    successful_builds = [b for b in builds if b.rc != 1]
+    # successful_builds = [b for b in builds if b.rc != 1]
 
-    logger.info("Running benchmarks for %d images", len(successful_builds))
-    logger.info("Failed builds for %d images", len(builds) - len(successful_builds))
-    for b in builds:
-        if b.rc == 1:
-            logger.warning("Build failed for %s", b.image_name)
+    # logger.info("Running benchmarks for %d images", len(successful_builds))
+    # logger.info("Failed builds for %d images", len(builds) - len(successful_builds))
+    # for b in builds:
+    #     if b.rc == 1:
+    #         logger.warning("Build failed for %s", b.image_name)
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     machine_args["num_cpu"] = str(args.num_cores)
-    files_by_image: dict[str, dict[str, str]] = asyncio.run(
+    files_by_image: dict[Task, dict[str, str]] = asyncio.run(
         orchestrate(
-            docker_image_names=[b.image_name for b in successful_builds],
+            contexts=tasks,
             asv_args=asv_args,
             machine_args=machine_args,
             max_concurrency=max_concurrency,
@@ -217,7 +232,7 @@ def main(args: argparse.Namespace) -> None:
         )
     )
     # save the files by image as a pickle file.
-    with open(output_dir / "files_by_image.pkl", "wb") as f:
+    with open(output_dir / "files_by_image.json", "wb") as f:
         pickle.dump(files_by_image, f)
 
     # save the files by image as a JSON file

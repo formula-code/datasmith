@@ -15,6 +15,7 @@ from docker.errors import APIError, ImageNotFound, NotFound
 
 from datasmith.agents.tool_executor import ContainerToolExecutor
 from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
+from datasmith.docker.orchestrator import gen_run_labels
 from datasmith.docker.validation import Task
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 def remove_containers_by_label(client: docker.DockerClient, run_id: str) -> None:
     with contextlib.suppress(Exception):
         for c in client.containers.list(all=True, filters={"label": f"datasmith.run={run_id}"}):
+            logger.debug("Removing container %s", c.name)
             c.remove(force=True)
 
 
@@ -32,6 +34,7 @@ def remove_images_by_label(client: docker.DockerClient, run_id: str) -> None:
         imgs = client.images.list(filters={"label": f"datasmith.run={run_id}"})
         for img in imgs:
             try:
+                logger.debug("Removing image %s (%s)", img.tags, img.id)
                 client.images.remove(img.id, force=True, noprune=False)
             except (ImageNotFound, NotFound):
                 pass
@@ -40,14 +43,6 @@ def remove_images_by_label(client: docker.DockerClient, run_id: str) -> None:
                 if getattr(e, "status_code", None) != 409:
                     # Optional: log at DEBUG
                     pass
-
-
-def gen_run_labels(t: Task, runid: str) -> dict[str, str]:
-    return {
-        "datasmith.run": runid,
-        "datasmith.task": f"{t.owner}/{t.repo}",
-        "datasmith.sha": t.sha if t.sha else "unknown",
-    }
 
 
 def _preview(s: str, n: int = 160) -> str:
@@ -645,24 +640,27 @@ def agent_build_and_validate(  # noqa: C901
         with contextlib.suppress(Exception):
             tool_exec.shutdown()
 
-        run_id = run_labels.get("datasmith.run", "unknown")
-        remove_containers_by_label(client, run_id)
-        for name in [
-            task.with_tag("env").get_container_name(),
-            task.with_tag("pkg").get_container_name(),
-            f"{task.with_tag('env').get_container_name()}-{run_id[:8]}",
-            f"{task.with_tag('pkg').get_container_name()}-{run_id[:8]}",
-        ]:
-            with contextlib.suppress(Exception, NotFound):
-                c = client.containers.get(name)
-                c.remove(force=True)
-
-        remove_images_by_label(client, run_id)
-        for tag in [task.with_tag("env").get_image_name(), task.with_tag("pkg").get_image_name()]:
-            with contextlib.suppress(NotFound, ImageNotFound):
-                client.images.remove(tag, force=True, noprune=False)
-
         try:
-            client.images.prune(filters={"dangling": True})
+            run_id = run_labels.get("datasmith.run", "unknown")
+            remove_containers_by_label(client, run_id)
+            for name in [
+                task.with_tag("env").get_container_name(),
+                task.with_tag("pkg").get_container_name(),
+                f"{task.with_tag('env').get_container_name()}-{run_id[:8]}",
+                f"{task.with_tag('pkg').get_container_name()}-{run_id[:8]}",
+            ]:
+                with contextlib.suppress(Exception, NotFound):
+                    c = client.containers.get(name)
+                    c.remove(force=True)
+
+            remove_images_by_label(client, run_id)
+            for tag in [task.with_tag("env").get_image_name(), task.with_tag("pkg").get_image_name()]:
+                with contextlib.suppress(NotFound, ImageNotFound):
+                    client.images.remove(tag, force=True, noprune=False)
+
+            try:
+                client.images.prune(filters={"dangling": True})
+            except Exception:
+                logger.exception("image prune failed")
         except Exception:
-            logger.exception("image prune failed")
+            logger.exception("agent_build_and_validate: cleanup error")

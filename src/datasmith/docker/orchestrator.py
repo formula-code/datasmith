@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import sys
 import tarfile
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -12,10 +14,18 @@ import docker
 from docker.errors import DockerException, ImageNotFound
 from docker.models.containers import Container
 
-from datasmith.docker.context import BuildResult, ContextRegistry, Task
+from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext, Task
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
+
+
+def gen_run_labels(t: Task, runid: str) -> dict[str, str]:
+    return {
+        "datasmith.run": runid,
+        "datasmith.task": f"{t.owner}/{t.repo}",
+        "datasmith.sha": t.sha if t.sha else "unknown",
+    }
 
 
 def get_docker_client() -> docker.DockerClient:
@@ -72,9 +82,9 @@ def build_repo_sha_image(
 
 async def run_container(
     client: docker.DockerClient,
-    idx: int,
+    task: Task,
+    ctx: DockerContext,
     cores: str | Sequence[int],
-    image: str,
     asv_args: str,
     machine_args: dict[str, str],
     output_dir: Path,
@@ -85,17 +95,17 @@ async def run_container(
 
     Returns the container's exit status code.
     """
+    assert task.sha is not None, "Task.sha must be set"  # noqa: S101
 
     # Normalise to the cpuset string Docker expects
     cpuset = ",".join(map(str, cores)) if not isinstance(cores, str) else cores
     num_cores = len(cpuset.split(","))
 
-    sha = image.split(":")[0].split("/")[-1]  # Extract the commit SHA from the image name
     if "machine" not in machine_args:
         raise ValueError("machine_args must contain a 'machine' key")
-    machine_args["machine"] = sha
+    machine_args["machine"] = task.sha
     env = {
-        "ASV_ARGS": f"{asv_args} --cpu-affinity {cpuset} --parallel {num_cores} --set-commit-hash={sha} --machine={sha}",
+        "ASV_ARGS": f"{asv_args} --cpu-affinity {cpuset} --parallel {num_cores} --set-commit-hash={task.sha} --machine={task.sha}",
         "ASV_MACHINE": machine_args.get("machine", ""),
         "ASV_OS": machine_args.get("os", ""),
         "ASV_NUM_CPU": machine_args.get("num_cpu", "1"),
@@ -105,14 +115,30 @@ async def run_container(
     }
 
     def _launch() -> tuple[int, dict[str, str]]:
-        container_name = f"{image.split(':')[0].replace('/', '-')}-{idx:03d}"
-        logger.debug("docker run name=%s cpuset=%s env=%s", container_name, cpuset, env)
+        assert task.sha is not None, "Task.sha must be set"  # noqa: S101
+        logger.debug("docker build name=%s cpuset=%s env=%s", task.get_image_name(), cpuset, env)
+        repo_url = f"https://github.com/{task.owner}/{task.repo}.git"
+        res = ctx.build_container_streaming(
+            client=client,
+            image_name=task.get_image_name(),
+            build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha},
+            probe=False,
+            force=True,
+            timeout_s=1800,  # 30 minutes
+            tail_chars=10_000,
+            pull=False,
+            run_labels=gen_run_labels(task, runid=uuid.uuid4().hex),
+        )
+        if not res.ok:
+            logger.error("Failed to build image %s: %s", task.get_image_name(), res.stderr_tail)
+            return 1, {}
 
+        logger.debug("docker run name=%s cpuset=%s env=%s", task.get_container_name(), cpuset, env)
         # Start the container on the specified CPUs
         container = client.containers.run(
-            image,
+            task.get_image_name(),
             detach=True,
-            name=container_name,
+            name=task.get_container_name(),
             environment=env,
             cpuset_cpus=cpuset,
             volumes={str(output_dir / "results"): {"bind": "/output", "mode": "rw"}},
@@ -120,13 +146,13 @@ async def run_container(
         )
 
         # Dump container stdout/stderr to a per-container log file
-        log_file = output_dir / "logs" / f"{container_name}.log"
+        log_file = output_dir / "logs" / f"{task.get_container_name()}.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
         for line in container.logs(stream=True, follow=True):
             with log_file.open("a") as f:
                 f.write(line.decode())
 
-        logger.info("Container %s started, waiting for it to finish...", container_name)
+        logger.info("Container %s started, waiting for it to finish...", task.get_container_name())
         result = container.wait()  # blocks until exit
         logger.info("Container result: %s", result)
 
@@ -134,7 +160,16 @@ async def run_container(
         files = log_container_output(container, archive="/output")
 
         # remove container
-        container.remove(force=True)
+        try:
+            container.remove(force=True)
+        except Exception:
+            logger.exception("Failed to remove container %s", task.get_container_name())
+            pass
+        try:
+            client.images.remove(image=task.get_image_name(), force=True, noprune=False)
+        except Exception:
+            logger.exception("Failed to remove image %s", task.get_image_name())
+            pass
         return result.get("StatusCode", 1), files
 
     # Keep the event loop responsive
@@ -183,14 +218,14 @@ def log_container_output(container: Container, archive: str = "/output") -> dict
 
 
 async def orchestrate(
-    docker_image_names: Sequence[str],
+    contexts: Sequence[tuple[Task, DockerContext]],
     asv_args: str,
     machine_args: dict[str, str],
     max_concurrency: int,
     n_cores: int,
     output_dir: Path,
     client: docker.DockerClient,
-) -> dict[str, dict[str, str]]:
+) -> dict[Task, dict[str, str]]:
     """
     Schedule all <repo, sha> pairs while ensuring that each container
     receives `n_cores` dedicated, non-overlapping CPU cores.
@@ -204,34 +239,40 @@ async def orchestrate(
     for s in core_sets:
         core_pool.put_nowait(s)
 
-    async def worker(idx: int, image: str) -> tuple[int, dict[str, str]]:
+    async def worker(task: Task, context: DockerContext) -> tuple[int, dict[str, str]]:
         core_set = await core_pool.get()  # blocks until a free set exists
         cpuset_str = ",".join(map(str, core_set))  # "0,1,2,3"
 
-        logger.info("▶︎ cores=%s image=%s", cpuset_str, image)
+        logger.info("▶︎ cores=%s image=%s", cpuset_str, task.get_image_name())
         try:
             rc, files = await run_container(
                 client=client,
-                idx=idx,
+                task=task,
+                ctx=context,
                 cores=cpuset_str,
-                image=image,
                 asv_args=asv_args,
                 machine_args=machine_args,
                 output_dir=output_dir,
             )
             status, files = ("OK", files) if rc == 0 else (f"FAIL({rc})", {})
             logger.info("■ cores=%s → %s", cpuset_str, status)
+            # Save the Task : files mapping in a JSON file at os.environ["CACHE_LOCATION"].parent/{task-image-name}.json
+            interim_path = Path(os.environ["CACHE_LOCATION"]).parent / "interim"
+            os.makedirs(interim_path, exist_ok=True)
+            with open(os.path.join(interim_path, f"{task.get_container_name()}.json"), "w") as f:
+                json.dump(files, f)
             return (rc, files)
         finally:
             # Always release the core set, even on failure
             core_pool.put_nowait(core_set)
 
-    tasks = [asyncio.create_task(worker(i, img)) for i, img in enumerate(docker_image_names)]
+    tasks = [asyncio.create_task(worker(t, ctx)) for t, ctx in contexts]
+    logger.info("Starting %d benchmark tasks with max concurrency %d", len(tasks), max_concurrency)
 
     results = await asyncio.gather(*tasks)
     status_codes, files_by_image = zip(*results)
-    failures = sum(rc != 0 for rc in status_codes)
+    failures = sum(rc == 0 for rc in status_codes)
     if failures:
         sys.exit(f"{failures} container(s) failed")
     logger.info("All benchmarks finished")
-    return dict(zip(docker_image_names, files_by_image))
+    return dict(zip([t for t, _ in contexts], files_by_image))

@@ -55,10 +55,12 @@ def find_tagged_commits(repo: Repo) -> list[str]:
             merge_shas.add(tag.commit.hexsha)
 
     logger.debug(f"Collected {len(merge_shas)} commits from {repo.working_dir}.")
-    return sorted(merge_shas)
+    return list(merge_shas)
 
 
-def find_parent_commits(repo: Repo, commits: list[str], add_first: bool = False) -> list[str]:
+def find_parent_commits(
+    repo: Repo, commits: list[str], add_first: bool = False, incl_datetime: bool = False
+) -> list[str] | list[tuple[str, float]]:
     parent_commits = set()
     for commit_sha in commits:
         try:
@@ -70,12 +72,15 @@ def find_parent_commits(repo: Repo, commits: list[str], add_first: bool = False)
                 parents = [parents[0]]
 
             for parent in parents:
-                parent_commits.add(parent.hexsha)
+                if incl_datetime:
+                    parent_commits.add((parent.hexsha, parent.committed_datetime.timestamp()))
+                else:
+                    parent_commits.add(parent.hexsha)  # type: ignore[arg-type]
         except Exception as e:
             logger.warning(f"Could not find commit {commit_sha} in {repo.working_dir}: {e}")
 
     logger.debug(f"Collected {len(parent_commits)} parent commits from {repo.working_dir}.")
-    return sorted(parent_commits)
+    return list(parent_commits)
 
 
 def collect_commits(repo: Repo) -> list[tuple[str, str]]:
@@ -182,7 +187,9 @@ def batch_classify_commits(
         return _parallel_classify(commits, process_commit_tuple, repo_name, n_workers)
 
 
-def find_parent_releases(repo_name: str, commits: list[str], add_first: bool = False) -> list[str]:
+def find_parent_releases(
+    repo_name: str, commits: list[str], add_first: bool = False, incl_datetime: bool = False
+) -> list[str] | list[tuple[str, float]]:
     """
     Return a list of commit SHAs that are parent commits of the given commits,
     **without** calling any GitHub API endpoints.
@@ -212,7 +219,7 @@ def find_parent_releases(repo_name: str, commits: list[str], add_first: bool = F
                 return []
             raise
 
-        return find_parent_commits(repo, commits, add_first=add_first)
+        return find_parent_commits(repo, commits, add_first=add_first, incl_datetime=incl_datetime)
 
 
 def find_tagged_releases(repo_name: str) -> list[str]:
@@ -306,4 +313,4 @@ def find_perf_commits(
                     summary_info[c] = ""
         commit_tuples = [(c.hexsha, c.message, summary_info[c]) for c in commits]
         merge_shas = batch_classify_commits(perf_classifier, repo_name, commit_tuples, n_workers)
-        return sorted(merge_shas)
+        return list(merge_shas)
