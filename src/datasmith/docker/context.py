@@ -4,6 +4,7 @@ import contextlib
 import datetime
 import io
 import json
+import os
 import re
 import tarfile
 import threading
@@ -182,8 +183,10 @@ class DockerContext:
         build_args: dict[str, str],
         force: bool = False,
         probe: bool = False,
+        run_labels: dict[str, str] | None = None,
     ) -> None:
         """Builds the Docker image if it does not exist or if force is True."""
+        run_labels = run_labels if run_labels else {}
         _, target = self.process_image_name(image_name)
         image_exists = False
         try:
@@ -210,6 +213,9 @@ class DockerContext:
                         tag=image_name,
                         buildargs={**build_args, "BUILDKIT_INLINE_CACHE": "1"},
                         target=target,
+                        rm=True,
+                        labels=run_labels,
+                        network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
                     )
                 except DockerException:
                     logger.exception("Failed to build Docker image '%s'", image_name)
@@ -286,6 +292,7 @@ class DockerContext:
                     pull=pull,
                     target=target,
                     labels=run_labels,
+                    network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
                 )
             except DockerException:
                 logger.exception("Failed to initiate build for '%s'", image_name)

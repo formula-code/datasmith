@@ -77,6 +77,7 @@ class PersistentContainer:
                 entrypoint=["/bin/bash", "-lc"],
                 labels=self.run_labels,
                 auto_remove=True,  # auto-remove on stop
+                network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
             )
         except APIError as e:
             if "Conflict" in str(e) and self.name:
@@ -101,6 +102,7 @@ class PersistentContainer:
                     entrypoint=["/bin/bash", "-lc"],
                     labels=self.run_labels,
                     auto_remove=True,  # auto-remove on stop
+                    network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
                 )
             else:
                 raise

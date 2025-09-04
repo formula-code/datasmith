@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import os
 import shlex
 import threading
 from pathlib import Path
@@ -226,6 +227,7 @@ def validate_one(  # noqa: C901
             name=task.get_container_name(),
             environment=env,
             volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
+            network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
         )
 
         # Wait with timeout; stop on timeout

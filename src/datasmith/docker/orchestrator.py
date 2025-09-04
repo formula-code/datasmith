@@ -116,6 +116,7 @@ async def run_container(
             environment=env,
             cpuset_cpus=cpuset,
             volumes={str(output_dir / "results"): {"bind": "/output", "mode": "rw"}},
+            network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
         )
 
         # Dump container stdout/stderr to a per-container log file

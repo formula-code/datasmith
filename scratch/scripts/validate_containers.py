@@ -4,6 +4,7 @@ This script builds and validates that each benchmark container can be compiled a
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import asv
@@ -123,6 +124,7 @@ def main(args: argparse.Namespace) -> None:
                         "ASV_MACHINE_ARGS": " ".join([f"--{k} '{v}'" for k, v in machine_args.items()]),
                     },
                     volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
+                    network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
                 )
                 for line in container.logs(stream=True, follow=True):
                     logger.info(line.decode().strip())
