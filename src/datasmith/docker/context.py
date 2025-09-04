@@ -107,11 +107,13 @@ class DockerContext:
 
     default_dockerfile_loc = Path(__file__).parent / "Dockerfile"
     default_entrypoint_loc = Path(__file__).parent / "entrypoint.sh"
+    default_docker_build_base_loc = Path(__file__).parent / "docker_build_base.sh"
     default_docker_build_env_loc = Path(__file__).parent / "docker_build_env.sh"
     default_docker_build_pkg_loc = Path(__file__).parent / "docker_build_pkg.sh"
     dockerfile_data: str
     entrypoint_data: str
     env_building_data: str
+    base_building_data: str
     building_data: str
 
     def __init__(
@@ -120,11 +122,14 @@ class DockerContext:
         dockerfile_data: str | None = None,
         entrypoint_data: str | None = None,
         env_building_data: str | None = None,
+        base_building_data: str | None = None,
     ) -> None:
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
         if entrypoint_data is None:
             entrypoint_data = self.default_entrypoint_loc.read_text()
+        if base_building_data is None:
+            base_building_data = self.default_docker_build_base_loc.read_text()
         if env_building_data is None:
             env_building_data = self.default_docker_build_env_loc.read_text()
         if building_data is None:
@@ -133,6 +138,7 @@ class DockerContext:
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
         self.env_building_data = env_building_data
+        self.base_building_data = base_building_data
         self.building_data = building_data
 
     def build_tarball_stream(self, probe: bool = False) -> io.BytesIO:
@@ -157,6 +163,13 @@ class DockerContext:
             env_building_info.size = len(env_building_data)
             env_building_info.mode = 0o755  # Make it executable
             tar.addfile(env_building_info, io.BytesIO(env_building_data))
+
+            # Add docker_build_base.sh
+            base_building_data = self.base_building_data.encode("utf-8")
+            base_building_info = tarfile.TarInfo(name="docker_build_base.sh")
+            base_building_info.size = len(base_building_data)
+            base_building_info.mode = 0o755  # Make it executable
+            tar.addfile(base_building_info, io.BytesIO(base_building_data))
 
             if not probe:
                 # Add docker_build_pkg.sh

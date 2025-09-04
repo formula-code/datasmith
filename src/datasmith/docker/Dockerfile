@@ -2,9 +2,6 @@
 
 FROM buildpack-deps:jammy AS base
 
-ARG REPO_URL
-ARG COMMIT_SHA
-
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         jq cmake ninja-build && \
@@ -28,7 +25,14 @@ RUN micromamba install -y -p $MAMBA_ROOT_PREFIX -c conda-forge \
 RUN mkdir -p /workspace /output
 WORKDIR /workspace
 
+
+COPY docker_build_base.sh /workspace/docker_build_base.sh
+RUN chmod +x /workspace/docker_build_base.sh && \
+    /workspace/docker_build_base.sh
+
+RUN micromamba clean --all --yes
 FROM base AS env
+
 ARG REPO_URL
 ARG COMMIT_SHA
 
@@ -47,7 +51,6 @@ COPY docker_build_env.sh /workspace/repo/docker_build_env.sh
 RUN chmod +x /workspace/repo/docker_build_env.sh && \
     /workspace/repo/docker_build_env.sh
 
-
 FROM env AS pkg
 
 # ---- PKG STAGE: build+test the package for each ASV Python ----
@@ -56,3 +59,6 @@ RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
     /workspace/repo/docker_build_pkg.sh
 # If you want to restrict to one version at build time, replace with:
 # RUN PY_VERSION=3.10 /workspace/repo/docker_build_pkg.sh
+
+# run micromamba clean in all
+RUN micromamba clean --all --yes

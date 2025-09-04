@@ -193,9 +193,9 @@ class BuildScriptAgentStep(dspy.Signature):
         desc="Describes where the failure occured. E.g. 'N/A', 'build failed', 'asv run failed'."
     )
     last_docker_build_script = dspy.InputField(desc="Previous docker_build.sh script.")
-    initial_template = dspy.InputField(
-        desc="Initial template of the docker_build.sh script with important instructions."
-    )
+    # initial_template = dspy.InputField(
+    #     desc="Initial template of the docker_build.sh script with important instructions."
+    # )
     repo_facts_json = dspy.InputField(desc="Some inferred repo facts (A JSON object with paths, candidates, versions).")
     toolbelt = dspy.InputField(desc="Human-readable summary of available tools.")
     messages_log = dspy.InputField(desc="Transcript of prior tool actions & observations.")
@@ -237,7 +237,7 @@ class BuildScriptProgram(dspy.Module):
         stdout_logs: str,
         failure_more: str,
         last_docker_build_script: str,
-        initial_template: str,
+        # initial_template: str,
         repo_facts_json: str,
         tool_executor: ContainerToolExecutor,
         max_steps: int = 4,
@@ -263,7 +263,7 @@ class BuildScriptProgram(dspy.Module):
                 stdout_logs=stdout_logs or "",
                 failure_more=failure_more or "N/A",
                 last_docker_build_script=last_docker_build_script or "",
-                initial_template=initial_template,
+                # initial_template=initial_template,
                 repo_facts_json=repo_facts_json or "{}",
                 toolbelt=toolbelt,
                 messages_log=messages_log,
@@ -285,6 +285,10 @@ class BuildScriptProgram(dspy.Module):
 
             messages_log += f"\n\n# Step [{step_idx + 1}/{max_steps}]\n# Action: {action}\n# Input: {action_input}\n# Observation:\n{observation[:4000]}"
 
+            if action in ("none", "finish"):
+                # Model is done but didn't provide a script. Stop.
+                break
+
             # Don't prefer build_script until model is completely done with it.
             # # If model already emitted a script, prefer it
             # if (out.docker_build_script or "").strip():  # pyright: ignore[reportAttributeAccessIssue]
@@ -305,7 +309,10 @@ class BuildScriptProgram(dspy.Module):
         # script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
         script = (iter_script or "").strip()
         logger.debug("DSPy: candidate script preview: %s", _preview(script, 240))
-        must_haves = ["###### SETUP CODE (NOT TO BE MODIFIED) ######"]
+        # source /etc/profile.d/asv_utils.sh || true
+        # source /etc/profile.d/asv_build_vars.sh || true
+
+        must_haves = ["/etc/profile.d/asv_utils.sh", "/etc/profile.d/asv_build_vars.sh"]
         ok_template = all(m in script for m in must_haves)
         must_not_haves = ["```bash", "```", "import IPython", "from IPython"]
         no_bad = all(m not in script for m in must_not_haves)
@@ -343,7 +350,7 @@ def synthesize_script(
     last_script: str,
     stderr_tail: str,
     stdout_tail: str,
-    building_template: str,
+    # building_template: str,
     failure_more: str,
     tool_exec: ContainerToolExecutor,
     max_steps: int = 4,
@@ -367,7 +374,7 @@ def synthesize_script(
             stdout_logs=stdout_tail or "",
             failure_more=failure_more or "N/A",
             last_docker_build_script=last_script or "",
-            initial_template=building_template,
+            # initial_template=building_template,
             repo_facts_json=tool_exec.facts_json(),
             tool_executor=tool_exec,
             max_steps=max_steps,
@@ -444,11 +451,11 @@ def agent_build_and_validate(  # noqa: C901
     assert task.sha is not None, "task.sha must be set"  # noqa: S101
     default_building_template = context_registry.get_default(tag="env")[1].building_data
     if len(similar_contexts := context_registry.get_similar(task.with_tag("env"))) > 0:
-        _, context = similar_contexts[0]
+        t, context = similar_contexts[0]
         logger.info(
             "build_once_with_context: found %d similar contexts; using most similar with key=%s",
             len(similar_contexts),
-            str(context),
+            str(t),
         )
         first_guess = context.building_data
     else:
@@ -540,7 +547,7 @@ def agent_build_and_validate(  # noqa: C901
                         attempts[-1].building_data,
                         stderr_tail=stderr_tail,
                         stdout_tail=stdout_tail,
-                        building_template=default_building_template,
+                        # building_template=default_building_template,
                         failure_more=failure_more,
                         tool_exec=tool_exec,
                         max_steps=args.max_steps,

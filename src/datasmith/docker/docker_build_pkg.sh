@@ -21,13 +21,13 @@ fi
 # Agent guidance (read-first)
 # -----------------------------
 # GOAL: For each Python version below, install the project in EDITABLE mode into env asv_{version},
-#       with NO build isolation, then run health checks.
+#       preferably with no build isolation, then run health checks.
 #
 # Below this comment, you should do whatever is necessary to build the project without errors. Including (but not limited to):
 # - Add extra conda/pip dependencies needed to build this project.
 # - Run repo-specific pre-steps (e.g., submodules, generating Cython, env vars).
 # - Run arbitrary micromamba/pip commands in the target env.
-# - Set CFLAGS/CXXFLAGS/LDFLAGS if needed for this repo.
+# - Set CFLAGS/CXXFLAGS/LDFLAGS if needed for this repo. (e.g. Add -Wno-error=incompatible-pointer-types to CFLAGS)
 # - Change files in the repo if needed (e.g., fix a missing #include).
 # - Anything else needed to get a successful editable install.
 #
@@ -58,24 +58,13 @@ for version in $TARGET_VERSIONS; do
   ENV_NAME="asv_${version}"
   log "==> Building in env: $ENV_NAME (python=$version)"
 
-  if ! micromamba env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-    die "Env $ENV_NAME not found. Did docker_build_env.sh run?"
-  fi
-
-  # Import name resolution (kept simple for the agent)
   IMP="${IMPORT_NAME:-}"
-  if [[ -z "$IMP" ]]; then
-    if ! IMP="$(detect_import_name --repo-root "$REPO_ROOT" 2>/dev/null)"; then
-      die "Could not determine import name. Set IMPORT_NAME in /etc/profile.d/asv_build_vars.sh"
-    fi
-  fi
   log "Using import name: $IMP"
 
   # -----------------------------
   # MODEL EDIT AREA: repo-specific tweaks (optional)
   # -----------------------------
   # Examples (uncomment if needed for this repo):
-  #
   # log "Updating submodules"
   # git -C "$REPO_ROOT" submodule update --init --recursive
   #
