@@ -654,8 +654,7 @@ class ContextRegistry:
 
         # Ensure canonical default exists
         default_task_canonical = Task(owner="default", repo="default", sha=None, tag="pkg")
-        if default_task_canonical not in registry:
-            registry[default_task_canonical] = DockerContext()
+        registry[default_task_canonical] = DockerContext()
 
         # Normalize any accidentally stored 'env' keys to canonical 'pkg'
         # (in case old payloads had per-tag entries)
