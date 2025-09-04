@@ -22,27 +22,81 @@ logger = logging.getLogger(__name__)
 
 
 def remove_containers_by_label(client: docker.DockerClient, run_id: str) -> None:
+    """
+    Fast container cleanup for this run_id:
+      - remove all labeled containers (force)
+      - prune any stopped containers that still carry the label (server-side)
+    """
     with contextlib.suppress(Exception):
         for c in client.containers.list(all=True, filters={"label": f"datasmith.run={run_id}"}):
-            logger.debug("Removing container %s", c.name)
-            c.remove(force=True)
-
-
-def remove_images_by_label(client: docker.DockerClient, run_id: str) -> None:
-    # List is cheap and does not contend. Remove by ID avoids tag races.
-    with contextlib.suppress(Exception):
-        imgs = client.images.list(filters={"label": f"datasmith.run={run_id}"})
-        for img in imgs:
             try:
-                logger.debug("Removing image %s (%s)", img.tags, img.id)
-                client.images.remove(img.id, force=True, noprune=False)
+                logger.debug("Removing container %s (%s)", c.name, c.id[:12])
+                c.remove(force=True)
+            except NotFound:
+                pass
+
+        # Server-side prune is much faster and avoids N API calls.
+        with contextlib.suppress(Exception):
+            client.containers.prune(filters={"label": [f"datasmith.run={run_id}"]})
+
+
+def fast_cleanup_run_artifacts(  # noqa: C901
+    client: docker.DockerClient,
+    run_id: str,
+    *,
+    extra_image_refs: list[str] | None = None,
+) -> None:
+    """
+    Aggressive but safe cleanup that prefers server-side prunes and removes by image ID:
+      1) Resolve explicit image refs (tags/names) to IDs.
+      2) Union with all images carrying datasmith.run=run_id.
+      3) Remove by ID; then issue a server-side prune for all *unused* images with that label.
+      4) Best-effort prune build cache, networks, volumes by label.
+    """
+    extra_image_refs = extra_image_refs or []
+
+    img_ids: set[str] = set()
+    with contextlib.suppress(Exception):
+        for ref in extra_image_refs:
+            try:
+                img = client.images.get(ref)
+                img_ids.add(img.id)  # type: ignore[arg-type]
+            except (ImageNotFound, NotFound):
+                pass
+
+        try:
+            labeled = client.images.list(filters={"label": f"datasmith.run={run_id}"})
+            for img in labeled:
+                img_ids.add(img.id)  # type: ignore[arg-type]
+        except Exception:
+            logger.exception("image list (by label) failed")
+
+    with contextlib.suppress(Exception):
+        for iid in img_ids:
+            try:
+                logger.debug("Removing image id=%s", iid[:20])
+                client.images.remove(iid, force=True, noprune=False)
             except (ImageNotFound, NotFound):
                 pass
             except APIError as e:
-                # 409 conflict: still in use by a live container; skip
                 if getattr(e, "status_code", None) != 409:
-                    # Optional: log at DEBUG
-                    pass
+                    logger.debug("images.remove(%s) failed: %s", iid[:20], getattr(e, "explanation", e))
+
+    with contextlib.suppress(Exception):
+        client.images.prune(filters={"label": [f"datasmith.run={run_id}"], "dangling": False})
+
+    with contextlib.suppress(Exception):
+        low = getattr(client, "api", None)
+        if low is not None:
+            if hasattr(low, "prune_builds"):
+                low.prune_builds(filters={"label": [f"datasmith.run={run_id}"]})
+            elif hasattr(low, "build_prune"):
+                low.build_prune(filters={"labels": [f"datasmith.run={run_id}"]})
+
+    with contextlib.suppress(Exception):
+        client.networks.prune(filters={"label": [f"datasmith.run={run_id}"]})
+    with contextlib.suppress(Exception):
+        client.volumes.prune(filters={"label": [f"datasmith.run={run_id}"]})
 
 
 def _preview(s: str, n: int = 160) -> str:
@@ -642,7 +696,10 @@ def agent_build_and_validate(  # noqa: C901
 
         try:
             run_id = run_labels.get("datasmith.run", "unknown")
+
+            # 1) Containers first
             remove_containers_by_label(client, run_id)
+            # Also try removing containers by their exact names once (cheap best-effort).
             for name in [
                 task.with_tag("env").get_container_name(),
                 task.with_tag("pkg").get_container_name(),
@@ -653,14 +710,15 @@ def agent_build_and_validate(  # noqa: C901
                     c = client.containers.get(name)
                     c.remove(force=True)
 
-            remove_images_by_label(client, run_id)
-            for tag in [task.with_tag("env").get_image_name(), task.with_tag("pkg").get_image_name()]:
-                with contextlib.suppress(NotFound, ImageNotFound):
-                    client.images.remove(tag, force=True, noprune=False)
+            # 2) Images & build cache (fast path)
+            fast_cleanup_run_artifacts(
+                client,
+                run_id,
+                extra_image_refs=[
+                    task.with_tag("env").get_image_name(),
+                    task.with_tag("pkg").get_image_name(),
+                ],
+            )
 
-            try:
-                client.images.prune(filters={"dangling": True})
-            except Exception:
-                logger.exception("image prune failed")
         except Exception:
             logger.exception("agent_build_and_validate: cleanup error")

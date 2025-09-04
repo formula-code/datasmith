@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import json
 import logging
 import math
 import os
@@ -134,6 +135,7 @@ def main(args: argparse.Namespace) -> None:
     client = get_docker_client()
     all_states = process_inputs(args)
     context_registry = ContextRegistry.load_from_file(path=args.context_registry)
+    interim_path = Path(os.environ["CACHE_LOCATION"]).parent / "interim"  # Look here for cached docker contexts
 
     # Prepare tasks
     tasks: list[tuple[Task, DockerContext]] = []
@@ -146,8 +148,8 @@ def main(args: argparse.Namespace) -> None:
                 tasks.append((task, context_registry.get(task)))
                 repo_commit_pairs[f"{owner}/{repo}"].append(task)
                 # also add the parent commit.
-            else:
-                logger.debug(f"main: skipping {task} as not in context registry")
+            # else:
+            # logger.debug(f"main: skipping {task} as not in context registry")
 
     # get all parent commits and add them as tasks as well.
     for repo_name, tsks in repo_commit_pairs.items():
@@ -184,45 +186,24 @@ def main(args: argparse.Namespace) -> None:
         k: str(v.replace(" ", "_").replace("'", "").replace('"', "")) for k, v in machine_defaults.items()
     }
     logger.debug("main: machine_defaults keys=%d", len(machine_defaults))
-
-    # builds: list[BuildResult] = []
-    # if args.max_concurrency < 1:
-    #     for t in tasks:
-    #         build_res: BuildResult = build_repo_sha_image(
-    #             client=client,
-    #             context_registry=context_registry,
-    #             task=t,
-    #             force=args.force_rebuild,
-    #         )
-    #         builds.append(build_res)
-    # else:
-    #     with ThreadPoolExecutor(max_workers=args.max_concurrency) as pool:
-    #         futures = [
-    #             pool.submit(
-    #                 build_repo_sha_image,
-    #                 client,
-    #                 context_registry,
-    #                 task,
-    #                 args.force_rebuild,
-    #             )
-    #             for task in tasks
-    #         ]
-    #         for fut in as_completed(futures):
-    #             builds.append(fut.result())
-
-    # successful_builds = [b for b in builds if b.rc != 1]
-
-    # logger.info("Running benchmarks for %d images", len(successful_builds))
-    # logger.info("Failed builds for %d images", len(builds) - len(successful_builds))
-    # for b in builds:
-    #     if b.rc == 1:
-    #         logger.warning("Build failed for %s", b.image_name)
+    dedup_tasks = []
+    seen = set()
+    for t, ctx in tasks:
+        if t.get_container_name() not in seen:
+            dedup_tasks.append((t, ctx))
+            seen.add(t.get_container_name())
+    tasks = dedup_tasks
+    logger.info("Total unique tasks to consider: %d", len(tasks))
+    to_benchmark = list(filter(lambda x: not (interim_path / f"{x[0].get_container_name()}.json").exists(), tasks))
+    logger.info("Benchmarking %d tasks", len(to_benchmark))
+    already_benchmarked = list(filter(lambda x: (interim_path / f"{x[0].get_container_name()}.json").exists(), tasks))
+    logger.info("Skipping %d tasks that have already been benchmarked", len(already_benchmarked))
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     machine_args["num_cpu"] = str(args.num_cores)
     files_by_image: dict[Task, dict[str, str]] = asyncio.run(
         orchestrate(
-            contexts=tasks,
+            contexts=to_benchmark,
             asv_args=asv_args,
             machine_args=machine_args,
             max_concurrency=max_concurrency,
@@ -231,6 +212,10 @@ def main(args: argparse.Namespace) -> None:
             client=client,
         )
     )
+    # Add already benchmarked files to the results
+    for task, _ in already_benchmarked:
+        results = json.loads((interim_path / f"{task.get_container_name()}.json").read_text())
+        files_by_image[task] = results
     # save the files by image as a pickle file.
     with open(output_dir / "files_by_image.json", "wb") as f:
         pickle.dump(files_by_image, f)
