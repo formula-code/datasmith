@@ -108,13 +108,15 @@ def prepare_tasks(
 ) -> list[Task]:
     tasks: list[Task] = []
     for (owner, repo), uniq in all_states.items():
-        limited = list(uniq)[: max(0, limit_per_repo)] if limit_per_repo > 0 else list(uniq)
-        for sha, date in limited:
+        n_added = 0
+        for sha, date in uniq:
             task = Task(owner, repo, sha, commit_date=date)
-            if task not in context_registry:
+            if task not in context_registry and (limit_per_repo < 0 or n_added < limit_per_repo):
                 tasks.append(task)
+                n_added += 1
             else:
                 logger.debug(f"prepare_tasks: skipping {task} as already in context registry")
+        # only keep limit_per_repo most recent
     return tasks
 
 
