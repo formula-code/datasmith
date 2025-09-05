@@ -402,6 +402,7 @@ class DockerContext:
             "entrypoint_data": self.entrypoint_data,
             "building_data": self.building_data,
             "env_building_data": self.env_building_data,
+            "base_building_data": self.base_building_data,
         }
 
     @classmethod
@@ -415,6 +416,7 @@ class DockerContext:
             entrypoint_data=data.get("entrypoint_data"),
             building_data=data.get("building_data", None),
             env_building_data=data.get("env_building_data", None),
+            base_building_data=data.get("base_building_data", None),
         )
 
 
