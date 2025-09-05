@@ -260,6 +260,7 @@ class DockerContext:
         run_labels = run_labels if run_labels else {}
         _, target = self.process_image_name(image_name)
         t0 = time.time()
+        success = False
         try:
             # Fast path: respect existing image when not forcing
             try:
@@ -270,6 +271,7 @@ class DockerContext:
                         client.images.remove(image=img.id, force=True)
                 else:
                     logger.info("Docker image '%s' found locally (skip build).", image_name)
+                    success = True
                     return BuildResult(
                         ok=True,
                         image_name=image_name,
@@ -309,6 +311,7 @@ class DockerContext:
                 )
             except DockerException:
                 logger.exception("Failed to initiate build for '%s'", image_name)
+                success = False
                 return BuildResult(
                     ok=False,
                     image_name=image_name,
@@ -354,6 +357,7 @@ class DockerContext:
                 try:
                     img = client.images.get(image_name)
                     logger.info("Build completed successfully for '%s' in %.1f sec.", image_name, duration)
+                    success = True
                     return BuildResult(
                         ok=True,
                         image_name=image_name,
@@ -375,6 +379,7 @@ class DockerContext:
                 error_seen or "unknown",
                 "".join(stdout_buf)[-100:] if stdout_buf else "",
             )
+            success = False
             return BuildResult(
                 ok=False,
                 image_name=image_name,
@@ -385,7 +390,7 @@ class DockerContext:
                 stdout_tail="".join(stdout_buf)[-tail_chars:],
             )
         finally:
-            if delete_img:
+            if delete_img or (not success):
                 try:
                     img = client.images.get(image_name)
                     logger.debug("Deleting image '%s' after build.", image_name)
