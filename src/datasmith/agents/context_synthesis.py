@@ -75,7 +75,7 @@ def fast_cleanup_run_artifacts(  # noqa: C901
         for iid in img_ids:
             try:
                 logger.debug("Removing image id=%s", iid[:20])
-                client.images.remove(iid, force=True, noprune=False)
+                client.images.remove(iid, force=True, noprune=True)
             except (ImageNotFound, NotFound):
                 pass
             except APIError as e:
@@ -400,7 +400,7 @@ def build_once_with_context(
     run_labels: dict[str, str],
     probe: bool = False,
     pull: bool = False,
-    force: bool = True,
+    force: bool = False,
 ) -> BuildResult:
     logger.info("build_once_with_context: registering context key=%s", task.get_image_name())
     logger.debug(
@@ -487,7 +487,7 @@ def agent_build_and_validate(  # noqa: C901
             tail_chars=args.tail_chars,
             probe=True,
             pull=True,
-            force=True,  # If the env is already present, don't rebuild (saves time)
+            force=False,  # If the env is already present, don't rebuild (saves time)
             run_labels=run_labels,
         )
         if not env_res.ok:
@@ -582,7 +582,7 @@ def agent_build_and_validate(  # noqa: C901
                 sha=task.sha,
                 timeout_s=args.build_timeout,
                 tail_chars=args.tail_chars * 2,
-                force=True,  # Always rebuild package image to pick up new script
+                force=False,  # Always rebuild package image to pick up new script
                 run_labels=run_labels,
             )
             attempts.append(AttemptRecord(attempt_idx=i, building_data=script, build_result=build_res))

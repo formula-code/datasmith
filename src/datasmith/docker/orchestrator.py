@@ -16,7 +16,7 @@ import docker
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.models.containers import Container
 
-from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext, Task
+from datasmith.docker.context import BuildResult, DockerContext, Task
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
@@ -118,10 +118,10 @@ async def _guard_loop(
         await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
 
-def get_docker_client() -> docker.DockerClient:
+def get_docker_client(max_concurrency: int = 10) -> docker.DockerClient:
     """Return an authenticated Docker client or exit with an error."""
     try:
-        return docker.from_env(timeout=60)
+        return docker.from_env(timeout=60, max_pool_size=max_concurrency)
     except DockerException as exc:
         sys.exit(f"Could not connect to Docker daemon: {exc}")
 
@@ -151,21 +151,20 @@ def build_repo_image(client: docker.DockerClient, image_name: str, repo_url: str
 
 
 def build_repo_sha_image(
-    client: docker.DockerClient, context_registry: ContextRegistry, task: Task, force: bool = False
+    client: docker.DockerClient, docker_ctx: DockerContext, task: Task, force: bool = False, run_id: str | None = None
 ) -> BuildResult:
     assert task.sha is not None, "Task.sha must be set"  # noqa: S101
-    image_name = f"asv/{task.owner}/{task.repo}/{task.sha}".lower()
-    docker_ctx = context_registry[image_name]
+    repo_url = f"https://www.github.com/{task.owner}/{task.repo}"
     build_res: BuildResult = docker_ctx.build_container_streaming(
         client=client,
-        image_name=image_name,
-        build_args={
-            "REPO_URL": f"https://www.github.com/{task.owner}/{task.repo}",
-            "COMMIT_SHA": task.sha,
-        },
-        force=force,
+        image_name=task.get_image_name(),
+        build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha},
+        probe=False,
+        force=False,
+        timeout_s=1800,  # 30 minutes
         tail_chars=10_000,
         pull=False,
+        run_labels=gen_run_labels(task, runid="unknown" if run_id is None else run_id),
     )
     return build_res
 
@@ -214,7 +213,7 @@ async def run_container(  # noqa: C901
             image_name=task.get_image_name(),
             build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha},
             probe=False,
-            force=True,
+            force=False,
             timeout_s=1800,  # 30 minutes
             tail_chars=10_000,
             pull=False,
@@ -299,7 +298,7 @@ async def run_container(  # noqa: C901
             logger.exception("Failed to remove container %s", task.get_container_name())
             pass
         try:
-            client.images.remove(image=task.get_image_name(), force=True, noprune=False)
+            client.images.remove(image=task.get_image_name(), force=True, noprune=True)
         except Exception:
             logger.exception("Failed to remove image %s", task.get_image_name())
             pass

@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-FROM buildpack-deps:jammy AS base
+ARG BASE_IMAGE=buildpack-deps:jammy
+FROM ${BASE_IMAGE} AS base
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

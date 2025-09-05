@@ -10,14 +10,16 @@ import os
 import pickle
 import shutil
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import asv
 import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
-from datasmith.docker.context import ContextRegistry, DockerContext, Task
+from datasmith.docker.context import ContextRegistry, DockerContext, Task, build_base_image
 from datasmith.docker.orchestrator import (
+    build_repo_sha_image,
     get_docker_client,
     orchestrate,
 )
@@ -131,11 +133,15 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
     return all_states
 
 
-def main(args: argparse.Namespace) -> None:
-    client = get_docker_client()
+def main(args: argparse.Namespace) -> None:  # noqa: C901
+    client = get_docker_client(args.max_concurrency)
     all_states = process_inputs(args)
     context_registry = ContextRegistry.load_from_file(path=args.context_registry)
     interim_path = Path(os.environ["CACHE_LOCATION"]).parent / "interim"  # Look here for cached docker contexts
+
+    logger.info("Building base image...")
+    base_tag = build_base_image(client, DockerContext())
+    os.environ["DOCKER_CACHE_FROM"] = base_tag
 
     # Prepare tasks
     tasks: list[tuple[Task, DockerContext]] = []
@@ -199,6 +205,18 @@ def main(args: argparse.Namespace) -> None:
     already_benchmarked = list(filter(lambda x: (interim_path / f"{x[0].get_container_name()}.json").exists(), tasks))
     logger.info("Skipping %d tasks that have already been benchmarked", len(already_benchmarked))
 
+    # build the containers.
+    builds = []
+    with ThreadPoolExecutor(max_workers=args.max_concurrency) as pool:
+        futures = [
+            pool.submit(build_repo_sha_image, client, ctx, task, args.force_rebuild, run_id="CANARY-BUILD")
+            for (task, ctx) in tasks
+        ]
+        for fut in as_completed(futures):
+            builds.append(fut.result())
+
+    to_benchmark = [t for (t, b) in zip(tasks, builds) if b.rc == 0]
+
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     machine_args["num_cpu"] = str(args.num_cores)
     files_by_image: dict[Task, dict[str, str]] = asyncio.run(
@@ -226,6 +244,12 @@ def main(args: argparse.Namespace) -> None:
         pd.DataFrame.from_dict(files_by_image, orient="index").to_json(f, orient="records", lines=True)
 
     logger.info("Benchmark results saved to %s", output_file)
+
+    # remove all images with CANARY-BUILD tag.
+    try:
+        client.images.prune(filters={"label": "datasmith.run=CANARY-BUILD"})
+    except Exception:
+        logger.exception("Failed to prune images with CANARY-BUILD tag")
 
 
 if __name__ == "__main__":

@@ -193,7 +193,7 @@ def validate_one(  # noqa: C901
             "REPO_URL": f"https://www.github.com/{task.owner}/{task.repo}",
             "COMMIT_SHA": task.sha,
         },
-        force=True,  # preserve your original behavior
+        force=False,
         timeout_s=args.build_timeout,
         tail_chars=args.tail_chars,
         pull=False,

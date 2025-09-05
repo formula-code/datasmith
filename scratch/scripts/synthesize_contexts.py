@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pandas as pd
 from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.context_synthesis import agent_build_and_validate
 from datasmith.benchmark.collection import BenchmarkCollection
-from datasmith.docker.context import ContextRegistry
+from datasmith.docker.context import ContextRegistry, DockerContext, build_base_image
 from datasmith.docker.orchestrator import get_docker_client
 from datasmith.docker.validation import Task, _err_lock
 from datasmith.logging_config import configure_logging
@@ -130,6 +131,10 @@ def main(args: argparse.Namespace) -> None:
         if args.context_registry.exists()
         else ContextRegistry()
     )
+
+    logger.info("Building base image...")
+    base_tag = build_base_image(client, DockerContext())
+    os.environ["DOCKER_CACHE_FROM"] = base_tag
 
     # Prepare tasks
     tasks = prepare_tasks(all_states, args.limit_per_repo, context_registry)

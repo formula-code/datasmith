@@ -24,6 +24,25 @@ from datasmith.logging_config import get_logger
 logger = get_logger("docker.context")
 
 
+def build_base_image(client: docker.DockerClient, ctx: DockerContext) -> str:
+    base_key = hash(ctx)
+    base_tag = f"asv-base-rev-{base_key}:base"
+
+    res = ctx.build_container_streaming(
+        client=client,
+        image_name=base_tag,
+        build_args={},
+        probe=True,
+        force=False,
+        pull=False,
+        timeout_s=1800,
+    )
+    if not res.ok:
+        logger.exception("Failed to build base image %s error=%s", base_tag, res.stderr_tail)
+        raise RuntimeError("Failed to build base image")
+    return base_tag
+
+
 @dataclass
 class BuildResult:
     ok: bool
@@ -141,43 +160,32 @@ class DockerContext:
         self.base_building_data = base_building_data
         self.building_data = building_data
 
+    @staticmethod
+    def add_bytes(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644) -> None:
+        info = tarfile.TarInfo(name=name)
+        info.size = len(data)
+        info.mode = mode
+        info.mtime = 0
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        tar.addfile(info, io.BytesIO(data))
+
     def build_tarball_stream(self, probe: bool = False) -> io.BytesIO:
         tar_stream = io.BytesIO()
         with tarfile.open(fileobj=tar_stream, mode="w") as tar:
             # Add Dockerfile
-            dockerfile_bytes = self.dockerfile_data.encode("utf-8")
-            dockerfile_info = tarfile.TarInfo(name="Dockerfile")
-            dockerfile_info.size = len(dockerfile_bytes)
-            tar.addfile(dockerfile_info, io.BytesIO(dockerfile_bytes))
-
+            DockerContext.add_bytes(tar, "Dockerfile", self.dockerfile_data.encode("utf-8"))
             # Add entrypoint.sh
-            entrypoint_data = self.entrypoint_data.encode("utf-8")
-            entrypoint_info = tarfile.TarInfo(name="entrypoint.sh")
-            entrypoint_info.size = len(entrypoint_data)
-            entrypoint_info.mode = 0o755  # Make it executable
-            tar.addfile(entrypoint_info, io.BytesIO(entrypoint_data))
-
+            DockerContext.add_bytes(tar, "entrypoint.sh", self.entrypoint_data.encode("utf-8"), mode=0o755)
             # Add docker_build_env.sh
-            env_building_data = self.env_building_data.encode("utf-8")
-            env_building_info = tarfile.TarInfo(name="docker_build_env.sh")
-            env_building_info.size = len(env_building_data)
-            env_building_info.mode = 0o755  # Make it executable
-            tar.addfile(env_building_info, io.BytesIO(env_building_data))
+            DockerContext.add_bytes(tar, "docker_build_env.sh", self.env_building_data.encode("utf-8"), mode=0o755)
 
             # Add docker_build_base.sh
-            base_building_data = self.base_building_data.encode("utf-8")
-            base_building_info = tarfile.TarInfo(name="docker_build_base.sh")
-            base_building_info.size = len(base_building_data)
-            base_building_info.mode = 0o755  # Make it executable
-            tar.addfile(base_building_info, io.BytesIO(base_building_data))
+            DockerContext.add_bytes(tar, "docker_build_base.sh", self.base_building_data.encode("utf-8"), mode=0o755)
 
             if not probe:
                 # Add docker_build_pkg.sh
-                building_data = self.building_data.encode("utf-8")
-                building_info = tarfile.TarInfo(name="docker_build_pkg.sh")
-                building_info.size = len(building_data)
-                building_info.mode = 0o755  # Make it executable
-                tar.addfile(building_info, io.BytesIO(building_data))
+                DockerContext.add_bytes(tar, "docker_build_pkg.sh", self.building_data.encode("utf-8"), mode=0o755)
 
         # Reset the stream position to the beginning
         tar_stream.seek(0)
@@ -216,6 +224,11 @@ class DockerContext:
             pass  # Image doesn't exist or was removed, proceed to build
 
         if not image_exists:
+            cache_from = None
+            if base_image := os.environ.get("DOCKER_CACHE_FROM", None):
+                build_args = {**build_args, "BASE_IMAGE": base_image}
+                cache_from = [base_image]
+
             if len(build_args):
                 build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in build_args.items())
                 logger.info("$ docker build -t %s src/datasmith/docker/ --build-arg %s", image_name, build_args_str)
@@ -229,6 +242,7 @@ class DockerContext:
                         rm=True,
                         labels=run_labels,
                         network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
+                        cache_from=cache_from,
                     )
                 except DockerException:
                     logger.exception("Failed to build Docker image '%s'", image_name)
@@ -289,6 +303,11 @@ class DockerContext:
             stdout_buf: deque[str] = deque(maxlen=2000)  # chunk-tail buffers
             stderr_buf: deque[str] = deque(maxlen=2000)
 
+            cache_from = None
+            if base_image := os.environ.get("DOCKER_CACHE_FROM", None):
+                build_args = {**build_args, "BASE_IMAGE": base_image}
+                cache_from = [base_image]
+
             # Pretty log line for transparency
             if build_args:
                 build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in build_args.items())
@@ -308,6 +327,7 @@ class DockerContext:
                     target=target,
                     labels=run_labels,
                     network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
+                    cache_from=cache_from,
                 )
             except DockerException:
                 logger.exception("Failed to initiate build for '%s'", image_name)
@@ -423,6 +443,15 @@ class DockerContext:
             env_building_data=data.get("env_building_data", None),
             base_building_data=data.get("base_building_data", None),
         )
+
+    def __hash__(self) -> int:
+        return hash((
+            self.dockerfile_data,
+            self.entrypoint_data,
+            self.building_data,
+            self.env_building_data,
+            self.base_building_data,
+        ))
 
 
 class ContextRegistry:
