@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-timeout", type=int, default=15 * 60, help="Seconds before aborting asv run.")
     parser.add_argument("--tail-chars", type=int, default=4000, help="Chars of log tail to include in failure report.")
     parser.add_argument(
+        "--max-similar-candidates",
+        type=int,
+        default=1,
+        help="Number of similar candidates [sorted by recency] to try out before running agent. (default: 1)",
+    )
+    parser.add_argument(
         "--limit-per-repo", type=int, default=5, help="Cap SHAs per repo (keeps your small-scale test). -1 = no limit."
     )
     parser.add_argument(

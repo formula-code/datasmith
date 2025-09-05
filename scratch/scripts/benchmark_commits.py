@@ -133,6 +133,14 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
     return all_states
 
 
+def is_benchmarked(task: Task, interim_path: Path, output_dir: Path) -> bool:
+    return (
+        (interim_path / f"{task.get_container_name()}.json").exists()
+        or (output_dir / "results" / f"{task.get_container_name()}").exists()
+        or (output_dir / "logs" / f"{task.get_container_name()}").with_suffix(".log").exists()
+    )
+
+
 def main(args: argparse.Namespace) -> None:  # noqa: C901
     client = get_docker_client(args.max_concurrency)
     all_states = process_inputs(args)
@@ -202,7 +210,7 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
     logger.info("Total unique tasks to consider: %d", len(tasks))
     to_benchmark = list(filter(lambda x: not (interim_path / f"{x[0].get_container_name()}.json").exists(), tasks))
     logger.info("Benchmarking %d tasks", len(to_benchmark))
-    already_benchmarked = list(filter(lambda x: (interim_path / f"{x[0].get_container_name()}.json").exists(), tasks))
+    already_benchmarked = list(filter(lambda x: is_benchmarked(x[0], interim_path, output_dir), tasks))
     logger.info("Skipping %d tasks that have already been benchmarked", len(already_benchmarked))
 
     # build the containers.
