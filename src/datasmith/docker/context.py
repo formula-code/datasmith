@@ -16,10 +16,9 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import docker
-from docker.errors import APIError, DockerException, ImageNotFound
-
 from datasmith.execution.utils import _get_commit_info
 from datasmith.logging_config import get_logger
+from docker.errors import APIError, DockerException, ImageNotFound
 
 logger = get_logger("docker.context")
 
@@ -226,6 +225,7 @@ class DockerContext:
         if not image_exists:
             cache_from = None
             if base_image := os.environ.get("DOCKER_CACHE_FROM", None):
+                logger.info("Using DOCKER_CACHE_FROM='%s' for build cache.", base_image)
                 build_args = {**build_args, "BASE_IMAGE": base_image}
                 cache_from = [base_image]
 
@@ -305,6 +305,7 @@ class DockerContext:
 
             cache_from = None
             if base_image := os.environ.get("DOCKER_CACHE_FROM", None):
+                logger.info("Using DOCKER_CACHE_FROM='%s' for build cache.", base_image)
                 build_args = {**build_args, "BASE_IMAGE": base_image}
                 cache_from = [base_image]
 

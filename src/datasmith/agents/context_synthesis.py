@@ -9,14 +9,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import docker
 import dspy
-from docker.errors import APIError, ImageNotFound, NotFound
 
+import docker
 from datasmith.agents.tool_executor import ContainerToolExecutor
 from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import gen_run_labels
 from datasmith.docker.validation import Task
+from docker.errors import APIError, ImageNotFound, NotFound
 
 logger = logging.getLogger(__name__)
 
@@ -503,7 +503,7 @@ def agent_build_and_validate(  # noqa: C901
             timeout_s=args.build_timeout,
             tail_chars=args.tail_chars,
             probe=True,
-            pull=True,
+            pull=False,
             force=False,  # don't rebuild if already present
             run_labels=run_labels,
         )
