@@ -4,6 +4,7 @@ import argparse
 import datetime
 import json
 import os
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -117,15 +118,14 @@ def prepare_tasks(
 ) -> list[Task]:
     tasks: list[Task] = []
     for (owner, repo), uniq in all_states.items():
-        n_added = 0
-        for sha, date in uniq:
-            task = Task(owner, repo, sha, commit_date=date)
-            if task not in context_registry and (limit_per_repo < 0 or n_added < limit_per_repo):
-                tasks.append(task)
-                n_added += 1
-            else:
-                logger.debug(f"prepare_tasks: skipping {task} as already in context registry")
-        # only keep limit_per_repo most recent
+        tasks = [Task(owner, repo, sha, commit_date=date) for sha, date in uniq]
+        tasks = list(filter(lambda t: t not in context_registry, tasks))
+        if limit_per_repo < 0:
+            limit_per_repo = len(tasks)
+        else:
+            # randomly choose limit_per_repo tasks from tasks
+            tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))
+        tasks.extend(tasks)
     return tasks
 
 
