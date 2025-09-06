@@ -9,14 +9,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import dspy
-
 import docker
+import dspy
+from docker.errors import APIError, ImageNotFound, NotFound
+
 from datasmith.agents.tool_executor import ContainerToolExecutor
 from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import gen_run_labels
 from datasmith.docker.validation import Task
-from docker.errors import APIError, ImageNotFound, NotFound
 
 logger = logging.getLogger(__name__)
 

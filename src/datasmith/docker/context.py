@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import docker
+from docker.errors import APIError, DockerException, ImageNotFound
+
 from datasmith.execution.utils import _get_commit_info
 from datasmith.logging_config import get_logger
-from docker.errors import APIError, DockerException, ImageNotFound
 
 logger = get_logger("docker.context")
 
