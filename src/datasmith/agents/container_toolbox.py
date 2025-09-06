@@ -343,21 +343,17 @@ class PersistentContainer:
                 m = importlib.import_module(name)
                 v = getattr(m, "__version__", None)
                 print("IMPORTED::%s::%s" % (name, v or "unknown"))
-                sys.exit(0)
             except Exception as e:
                 print("FAILED::%s::%s" % (name, e))
-        sys.exit(1)
+                sys.exit(1)
+        sys.exit(0)
         """)
             .format(names=repr(candidates))
             .strip()
         )
         res = self.exec(f'{cmd_python} - << "PY"\n{body}\nPY', timeout_s=60)
         ok = "IMPORTED::" in res.stdout
-        succeeded = None
-        for line in res.stdout.splitlines():
-            if line.startswith("IMPORTED::"):
-                succeeded = line.split("::", 2)[1]
-                break
+        succeeded = [line.split("::", 2)[1] for line in res.stdout.splitlines() if line.startswith("IMPORTED::")]
         stdout_snip = (res.stdout[:1000] + "..." + res.stdout[-1000:]) if len(res.stdout) > 2000 else res.stdout
         stderr_snip = (res.stderr[:1000] + "..." + res.stderr[-1000:]) if len(res.stderr) > 2000 else res.stderr
         return {
@@ -368,3 +364,29 @@ class PersistentContainer:
             "stderr": stderr_snip,
             "rc": 0 if ok else 1,
         }
+
+
+# if __name__ == "__main__":
+#     import docker
+#     from datasmith.docker.context import Task, ContextRegistry, DockerContext
+#     client = docker.from_env()
+#     t = Task(owner="arviz-devs", repo="arviz", sha="3a454f7d47092764840b267896da581b90a3244a")
+#     ctx = DockerContext()
+#     ctx.build_container_streaming(
+#         client=client,
+#         image_name=t.with_tag("env").get_image_name(),
+#         build_args={},
+#         probe=True,
+#     )
+#     pc = PersistentContainer(
+#         client=client,
+#         image=t.with_tag("env").get_image_name(),
+#         workdir="/workspace",
+#     )
+#     import IPython; IPython.embed()
+
+#     # garbage collection.
+#     pc.stop()
+#     client.images.remove(t.with_tag("env").get_image_name(), force=True)
+#     del pc
+#     del ctx

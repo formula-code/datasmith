@@ -15,6 +15,7 @@ from pathlib import Path
 
 import asv
 import pandas as pd
+from tqdm import tqdm
 
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.docker.context import ContextRegistry, DockerContext, Task, build_base_image
@@ -215,14 +216,13 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
 
     # build the containers.
     builds = []
-    with ThreadPoolExecutor(max_workers=args.max_concurrency) as pool:
+    with ThreadPoolExecutor(max_workers=args.max_concurrency // 2) as pool:
         futures = [
             pool.submit(build_repo_sha_image, client, ctx, task, args.force_rebuild, run_id="CANARY-BUILD")
             for (task, ctx) in tasks
         ]
-        for fut in as_completed(futures):
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Building containers"):
             builds.append(fut.result())
-
     to_benchmark = [t for (t, b) in zip(tasks, builds) if b.rc == 0]
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]

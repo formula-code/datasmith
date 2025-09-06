@@ -161,7 +161,7 @@ def build_repo_sha_image(
         build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha},
         probe=False,
         force=False,
-        timeout_s=1800,  # 30 minutes
+        timeout_s=15 * 60,  # 15 minutes
         tail_chars=10_000,
         pull=False,
         run_labels=gen_run_labels(task, runid="unknown" if run_id is None else run_id),
@@ -216,7 +216,7 @@ async def run_container(  # noqa: C901
             force=False,
             timeout_s=1800,  # 30 minutes
             tail_chars=10_000,
-            pull=False,
+            pull=True,
             run_labels=gen_run_labels(task, runid="unknown" if run_id is None else run_id),
         )
         if not res.ok:
