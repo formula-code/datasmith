@@ -59,6 +59,12 @@ class PersistentContainer:
         self.container: Container | None = None
         self.run_labels = run_labels or {}
 
+    def is_running(self) -> bool:
+        if not self.container:
+            return False
+        self.container.reload()
+        return self.container.status == "running"
+
     def start(self) -> None:
         if self.container is not None:
             return
@@ -135,6 +141,8 @@ class PersistentContainer:
                 self.container = None
 
     def exec(self, cmd: str, *, timeout_s: int | None = 30) -> ExecResult:
+        if not self.is_running():
+            self.start()
         if not self.container:
             raise RuntimeError("container not started")
         args, _ = _bash(cmd, timeout_s=timeout_s)
@@ -160,6 +168,9 @@ class PersistentContainer:
         Heuristics to locate the repo root inside the container.
         Tries git, then common roots, then a bounded 'find'.
         """
+        if not self.is_running():
+            self.start()
+
         # 1) git (fast if .git present)
         res = self.exec("git rev-parse --show-toplevel || true")
         if res.stdout.strip():
@@ -190,6 +201,8 @@ class PersistentContainer:
         return res.stdout.strip() or None
 
     def list_tree(self, root: str, *, max_depth: int = 3, max_items: int = 500) -> list[str]:
+        if not self.is_running():
+            self.start()
         cmd = (
             f"cd {shlex.quote(root)} 2>/dev/null && "
             f'find . -maxdepth {int(max_depth)} -type f -print 2>/dev/null | sed "s|^\\./||" | head -n {int(max_items)}'
@@ -198,6 +211,8 @@ class PersistentContainer:
         return [ln for ln in res.stdout.splitlines() if ln.strip()]
 
     def read_file(self, path: str, *, max_bytes: int = 256_000) -> str:
+        if not self.is_running():
+            self.start()
         # use Python for robust UTF-8 handling across environments
         py = textwrap.dedent(f"""
         import sys, os, io
@@ -218,6 +233,8 @@ class PersistentContainer:
         Extracts asv dir, pyproject/setup files, requirements/env files, package name candidates,
         and python versions from asv.conf.json (if present). Portable across BusyBox/GNU find.
         """
+        if not self.is_running():
+            self.start()
         scan_cmd = textwrap.dedent(f"""
             set -e
             base={shlex.quote(repo_root)}
@@ -343,6 +360,8 @@ class PersistentContainer:
         Run a quick python import test inside the container.
         'cmd_python' can be 'python' or 'micromamba run -n asv_3.11 python', etc.
         """
+        if not self.is_running():
+            self.start()
         body = (
             textwrap.dedent("""
         import importlib, sys
