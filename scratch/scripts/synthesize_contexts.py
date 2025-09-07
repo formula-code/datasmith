@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
-import os
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -139,7 +138,8 @@ def main(args: argparse.Namespace) -> None:
 
     logger.info("Building base image...")
     base_tag = build_base_image(client, DockerContext())
-    os.environ["DOCKER_CACHE_FROM"] = base_tag
+    logger.debug("%s", base_tag)
+    # os.environ["DOCKER_CACHE_FROM"] = base_tag
 
     # Prepare tasks
     tasks = prepare_tasks(all_states, args.limit_per_repo, context_registry)
@@ -154,6 +154,7 @@ def main(args: argparse.Namespace) -> None:
         k: str(v.replace(" ", "_").replace("'", "").replace('"', "")) for k, v in machine_defaults.items()
     }
     logger.debug("main: machine_defaults keys=%d", len(machine_defaults))
+    logger.info("main: Starting work on %d tasks[%d workers]", len(tasks), args.max_workers)
 
     results: list[dict] = []
     if args.max_workers < 1:
