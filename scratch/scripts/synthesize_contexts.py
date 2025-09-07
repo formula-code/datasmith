@@ -21,8 +21,8 @@ from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
 # configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
-configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
-
+# configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
+configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
 
 # logger = configure_logging(level=10)
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".tiny.log"), "w"))  # noqa: SIM115
@@ -98,7 +98,7 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             sha = row["sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
-                logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
+                logger.debug("Skipping %s commit %s as it does not have ASV benchmarks.", repo_name, sha)
                 continue
             owner, repo = repo_name.split("/")
             commit_date_unix: float = (
@@ -117,13 +117,10 @@ def prepare_tasks(
     all_states: dict[tuple[str, str], set[tuple[str, float]]], limit_per_repo: int, context_registry: ContextRegistry
 ) -> list[Task]:
     all_tasks: list[Task] = []
-    for (owner, repo), uniq in all_states.items():
-        tasks = [Task(owner, repo, sha, commit_date=date) for sha, date in uniq]
+    for (owner, repo), tup in all_states.items():
+        tasks = list({Task(owner, repo, sha, commit_date=date) for sha, date in tup})
         tasks = list(filter(lambda t: t not in context_registry, tasks))
-        if limit_per_repo < 0:
-            limit_per_repo = len(tasks)
-        else:
-            # randomly choose limit_per_repo tasks from tasks
+        if limit_per_repo > 0:
             tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))
         all_tasks.extend(tasks)
     return all_tasks

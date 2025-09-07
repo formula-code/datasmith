@@ -405,7 +405,7 @@ def build_once_with_context(
     pull: bool = False,
     force: bool = False,
 ) -> BuildResult:
-    logger.info("build_once_with_context: registering context key=%s", task.get_image_name())
+    # logger.info("build_once_with_context: registering context key=%s", task.get_image_name())
     logger.debug(
         "build_once_with_context: build args: REPO_URL=%s, COMMIT_SHA=%s, timeout_s=%s, tail_chars=%s, pull=%s",
         repo_url,
