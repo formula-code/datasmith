@@ -711,3 +711,16 @@ class ContextRegistry:
             registry[canonical] = ctx
 
         return cls(registry=registry)
+
+    # make helper methods to make cls pickle friendly
+    def __getstate__(self) -> dict[str, Any]:
+        """Prepare the state for pickling."""
+        serialized_str = self.serialize(pretty=False)
+        return json.loads(serialized_str)  #  type: ignore[no-any-return]
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore the state from pickling."""
+        serialized_str = json.dumps(state)
+        obj = self.deserialize(serialized_str)
+        self.registry = obj.registry
+        self._lock = threading.Lock()

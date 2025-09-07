@@ -121,7 +121,7 @@ async def _guard_loop(
 def get_docker_client(max_concurrency: int = 10) -> docker.DockerClient:
     """Return an authenticated Docker client or exit with an error."""
     try:
-        return docker.from_env(timeout=60, max_pool_size=max_concurrency)
+        return docker.from_env(timeout=300, max_pool_size=max_concurrency)
     except DockerException as exc:
         sys.exit(f"Could not connect to Docker daemon: {exc}")
 
@@ -239,7 +239,7 @@ async def run_container(  # noqa: C901
                 volumes={str(run_dir): {"bind": "/output", "mode": "rw"}},
                 network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
             )
-        except APIError as exc:
+        except Exception as exc:
             if "Conflict" in str(exc):
                 logger.warning(
                     "Container name conflict, trying to remove existing container %s.", task.get_container_name()

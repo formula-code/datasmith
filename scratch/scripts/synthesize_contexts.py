@@ -116,7 +116,7 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
 def prepare_tasks(
     all_states: dict[tuple[str, str], set[tuple[str, float]]], limit_per_repo: int, context_registry: ContextRegistry
 ) -> list[Task]:
-    tasks: list[Task] = []
+    all_tasks: list[Task] = []
     for (owner, repo), uniq in all_states.items():
         tasks = [Task(owner, repo, sha, commit_date=date) for sha, date in uniq]
         tasks = list(filter(lambda t: t not in context_registry, tasks))
@@ -125,8 +125,8 @@ def prepare_tasks(
         else:
             # randomly choose limit_per_repo tasks from tasks
             tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))
-        tasks.extend(tasks)
-    return tasks
+        all_tasks.extend(tasks)
+    return all_tasks
 
 
 def main(args: argparse.Namespace) -> None:

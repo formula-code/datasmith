@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-
 from datasmith.benchmark.collection import BenchmarkCollection
 
 

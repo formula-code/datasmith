@@ -14,9 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import asv
-import pandas as pd
-from tqdm import tqdm
 
+import pandas as pd
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.docker.context import ContextRegistry, DockerContext, Task, build_base_image
 from datasmith.docker.orchestrator import (
@@ -27,6 +26,7 @@ from datasmith.docker.orchestrator import (
 from datasmith.execution.collect_commits_offline import find_parent_releases
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
+from tqdm import tqdm
 
 logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 # logger = configure_logging(level=logging.DEBUG)
@@ -216,7 +216,7 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
 
     # build the containers.
     builds = []
-    with ThreadPoolExecutor(max_workers=args.max_concurrency // 2) as pool:
+    with ThreadPoolExecutor(max_workers=args.max_concurrency) as pool:
         futures = [
             pool.submit(build_repo_sha_image, client, ctx, task, args.force_rebuild, run_id="CANARY-BUILD")
             for (task, ctx) in tasks

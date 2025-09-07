@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 
 import pandas as pd
-
 from datasmith.collation.collate_benchmark_results import aggregate_benchmark_runs, publish_repo
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.scrape_dashboards import make_benchmark_from_html

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import docker
-from docker.errors import APIError, NotFound
+from docker.errors import APIError
 from docker.models.containers import Container
 
 logger = logging.getLogger(__name__)
@@ -81,19 +82,27 @@ class PersistentContainer:
             )
         except APIError as e:
             if "Conflict" in str(e) and self.name:
+                runid = (self.run_labels or {}).get("datasmith.run")
                 logger.warning("Container name conflict, trying to remove existing container %s.", self.name)
                 try:
-                    old_container = self.client.containers.get(self.name)
-                    old_container.stop(timeout=60)
-                    old_container.remove(force=True)
-                except NotFound:
-                    pass
-                except APIError:
-                    logger.exception("Failed to remove existing container %s, cannot continue.", self.name)
+                    old = self.client.containers.get(self.name)
+                    labels = old.labels or {}
+                    if labels.get("datasmith.run") == runid:
+                        with contextlib.suppress(Exception):
+                            old.stop(timeout=60)
+                            old.remove(force=True)
+                        new_name = self.name
+                    else:
+                        suffix = (runid or "run")[:8]
+                        new_name = f"{self.name}-{suffix}"
+                        logger.warning("Name conflict with foreign run; using %s instead.", new_name)
+                except Exception:
+                    suffix = (runid or "run")[:8]
+                    new_name = f"{self.name}-{suffix}"
                 self.container = self.client.containers.run(
                     self.image,
                     command=["trap : TERM INT; while :; do sleep 2147483647; done"],
-                    name=self.name,
+                    name=new_name,
                     working_dir=self.workdir,
                     environment=self.env,
                     stdin_open=False,

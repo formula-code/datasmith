@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 import pandas as pd
+from datasmith.docker.context import ContextRegistry
 
 
 @dataclass(slots=True)
@@ -65,6 +66,8 @@ class BenchmarkCollection:
     coverage: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     comments: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     enriched_breakpoints: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+
+    context_registry: ContextRegistry = field(default_factory=ContextRegistry, repr=False)
 
     def save(self, path: str | Path) -> Path:
         """

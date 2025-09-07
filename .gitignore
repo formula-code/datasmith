@@ -196,6 +196,8 @@ cython_debug/
 tokens.env
 benchmark_results/
 scratch/artifacts/
+scratch/example-docker-task
+asv-output/
 output
 
 # Database files

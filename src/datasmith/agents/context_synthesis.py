@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import logging
 import pickle
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,16 +61,18 @@ def fast_cleanup_run_artifacts(  # noqa: C901
         for ref in extra_image_refs:
             try:
                 img = client.images.get(ref)
-                img_ids.add(img.id)  # type: ignore[arg-type]
+                labels = getattr(img, "labels", None) or img.attrs.get("Config", {}).get("Labels", {}) or {}
+                if (labels.get("datasmith.run") == run_id) and img.id:
+                    img_ids.add(img.id)
             except (ImageNotFound, NotFound):
                 pass
 
-        try:
-            labeled = client.images.list(filters={"label": f"datasmith.run={run_id}"})
-            for img in labeled:
-                img_ids.add(img.id)  # type: ignore[arg-type]
-        except Exception:
-            logger.exception("image list (by label) failed")
+        # try:
+        #     labeled = client.images.list(filters={"label": f"datasmith.run={run_id}"})
+        #     for img in labeled:
+        #         img_ids.add(img.id)  # type: ignore[arg-type]
+        # except Exception:
+        #     logger.exception("image list (by label) failed")
 
     with contextlib.suppress(Exception):
         for iid in img_ids:
@@ -435,6 +438,20 @@ def build_once_with_context(
     return res
 
 
+def _image_exists(client: docker.DockerClient, name: str, retries: int = 3, delay: float = 0.5) -> bool:
+    for i in range(retries):
+        try:
+            client.images.get(name)
+            return True  # noqa: TRY300
+        except ImageNotFound:
+            return False
+        except Exception:
+            if i == retries - 1:
+                raise
+            time.sleep(delay * (2**i))
+    return False
+
+
 def agent_build_and_validate(  # noqa: C901
     task: Task,
     args: argparse.Namespace,
@@ -492,7 +509,10 @@ def agent_build_and_validate(  # noqa: C901
     logger.debug("agent_build_and_validate: task=%s repo_url=%s", task, repo_url)
 
     # Ensure probe ENV image exists
-    if not client.images.list(name=task.with_tag("env").get_image_name()):
+    # if not client.images.list(name=task.with_tag("env").get_image_name()):
+    # instead of the expensive list(), try get()
+
+    if not _image_exists(client, task.with_tag("env").get_image_name()):
         logger.info("agent_build_and_validate: probe image not found, building probe image")
         env_res = build_once_with_context(
             client=client,
@@ -527,7 +547,7 @@ def agent_build_and_validate(  # noqa: C901
     tool_exec = ContainerToolExecutor(
         docker_client=client,
         image_name=task.with_tag("env").get_image_name(),
-        container_name=task.with_tag("env").get_container_name(),
+        container_name=task.with_tag("env").get_container_name() + f"-{run_labels.get('datasmith.run', 'run')[:8]}",
         workdir="/workspace/repo/",
         run_labels=run_labels,
     )
