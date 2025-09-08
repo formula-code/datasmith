@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import re
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -12,7 +11,7 @@ from git import Repo
 from tqdm.auto import tqdm
 
 from datasmith.execution.collect_commits_offline import collect_commits
-from datasmith.execution.utils import _get_commit_info_offline, find_file_in_tree
+from datasmith.execution.utils import _get_commit_info_offline, clone_repo, find_file_in_tree, has_core_file
 from datasmith.logging_config import configure_logging
 
 # Configure logging for the script
@@ -46,44 +45,6 @@ def _commit_info_worker(arg_tuple: tuple[Repo, str]) -> dict[str, Any] | None:
     return _get_commit_info_offline(repo, sha)
 
 
-NON_CORE_PATTERNS = re.compile(
-    r"""(
-           (^|/)tests?(/|$)        |   # any tests/ directory
-           (^|/)doc[s]?(/|$)       |   # docs/, doc/, documentation/
-           (^|/)examples?(/|$)     |   # examples/
-           (^|/)\.github(/|$)      |   # GitHub meta files
-           (^|/)benchmarks?(/|$)   |   # benchmarks/
-           (^|/)dist-info(/|$)     |   # wheel metadata
-           (^|/)build(/|$)         |   # build artifacts
-           (^|/)site-packages(/|$) |   # vendored wheels
-           (^|/)__(init|pycache)__ |   # __init__.py, __pycache__
-           (^|/)requirements-docs\.txt$|
-           (^|/)pyproject\.toml$|
-           (^|/)README\.md$        |
-           \.rst$                  |   # reStructuredText docs
-           \.md$                       # markdown docs
-       )""",
-    re.VERBOSE,
-)
-
-
-def has_core_file(files_changed: str) -> bool:
-    """
-    Return True if *any* path in the newline-separated `files_changed`
-    string is judged to be a *core* file under the rules above.
-    """
-    for path in files_changed.split("\n"):
-        path = path.strip()
-        # Empty lines can show up if a commit touches a single file
-        if not path:
-            continue
-        if not NON_CORE_PATTERNS.search(path):
-            # As soon as we find one path that is NOT caught by the
-            # non-core pattern, we know the commit touched "core" code.
-            return True
-    return False
-
-
 def main() -> None:
     args = parse_args()
 
@@ -115,27 +76,12 @@ def main() -> None:
 
     # download all repos to a temp dir
     with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
-
-        def clone_repo(repo_name: str) -> tuple[str, Repo]:
-            repo_name = repo_name.strip("/")
-            owner, name = repo_name.split("/", 1)
-            path = Path(td) / f"{owner}__{name}.git"
-            repo = Repo.clone_from(
-                f"https://github.com/{repo_name}.git",
-                path,
-                quiet=True,
-                allow_unsafe_options=True,
-                allow_unsafe_protocols=True,
-            )
-            logger.debug("Cloned repo %s to %s", repo_name, path)
-            return repo_name, repo
-
         commit2kind = {}
         commit2repo = {}
         all_repos = {}
         commit_info_args: list[tuple[Repo, str]] = []
         with ThreadPoolExecutor(max_workers=args.threads) as tp:
-            futures = {tp.submit(clone_repo, repo_name): repo_name for repo_name in all_repo_names}
+            futures = {tp.submit(clone_repo, td, repo_name): repo_name for repo_name in all_repo_names}
             for f in tqdm(as_completed(futures), total=len(futures), desc="Cloning repos"):
                 repo_name, repo = f.result()
                 all_repos[repo_name] = repo
@@ -171,7 +117,6 @@ def main() -> None:
     commits_meta = pd.json_normalize(commit_info)  # pyright: ignore[reportArgumentType]
     commits_meta = commits_meta[commits_meta["has_asv"]]  # Take out all commits that don't have asv installed.
     commits_meta["kind"] = commits_meta["sha"].map(commit2kind)
-    commits_meta["repo_name"]
 
     commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
     commits_merged["repo_name"] = commits_merged["sha"].map(commit2repo)

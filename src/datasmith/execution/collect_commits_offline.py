@@ -5,16 +5,17 @@ import os
 import re
 import sys
 import tempfile
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Callable
 
+import pandas as pd
 from git import Commit, GitCommandError, Repo
 from tqdm.auto import tqdm
 
 from datasmith import logger
 from datasmith.agents.perf_judge import PerfClassifier
-from datasmith.execution.utils import get_change_summary
+from datasmith.execution.utils import _get_commit_info_offline, clone_repo, get_change_summary, has_core_file
 
 _PR_MERGE_PATTERNS: tuple[re.Pattern[str], ...] = (
     # standard "Merge pull request #123 ..."
@@ -148,8 +149,44 @@ def _parallel_classify(
 
         pbar.close()
 
-    logger.info(f"Collected {len(merge_shas)} commits from {repo_name}.")
+    logger.info("Collected %d commits from %s.", len(merge_shas), repo_name)
     return merge_shas
+
+
+def get_offline_commit_info(breakpoints: pd.DataFrame, repo_name: str) -> pd.DataFrame:
+    commit2kind = {}
+    commit2repo = {}
+    commits = []
+
+    for gt_hash in breakpoints["gt_hash"].dropna().unique():
+        if gt_hash not in commit2kind:
+            commit2kind[gt_hash] = "commit"
+            commit2repo[gt_hash] = repo_name
+            commits.append(gt_hash)
+    for hash_ in breakpoints["hash"].dropna().unique():
+        if hash_ not in commit2kind:
+            commit2kind[hash_] = "parent"
+            commit2repo[hash_] = repo_name
+            commits.append(hash_)
+
+    with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
+        repo_name, repo = clone_repo(root_path=td, repo_name=repo_name)
+        repo_repeat = [repo] * len(commits)
+        with ProcessPoolExecutor(max_workers=4) as pp:
+            commit_info = list(
+                tqdm(
+                    pp.map(_get_commit_info_offline, repo_repeat, commits),
+                    total=len(commits),
+                    desc="Fetching commit metadata",
+                )
+            )
+        commits_meta = pd.json_normalize(commit_info)  # pyright: ignore[reportArgumentType]
+        commits_meta = commits_meta[commits_meta["has_asv"]]  # Take out all commits that don't have asv installed.
+        commits_meta["kind"] = commits_meta["sha"].map(commit2kind)
+
+        commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
+        commits_merged["repo_name"] = commits_merged["sha"].map(commit2repo)
+    return commits_merged
 
 
 def batch_classify_commits(

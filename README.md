@@ -123,6 +123,21 @@ $ python scratch/scripts/detect_breakpoints.py \
 
 The `breakpoints.fc.pkl` collection contains all the information about the detected performance improving commits, a markdown report for each commit with useful hints for the optimizer, and a merged CSV file that contains the performance data for all commits in the repository. These files can then be used in the evaluation harness for benchmarking the performance of an optimizer `[@TODO:link formula-code/evaluation-harness]`.
 
+### 3. Synthesize Contexts.
+
+For each commit-sha pair in the breakpoints, we must synthesize contexts for all commit-sha pairs in the breakpoints.
+
+```bash
+$ python scratch/scripts/synthesize_contexts.py \
+       --dashboard scratch/artifacts/processed/downloads/astropy/dashboard.fc.pkl \
+       --output-dir scratch/artifacts/processed/downloads/astropy/contexts/ \
+       --context-registry scratch/artifacts/processed/downloads/astropy/context_registry.json \
+       --max-workers 16 \
+       --limit-per-repo 2 \
+       --max-attempts 3 \
+       --max-steps 10
+```
+
 
 
 ## FormulaCode

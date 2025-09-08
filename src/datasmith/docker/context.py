@@ -40,9 +40,9 @@ def _new_api_client(client: docker.DockerClient) -> docker.APIClient:
         api_version = "auto"
 
     try:
-        return docker.APIClient(base_url=base_url, version=api_version)
+        return docker.APIClient(base_url=base_url, version=api_version, timeout=600)
     except Exception:
-        return docker.APIClient(version="auto")
+        return docker.APIClient(version="auto", timeout=600)
 
 
 def build_base_image(client: docker.DockerClient, ctx: DockerContext) -> str:
@@ -82,6 +82,10 @@ class Task:
     sha: str | None = None
     commit_date: float = 0.0
     tag: str = "pkg"  # 'pkg' (env + package) or 'env' (env-only)
+
+    @classmethod
+    def default_task(cls) -> Task:
+        return cls(owner="default", repo="default", sha=None, tag="pkg")
 
     @staticmethod
     def _sanitize_component(s: str) -> str:
@@ -525,7 +529,7 @@ class ContextRegistry:
             default_context = DockerContext()
 
         # Single default context (canonicalized to tag='pkg')
-        default_task_canonical = Task(owner="default", repo="default", sha=None, tag="pkg")
+        default_task_canonical = Task.default_task()
         if default_task_canonical not in self.registry:
             self.registry[default_task_canonical] = default_context
         logger.debug("Default Docker context initialized (single canonical context).")

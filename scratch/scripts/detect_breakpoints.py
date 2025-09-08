@@ -1,12 +1,16 @@
+from __future__ import annotations
+
 import argparse
 import json
 from pathlib import Path
 
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.detection.detect_breakpoints import detect_all_breakpoints
+from datasmith.execution.collect_commits_offline import get_offline_commit_info
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.build_reports import breakpoints_scrape_comments
 from datasmith.scrape.code_coverage import generate_coverage_dataframe
+from datasmith.scrape.scrape_dashboards import get_taskname_from_index
 
 # Configure logging for the script
 logger = configure_logging()
@@ -24,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         type=Path,
-        required=True,
+        default=None,
         help=("A *.fc.pkl file that contains all the summaries, benchmarks and index.json."),
     )
     parser.add_argument(
@@ -71,21 +75,41 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:  # pragma: no cover - CLI glue
-    args = parse_args()
-
+def main(args: argparse.Namespace) -> None:  # pragma: no cover - CLI glue
     if args.commit_urls_location is not None:
-        with open(args.commit_urls_location) as f:
+        with open(args.commit_urls_location, encoding="utf-8") as f:
             commit_urls_dict = json.load(f)
     else:
         commit_urls_dict = None
 
     dataset_path = args.dataset.expanduser().resolve()
     collection = BenchmarkCollection.load(dataset_path)
+    task = get_taskname_from_index(collection.index_data)
+    # save the collection with the new task info.
+    import IPython
+
+    IPython.embed()
+    collection.task = task
+    collection.save(dataset_path)
+    logger.info("Updated task info to %s/%s and saved.", task.owner, task.repo)
+    logger.info("Loaded dataset from '%s'.", dataset_path)
+
     summary_df = collection.summaries
     breakpoints = detect_all_breakpoints(summary_df, method=args.method).dropna(subset=["hash"])
     collection.breakpoints = breakpoints
-    logger.info("Found %s potential downward shifts.", f"{len(breakpoints):,}")
+    logger.info("Found %s potential downward shifts.", f"{breakpoints['gt_hash'].nunique():,}")
+
+    # get information about offline commits.
+    repo_name = f"{collection.task.owner}/{collection.task.repo}"
+    assert repo_name != "default/default", "Please provide a valid dataset with owner/repo info."  # noqa: S101
+    commits = get_offline_commit_info(breakpoints, repo_name)
+    if not commits.empty:
+        collection.commits = commits
+        collection.breakpoints = breakpoints[breakpoints["gt_hash"].isin(commits["sha"])]
+        removed = breakpoints[~breakpoints["gt_hash"].isin(commits["sha"])]["gt_hash"].nunique()
+        if removed > 0:
+            logger.warning("Removed %s breakpoints whose gt_hash was filtered out by commits metadata.", removed)
+            breakpoints = collection.breakpoints
 
     if args.compute_coverage:
         coverage_df = generate_coverage_dataframe(
@@ -95,15 +119,18 @@ def main() -> None:  # pragma: no cover - CLI glue
             only=args.only,
         )
         collection.coverage = coverage_df
-        if args.build_reports:
-            logger.info("Building GitHub commit reports and merged dataframe ...")
-            new_breakpoints_df, comments_df = breakpoints_scrape_comments(
-                breakpoints_df=breakpoints,
-                coverage_df=coverage_df,
-                index_data=collection.index_data,
-            )
-            collection.comments = comments_df
-            collection.enriched_breakpoints = new_breakpoints_df
+    else:
+        coverage_df = None
+
+    if args.build_reports:
+        logger.info("Building GitHub commit reports and merged dataframe ...")
+        new_breakpoints_df, comments_df = breakpoints_scrape_comments(
+            breakpoints_df=breakpoints,
+            coverage_df=coverage_df,
+            index_data=collection.index_data,
+        )
+        collection.comments = comments_df
+        collection.enriched_breakpoints = new_breakpoints_df
 
     # Save the collection.
     collection.save(dataset_path.parent / "breakpoints.fc.pkl")
@@ -111,4 +138,18 @@ def main() -> None:  # pragma: no cover - CLI glue
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+
+    if args.dataset is None:
+        # find all datasets under scratch/artifacts/processed and run on them.
+        processed_dir = Path("scratch") / "artifacts" / "processed"
+        datasets = list(processed_dir.glob("**/dashboard.fc.pkl"))
+        logger.info("No dataset provided, running on all datasets (%s found).", f"{len(datasets):,}")
+        for dataset_path in datasets:
+            args.dataset = dataset_path
+            try:
+                main(args)
+            except Exception as e:
+                print(e)
+    else:
+        main(args)

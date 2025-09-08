@@ -212,7 +212,7 @@ def build_report(commit_url: str) -> str:
 
 
 def breakpoints_scrape_comments(
-    breakpoints_df: pd.DataFrame, coverage_df: pd.DataFrame, index_data: dict[str, typing.Any]
+    breakpoints_df: pd.DataFrame, coverage_df: pd.DataFrame | None, index_data: dict[str, typing.Any]
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate GitHub commit reports and return an enriched *merged* DataFrame.
 

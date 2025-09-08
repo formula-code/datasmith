@@ -438,6 +438,7 @@ async def orchestrate(
     status_codes, files_by_image = zip(*results)
     failures = sum(rc == 0 for rc in status_codes)
     if failures:
-        sys.exit(f"{failures} container(s) failed")
+        # sys.exit(f"{failures} container(s) failed")
+        logger.warning("%d container(s) failed", failures)
     logger.info("All benchmarks finished")
     return dict(zip([t for t, _ in contexts], files_by_image))

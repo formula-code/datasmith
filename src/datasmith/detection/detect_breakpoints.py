@@ -41,7 +41,7 @@ def get_breakpoints(df: pd.DataFrame) -> list[dict] | None:
 def get_breakpoints_asv(df: pd.DataFrame) -> list[dict] | None:
     """Return a list of significant downward shifts for **one** benchmark."""
     y = df["time"].to_numpy(dtype=float)
-    if "time_str" in df.columns:
+    if "time_std" in df.columns:
         y_sigma = df["time_std"].to_numpy(dtype=float)
     else:
         logger.warning("No time_std column found, using None for sigma.")
@@ -92,7 +92,7 @@ def detect_all_breakpoints(summary_df: pd.DataFrame, method: str = "rbf") -> pd.
     if missing := needed - set(summary_df.columns):
         raise ValueError(str(missing))
 
-    detected = summary_df.groupby("benchmark", sort=False).apply(detection_method, include_groups=False).dropna()
+    detected = summary_df.groupby("benchmark", sort=False).apply(detection_method, include_groups=True).dropna()
 
     if detected.empty:
         return pd.DataFrame()

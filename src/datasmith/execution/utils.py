@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import Any
 
 from git import BadName, Commit, GitCommandError, Repo
@@ -17,12 +18,64 @@ _FLAG_MAP = {
     "x": re.VERBOSE,
 }
 
+NON_CORE_PATTERNS = re.compile(
+    r"""(
+           (^|/)tests?(/|$)        |   # any tests/ directory
+           (^|/)doc[s]?(/|$)       |   # docs/, doc/, documentation/
+           (^|/)examples?(/|$)     |   # examples/
+           (^|/)\.github(/|$)      |   # GitHub meta files
+           (^|/)benchmarks?(/|$)   |   # benchmarks/
+           (^|/)dist-info(/|$)     |   # wheel metadata
+           (^|/)build(/|$)         |   # build artifacts
+           (^|/)site-packages(/|$) |   # vendored wheels
+           (^|/)__(init|pycache)__ |   # __init__.py, __pycache__
+           (^|/)requirements-docs\.txt$|
+           (^|/)pyproject\.toml$|
+           (^|/)README\.md$        |
+           \.rst$                  |   # reStructuredText docs
+           \.md$                       # markdown docs
+       )""",
+    re.VERBOSE,
+)
+
+
+def has_core_file(files_changed: str) -> bool:
+    """
+    Return True if *any* path in the newline-separated `files_changed`
+    string is judged to be a *core* file under the rules above.
+    """
+    for path in files_changed.split("\n"):
+        path = path.strip()
+        # Empty lines can show up if a commit touches a single file
+        if not path:
+            continue
+        if not NON_CORE_PATTERNS.search(path):
+            # As soon as we find one path that is NOT caught by the
+            # non-core pattern, we know the commit touched "core" code.
+            return True
+    return False
+
 
 def _parse_flag_string(flag_str: str) -> int:
     flags = 0
     for ch in flag_str:
         flags |= _FLAG_MAP.get(ch, 0)
     return flags
+
+
+def clone_repo(root_path: str | Path, repo_name: str) -> tuple[str, Repo]:
+    repo_name = repo_name.strip("/")
+    owner, name = repo_name.split("/", 1)
+    path = Path(root_path) / f"{owner}__{name}.git"
+    repo = Repo.clone_from(
+        f"https://github.com/{repo_name}.git",
+        path,
+        quiet=True,
+        allow_unsafe_options=True,
+        allow_unsafe_protocols=True,
+    )
+    logger.debug("Cloned repo %s to %s", repo_name, path)
+    return repo_name, repo
 
 
 def _compile_patterns(raws: list[str], base_flags: int) -> list[re.Pattern[str]]:

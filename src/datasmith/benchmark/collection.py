@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import cast
 
 import pandas as pd
-from datasmith.docker.context import ContextRegistry
+
+from datasmith.docker.context import ContextRegistry, Task
 
 
 @dataclass(slots=True)
@@ -52,12 +53,15 @@ class BenchmarkCollection:
         DataFrame with comments associated with each breakpoint (if computed).
     enriched_breakpoints:
         DataFrame with detected breakpoints, including metadata from GitHub/Codecov (if computed).
+    commits:
+        Information about commits related to breakpoints (if computed).
     """
 
     base_url: str
     collected_at: datetime
     modified_at: datetime
     param_keys: list[str]
+    task: Task
     index_data: dict[str, str] = field(default_factory=dict, repr=False)
     benchmarks: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     summaries: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
@@ -66,6 +70,7 @@ class BenchmarkCollection:
     coverage: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     comments: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     enriched_breakpoints: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+    commits: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
 
     context_registry: ContextRegistry = field(default_factory=ContextRegistry, repr=False)
 
