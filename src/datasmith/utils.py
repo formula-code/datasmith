@@ -11,6 +11,7 @@ from typing import cast
 
 import requests
 import simple_useragent as sua  # type: ignore[import-untyped]
+from requests.adapters import HTTPAdapter
 from requests.exceptions import HTTPError, RequestException, Timeout
 
 from datasmith import logger
@@ -25,6 +26,9 @@ if not CACHE_LOCATION:
 _cache_lock = threading.Lock()  # Lock for database operations
 find_json_block = re.compile(r"```json(.*?)```", re.DOTALL)
 _session = requests.Session()
+adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=0)
+_session.mount("https://", adapter)
+_session.mount("http://", adapter)
 
 
 def _build_github_headers() -> dict[str, str]:
@@ -47,7 +51,7 @@ def _build_codecov_headers() -> dict[str, str]:
     token = os.environ.get("CODECOV_TOKEN", None)
     return {
         "Accept": "application/json",
-        "User-Agent": random.choice(LIST_UA),  # noqa: S311
+        "User-Agent": LIST_UA[0],
         **({"Authorization": f"Bearer {token}"} if token else {}),
     }
 
@@ -144,11 +148,14 @@ def cache_completion(db_loc: str, table_name: str = "cache"):
     return decorator
 
 
+RPS = {"github": 20, "codecov": 20}
+_last_call = {"github": 0.0, "codecov": 0.0}
+
+
 def _request_with_backoff(
     url: str,
     site_name: str,
     session: requests.Session = _session,
-    rps: int = 2,
     base_delay: float = 1.0,
     max_retries: int = 5,
     max_backoff: float = 60.0,
@@ -157,68 +164,37 @@ def _request_with_backoff(
     GET ``url`` with retry, exponential back-off, client-side throttling,
     and GitHub-aware rate-limit handling.
     """
-    last_exception: RequestException | None = None
-    delay: float = base_delay
-
-    for attempt in range(1, max_retries + 1):
-        # ---------- client-side throttle ----------
-        throttle = max(0, (1 / rps))
-        logger.debug(
-            "Attempt %d/%d → %s (site=%s) | throttling %.2fs",
-            attempt,
-            max_retries,
-            url,
-            site_name,
-            throttle,
-        )
-        time.sleep(throttle)
+    delay = base_delay
+    last_exception = None
+    for _ in range(1, max_retries + 1):
+        # conditional throttle
+        now = time.time()
+        min_interval = 1.0 / RPS.get(site_name, 2)
+        since = now - _last_call.get(site_name, 0.0)
+        if since < min_interval:
+            time.sleep(min_interval - since)
+        _last_call[site_name] = time.time()
 
         try:
-            logger.debug("GET %s (timeout=15s)", url)
             resp = session.get(url, headers=_build_headers(site_name), timeout=15)
-            logger.debug("Status %d from %s", resp.status_code, url)
-
             if resp.status_code in (403, 429):
-                # ---------------- rate limited ----------------
-                reset = resp.headers.get("X-RateLimit-Reset")
-                remaining = resp.headers.get("X-RateLimit-Remaining", "1")
-
-                if remaining == "0" and reset:
-                    sleep_for = max(0.0, float(reset) - float(time.time()))
+                ra = resp.headers.get("Retry-After")
+                if ra:
+                    sleep_for = float(ra)
                 else:
                     sleep_for = min(delay, max_backoff)
-
-                logger.debug(
-                    "Rate-limited (remaining=%s, reset=%s). Sleeping %.2fs then retrying.",
-                    remaining,
-                    reset,
-                    sleep_for,
-                )
+                    delay *= 2
                 resp.close()
-                time.sleep(sleep_for + random.uniform(0, 1))  # noqa: S311
-                delay *= 2.0
+                time.sleep(sleep_for)
                 continue
-
             resp.raise_for_status()
-            logger.debug("Success on attempt %d for %s", attempt, url)
-            return resp  # noqa: TRY300
-
         except (Timeout, requests.ConnectionError, HTTPError) as exc:
-            last_exception = exc  # may be re-raised later
-            logger.debug(
-                "Transient error on attempt %d for %s: %s. Backing off %.2fs",
-                attempt,
-                url,
-                exc,
-                delay,
-                exc_info=True,
-            )
-            time.sleep(min(delay, max_backoff) + random.uniform(0, 1))  # noqa: S311
-            delay *= 2.0
-
-    # Out of retries
-    logger.debug("Exhausted retries for %s; raising %s", url, last_exception)
-    raise last_exception or RuntimeError("Unknown error fetching GitHub API")
+            last_exception = exc
+            time.sleep(min(delay, max_backoff))
+            delay *= 2
+        else:
+            return resp
+    raise last_exception or RuntimeError("Unknown error")
 
 
 def get_db_connection(db_loc: str) -> tuple[sqlite3.Cursor, sqlite3.Connection]:
@@ -370,6 +346,11 @@ def _get_codecov_metadata(endpoint: str, params: dict[str, str] | None = None) -
     """
     if not endpoint:
         return None
+    if not params:
+        params = {}
+    if "format" not in params:
+        params["format"] = "json"
+
     endpoint = endpoint.lstrip("/")
     api_url = prepare_url(f"https://api.codecov.io/api/v2/gh/{endpoint}", params=params)
     try:

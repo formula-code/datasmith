@@ -14,8 +14,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import asv
-
 import pandas as pd
+from tqdm import tqdm
+
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.docker.context import ContextRegistry, DockerContext, Task, build_base_image
 from datasmith.docker.orchestrator import (
@@ -26,7 +27,6 @@ from datasmith.docker.orchestrator import (
 from datasmith.execution.collect_commits_offline import find_parent_releases
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
-from tqdm import tqdm
 
 logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 # logger = configure_logging(level=logging.DEBUG)
@@ -150,7 +150,8 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
 
     logger.info("Building base image...")
     base_tag = build_base_image(client, DockerContext())
-    os.environ["DOCKER_CACHE_FROM"] = base_tag
+    logger.info("Base image built with tag: %s", base_tag)
+    # os.environ["DOCKER_CACHE_FROM"] = base_tag
 
     # Prepare tasks
     tasks: list[tuple[Task, DockerContext]] = []
@@ -257,7 +258,7 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
     try:
         client.images.prune(filters={"label": "datasmith.run=CANARY-BUILD"})
     except Exception:
-        logger.exception("Failed to prune images with CANARY-BUILD tag")
+        logger.exception("Failed to nprune images with CANARY-BUILD tag")
 
 
 if __name__ == "__main__":

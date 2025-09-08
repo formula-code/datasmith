@@ -32,7 +32,6 @@ def search_pages(
                 url=url,
                 site_name="github",
                 session=sess,
-                rps=2,
                 base_delay=base_delay,
                 max_retries=max_retries,
                 max_backoff=max_backoff,
