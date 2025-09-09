@@ -52,8 +52,7 @@ elif [[ "$URL" =~ ^(https://)?(www\.)?github\.com/joblib/joblib(\.git)?$ ]]; the
     git clone https://github.com/pierreglaser/joblib_benchmarks.git /tmp/repo
     cp -r /tmp/repo/* /workspace/repo/
 elif [[ "$URL" =~ ^(https://)?(www\.)?github\.com/astropy/astropy(\.git)?$ ]]; then
-    git clone -b main https://github.com/astropy/astropy-benchmarks.git --single-branch /tmp/repo
-    cp -r /tmp/repo/* /workspace/repo/
+    git clone -b main https://github.com/astropy/astropy-benchmarks.git --single-branch
 fi
 
 IMPORT_NAME="$(detect_import_name || true)"
