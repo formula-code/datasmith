@@ -36,10 +36,25 @@ EOF
 
 # shellcheck disable=SC1091
 source /etc/profile.d/asv_utils.sh || true
-source /etc/profile.d/asv_build_vars.sh || true
 
 # Ensure base micromamba is active for introspecting ASV config
 micromamba activate base
+
+URL=$(git remote -v | grep "(fetch)" | awk '{print $2}')
+
+if [[ "$URL" =~ ^(https://)?(www\.)?github\.com/dask/dask(\.git)?$ ]]; then
+    git clone https://github.com/dask/dask-benchmarks.git /tmp/repo
+    cp -r /tmp/repo/dask/* /workspace/repo/
+elif [[ "$URL" =~ ^(https://)?(www\.)?github\.com/dask/distributed(\.git)?$ ]]; then
+    git clone https://github.com/dask/dask-benchmarks.git /tmp/repo
+    cp -r /tmp/repo/distributed/* /workspace/repo/
+elif [[ "$URL" =~ ^(https://)?(www\.)?github\.com/joblib/joblib(\.git)?$ ]]; then
+    git clone https://github.com/pierreglaser/joblib_benchmarks.git /tmp/repo
+    cp -r /tmp/repo/* /workspace/repo/
+elif [[ "$URL" =~ ^(https://)?(www\.)?github\.com/astropy/astropy(\.git)?$ ]]; then
+    git clone -b main https://github.com/astropy/astropy-benchmarks.git --single-branch /tmp/repo
+    cp -r /tmp/repo/* /workspace/repo/
+fi
 
 IMPORT_NAME="$(detect_import_name || true)"
 if [[ -z "$IMPORT_NAME" ]]; then

@@ -17,7 +17,6 @@ from datasmith.docker.context import ContextRegistry, DockerContext, build_base_
 from datasmith.docker.orchestrator import get_docker_client
 from datasmith.docker.validation import Task, _err_lock
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.utils import _parse_commit_url
 
 # configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
@@ -82,11 +81,15 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
     if args.dashboard:
         dashboard = BenchmarkCollection.load(args.dashboard)
         all_states = {}
-        for owner, repo, sha in dashboard.enriched_breakpoints.url.apply(_parse_commit_url):
+        for row in dashboard.commits.itertuples():
+            owner, repo = row.repo_name.split("/")  # pyright: ignore[reportArgumentType, reportAttributeAccessIssue]
+            sha = row.sha
+            date_fmt = row.date  # 2019-10-19T11:32:20-04:00
+            date_unit = 0.0 if date_fmt is None else datetime.datetime.fromisoformat(date_fmt).timestamp()  # pyright: ignore[reportArgumentType]
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = {(sha, 0.0)}
+                all_states[(owner, repo)] = {(sha, date_unit)}
             else:
-                all_states[(owner, repo)].add((sha, 0.0))
+                all_states[(owner, repo)].add((sha, date_unit))
     elif args.commits:
         commits = (
             pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
@@ -130,9 +133,13 @@ def main(args: argparse.Namespace) -> None:
     all_states = process_inputs(args)
     if not args.context_registry.exists():
         logger.warning("main: context registry file %s does not exist; starting fresh", args.context_registry)
+        context_registry_pth = Path("scratch/context_registry_init.json")
+    else:
+        context_registry_pth = args.context_registry
+
     context_registry = (
-        ContextRegistry.load_from_file(path=args.context_registry)
-        if args.context_registry.exists()
+        ContextRegistry.load_from_file(path=context_registry_pth)
+        if context_registry_pth.exists()
         else ContextRegistry()
     )
 
@@ -168,7 +175,7 @@ def main(args: argparse.Namespace) -> None:
                 max_attempts=args.max_attempts,
             )
             results.append(res)
-            with _err_lock, open(args.output_dir / "results.jsonl", "a") as jf:
+            with _err_lock, open(args.output_dir / "results.jsonl", "a", encoding="utf-8") as jf:
                 jf.write(json.dumps(res) + "\n")
 
             if int(res["rc"]) != 1:
@@ -195,7 +202,7 @@ def main(args: argparse.Namespace) -> None:
                     logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
                     context_registry.save_to_file(path=args.context_registry)
 
-                with _err_lock, open(args.output_dir / "results.jsonl", "a") as jf:
+                with _err_lock, open(args.output_dir / "results.jsonl", "a", encoding="utf-8") as jf:
                     jf.write(json.dumps(res) + "\n")
 
     # Rollup (minimal, quick to read)
@@ -215,7 +222,7 @@ def main(args: argparse.Namespace) -> None:
         }
         for r in results
     }
-    with open(args.output_dir / "all_files_by_image.json", "w") as f:
+    with open(args.output_dir / "all_files_by_image.json", "w", encoding="utf-8") as f:
         json.dump(rollup, f, indent=2)
 
     failed = [r for r in results if not r["ok"]]

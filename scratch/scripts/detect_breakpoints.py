@@ -86,9 +86,6 @@ def main(args: argparse.Namespace) -> None:  # pragma: no cover - CLI glue
     collection = BenchmarkCollection.load(dataset_path)
     task = get_taskname_from_index(collection.index_data)
     # save the collection with the new task info.
-    import IPython
-
-    IPython.embed()
     collection.task = task
     collection.save(dataset_path)
     logger.info("Updated task info to %s/%s and saved.", task.owner, task.repo)

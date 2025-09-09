@@ -128,7 +128,7 @@ def noisy_search(noisy_key: str) -> str | None:
     return None
 
 
-def get_taskname_from_index(index_data: dict) -> Task:
+def get_commit_url_from_index(index_data: dict) -> str | None:
     if pot_commit_url := index_data.get("show_commit_url"):
         # get the commit_url
         try:
@@ -143,15 +143,21 @@ def get_taskname_from_index(index_data: dict) -> Task:
             elif match := noisy_search(index_data.get("project_url", "")):
                 logger.warning("Using fuzzy match for commit URL: %s -> %s", index_data.get("project_url", ""), match)
                 commit_url = match
-
-            if commit_url is not None:
-                owner, repo = commit_url.strip().strip("/").split("/")[-2:]
-                task = Task(owner=owner, repo=repo, sha=None)
-                return task
+            else:
+                return commit_url
         except Exception as e:
             logger.warning("Failed to parse commit URL %s: %s", pot_commit_url, e)
+            return None
+    return None
 
-    return Task.default_task()
+
+def get_taskname_from_index(index_data: dict) -> Task:
+    commit_url = get_commit_url_from_index(index_data)
+    if commit_url is None:
+        return Task.default_task()
+    owner, repo = commit_url.strip().strip("/").split("/")[-2:]
+    task = Task(owner=owner, repo=repo, sha=None)
+    return task
 
 
 # def make_graph_dir(param_dict: dict, all_keys: list, *, quote: bool) -> str:

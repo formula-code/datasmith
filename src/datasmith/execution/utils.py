@@ -202,7 +202,7 @@ def _get_commit_info(repo_name: str, commit_sha: str) -> dict:
 
 
 def has_asv(repo: Repo, c: Commit) -> bool:
-    return any(obj.type == "blob" and obj.name == "asv.conf.json" for obj in c.tree.traverse())  # type: ignore[union-attr]
+    return any(obj.type == "blob" and re.match(r"asv\..*\.json", obj.name) for obj in c.tree.traverse())  # type: ignore[union-attr]
 
 
 def get_change_summary(commit: Commit) -> str:

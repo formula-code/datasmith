@@ -12,6 +12,7 @@ import pandas as pd
 import tiktoken
 import tqdm
 
+from datasmith.scrape.scrape_dashboards import get_commit_url_from_index
 from datasmith.scrape.utils import _parse_commit_url
 from datasmith.utils import CACHE_LOCATION, _get_github_metadata, cache_completion
 
@@ -221,7 +222,9 @@ def breakpoints_scrape_comments(
     * The returned DataFrame includes an `n_tokens` column.
     """
     bp = breakpoints_df.copy()
-    bp["gt_url"] = bp["gt_hash"].astype(str).map(lambda h: urllib.parse.urljoin(index_data["show_commit_url"], h))
+    repo_url = get_commit_url_from_index(index_data)
+    repo_url = repo_url.strip("/") if repo_url else index_data.get("show_commit_url", "")
+    bp["gt_url"] = bp["gt_hash"].astype(str).map(lambda h: urllib.parse.urljoin(repo_url + "/", f"commit/{h}"))
 
     if coverage_df is not None:
         # Average coverage per commit for the ground-truth hash
