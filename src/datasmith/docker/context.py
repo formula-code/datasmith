@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import datetime
 import io
 import json
@@ -547,12 +548,14 @@ class ContextRegistry:
         return self._canonicalize(t)
 
     def get_default(self, tag: str = "pkg") -> tuple[Task, DockerContext]:
-        if tag not in self.VALID_TAGS:
-            raise ValueError(f"Unknown tag '{tag}'. Valid tags: {sorted(self.VALID_TAGS)}")
-        # lookup under canonical default; return Task with requested tag
-        user_task = Task(owner="default", repo="default", sha=None, tag=tag)
-        canonical = self._canonicalize(user_task)
-        return user_task, self.registry[canonical]
+        with self._lock:
+            if tag not in self.VALID_TAGS:
+                raise ValueError(f"Unknown tag '{tag}'. Valid tags: {sorted(self.VALID_TAGS)}")
+            # lookup under canonical default; return Task with requested tag
+            user_task = Task(owner="default", repo="default", sha=None, tag=tag)
+            canonical = self._canonicalize(user_task)
+            ctx = copy.deepcopy(self.registry[canonical])
+            return user_task, ctx
 
     def get_lock(self) -> threading.Lock:
         return self._lock
@@ -622,23 +625,24 @@ class ContextRegistry:
             2) owner/repo     (canonical key, tag='pkg')
             3) default        (canonical key, tag='pkg')
         """
-        # Keep the user's tag but look up under canonical keys
-        user_task = self.parse_key(key) if isinstance(key, str) else key
-        canonical = self._canonicalize(user_task)
+        with self._lock:
+            # Keep the user's tag but look up under canonical keys
+            user_task = self.parse_key(key) if isinstance(key, str) else key
+            canonical = self._canonicalize(user_task)
 
-        # exact match first (canonical)
-        if canonical.sha is not None and canonical in self.registry:
-            logger.debug(f"Found exact context for key '{user_task}' via '{canonical}'.")
-            return self.registry[canonical]
+            # exact match first (canonical)
+            if canonical.sha is not None and canonical in self.registry:
+                logger.debug(f"Found exact context for key '{user_task}' via '{canonical}'.")
+                return self.registry[canonical]
 
-        # owner/repo base (canonical)
-        base = Task(owner=canonical.owner, repo=canonical.repo, sha=None, tag="pkg")
-        if base in self.registry:
-            logger.debug(f"Found fallback context '{base}' for key '{user_task}'.")
-            return self.registry[base]
+            # owner/repo base (canonical)
+            base = Task(owner=canonical.owner, repo=canonical.repo, sha=None, tag="pkg")
+            if base in self.registry:
+                logger.debug(f"Found fallback context '{base}' for key '{user_task}'.")
+                return self.registry[base]
 
-        logger.info(f"No context found for key '{user_task}'. Using default context.")
-        return self.registry[Task(owner="default", repo="default", sha=None, tag="pkg")]
+            logger.info(f"No context found for key '{user_task}'. Using default context.")
+            return self.registry[Task(owner="default", repo="default", sha=None, tag="pkg")]
 
     def get_similar(self, key: str | Task) -> list[tuple[Task, DockerContext]]:  # noqa: C901
         """
@@ -649,56 +653,57 @@ class ContextRegistry:
              sorted by |commit_date diff| if available, else by SHA
           3) base owner/repo           — returned Tasks use the caller's tag
         """
-        user_task = self.parse_key(key) if isinstance(key, str) else key
-        canonical = self._canonicalize(user_task)
+        with self._lock:
+            user_task = self.parse_key(key) if isinstance(key, str) else key
+            canonical = self._canonicalize(user_task)
 
-        results: list[tuple[Task, DockerContext]] = []
-        seen_canonical: set[Task] = set()
+            results: list[tuple[Task, DockerContext]] = []
+            seen_canonical: set[Task] = set()
 
-        # 1) Exact match (if present)
-        if canonical in self.registry:
-            results.append((canonical.with_tag(user_task.tag), self.registry[canonical]))
-            seen_canonical.add(canonical)
+            # 1) Exact match (if present)
+            if canonical in self.registry:
+                results.append((canonical.with_tag(user_task.tag), self.registry[canonical]))
+                seen_canonical.add(canonical)
 
-        # 2) Other SHAs for same owner/repo (canonical keys in registry)
-        candidates: list[tuple[Task, DockerContext]] = []
-        for t, ctx in self.registry.items():
-            if t in seen_canonical:
-                continue
-            if t.owner == canonical.owner and t.repo == canonical.repo and t.sha is not None:
-                candidates.append((t, ctx))
+            # 2) Other SHAs for same owner/repo (canonical keys in registry)
+            candidates: list[tuple[Task, DockerContext]] = []
+            for t, ctx in self.registry.items():
+                if t in seen_canonical:
+                    continue
+                if t.owner == canonical.owner and t.repo == canonical.repo and t.sha is not None:
+                    candidates.append((t, ctx))
 
-        has_valid_commit_date = (
-            getattr(canonical, "sha", None) is not None and getattr(canonical, "commit_date", None) is not None
-        )
-        if has_valid_commit_date:
+            has_valid_commit_date = (
+                getattr(canonical, "sha", None) is not None and getattr(canonical, "commit_date", None) is not None
+            )
+            if has_valid_commit_date:
 
-            def _sort(item: tuple[Task, DockerContext]) -> tuple[float, str]:
-                t, _ = item
-                cand_cd = getattr(t, "commit_date", None)
-                if cand_cd is None:
-                    return (float("inf"), str(t.sha))
-                try:
-                    return (abs(canonical.commit_date - cand_cd), str(t.sha))
-                except Exception:
-                    return (float("inf"), str(t.sha))
+                def _sort(item: tuple[Task, DockerContext]) -> tuple[float, str]:
+                    t, _ = item
+                    cand_cd = getattr(t, "commit_date", None)
+                    if cand_cd is None:
+                        return (float("inf"), str(t.sha))
+                    try:
+                        return (abs(canonical.commit_date - cand_cd), str(t.sha))
+                    except Exception:
+                        return (float("inf"), str(t.sha))
 
-            candidates.sort(key=_sort)
-        else:
-            candidates.sort(key=lambda item: str(item[0].sha))
+                candidates.sort(key=_sort)
+            else:
+                candidates.sort(key=lambda item: str(item[0].sha))
 
-        for t, ctx in candidates:
-            if t not in seen_canonical:
-                # Present with the user's tag for downstream execution behavior
-                results.append((t.with_tag(user_task.tag), ctx))
-                seen_canonical.add(t)
+            for t, ctx in candidates:
+                if t not in seen_canonical:
+                    # Present with the user's tag for downstream execution behavior
+                    results.append((t.with_tag(user_task.tag), ctx))
+                    seen_canonical.add(t)
 
-        # 3) Base owner/repo
-        base = Task(owner=canonical.owner, repo=canonical.repo, sha=None, tag="pkg")
-        if base in self.registry and base not in seen_canonical:
-            results.append((base.with_tag(user_task.tag), self.registry[base]))
+            # 3) Base owner/repo
+            base = Task(owner=canonical.owner, repo=canonical.repo, sha=None, tag="pkg")
+            if base in self.registry and base not in seen_canonical:
+                results.append((base.with_tag(user_task.tag), self.registry[base]))
 
-        return results
+            return results
 
     def __getitem__(self, key: str) -> DockerContext:
         return self.get(key)
