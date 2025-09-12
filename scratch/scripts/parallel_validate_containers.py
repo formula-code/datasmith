@@ -16,8 +16,8 @@ from datasmith.docker.validation import Task, _err_lock, validate_one
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
-logger = configure_logging()
-# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))
+# logger = configure_logging()
+logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory where the results will be stored.",
     )
     parser.add_argument("--max-workers", type=int, default=8, help="Max parallel builds/runs.")
-    parser.add_argument("--build-timeout", type=int, default=20 * 60, help="Seconds before aborting a docker build.")
+    parser.add_argument("--build-timeout", type=int, default=30 * 60, help="Seconds before aborting a docker build.")
     parser.add_argument("--run-timeout", type=int, default=15 * 60, help="Seconds before aborting asv run.")
     parser.add_argument("--tail-chars", type=int, default=4000, help="Chars of log tail to include in failure report.")
     parser.add_argument(
@@ -59,6 +59,13 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Path to the context registry JSON file.",
     )
+    parser.add_argument(
+        "--target",
+        required=True,
+        type=str,
+        help="Tag to apply to built images. One of base,env,pkg,run",
+        choices=["base", "env", "pkg", "run"],
+    )
     return parser.parse_args()
 
 
@@ -67,6 +74,9 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
         dashboard = BenchmarkCollection.load(args.dashboard)
         all_states = {}
         for owner, repo, sha in dashboard.enriched_breakpoints.url.apply(_parse_commit_url):
+            owner = owner.lower()
+            repo = repo.lower()
+            sha = sha.lower()
             if (owner, repo) not in all_states:
                 all_states[(owner, repo)] = {(sha, 0.0)}
             else:
@@ -78,7 +88,7 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]
-            sha = row["commit_sha"]
+            sha = row["sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
                 logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
@@ -102,13 +112,14 @@ def main(args: argparse.Namespace) -> None:
     all_states = process_inputs(args)
     context_registry = ContextRegistry.load_from_file(path=args.context_registry)
     # Prepare tasks
+    all_imgs = {t.get_image_name() for t in context_registry.registry}
     tasks: list[Task] = []
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
         for sha, date in limited:
             task = Task(owner, repo, sha, commit_date=float(date))
-            if task in context_registry:
-                tasks.append(task)
+            if task.with_tag("pkg").get_image_name() in all_imgs and (sha is not None):
+                tasks.append(task.with_tag(args.target))
             else:
                 logger.debug(f"main: skipping {task} not in context registry")
 
