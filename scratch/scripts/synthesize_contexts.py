@@ -118,10 +118,11 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
 def prepare_tasks(
     all_states: dict[tuple[str, str], set[tuple[str, float]]], limit_per_repo: int, context_registry: ContextRegistry
 ) -> list[Task]:
+    all_imgs = {t.with_tag("pkg").get_image_name() for t in context_registry.registry}
     all_tasks: list[Task] = []
     for (owner, repo), tup in all_states.items():
         tasks = list({Task(owner, repo, sha, commit_date=date) for sha, date in tup})
-        tasks = list(filter(lambda t: t not in context_registry, tasks))
+        tasks = list(filter(lambda t: t.with_tag("pkg").get_image_name() not in all_imgs, tasks))
         if limit_per_repo > 0:
             tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))
         all_tasks.extend(tasks)
