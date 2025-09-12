@@ -154,13 +154,14 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
     # os.environ["DOCKER_CACHE_FROM"] = base_tag
 
     # Prepare tasks
+    all_imgs = {t.get_image_name() for t in context_registry.registry}
     tasks: list[tuple[Task, DockerContext]] = []
     repo_commit_pairs = defaultdict(list)
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
         for sha, date in limited:
             task = Task(owner, repo, sha, commit_date=date)
-            if task in context_registry:
+            if task.with_tag("pkg").get_image_name() in all_imgs:
                 tasks.append((task, context_registry.get(task)))
                 repo_commit_pairs[f"{owner}/{repo}"].append(task)
                 # also add the parent commit.
@@ -210,21 +211,25 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
             seen.add(t.get_container_name())
     tasks = dedup_tasks
     logger.info("Total unique tasks to consider: %d", len(tasks))
-    to_benchmark = list(filter(lambda x: not (interim_path / f"{x[0].get_container_name()}.json").exists(), tasks))
-    logger.info("Benchmarking %d tasks", len(to_benchmark))
     already_benchmarked = list(filter(lambda x: is_benchmarked(x[0], interim_path, output_dir), tasks))
     logger.info("Skipping %d tasks that have already been benchmarked", len(already_benchmarked))
+    to_benchmark = list(filter(lambda x: not is_benchmarked(x[0], interim_path, output_dir), tasks))
+    logger.info("Total tasks to benchmark: %d", len(to_benchmark))
+    if len(to_benchmark) == 0:
+        logger.info("No tasks to benchmark. Exiting.")
+        return
 
     # build the containers.
     builds = []
-    with ThreadPoolExecutor(max_workers=args.max_concurrency) as pool:
+    with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
         futures = [
             pool.submit(build_repo_sha_image, client, ctx, task, args.force_rebuild, run_id="CANARY-BUILD")
-            for (task, ctx) in tasks
+            for (task, ctx) in to_benchmark
         ]
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Building containers"):
             builds.append(fut.result())
-    to_benchmark = [t for (t, b) in zip(tasks, builds) if b.rc == 0]
+    to_benchmark = [t for (t, b) in zip(to_benchmark, builds) if b.rc == 0]
+    logger.info("Successfully built %d containers", len(to_benchmark))
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     machine_args["num_cpu"] = str(args.num_cores)
@@ -241,8 +246,9 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
     )
     # Add already benchmarked files to the results
     for task, _ in already_benchmarked:
-        results = json.loads((interim_path / f"{task.get_container_name()}.json").read_text())
-        files_by_image[task] = results
+        if (interim_path / f"{task.get_container_name()}-final.json").exists():
+            results = json.loads((interim_path / f"{task.get_container_name()}-final.json").read_text())
+            files_by_image[task] = results
     # save the files by image as a pickle file.
     with open(output_dir / "files_by_image.json", "wb") as f:
         pickle.dump(files_by_image, f)
