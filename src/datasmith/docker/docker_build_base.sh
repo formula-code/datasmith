@@ -194,6 +194,11 @@ EXCEPTIONS.update({
     "h5py": "h5py",
     "networkx": "networkx",
     "shapely": "shapely",
+    "dask": "dask",
+    "distributed": "distributed",
+    "joblib": "joblib",
+    "astropy": "astropy",
+    "pymc3": "pymc3",
 
     # --- ML / stats / optimization / viz ---
     "optuna": "optuna",
@@ -683,7 +688,7 @@ for version in $PY_VERSIONS; do
     # Generic toolchain useful for many compiled projects (installed once here)
     micromamba install -y -n "$ENV_NAME" -c conda-forge \
         pip git conda mamba "libmambapy<2" \
-        numpy scipy cython joblib threadpoolctl pytest \
+        numpy scipy cython joblib threadpoolctl matplotlib pytest \
         compilers meson-python cmake ninja pkg-config tomli
 
     # Keep ASV consistent

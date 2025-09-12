@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 import docker
+from docker.errors import ImageNotFound
 from docker.models.containers import Container
 
 from datasmith.docker.context import BuildResult, ContextRegistry, Task
@@ -182,7 +183,29 @@ def validate_one(  # noqa: C901
     Returns a structured dict for JSONL summarization.
     """
     assert task.sha is not None, "Task.sha must be set"  # noqa: S101
-    docker_ctx = context_registry[task.get_image_name()]
+    # if the task.get_image_name() already exists using the docker client, skip the build
+    with contextlib.suppress(ImageNotFound):
+        if client.images.get(task.get_image_name()):
+            # remove the image
+            logger.debug("validate_one: image %s already exists, removing image...", task.get_image_name())
+            client.images.remove(image=task.get_image_name(), force=True)
+            logger.debug("validate_one: removed image %s", task.get_image_name())
+            # return {
+            #     "owner": task.owner,
+            #     "repo": task.repo,
+            #     "sha": task.sha,
+            #     "image_name": task.get_image_name(),
+            #     "stage": "build-skipped",
+            #     "ok": True,
+            #     "rc": 0,
+            #     "duration_s": 0.0,
+            #     "cmd_build": f"docker image {task.get_image_name()} (skipped)",
+            #     "cmd_run": "",
+            #     "stderr_tail": "",
+            #     "stdout_tail": "",
+            #     "files": {},
+            # }
+    docker_ctx = context_registry.get(task)
 
     build_cmd, run_cmd = format_cmds(task.get_image_name(), task.owner, task.repo, task.sha, args.output_dir)
 
@@ -196,7 +219,7 @@ def validate_one(  # noqa: C901
         force=False,
         timeout_s=args.build_timeout,
         tail_chars=args.tail_chars,
-        pull=False,
+        pull=True,
     )
     if build_res.rc == 124:
         build_stage = "build-timeout"

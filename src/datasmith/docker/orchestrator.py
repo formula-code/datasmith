@@ -1,25 +1,156 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tarfile
+import time
 import uuid
 from collections.abc import Sequence
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.models.containers import Container
+from requests.exceptions import ReadTimeout
 
 from datasmith.docker.context import BuildResult, DockerContext, Task
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
+
+
+def _new_api_client_from(client: docker.DockerClient, *, timeout: int = 600) -> docker.APIClient:
+    """Fresh low-level client per worker to avoid connection contention; longer timeout for start."""
+    try:
+        base_url = client.api.base_url
+    except Exception:
+        base_url = None
+    try:
+        api_version = client.version().get("ApiVersion", "auto")
+    except Exception:
+        api_version = "auto"
+    return docker.APIClient(base_url=base_url, version=api_version, timeout=timeout)
+
+
+# helpers: reproducible, minimally .dockerignore-aware tar of a directory
+def _read_dockerignore(root: Path) -> tuple[list[str], list[str]]:
+    path = root / ".dockerignore"
+    if not path.exists():
+        return [], []
+    ignores: list[str] = []
+    negates: list[str] = []
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("!"):
+            negates.append(line[1:].strip())
+        else:
+            ignores.append(line)
+    # Always ignore .git if not explicitly negated
+    if ".git" not in ignores:
+        ignores.append(".git")
+    return ignores, negates
+
+
+def _path_matches_any(rel_posix: str, pats: list[str]) -> bool:
+    # naive but effective: support *, ?, ** via fnmatch; also treat dir/ as prefix
+    for p in pats:
+        if p.endswith("/") and (rel_posix == p[:-1] or rel_posix.startswith(p)):
+            return True
+        if fnmatch(rel_posix, p) or fnmatch("/" + rel_posix, p):
+            return True
+    return False
+
+
+def _dir_context_tar_bytes(root_dir: str, dockerfile_name: str = "Dockerfile") -> bytes:  # noqa: C901
+    root = Path(root_dir).resolve()
+    ignores, negates = _read_dockerignore(root)
+
+    def is_included(p: Path) -> bool:
+        rel = p.relative_to(root).as_posix()
+        if rel == "":
+            return True
+        ignored = _path_matches_any(rel, ignores)
+        if ignored and _path_matches_any(rel, negates):
+            ignored = False
+        return not ignored
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        # walk deterministically
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirpath_p = Path(dirpath)
+            # sort for deterministic order
+            dirnames.sort()
+            filenames.sort()
+            # ensure directory entries are added with stable metadata
+            rel_dir = dirpath_p.relative_to(root).as_posix()
+            if rel_dir != "" and is_included(dirpath_p):
+                ti = tarfile.TarInfo(name=rel_dir)
+                ti.type = tarfile.DIRTYPE
+                ti.mode = 0o755
+                ti.mtime = 0
+                ti.uid = ti.gid = 0
+                ti.uname = ti.gname = ""
+                tar.addfile(ti)
+
+            # files
+            for name in filenames:
+                p = dirpath_p / name
+                if not is_included(p):
+                    continue
+                rel = p.relative_to(root).as_posix()
+
+                try:
+                    st = os.lstat(p)
+                except FileNotFoundError:
+                    continue  # raced; skip
+
+                if stat.S_ISLNK(st.st_mode):
+                    # preserve symlink
+                    ti = tarfile.TarInfo(name=rel)
+                    ti.type = tarfile.SYMTYPE
+                    ti.linkname = os.readlink(p)
+                    ti.mode = 0o777
+                    ti.mtime = 0
+                    ti.uid = ti.gid = 0
+                    ti.uname = ti.gname = ""
+                    tar.addfile(ti)
+                elif stat.S_ISREG(st.st_mode):
+                    ti = tarfile.TarInfo(name=rel)
+                    ti.size = st.st_size
+                    ti.mode = stat.S_IMODE(st.st_mode) or 0o644
+                    ti.mtime = 0
+                    ti.uid = ti.gid = 0
+                    ti.uname = ti.gname = ""
+                    with open(p, "rb") as f:
+                        tar.addfile(ti, fileobj=f)
+                # other types (sockets, pipes) are skipped
+
+        # Ensure the Dockerfile exists at root with canonical name
+        df = root / dockerfile_name
+        if df.exists() and dockerfile_name != "Dockerfile":
+            # duplicate/alias to "Dockerfile" for the builder
+            with open(df, "rb") as f:
+                data = f.read()
+            ti = tarfile.TarInfo(name="Dockerfile")
+            ti.size = len(data)
+            ti.mode = 0o644
+            ti.mtime = 0
+            ti.uid = ti.gid = 0
+            ti.uname = ti.gname = ""
+            tar.addfile(ti, io.BytesIO(data))
+    buf.seek(0)
+    return buf.getvalue()
 
 
 def gen_run_labels(t: Task, runid: str) -> dict[str, str]:
@@ -109,23 +240,85 @@ async def _guard_loop(
 
     # Then periodic checks
     while not stop_event.is_set():
-        try:
+        with contextlib.suppress(SystemExit, Exception):
             await _guard_and_prune(client, min_free_gb, data_root, run_id, hard_fail)
-        except SystemExit:
-            raise
-        except Exception:
-            logger.exception("Periodic disk guard failed")
-        await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
 
 def get_docker_client(max_concurrency: int = 10) -> docker.DockerClient:
     """Return an authenticated Docker client or exit with an error."""
     try:
-        return docker.from_env(timeout=300, max_pool_size=max_concurrency)
+        return docker.from_env(timeout=1800, max_pool_size=max_concurrency)
     except DockerException as exc:
         sys.exit(f"Could not connect to Docker daemon: {exc}")
 
 
+# def build_repo_image(client: docker.DockerClient, image_name: str, repo_url: str, docker_dir: str) -> None:
+#     """Ensure IMAGE exists locally, building it from docker_dir with low-level API.
+
+#     Uses a reproducible tar context (stable mtimes/owners/order) to improve cache
+#     hits and a fresh API client to avoid connection contention/timeouts.
+#     """
+#     try:
+#         client.images.get(image_name)
+#         logger.info("Docker image '%s' found locally.", image_name)
+#         return
+#     except ImageNotFound:
+#         pass
+
+#     if not repo_url:
+#         raise RuntimeError(f"Image '{image_name}' not found and no REPO_URL provided.")
+
+#     logger.info("Docker image '%s' not found locally, building it with REPO_URL=%s", image_name, repo_url)
+
+#     # Prepare reproducible context bytes once
+#     try:
+#         context_bytes = _dir_context_tar_bytes(docker_dir, dockerfile_name="Dockerfile")
+#     except Exception as exc:
+#         raise SystemExit(f"Failed to prepare build context from {docker_dir}: {exc}") from exc
+
+#     api = _new_api_client_from(client, timeout=1800)
+
+#     buildargs = {"REPO_URL": repo_url, "BUILDKIT_INLINE_CACHE": "1"}
+#     cache_from = None
+#     if base_image := os.environ.get("DOCKER_CACHE_FROM", None):
+#         logger.info("Using DOCKER_CACHE_FROM='%s' for build cache.", base_image)
+#         cache_from = [base_image]
+
+#     network_mode = os.environ.get("DOCKER_NETWORK_MODE", "") or None
+
+#     # Pretty log
+#     logger.info("$ docker build -t %s %s --build-arg REPO_URL=%s", image_name, docker_dir, repo_url)
+
+#     try:
+#         stream = api.build(
+#             fileobj=io.BytesIO(context_bytes),
+#             custom_context=True,
+#             tag=image_name,
+#             buildargs=buildargs,
+#             decode=True,
+#             rm=True,
+#             pull=False,
+#             network_mode=network_mode,
+#             cache_from=cache_from,
+#         )
+#         # Drain stream to completion (avoids premature socket close)
+#         for _ in stream:
+#             pass
+#     except ReadTimeout:
+#         logger.exception("Build timed out for image %s", image_name)
+#         raise
+#     except DockerException as exc2:
+#         raise SystemExit(f"Failed to build image {image_name}: {exc2}") from exc2
+
+
+#     # Ensure image present
+#     try:
+#         client.images.get(image_name)
+#     except ImageNotFound as exc:
+#         raise RuntimeError(f"Build completed but image '{image_name}' not found.") from exc
 def build_repo_image(client: docker.DockerClient, image_name: str, repo_url: str, docker_dir: str) -> None:
     """Ensure IMAGE exists locally, optionally pulling it."""
     try:
@@ -183,11 +376,10 @@ async def run_container(  # noqa: C901
     Launch one container pinned to *cores* (a cpuset string like ``"4,5,6,7"`` or
     an iterable of ints) and wait for it to finish.
 
-    Returns the container's exit status code.
+    Returns the container's exit status code and collected files.
     """
     assert task.sha is not None, "Task.sha must be set"  # noqa: S101
 
-    # Normalise to the cpuset string Docker expects
     cpuset = ",".join(map(str, cores)) if not isinstance(cores, str) else cores
     num_cores = len(cpuset.split(","))
 
@@ -207,6 +399,8 @@ async def run_container(  # noqa: C901
     def _launch() -> tuple[int, dict[str, str]]:  # noqa: C901
         assert task.sha is not None, "Task.sha must be set"  # noqa: S101
         logger.debug("docker build name=%s cpuset=%s env=%s", task.get_image_name(), cpuset, env)
+
+        # Build (streaming) — unchanged, but keep pull=True if you need fresh bases
         repo_url = f"https://github.com/{task.owner}/{task.repo}.git"
         res = ctx.build_container_streaming(
             client=client,
@@ -224,66 +418,100 @@ async def run_container(  # noqa: C901
             return 1, {}
 
         logger.debug("docker run name=%s cpuset=%s env=%s", task.get_container_name(), cpuset, env)
-        # Start the container on the specified CPUs
+
         run_dir = (output_dir / "results" / task.get_container_name()).resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # Ensure that task.get_image_name() isn't already running. If it is, remove it.
+        # Low-level client per-call avoids session/socket contention
+        api = _new_api_client_from(client, timeout=600)
+
+        # HostConfig and create_container; only set network_mode when provided
+        network_mode = os.environ.get("DOCKER_NETWORK_MODE", "") or None
+        host_config = api.create_host_config(
+            cpuset_cpus=cpuset,
+            binds={str(run_dir): {"bind": "/output", "mode": "rw"}},
+            network_mode=network_mode,  # None => omitted by docker-py
+        )
+
+        # Handle name conflicts explicitly
+        container_id = None
         try:
-            container = client.containers.run(
-                task.get_image_name(),
-                detach=True,
+            container_resp = api.create_container(
+                image=task.get_image_name(),
                 name=task.get_container_name(),
                 environment=env,
-                cpuset_cpus=cpuset,
-                volumes={str(run_dir): {"bind": "/output", "mode": "rw"}},
-                network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
+                host_config=host_config,
             )
-        except Exception as exc:
-            if "Conflict" in str(exc):
-                logger.warning(
-                    "Container name conflict, trying to remove existing container %s.", task.get_container_name()
-                )
+            container_id = container_resp.get("Id")
+        except APIError as e:
+            response = getattr(e, "response", None)
+            if response is not None and getattr(response, "status_code", None) == 409:
+                logger.warning("Container name conflict, removing existing %s", task.get_container_name())
                 try:
-                    old_container = client.containers.get(task.get_container_name())
-                    old_container.stop(timeout=60)
-                    old_container.remove(force=True)
+                    old = client.containers.get(task.get_container_name())
+                    with contextlib.suppress(Exception):
+                        old.stop(timeout=60)
+                    with contextlib.suppress(Exception):
+                        old.remove(force=True)
                 except NotFound:
-                    logger.warning("Container %s not found when trying to remove it.", task.get_container_name())
-                    return 1, {}
-                except APIError:
-                    logger.exception(
-                        "Failed to remove existing container %s, cannot continue.", task.get_container_name()
-                    )
-                    return 1, {}
-                # Try to run again
-                container = client.containers.run(
-                    task.get_image_name(),
-                    detach=True,
+                    pass
+                # retry once
+                container_resp = api.create_container(
+                    image=task.get_image_name(),
                     name=task.get_container_name(),
                     environment=env,
-                    cpuset_cpus=cpuset,
-                    volumes={str(run_dir): {"bind": "/output", "mode": "rw"}},
-                    network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
+                    host_config=host_config,
                 )
+                container_id = container_resp.get("Id")
             else:
-                logger.exception("Failed to start container %s", task.get_container_name())
+                logger.exception("create_container failed for %s", task.get_container_name())
                 return 1, {}
 
-        # Dump container stdout/stderr to a per-container log file
+        if not container_id:
+            logger.error("No container id returned for %s", task.get_container_name())
+            return 1, {}
+
+        # Start with retry/backoff to ride out daemon stalls instead of hard 300s timeout
+        backoff = [1, 2, 4, 8, 16, 32]
+        for i, d in enumerate(backoff, start=1):
+            try:
+                api.start(container_id)  # returns 204
+                break
+            except ReadTimeout:
+                if i == len(backoff):
+                    logger.exception(
+                        "Timed out starting container %s after %ss", task.get_container_name(), sum(backoff)
+                    )
+                    return 1, {}
+                logger.warning("ReadTimeout on start(%s); retrying in %ss", task.get_container_name(), d)
+                time.sleep(d)
+            except APIError:
+                if i == len(backoff):
+                    logger.exception("APIError starting container %s", task.get_container_name())
+                    return 1, {}
+                logger.warning("APIError on start(%s); retrying in %ss", task.get_container_name(), d)
+                time.sleep(d)
+
+        # Switch back to high-level object for logs/wait ergonomics
+        container = client.containers.get(container_id)
+
+        # Stream logs to file efficiently (open once, write bytes)
         log_file = output_dir / "logs" / f"{task.get_container_name()}.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        for line in container.logs(stream=True, follow=True):
-            with log_file.open("a") as f:
-                f.write(line.decode())
+        try:
+            for chunk in container.logs(stream=True, follow=True):
+                # chunk is bytes already
+                with log_file.open("ab") as f:
+                    f.write(chunk)
+        except Exception:
+            logger.exception("Log streaming failed for %s (continuing)", task.get_container_name())
 
         logger.info("Container %s started, waiting for it to finish...", task.get_container_name())
         result = container.wait()  # blocks until exit
         logger.info("Container %s finished with status %s", task.get_container_name(), result.get("StatusCode", 1))
 
-        # get the contents of all files in the /output folder and return dictionary.
-        # files = log_container_output(container, archive="/output")
-        files = {}
+        # collect files from the run directory
+        files: dict[str, str] = {}
         for p in run_dir.rglob("*"):
             if p.is_file():
                 try:
@@ -291,17 +519,16 @@ async def run_container(  # noqa: C901
                 except UnicodeDecodeError:
                     files[str(p.relative_to(output_dir))] = f"<{p.stat().st_size} bytes>"
 
-        # remove container
+        # cleanup
         try:
             container.remove(force=True)
         except Exception:
             logger.exception("Failed to remove container %s", task.get_container_name())
-            pass
         try:
             client.images.remove(image=task.get_image_name(), force=True, noprune=True)
         except Exception:
             logger.exception("Failed to remove image %s", task.get_image_name())
-            pass
+
         return result.get("StatusCode", 1), files
 
     # Keep the event loop responsive
@@ -358,7 +585,7 @@ async def orchestrate(
     output_dir: Path,
     client: docker.DockerClient,
     *,
-    guard_min_free_gb: float = float(os.getenv("DATASMITH_MIN_FREE_GB", "200")),  # default: 200GB
+    guard_min_free_gb: float = float(os.getenv("DATASMITH_MIN_FREE_GB", "1200")),  # default: 1200GB
     guard_interval_s: int = int(os.getenv("DATASMITH_GUARD_INTERVAL_S", "120")),  # default: 2 min
     guard_hard_fail: bool = bool(int(os.getenv("DATASMITH_GUARD_HARD_FAIL", "0"))),
     guard_data_root: str | None = None,
@@ -383,16 +610,20 @@ async def orchestrate(
 
         logger.info("▶︎ cores=%s image=%s", cpuset_str, task.get_image_name())
         try:
-            rc, files = await run_container(
-                client=client,
-                task=task,
-                ctx=context,
-                cores=cpuset_str,
-                asv_args=asv_args,
-                machine_args=machine_args,
-                output_dir=output_dir,
-                run_id=run_id,
-            )
+            try:
+                rc, files = await run_container(
+                    client=client,
+                    task=task,
+                    ctx=context,
+                    cores=cpuset_str,
+                    asv_args=asv_args,
+                    machine_args=machine_args,
+                    output_dir=output_dir,
+                    run_id=run_id,
+                )
+            except Exception:
+                logger.exception("Container run failed for %s", task.get_container_name())
+                rc, files = 1, {}
             status, files = ("OK", files) if rc == 0 else (f"FAIL({rc})", {})
             logger.info("■ cores=%s → %s", cpuset_str, status)
             if len(files):
@@ -436,7 +667,7 @@ async def orchestrate(
         logger.debug("Final prune skipped or failed", exc_info=True)
 
     status_codes, files_by_image = zip(*results)
-    failures = sum(rc == 0 for rc in status_codes)
+    failures = sum(rc != 0 for rc in status_codes)
     if failures:
         # sys.exit(f"{failures} container(s) failed")
         logger.warning("%d container(s) failed", failures)

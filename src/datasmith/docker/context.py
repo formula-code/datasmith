@@ -104,13 +104,13 @@ class Task:
 
     def with_tag(self, tag: str) -> Task:
         """Return a new Task with the given tag."""
-        if tag not in {"env", "pkg"}:
-            raise ValueError(f"Tag must be either 'env' or 'pkg', got '{tag}'.")
+        if tag not in {"env", "pkg", "run", "base"}:
+            raise ValueError(f"Tag must be either 'env', 'pkg', 'run', or 'base', got '{tag}'.")
         return Task(owner=self.owner, repo=self.repo, sha=self.sha, commit_date=self.commit_date, tag=tag)
 
     def get_image_name(self) -> str:
         """Return the Docker image name for this task (repo:tag)."""
-        assert self.tag in {"env", "pkg"}, "Tag must be either 'env' or 'pkg'."  # noqa: S101
+        assert self.tag in {"env", "pkg", "run", "base"}, "Tag must be either 'env', 'pkg', 'run', or 'base'."  # noqa: S101
 
         owner = self._sanitize_component(self.owner)
         repo = self._sanitize_component(self.repo)
@@ -122,7 +122,7 @@ class Task:
 
     def get_container_name(self) -> str:
         """Return a suitable (deterministic) Docker container name for this task."""
-        assert self.tag in {"env", "pkg"}, "Tag must be either 'env' or 'pkg'."  # noqa: S101
+        assert self.tag in {"env", "pkg", "run", "base"}, "Tag must be either 'env', 'pkg', 'run', or 'base'."  # noqa: S101
 
         owner = self._sanitize_component(self.owner)
         repo = self._sanitize_component(self.repo)
@@ -153,11 +153,13 @@ class DockerContext:
     default_dockerfile_loc = Path(__file__).parent / "Dockerfile"
     default_entrypoint_loc = Path(__file__).parent / "entrypoint.sh"
     default_docker_build_base_loc = Path(__file__).parent / "docker_build_base.sh"
+    default_docker_build_run_loc = Path(__file__).parent / "docker_build_run.sh"
     default_docker_build_env_loc = Path(__file__).parent / "docker_build_env.sh"
     default_docker_build_pkg_loc = Path(__file__).parent / "docker_build_pkg.sh"
     dockerfile_data: str
     entrypoint_data: str
     env_building_data: str
+    run_building_data: str
     base_building_data: str
     building_data: str
 
@@ -171,6 +173,7 @@ class DockerContext:
         entrypoint_data: str | None = None,
         env_building_data: str | None = None,
         base_building_data: str | None = None,
+        run_building_data: str | None = None,
     ) -> None:
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
@@ -182,11 +185,14 @@ class DockerContext:
             env_building_data = self.default_docker_build_env_loc.read_text()
         if building_data is None:
             building_data = self.default_docker_build_pkg_loc.read_text()
+        if run_building_data is None:
+            run_building_data = self.default_docker_build_run_loc.read_text()
 
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
         self.env_building_data = env_building_data
         self.base_building_data = base_building_data
+        self.run_building_data = run_building_data
         self.building_data = building_data
 
         self._context_tar_bytes = {}
@@ -212,6 +218,7 @@ class DockerContext:
             DockerContext.add_bytes(tar, "Dockerfile", self.dockerfile_data.encode("utf-8"))
             DockerContext.add_bytes(tar, "entrypoint.sh", self.entrypoint_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "docker_build_env.sh", self.env_building_data.encode("utf-8"), mode=0o755)
+            DockerContext.add_bytes(tar, "docker_build_run.sh", self.run_building_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "docker_build_base.sh", self.base_building_data.encode("utf-8"), mode=0o755)
             if not probe:
                 DockerContext.add_bytes(tar, "docker_build_pkg.sh", self.building_data.encode("utf-8"), mode=0o755)
@@ -518,7 +525,7 @@ class ContextRegistry:
     all contexts are stored under a canonical key with tag='pkg'.
     """
 
-    VALID_TAGS: ClassVar[set[str]] = {"env", "pkg"}
+    VALID_TAGS: ClassVar[set[str]] = {"env", "pkg", "run", "base"}
 
     def __init__(self, registry: dict[Task, DockerContext] | None = None, default_context: DockerContext | None = None):
         if registry is None:

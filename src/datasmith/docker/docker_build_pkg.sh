@@ -90,7 +90,11 @@ for version in $TARGET_VERSIONS; do
   # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
   # In case setup.py is used, no need to append $EXTRAS.
   log "Editable install with --no-build-isolation"
-  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
+  # try with $EXTRAS first, then without if it fails
+  if ! PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS; then
+    warn "Failed to install with --no-build-isolation$EXTRAS, trying without extras"
+    PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+  fi
 
   # Health checks (import + compiled extension probe; optional pytest smoke with RUN_PYTEST_SMOKE=1)
   log "Running smoke checks"

@@ -63,3 +63,9 @@ RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
 
 # run micromamba clean in all
 RUN micromamba clean --all --yes
+
+from pkg AS run
+
+COPY docker_build_run.sh /docker_build_run.sh
+RUN chmod +x /docker_build_run.sh \
+    && /docker_build_run.sh

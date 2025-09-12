@@ -25,18 +25,24 @@ if not CACHE_LOCATION:
 
 _cache_lock = threading.Lock()  # Lock for database operations
 find_json_block = re.compile(r"```json(.*?)```", re.DOTALL)
-_session = requests.Session()
-adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=0)
-_session.mount("https://", adapter)
-_session.mount("http://", adapter)
 
 
-def _build_github_headers() -> dict[str, str]:
+def get_session() -> requests.Session:
+    """Get a requests session with connection pooling."""
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=0)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _build_github_headers(diff_api: bool = False) -> dict[str, str]:
     if "GH_TOKEN" not in os.environ:
         logger.warning("No GH_TOKEN environment variable found. Rate limits may apply.")
     token = os.environ.get("GH_TOKEN", None)
+    header = "application/vnd.github.v3.diff" if diff_api else "application/vnd.github+json"
     return {
-        "Accept": "application/vnd.github+json",
+        "Accept": header,
         "User-Agent": random.choice(LIST_UA),  # noqa: S311
         **({"Authorization": f"Bearer {token}"} if token else {}),
     }
@@ -56,17 +62,17 @@ def _build_codecov_headers() -> dict[str, str]:
     }
 
 
-configured_headers = {
+configured_headers: dict[str, typing.Callable[..., dict[str, str]]] = {
     "github": _build_github_headers,
     "codecov": _build_codecov_headers,
 }
 
 
-def _build_headers(name: str) -> dict[str, str]:
+def _build_headers(name: str, **kwargs: typing.Any) -> dict[str, str]:
     if name not in configured_headers:
         raise ValueError(f"Unknown header type: {name}. Available types: {', '.join(configured_headers.keys())}")
 
-    return configured_headers[name]()
+    return configured_headers[name](**kwargs)
 
 
 @typing.no_type_check
@@ -155,15 +161,18 @@ _last_call = {"github": 0.0, "codecov": 0.0}
 def _request_with_backoff(
     url: str,
     site_name: str,
-    session: requests.Session = _session,
+    session: requests.Session = get_session(),  # noqa: B008
     base_delay: float = 1.0,
     max_retries: int = 5,
     max_backoff: float = 60.0,
+    header_kwargs: dict | None = None,
 ) -> requests.Response:
     """
     GET ``url`` with retry, exponential back-off, client-side throttling,
     and GitHub-aware rate-limit handling.
     """
+    if header_kwargs is None:
+        header_kwargs = {}
     delay = base_delay
     last_exception = None
     for _ in range(1, max_retries + 1):
@@ -176,7 +185,7 @@ def _request_with_backoff(
         _last_call[site_name] = time.time()
 
         try:
-            resp = session.get(url, headers=_build_headers(site_name), timeout=15)
+            resp = session.get(url, headers=_build_headers(site_name, **header_kwargs), timeout=15)
             if resp.status_code in (403, 429):
                 ra = resp.headers.get("Retry-After")
                 if ra:
@@ -232,9 +241,13 @@ def _get_github_metadata(endpoint: str, params: dict[str, str] | None = None) ->
     if not endpoint:
         return None
     endpoint = endpoint.lstrip("/")
+    header_kwargs = {"diff_api": True} if params and params.get("diff_api", "false").lower() == "true" else {}
+    # pop the diff_api param so it doesn't go into the URL
+    if params and "diff_api" in params:
+        params.pop("diff_api")
     api_url = prepare_url(f"https://api.github.com/{endpoint}", params=params)
     try:
-        r = _request_with_backoff(api_url, site_name="github")
+        r = _request_with_backoff(api_url, site_name="github", header_kwargs=header_kwargs)
     except HTTPError as e:
         status = getattr(e.response, "status_code", None)
         if status in (404, 451, 410):
@@ -248,6 +261,9 @@ def _get_github_metadata(endpoint: str, params: dict[str, str] | None = None) ->
         logger.error("Runtime error fetching %s: %s", api_url, e, exc_info=True)
         return None
 
+    if header_kwargs.get("diff_api", False):
+        # for diff API, return the text as a single-item dict
+        return {"diff": r.text}
     return cast(dict[str, typing.Any], r.json())
 
 
@@ -256,7 +272,7 @@ def _post_with_backoff(
     site_name: str,
     payload: dict[str, typing.Any],
     *,
-    session: requests.Session = _session,
+    session: requests.Session = get_session(),  # noqa: B008
     rps: int = 2,
     base_delay: float = 1.0,
     max_retries: int = 5,
