@@ -140,6 +140,14 @@ class Task:
         # Be conservative on length (Docker allows long names, but trim to 128 chars)
         return name[:128]
 
+    def __eq__(self, value: object) -> bool:
+        if not isinstance(value, Task):
+            return NotImplemented
+        return self.owner == value.owner and self.repo == value.repo and self.sha == value.sha and self.tag == value.tag
+
+    def __hash__(self) -> int:
+        return hash((self.owner, self.repo, self.sha, self.tag))
+
 
 class DockerContext:
     """

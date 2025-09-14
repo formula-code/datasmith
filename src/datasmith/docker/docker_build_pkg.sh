@@ -58,7 +58,7 @@ for version in $TARGET_VERSIONS; do
   ENV_NAME="asv_${version}"
   log "==> Building in env: $ENV_NAME (python=$version)"
 
-  IMP="${IMPORT_NAME:-}"
+  IMP="$(detect_import_name || true)"
   log "Using import name: $IMP"
 
   # -----------------------------

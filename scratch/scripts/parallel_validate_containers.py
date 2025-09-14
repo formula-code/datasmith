@@ -112,14 +112,13 @@ def main(args: argparse.Namespace) -> None:
     all_states = process_inputs(args)
     context_registry = ContextRegistry.load_from_file(path=args.context_registry)
     # Prepare tasks
-    all_imgs = {t.get_image_name() for t in context_registry.registry}
     tasks: list[Task] = []
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
         for sha, date in limited:
             task = Task(owner, repo, sha, commit_date=float(date))
-            if task.with_tag("pkg").get_image_name() in all_imgs and (sha is not None):
-                tasks.append(task.with_tag(args.target))
+            if task.with_tag("pkg") in context_registry:
+                tasks.append(task)
             else:
                 logger.debug(f"main: skipping {task} not in context registry")
 
@@ -145,7 +144,10 @@ def main(args: argparse.Namespace) -> None:
         return
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-            futures = [ex.submit(validate_one, t, args, client, context_registry, machine_defaults) for t in tasks]
+            futures = [
+                ex.submit(validate_one, t.with_tag(args.target), args, client, context_registry, machine_defaults)
+                for t in tasks
+            ]
             for fut in as_completed(futures):
                 rec = fut.result()
                 results.append(rec)

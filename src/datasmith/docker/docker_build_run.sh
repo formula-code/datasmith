@@ -49,6 +49,70 @@ if [ -n "$install_command" ]; then
   done <<< "$install_command"
 fi
 
+set -u
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+# 1) Build a clean constraints file (name==version only)
+CONSTRAINTS_FILE="$(mktemp)"
+python - <<'PY' > "$CONSTRAINTS_FILE"
+import json, subprocess, sys
+pkgs = json.loads(subprocess.check_output([sys.executable, "-m", "pip", "list", "--format=json"]))
+for d in pkgs:
+    print(f"{d['name']}=={d['version']}")
+PY
+export PIP_CONSTRAINT="$CONSTRAINTS_FILE"
+
+# 2) Collect matrix packages and append explicit pins
+PKG_LIST_FILE="$(mktemp)"
+python - <<'PY' | tee "$PKG_LIST_FILE" >/dev/null
+import os, asv
+conf = asv.config.Config.load(os.environ.get("CONF_NAME","asv.conf.json"))
+banned = {"cython","python-build","meson","ninja","setuptools","wheel","pip",
+          "virtualenv","micromamba","conda","mamba","git","scipy"}
+pkgs, pins = [], []
+if conf.matrix:
+    for pkg, versions in conf.matrix.items():
+        if any(b in pkg.lower() for b in banned): continue
+        pinned = (str(versions[0]).strip() if versions and versions[0] else None)
+        if pinned:
+            pins.append(f"{pkg}=={pinned}")
+            pkgs.append(f"{pkg}=={pinned}")
+        else:
+            pkgs.append(pkg)
+
+with open(os.environ["PIP_CONSTRAINT"], "a", encoding="utf-8") as cf:
+    seen=set()
+    for p in pins:
+        if p not in seen:
+            cf.write(p + "\n"); seen.add(p)
+
+print("\n".join(pkgs))
+PY
+
+# 3) Best-effort install with per-package timeout
+SKIPPED=()
+INSTALLED=()
+
+while IFS= read -r pkg; do
+  [ -z "$pkg" ] && continue
+  echo ">> checking $pkg"
+  # Use GNU timeout (60s) around the dry-run check
+  if timeout 60 python -m pip install --no-cache-dir \
+        --upgrade-strategy only-if-needed -c "$CONSTRAINTS_FILE" \
+        --dry-run "$pkg" >/dev/null 2>&1; then
+    # If the dry run succeeds, do the real install (no timeout here, or add another timeout if desired)
+    if python -m pip install --no-cache-dir \
+          --upgrade-strategy only-if-needed -c "$CONSTRAINTS_FILE" "$pkg"; then
+      INSTALLED+=("$pkg")
+    else
+      echo "!! install failed for $pkg — skipping."
+      SKIPPED+=("$pkg")
+    fi
+  else
+    echo "!! timeout/violation on $pkg — skipping."
+    SKIPPED+=("$pkg")
+  fi
+done < "$PKG_LIST_FILE"
+
 # cd to dirname $CONF_NAME
 CWD=$(pwd)
 cd "$(dirname "$CONF_NAME")"

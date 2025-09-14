@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 
 import docker
-from docker.errors import ImageNotFound
+from docker.errors import ImageNotFound, NotFound
 from docker.models.containers import Container
 
 from datasmith.docker.context import BuildResult, ContextRegistry, Task
@@ -184,7 +184,7 @@ def validate_one(  # noqa: C901
     """
     assert task.sha is not None, "Task.sha must be set"  # noqa: S101
     # if the task.get_image_name() already exists using the docker client, skip the build
-    with contextlib.suppress(ImageNotFound):
+    with contextlib.suppress(ImageNotFound, NotFound):
         if client.images.get(task.get_image_name()):
             # remove the image
             logger.debug("validate_one: image %s already exists, removing image...", task.get_image_name())
@@ -206,6 +206,8 @@ def validate_one(  # noqa: C901
             #     "files": {},
             # }
     docker_ctx = context_registry.get(task)
+    if docker_ctx == context_registry.get_default():
+        _, docker_ctx = context_registry.get_similar(task)[0]
 
     build_cmd, run_cmd = format_cmds(task.get_image_name(), task.owner, task.repo, task.sha, args.output_dir)
 

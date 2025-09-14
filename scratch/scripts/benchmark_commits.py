@@ -154,14 +154,13 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
     # os.environ["DOCKER_CACHE_FROM"] = base_tag
 
     # Prepare tasks
-    all_imgs = {t.get_image_name() for t in context_registry.registry}
     tasks: list[tuple[Task, DockerContext]] = []
     repo_commit_pairs = defaultdict(list)
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
         for sha, date in limited:
             task = Task(owner, repo, sha, commit_date=date)
-            if task.with_tag("pkg").get_image_name() in all_imgs:
+            if task in context_registry:
                 tasks.append((task, context_registry.get(task)))
                 repo_commit_pairs[f"{owner}/{repo}"].append(task)
                 # also add the parent commit.

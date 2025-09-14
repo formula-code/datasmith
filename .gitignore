@@ -197,8 +197,9 @@ tokens.env
 benchmark_results/
 scratch/artifacts/
 scratch/example-docker-task
+scratch/rsync-backups/
 asv-output/
 output
-
+*context_registry*
 # Database files
 *.db
