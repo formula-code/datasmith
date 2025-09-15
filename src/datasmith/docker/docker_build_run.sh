@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# set -x
 set -euo pipefail
 
 cd /workspace/repo || exit 1
@@ -60,7 +59,7 @@ for d in pkgs:
     print(f"{d['name']}=={d['version']}")
 PY
 export PIP_CONSTRAINT="$CONSTRAINTS_FILE"
-
+export CONF_NAME="$CONF_NAME"
 # 2) Collect matrix packages and append explicit pins
 PKG_LIST_FILE="$(mktemp)"
 python - <<'PY' | tee "$PKG_LIST_FILE" >/dev/null
@@ -95,8 +94,8 @@ INSTALLED=()
 while IFS= read -r pkg; do
   [ -z "$pkg" ] && continue
   echo ">> checking $pkg"
-  # Use GNU timeout (60s) around the dry-run check
-  if timeout 60 python -m pip install --no-cache-dir \
+  # Use GNU timeout (600s) around the dry-run check
+  if timeout 600 python -m pip install --no-cache-dir \
         --upgrade-strategy only-if-needed -c "$CONSTRAINTS_FILE" \
         --dry-run "$pkg" >/dev/null 2>&1; then
     # If the dry run succeeds, do the real install (no timeout here, or add another timeout if desired)
