@@ -110,7 +110,7 @@ KNOWN_COMMIT_URLS = {
     "datashader": "https://github.com/holoviz/datashader/",
     "xarray-spatial": "https://github.com/makepath/xarray-spatial/",
     # --- misc ---
-    "enlighten": "https://github.com/RazerM/enlighten/",
+    "enlighten": "https://github.com/Rockhopper-Technologies/enlighten/",
     "xorbits": "https://github.com/xorbitsai/xorbits/",
     "lmfit-py": "https://github.com/lmfit/lmfit-py/",
     "mdanalysis": "https://github.com/MDAnalysis/mdanalysis/",
@@ -129,10 +129,10 @@ def noisy_search(noisy_key: str) -> str | None:
 
 
 def get_commit_url_from_index(index_data: dict) -> str | None:
+    commit_url = None
     if pot_commit_url := index_data.get("show_commit_url"):
         # get the commit_url
         try:
-            commit_url = None
             if "/commit" in pot_commit_url:
                 commit_url = pot_commit_url.replace("/commit", "/").replace("/tree/", "/")
             elif index_data.get("project") in KNOWN_COMMIT_URLS:
@@ -144,11 +144,10 @@ def get_commit_url_from_index(index_data: dict) -> str | None:
                 logger.warning("Using fuzzy match for commit URL: %s -> %s", index_data.get("project_url", ""), match)
                 commit_url = match
             else:
-                return commit_url
+                logger.warning("Could not find known commit URL for project %s", index_data.get("project"))
         except Exception as e:
             logger.warning("Failed to parse commit URL %s: %s", pot_commit_url, e)
-            return None
-    return None
+    return commit_url
 
 
 def get_taskname_from_index(index_data: dict) -> Task:

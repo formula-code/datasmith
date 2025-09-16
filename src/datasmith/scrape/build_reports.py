@@ -10,8 +10,8 @@ from urllib.parse import urlparse
 
 import pandas as pd
 import tiktoken
-import tqdm
 
+import tqdm
 from datasmith.scrape.scrape_dashboards import get_commit_url_from_index
 from datasmith.scrape.utils import _parse_commit_url
 from datasmith.utils import CACHE_LOCATION, _get_github_metadata, cache_completion

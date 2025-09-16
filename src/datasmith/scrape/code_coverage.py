@@ -6,8 +6,8 @@ import urllib.parse
 from collections.abc import Generator
 
 import pandas as pd
-import tqdm
 
+import tqdm
 from datasmith.execution.utils import _get_commit_info
 from datasmith.scrape.utils import _parse_commit_url
 from datasmith.utils import _get_codecov_metadata
