@@ -40,6 +40,14 @@ BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
 source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
 
+# if ENV_NAME is not set, set it to the first version in ASV_PY_VERSIONS
+if [ -z "${ENV_NAME:-}" ]; then
+  ENV_NAME="asv_$(echo "$ASV_PY_VERSIONS" | awk '{print $1}')"
+  set +u
+  micromamba activate "$ENV_NAME"
+  set -u
+fi
+
 CURR_DIR="$(pwd)"
 cd /workspace/repo
 

@@ -640,42 +640,6 @@ micromamba activate base
 # Minimal tools in base to parse metadata (pyproject & egg-info)
 micromamba install -y -n base -c conda-forge python tomli setuptools >/dev/null
 
-# IMPORT_NAME="$(detect_import_name || true)"
-# if [[ -z "$IMPORT_NAME" ]]; then
-#     echo "WARN: Could not determine import name; the pkg stage will fall back to local detection."
-# fi
-
-# Move into the directory that contains asv.*.json
-# cd_asv_json_dir || { echo "No 'asv.*.json' file found." >&2; exit 1; }
-
-# CONF_NAME="$(asv_conf_name || true)"
-# if [[ -z "${CONF_NAME:-}" ]]; then
-#     echo "No 'asv.*.json' file found." >&2
-#     exit 1
-# fi
-
-# Make sure tomli is available in base for pyproject parsing
-micromamba install -y -n base -c conda-forge tomli >/dev/null
-
-# Read python versions from the ASV config
-# PY_VERSIONS=$(python - <<PY
-# import asv
-# cfg = asv.config.Config.load("$CONF_NAME")
-# # remove any python less than 3.7 (ASV dropped support for 3.6+ in v0.5)
-# cfg.pythons = [v for v in cfg.pythons if tuple(map(int, v.split('.'))) >= (3,7)]
-# print(" ".join(cfg.pythons))
-# PY
-# )
-
-# If none found, throw a noticeable error and exit
-# if [[ -z "$PY_VERSIONS" ]]; then
-#     echo "No Satisfying PY_VERSIONS found in $CONF_NAME" >&2
-#     # echo asv config for debugging
-#     cat "$CONF_NAME" >&2
-#     exit 1
-# fi
-
-
 # Create the per-version envs with common build deps & ASV
 PY_VERSIONS="3.7 3.8 3.9 3.10 3.11 3.12"
 for version in $PY_VERSIONS; do
@@ -687,9 +651,9 @@ for version in $PY_VERSIONS; do
 
     # Generic toolchain useful for many compiled projects (installed once here)
     micromamba install -y -n "$ENV_NAME" -c conda-forge \
-        pip git conda mamba "libmambapy<2" \
-        numpy scipy cython joblib threadpoolctl matplotlib pytest \
-        compilers meson-python cmake ninja pkg-config tomli
+        pip git conda mamba "libmambapy<=1.9.9" \
+        numpy scipy cython joblib fakeredis threadpoolctl matplotlib pytest \
+        compilers meson-python cmake ninja pkg-config tomli hypothesis
 
     # Keep ASV consistent
     micromamba run -n "$ENV_NAME" bash -lc "python -m pip install --upgrade pip setuptools wheel"

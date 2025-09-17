@@ -79,12 +79,6 @@ for version in $TARGET_VERSIONS; do
   # export LDFLAGS="${LDFLAGS:-}"
   # -----------------------------
 
-  # Install some generic packages needed for building/testing.
-  # Libmambapy must be < 2 avoid issues running airspeed-velocity.
-  micromamba install -y -n "$ENV_NAME" -c conda-forge pip git conda mamba "libmambapy<=1.9.9" \
-        numpy scipy cython joblib fakeredis threadpoolctl pytest \
-        compilers meson-python cmake ninja pkg-config tomli
-
   # Editable install (no build isolation preferrably). Toolchain lives in the env already.
   # $EXTRAS is an optional argument to install all discovered extra dependencies.
   # It will be empty if pyproject.toml does not exist or has no [project.optional-dependencies].
