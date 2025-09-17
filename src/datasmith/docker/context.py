@@ -165,6 +165,7 @@ class DockerContext:
     default_docker_build_env_loc = Path(__file__).parent / "docker_build_env.sh"
     default_docker_build_pkg_loc = Path(__file__).parent / "docker_build_pkg.sh"
     default_profile_loc = Path(__file__).parent / "profile.sh"
+    default_run_tests_loc = Path(__file__).parent / "run_tests.sh"
     dockerfile_data: str
     entrypoint_data: str
     env_building_data: str
@@ -172,6 +173,7 @@ class DockerContext:
     base_building_data: str
     building_data: str
     profile_data: str
+    run_tests_data: str
 
     # Cached, reproducible tar bytes per (probe: bool). Immutable => thread-safe reuse.
     _context_tar_bytes: dict[bool, bytes]
@@ -185,6 +187,7 @@ class DockerContext:
         base_building_data: str | None = None,
         run_building_data: str | None = None,
         profile_data: str | None = None,
+        run_tests_data: str | None = None,
     ) -> None:
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
@@ -200,6 +203,8 @@ class DockerContext:
             run_building_data = self.default_docker_build_run_loc.read_text()
         if profile_data is None:
             profile_data = self.default_profile_loc.read_text()
+        if run_tests_data is None:
+            run_tests_data = self.default_run_tests_loc.read_text()
 
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
@@ -208,6 +213,7 @@ class DockerContext:
         self.run_building_data = run_building_data
         self.building_data = building_data
         self.profile_data = profile_data
+        self.run_tests_data = run_tests_data
 
         self._context_tar_bytes = {}
 
@@ -235,6 +241,7 @@ class DockerContext:
             DockerContext.add_bytes(tar, "docker_build_run.sh", self.run_building_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "docker_build_base.sh", self.base_building_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "profile.sh", self.profile_data.encode("utf-8"), mode=0o755)
+            DockerContext.add_bytes(tar, "run_tests.sh", self.run_tests_data.encode("utf-8"), mode=0o755)
             if not probe:
                 DockerContext.add_bytes(tar, "docker_build_pkg.sh", self.building_data.encode("utf-8"), mode=0o755)
         buf.seek(0)
@@ -508,6 +515,7 @@ class DockerContext:
             "base_building_data": self.base_building_data,
             "run_building_data": self.run_building_data,
             "profile_data": self.profile_data,
+            "run_tests_data": self.run_tests_data,
         }
 
     @classmethod
@@ -524,6 +532,7 @@ class DockerContext:
             base_building_data=data.get("base_building_data", None),
             run_building_data=data.get("run_building_data", None),
             profile_data=data.get("profile_data", None),
+            run_tests_data=data.get("run_tests_data", None),
         )
 
     def __hash__(self) -> int:
@@ -535,6 +544,7 @@ class DockerContext:
             self.base_building_data,
             self.run_building_data,
             self.profile_data,
+            self.run_tests_data,
         ))
 
 

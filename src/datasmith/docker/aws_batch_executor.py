@@ -397,7 +397,8 @@ for i in $(seq 0 $((TASK_COUNT - 1))); do
   echo "$TASK_DATA" | jq -r '.context.base_building_data' > docker_build_base.sh
   echo "$TASK_DATA" | jq -r '.context.run_building_data' > docker_build_run.sh
   echo "$TASK_DATA" | jq -r '.context.profile_data' > profile.sh
-  chmod +x entrypoint.sh docker_build_*.sh profile.sh || true
+  echo "$TASK_DATA" | jq -r '.context.run_tests_data' > run_tests.sh
+  chmod +x entrypoint.sh docker_build_*.sh profile.sh run_tests.sh || true
 
         echo "==> Building Docker image for $OWNER/$REPO@$SHA"
         REPO_URL="https://github.com/$OWNER/$REPO.git"
@@ -456,7 +457,8 @@ EOF
           sed -i "s/BUILD_LOG_CONTENT_PLACEHOLDER/$BUILD_LOG_CONTENT/g" failure_template.json
 
           mv failure_template.json result.json
-          retry aws s3 cp result.json "s3://{self.cfg.s3_bucket}/{self.cfg.s3_prefix}/results/$RUN_ID/batch-$BATCH_IDX/$TASK_ID/result.json" || true
+          PADDED_BATCH_IDX=$(printf "%03d" "$BATCH_IDX")
+          retry aws s3 cp result.json "s3://{self.cfg.s3_bucket}/{self.cfg.s3_prefix}/results/$RUN_ID/batch-$PADDED_BATCH_IDX/$TASK_ID/result.json" || true
           cd ..
           continue
         fi
@@ -562,7 +564,8 @@ EOF
 
         mv success_template.json result.json
 
-  retry aws s3 cp result.json "s3://{self.cfg.s3_bucket}/{self.cfg.s3_prefix}/results/$RUN_ID/batch-$BATCH_IDX/$TASK_ID/result.json" || true
+  PADDED_BATCH_IDX=$(printf "%03d" "$BATCH_IDX")
+  retry aws s3 cp result.json "s3://{self.cfg.s3_bucket}/{self.cfg.s3_prefix}/results/$RUN_ID/batch-$PADDED_BATCH_IDX/$TASK_ID/result.json" || true
 
   docker rmi "$IMAGE_NAME" || true
   cd ..

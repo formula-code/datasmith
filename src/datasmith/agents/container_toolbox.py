@@ -339,6 +339,22 @@ class PersistentContainer:
                     if v not in cands:
                         cands.append(v)
 
+        # Collect installed packages exported by build_env (if present)
+        installed_packages: dict[str, list[str]] = {}
+        try:
+            ls = self.exec("ls -1 /etc/asv_env 2>/dev/null | grep '^installed_packages_' || true", timeout_s=10)
+            for fname in [ln.strip() for ln in ls.stdout.splitlines() if ln.strip()]:
+                if not fname.startswith("installed_packages_"):
+                    continue
+                version = fname.split("installed_packages_", 1)[1]
+                cat = self.exec(f"cat /etc/asv_env/{shlex.quote(fname)} 2>/dev/null || true", timeout_s=10)
+                lines = [ln.strip() for ln in cat.stdout.splitlines() if ln.strip()]
+                if version:
+                    installed_packages[version] = lines
+        except Exception:
+            logger.warning("Error collecting installed packages", exc_info=True)
+            pass
+
         return {
             "repo_root": repo_root,
             "asv_dir": asv_dir,
@@ -353,6 +369,7 @@ class PersistentContainer:
             "project_name_from_asv": meta.get("project_name_from_asv"),
             "python_versions_from_asv": meta.get("python_versions_from_asv") or [],
             "pkg_candidates": cands[:8],
+            "installed_packages": installed_packages,
         }
 
     def try_import(self, cmd_python: str, candidates: list[str]) -> dict:

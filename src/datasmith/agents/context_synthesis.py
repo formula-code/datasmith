@@ -15,9 +15,8 @@ import dspy
 from docker.errors import APIError, ImageNotFound, NotFound
 
 from datasmith.agents.tool_executor import ContainerToolExecutor
-from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
+from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext, Task
 from datasmith.docker.orchestrator import gen_run_labels
-from datasmith.docker.validation import Task
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +107,141 @@ def _preview(s: str, n: int = 160) -> str:
     return s[:n] + ("..." if len(s) > n else "")
 
 
+def _detect_test_suite_dir(
+    client: docker.DockerClient,
+    image_name: str,
+    repo_name: str,
+    run_labels: dict[str, str],
+    timeout: int = 60,
+) -> str:
+    """
+    Best-effort in-container heuristic to choose a test suite path:
+    - Prefer '/workspace/repo/tests' if exists
+    - Then try repo name directory (e.g., 'scipy') if exists
+    - Then common package names
+    - Else '.'
+    """
+    candidates = [
+        "tests",
+        repo_name,
+        "scipy",
+        "sklearn",
+        "pandas",
+        "numpy",
+        "torch",
+        "xarray",
+        "dask",
+        "statsmodels",
+    ]
+
+    script = (
+        "set -euo pipefail; cd /workspace/repo; "
+        + "for d in "
+        + " ".join(f"{c}" for c in candidates)
+        + '; do if [ -d "$d" ]; then echo $d; exit 0; fi; done; echo .'
+    )
+
+    container = None
+    try:
+        container = client.containers.run(
+            image=image_name,
+            command=[script],
+            entrypoint=["/bin/bash", "-lc"],
+            detach=True,
+            labels=run_labels,
+            working_dir="/workspace/repo",
+        )
+        rc = container.wait(timeout=timeout).get("StatusCode", 1)
+        out = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace").strip()
+        if rc == 0 and out:
+            first_line = out.splitlines()[0].strip()
+            return first_line or "."
+    except Exception:
+        logger.warning("Error detecting test suite dir", exc_info=True)
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            if container is not None:
+                container.remove(force=True)
+    return "."
+
+
+def _run_quick_profile(
+    client: docker.DockerClient,
+    image_name: str,
+    run_labels: dict[str, str],
+    timeout: int = 600,
+) -> tuple[bool, str]:
+    """Run a quick profiling sanity check using /profile.sh in the image."""
+    container = None
+    quick_s = 45
+    try:
+        cmd = [
+            f'timeout -k 5 {quick_s}s /profile.sh /output/profile ""',
+        ]
+        logger.debug("profile:spawn cmd=%s", " ".join(cmd))
+        container = client.containers.run(
+            image=image_name,
+            command=cmd,
+            entrypoint=["/bin/bash", "-lc"],
+            detach=True,
+            labels=run_labels,
+        )
+        rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
+        logs = (container.logs() or b"").decode("utf-8", errors="replace")
+        if rc == 124:
+            logger.debug("profile:timeout rc=124 treated as success")
+            return (True, _preview(logs, 4000))
+        if rc != 0:
+            logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(logs, 240))
+        return (rc == 0, _preview(logs, 4000))
+    except Exception as e:
+        return (False, f"exception: {e}")
+    finally:
+        with contextlib.suppress(Exception):
+            if container is not None:
+                container.remove(force=True)
+
+
+def _run_quick_tests(
+    client: docker.DockerClient,
+    image_name: str,
+    repo_name: str,
+    run_labels: dict[str, str],
+    timeout: int = 900,
+) -> tuple[bool, str]:
+    """Run a quick test sanity check using /run_tests.sh in the image."""
+    suite = _detect_test_suite_dir(client, image_name, repo_name, run_labels)
+    container = None
+    quick_s = 45
+    try:
+        cmd = [
+            f"pip install feedparser ; timeout -k 5 {quick_s}s /run_tests.sh /output/tests {suite} -q -k 'not slow and not network'",
+        ]
+        logger.debug("tests:spawn cmd=%s", " ".join(cmd))
+        container = client.containers.run(
+            image=image_name,
+            command=cmd,
+            entrypoint=["/bin/bash", "-lc"],
+            detach=True,
+            labels=run_labels,
+        )
+        rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
+        logs = (container.logs() or b"").decode("utf-8", errors="replace")
+        if rc == 124:
+            logger.debug("tests:timeout rc=124 treated as success")
+            return (True, _preview(logs, 4000))
+        if rc != 0:
+            logger.debug("tests:failed rc=%s stderr_tail: %s", rc, _preview(logs, 240))
+        return (rc == 0, _preview(logs, 4000))
+    except Exception as e:
+        return (False, f"exception: {e}")
+    finally:
+        with contextlib.suppress(Exception):
+            if container is not None:
+                container.remove(force=True)
+
+
 def _ts_to_iso(ts: float | int | None) -> str:
     if ts is None:
         return ""
@@ -115,54 +249,6 @@ def _ts_to_iso(ts: float | int | None) -> str:
         return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
     except Exception:
         return str(ts)
-
-
-# class BuildScriptSynthesis(dspy.Signature):
-#     """
-#     Draft a bash script (docker_build.sh) to build & install a Python repo inside micromamba envs
-#     discovered via asv.*.json. The script MUST be idempotent and safe to run in Docker.
-#     Respect this template:
-#       - discover and cd into the dir containing asv.*.json
-#       - for each python version listed there:
-#           * create micromamba env "asv_${version}"
-#           * ensure asv + build tooling
-#           * then perform project install (editable or wheel) with best-guess flags
-#       - no user prompts, all non-interactive
-#       - Do not surround with ```bash ... ```. Return raw bash script.
-#     """
-
-#     # Inputs
-#     owner_repo = dspy.InputField(desc="The repository this commit belongs to. E.g. 'scikit-learn/scikit-learn'.")
-#     sha = dspy.InputField(desc="The commit SHA that is currently checked out.")
-#     commit_date = dspy.InputField(desc="The commit date in ISO format, e.g. '2023-10-05T12:34:56Z'.")
-#     stderr_logs = dspy.InputField(
-#         desc="The most recent stderr logs from the last build attempt. Upto ~8k tail-end chars."
-#     )
-#     stdout_logs = dspy.InputField(
-#         desc="The most recent stdout logs from the last build attempt. Upto ~8k tail-end chars."
-#     )
-#     failure_more = dspy.InputField(
-#         desc="Describes where the failure occured. E.g. 'N/A', 'build failed', 'asv run failed'."
-#     )
-#     last_docker_build_script = dspy.InputField(desc="Previous docker_build.sh script.")
-#     initial_template = dspy.InputField(desc="Stable outer template..")
-
-#     # Output
-#     error_summary = dspy.OutputField(desc="A brief summary of the last build failure, and possible causes.")
-#     resolution_steps = dspy.OutputField(desc="Concrete steps to resolve the failure.")
-#     docker_build_script = dspy.OutputField(
-#         desc="Final executable bash script that successfully builds the project from source."
-#     )
-# Draft a bash script (docker_build.sh) to build & install a Python repo inside micromamba envs
-# discovered via asv.*.json. The script MUST be idempotent and safe to run in Docker.
-# Respect this template:
-#   - discover and cd into the dir containing asv.*.json
-#   - for each python version listed there:
-#       * create micromamba env "asv_${version}"
-#       * ensure asv + build tooling
-#       * then perform project install (editable or wheel) with best-guess flags
-#   - no user prompts, all non-interactive
-#   - Do not surround with ```bash ... ```. Return raw bash script.
 
 
 class BuildScriptAgentStep(dspy.Signature):
@@ -180,6 +266,10 @@ class BuildScriptAgentStep(dspy.Signature):
         - The script MUST be idempotent and safe to run in Docker.
         - No user prompts, all non-interactive.
         - Do not surround with Markdown tags like ```bash ... ```.
+        - Critically: After editable install, the environment must be READY for quick verification:
+          - A lightweight profiling sanity check should be able to start (not error immediately) with the project importable.
+          - A lightweight pytest sanity check should be able to start (not error immediately), even for projects that require running from a subdirectory (e.g., SciPy).
+          - Install test/benchmark extras as needed (e.g., pyproject optional-dependencies, dev/test requirements) so that import and minimal pytest discovery succeed.
     """
 
     # Inputs (context)
@@ -229,6 +319,8 @@ class BuildScriptProgram(dspy.Module):
             "- try_import(candidates=[...]): (post-build) quick python import check inside the built image.\n"
             "- exec_arbitrary(command): run arbitrary shell command in the checked-out repo (careful!).\n"
             "- none/finish + docker_build_script: when you are satisfied, return the final build script in the docker_build_script field.\n"
+            "Hints:\n"
+            "- facts_json contains installed_packages (by Python version) exported by build_env; use it to avoid redundant installs or to spot missing test deps."
         )
 
     def forward(
@@ -292,24 +384,6 @@ class BuildScriptProgram(dspy.Module):
                 # Model is done but didn't provide a script. Stop.
                 break
 
-            # Don't prefer build_script until model is completely done with it.
-            # # If model already emitted a script, prefer it
-            # if (out.docker_build_script or "").strip():  # pyright: ignore[reportAttributeAccessIssue]
-            #     iter_script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
-            #     break
-
-        # out = self.predict(
-        #     owner_repo=owner_repo,
-        #     sha=sha,
-        #     commit_date=commit_date,
-        #     stderr_logs=stderr_logs or "",
-        #     stdout_logs=stdout_logs or "",
-        #     failure_more=failure_more or "N/A",
-        #     last_docker_build_script=last_docker_build_script or "",
-        #     initial_template=initial_template,
-        # )
-        # Safety belt: ensure the required fixed template anchors are present.
-        # script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
         script = (iter_script or "").strip()
         logger.debug("DSPy: candidate script preview: %s", _preview(script, 240))
         # source /etc/profile.d/asv_utils.sh || true
@@ -573,6 +647,8 @@ def agent_build_and_validate(  # noqa: C901
 
             # Build package image
             logger.info("agent_build_and_validate: building image '%s'", task.get_image_name())
+            logger.debug("build:start image=%s", task.get_image_name())
+            _t_build_start = time.time()
             build_res = build_once_with_context(
                 client=client,
                 task=task.with_tag("pkg"),
@@ -584,6 +660,58 @@ def agent_build_and_validate(  # noqa: C901
                 force=False,  # always rebuild pkg image to pick up new script
                 run_labels=run_labels,
             )
+            logger.debug(
+                "build:done ok=%s rc=%s duration=%.1fs",
+                build_res.ok,
+                build_res.rc,
+                time.time() - _t_build_start,
+            )
+            # move the profiling and testing here.
+            # change the signature so that if profile_ok or tests_ok is False, it returns False.
+            # and it also modifies build_res to include the error information from the profiling and testing.
+            if build_res.ok:
+                logger.info("agent_build_and_validate: build ok; verifying profile+tests before recording attempt")
+                logger.debug("profile:start")
+                _t_profile_start = time.time()
+                profile_ok, profile_preview = _run_quick_profile(
+                    client=client,
+                    image_name=task.with_tag("pkg").get_image_name(),
+                    run_labels=run_labels,
+                    timeout=min(args.build_timeout, 600),
+                )
+                logger.debug("profile:done ok=%s duration=%.1fs", profile_ok, time.time() - _t_profile_start)
+                logger.debug("tests:start")
+                _t_tests_start = time.time()
+                tests_ok, tests_preview = _run_quick_tests(
+                    client=client,
+                    image_name=task.with_tag("pkg").get_image_name(),
+                    repo_name=task.repo,
+                    run_labels=run_labels,
+                    timeout=min(args.build_timeout, 900),
+                )
+                logger.debug("tests:done ok=%s duration=%.1fs", tests_ok, time.time() - _t_tests_start)
+                if not (profile_ok and tests_ok):
+                    logger.warning(
+                        "agent_build_and_validate: verification failed (profile_ok=%s, tests_ok=%s)",
+                        profile_ok,
+                        tests_ok,
+                    )
+                    combined_preview = []
+                    combined_preview.append(f"[profile_ok={profile_ok}] {profile_preview}")
+                    combined_preview.append(f"[tests_ok={tests_ok}] {tests_preview}")
+                    preview_text = " | ".join(combined_preview)
+                    build_res = BuildResult(
+                        ok=False,
+                        image_id=build_res.image_id,
+                        image_name=build_res.image_name,
+                        rc=1,
+                        duration_s=build_res.duration_s,
+                        stderr_tail=preview_text,
+                        stdout_tail="",
+                    )
+                else:
+                    logger.info("agent_build_and_validate: verification passed (profile and tests)")
+
             attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
             attempt_idx += 1
 
@@ -593,7 +721,6 @@ def agent_build_and_validate(  # noqa: C901
 
                 final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
                 _save_pickle(ctx, final_pickle)
-                logger.info("agent_build_and_validate: build succeeded via similar-context candidate")
 
                 result = attempts[-1].build_result
                 if result is None:
@@ -633,7 +760,18 @@ def agent_build_and_validate(  # noqa: C901
                 return result_dict
 
             # Early exit if failure is unrelated to docker_build_pkg.sh
-            if build_res.stderr_tail and "docker_build_pkg.sh" not in build_res.stderr_tail:
+            is_verification_failure = False
+            try:
+                st = build_res.stderr_tail or ""
+                is_verification_failure = ("[profile_ok=" in st) or ("[tests_ok=" in st)
+            except Exception:
+                is_verification_failure = False
+            if (
+                (not build_res.ok)
+                and (build_res.stderr_tail)
+                and ("docker_build_pkg.sh" not in build_res.stderr_tail)
+                and (not is_verification_failure)
+            ):
                 logger.error(
                     "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh; not worth iterating"
                 )
@@ -719,6 +857,8 @@ def agent_build_and_validate(  # noqa: C901
                 _save_pickle(ctx, attempt_pickle)
 
             logger.info("agent_build_and_validate: building image '%s'", task.get_image_name())
+            logger.debug("build:start image=%s", task.get_image_name())
+            _t_build_start = time.time()
             build_res = build_once_with_context(
                 client=client,
                 task=task.with_tag("pkg"),
@@ -730,6 +870,58 @@ def agent_build_and_validate(  # noqa: C901
                 force=False,  # always rebuild to pick up new script
                 run_labels=run_labels,
             )
+            logger.debug(
+                "build:done ok=%s rc=%s duration=%.1fs",
+                build_res.ok,
+                build_res.rc,
+                time.time() - _t_build_start,
+            )
+            # move the profiling and testing here.
+            # change the signature so that if profile_ok or tests_ok is False, it returns False.
+            # and it also modifies build_res to include the error information from the profiling and testing.
+            if build_res.ok:
+                logger.info("agent_build_and_validate: build ok; verifying profile+tests before recording attempt")
+                logger.debug("profile:start")
+                _t_profile_start = time.time()
+                profile_ok, profile_preview = _run_quick_profile(
+                    client=client,
+                    image_name=task.with_tag("pkg").get_image_name(),
+                    run_labels=run_labels,
+                    timeout=min(args.build_timeout, 600),
+                )
+                logger.debug("profile:done ok=%s duration=%.1fs", profile_ok, time.time() - _t_profile_start)
+                logger.debug("tests:start")
+                _t_tests_start = time.time()
+                tests_ok, tests_preview = _run_quick_tests(
+                    client=client,
+                    image_name=task.with_tag("pkg").get_image_name(),
+                    repo_name=task.repo,
+                    run_labels=run_labels,
+                    timeout=min(args.build_timeout, 900),
+                )
+                logger.debug("tests:done ok=%s duration=%.1fs", tests_ok, time.time() - _t_tests_start)
+                if not (profile_ok and tests_ok):
+                    logger.warning(
+                        "agent_build_and_validate: verification failed (profile_ok=%s, tests_ok=%s). Iterating.",
+                        profile_ok,
+                        tests_ok,
+                    )
+                    combined_preview = []
+                    combined_preview.append(f"[profile_ok={profile_ok}] {profile_preview}")
+                    combined_preview.append(f"[tests_ok={tests_ok}] {tests_preview}")
+                    preview_text = " | ".join(combined_preview)
+                    build_res = BuildResult(
+                        ok=False,
+                        image_id=build_res.image_id,
+                        image_name=build_res.image_name,
+                        rc=1,
+                        duration_s=build_res.duration_s,
+                        stderr_tail=preview_text,
+                        stdout_tail="",
+                    )
+                else:
+                    logger.info("agent_build_and_validate: verification passed (profile and tests)")
+
             attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
             attempt_idx += 1
 
@@ -739,7 +931,6 @@ def agent_build_and_validate(  # noqa: C901
 
                 final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
                 _save_pickle(ctx, final_pickle)
-                logger.info("agent_build_and_validate: build succeeded via agent synthesis")
 
                 result = attempts[-1].build_result
                 if result is None:
@@ -778,7 +969,18 @@ def agent_build_and_validate(  # noqa: C901
                 return result_dict
 
             # Early exit if failure is unrelated to docker_build_pkg.sh
-            if build_res.stderr_tail and "docker_build_pkg.sh" not in build_res.stderr_tail:
+            is_verification_failure = False
+            try:
+                st = build_res.stderr_tail or ""
+                is_verification_failure = ("[profile_ok=" in st) or ("[tests_ok=" in st)
+            except Exception:
+                is_verification_failure = False
+            if (
+                (not build_res.ok)
+                and (build_res.stderr_tail)
+                and ("docker_build_pkg.sh" not in build_res.stderr_tail)
+                and (not is_verification_failure)
+            ):
                 logger.error(
                     "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh; not worth iterating"
                 )

@@ -7,14 +7,9 @@ set -euo pipefail
 source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
 
-ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
-REPO_ROOT="$ROOT_PATH"
+REPO_ROOT=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
 EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
-if [[ -z "${TARGET_VERSIONS}" ]]; then
-  echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
-  exit 1
-fi
 ###### END SETUP CODE ######
 
 # -----------------------------
@@ -35,6 +30,12 @@ fi
 # - Keep this script idempotent.
 # - Use: `pip install --no-build-isolation -v -e .` or `pip install -e .` or equivalent.
 # - Do not modify the SETUP CODE or helper functions below.
+# - Critically: Prepare for quick verification steps that will run after build:
+#   - A lightweight profiling sanity check should be able to start without immediate error.
+#   - A lightweight pytest sanity check should be able to start without immediate error.
+#     * Some projects (e.g., SciPy) require running pytest from a subdir (e.g., `scipy/`).
+#   - Install minimal test/benchmark extras or dev requirements so that import and basic pytest discovery succeed.
+#   - Prefer fast readiness (lightweight deps) over exhaustive installs.
 #
 # DO NOT:
 # - Change env names or Python versions outside MODEL EDIT AREA.

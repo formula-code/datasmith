@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -10,7 +11,6 @@ import stat
 import sys
 import tarfile
 import time
-import uuid
 from collections.abc import Sequence
 from fnmatch import fnmatch
 from pathlib import Path
@@ -25,6 +25,35 @@ from datasmith.docker.context import BuildResult, DockerContext, Task, _new_api_
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
+
+
+def _compute_deterministic_run_id(
+    contexts: Sequence[tuple[Task, DockerContext]],
+    *,
+    asv_args: str,
+    machine_args: dict[str, str],
+    n_cores: int,
+) -> str:
+    """Compute a deterministic run_id from tasks, contexts, and config.
+
+    The hash includes:
+    - Task identity: (owner, repo, sha, tag)
+    - DockerContext hash (relies on DockerContext.__hash__)
+    - Config that affects execution: asv_args, machine_args, n_cores
+    """
+    # Canonical payload
+    items: list[tuple[str, str, str | None, str | None, int]] = []
+    for task, ctx in contexts:
+        items.append((task.owner, task.repo, task.sha, getattr(task, "tag", None), hash(ctx)))
+
+    payload: dict[str, Any] = {
+        "tasks": sorted(items),
+        "asv_args": asv_args,
+        "machine_args": {k: machine_args[k] for k in sorted(machine_args.keys())},
+        "n_cores": n_cores,
+    }
+    s = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:32]
 
 
 # helpers: reproducible, minimally .dockerignore-aware tar of a directory
@@ -596,7 +625,9 @@ async def orchestrate(
     Schedule all <repo, sha> pairs while ensuring that each container
     receives `n_cores` dedicated, non-overlapping CPU cores.
     """
-    run_id = os.environ.get("DATASMITH_RUN_ID", uuid.uuid4().hex)
+    run_id = os.environ.get("DATASMITH_RUN_ID") or _compute_deterministic_run_id(
+        [(t, ctx) for t, ctx in contexts], asv_args=asv_args, machine_args=machine_args, n_cores=n_cores
+    )
     data_root = guard_data_root or _docker_data_root()
     # Build one contiguous block of `n_cores` for each worker slot
     core_sets = [list(range(i * n_cores, (i + 1) * n_cores)) for i in range(max_concurrency)]
@@ -768,7 +799,9 @@ async def batch_orchestrate(
     batch_executor = AWSBatchExecutor(aws_cfg)
 
     # Execute batch
-    run_id = os.environ.get("DATASMITH_RUN_ID", uuid.uuid4().hex)
+    run_id = os.environ.get("DATASMITH_RUN_ID") or _compute_deterministic_run_id(
+        contexts, asv_args=asv_args, machine_args=machine_args, n_cores=n_cores
+    )
     batch_results = batch_executor.execute_batch(
         tasks=contexts,
         machine_args=machine_args,

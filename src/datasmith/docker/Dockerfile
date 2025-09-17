@@ -53,8 +53,6 @@ RUN chmod +x /workspace/repo/docker_build_env.sh && \
     /workspace/repo/docker_build_env.sh
 
 FROM env AS pkg
-COPY profile.sh /profile.sh
-RUN chmod +x /profile.sh
 
 # ---- PKG STAGE: build+test the package for each ASV Python ----
 COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh
@@ -62,6 +60,11 @@ RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
     /workspace/repo/docker_build_pkg.sh
 # If you want to restrict to one version at build time, replace with:
 # RUN PY_VERSION=3.10 /workspace/repo/docker_build_pkg.sh
+
+# Copy these files after to avoid rerunning pkg stage
+COPY profile.sh /profile.sh
+COPY run_tests.sh /run_tests.sh
+RUN chmod +x /profile.sh /run_tests.sh
 
 # run micromamba clean in all
 RUN micromamba clean --all --yes
