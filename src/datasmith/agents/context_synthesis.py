@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import logging
 import pickle
+import shlex
 import time
 import uuid
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ import dspy
 from docker.errors import APIError, ImageNotFound, NotFound
 
 from datasmith.agents.tool_executor import ContainerToolExecutor
+from datasmith.agents.utils import _TEST_SUITE_IMPORT_OVERRIDES
 from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext, Task
 from datasmith.docker.orchestrator import gen_run_labels
 
@@ -107,65 +109,6 @@ def _preview(s: str, n: int = 160) -> str:
     return s[:n] + ("..." if len(s) > n else "")
 
 
-def _detect_test_suite_dir(
-    client: docker.DockerClient,
-    image_name: str,
-    repo_name: str,
-    run_labels: dict[str, str],
-    timeout: int = 60,
-) -> str:
-    """
-    Best-effort in-container heuristic to choose a test suite path:
-    - Prefer '/workspace/repo/tests' if exists
-    - Then try repo name directory (e.g., 'scipy') if exists
-    - Then common package names
-    - Else '.'
-    """
-    candidates = [
-        "tests",
-        repo_name,
-        "scipy",
-        "sklearn",
-        "pandas",
-        "numpy",
-        "torch",
-        "xarray",
-        "dask",
-        "statsmodels",
-    ]
-
-    script = (
-        "set -euo pipefail; cd /workspace/repo; "
-        + "for d in "
-        + " ".join(f"{c}" for c in candidates)
-        + '; do if [ -d "$d" ]; then echo $d; exit 0; fi; done; echo .'
-    )
-
-    container = None
-    try:
-        container = client.containers.run(
-            image=image_name,
-            command=[script],
-            entrypoint=["/bin/bash", "-lc"],
-            detach=True,
-            labels=run_labels,
-            working_dir="/workspace/repo",
-        )
-        rc = container.wait(timeout=timeout).get("StatusCode", 1)
-        out = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace").strip()
-        if rc == 0 and out:
-            first_line = out.splitlines()[0].strip()
-            return first_line or "."
-    except Exception:
-        logger.warning("Error detecting test suite dir", exc_info=True)
-        pass
-    finally:
-        with contextlib.suppress(Exception):
-            if container is not None:
-                container.remove(force=True)
-    return "."
-
-
 def _run_quick_profile(
     client: docker.DockerClient,
     image_name: str,
@@ -203,6 +146,17 @@ def _run_quick_profile(
                 container.remove(force=True)
 
 
+def _resolve_test_suite_name(repo_name: str) -> str:
+    """
+    Decide the TEST_SUITE argument for run_tests.sh, based on the repo key.
+    Falls back to a conservative transform: hyphens → underscores.
+    """
+    if repo_name in _TEST_SUITE_IMPORT_OVERRIDES:
+        return _TEST_SUITE_IMPORT_OVERRIDES[repo_name]
+    # default heuristic: convert repo name to a plausible import name
+    return repo_name.replace("-", "_")
+
+
 def _run_quick_tests(
     client: docker.DockerClient,
     image_name: str,
@@ -210,18 +164,21 @@ def _run_quick_tests(
     run_labels: dict[str, str],
     timeout: int = 900,
 ) -> tuple[bool, str]:
-    """Run a quick test sanity check using /run_tests.sh in the image."""
-    suite = _detect_test_suite_dir(client, image_name, repo_name, run_labels)
+    """Run a quick test sanity check using /run_tests.sh in the image.
+    Semantics preserved: feedparser install, 45s timeout, -q -k filter, rc==124 => success.
+    """
+    # import IPython; IPython.embed()
+    suite = _resolve_test_suite_name(repo_name)
     container = None
     quick_s = 45
     try:
-        cmd = [
-            f"pip install feedparser ; timeout -k 5 {quick_s}s /run_tests.sh /output/tests {suite} -q -k 'not slow and not network'",
-        ]
-        logger.debug("tests:spawn cmd=%s", " ".join(cmd))
+        cmdline = (
+            f"timeout -k 5 {quick_s}s /run_tests.sh /output/tests {shlex.quote(suite)} -q -k 'not slow and not network'"
+        )
+        logger.debug("tests:spawn cmd=%s", cmdline)
         container = client.containers.run(
             image=image_name,
-            command=cmd,
+            command=[cmdline],
             entrypoint=["/bin/bash", "-lc"],
             detach=True,
             labels=run_labels,
@@ -320,7 +277,7 @@ class BuildScriptProgram(dspy.Module):
             "- exec_arbitrary(command): run arbitrary shell command in the checked-out repo (careful!).\n"
             "- none/finish + docker_build_script: when you are satisfied, return the final build script in the docker_build_script field.\n"
             "Hints:\n"
-            "- facts_json contains installed_packages (by Python version) exported by build_env; use it to avoid redundant installs or to spot missing test deps."
+            "- facts_json contains installed_packages (by Python version) exported by build_env; use it to avoid redundant installs, to spot missing test deps, to downgrade or upgrade packages, etc."
         )
 
     def forward(

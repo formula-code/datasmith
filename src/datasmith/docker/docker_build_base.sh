@@ -653,7 +653,14 @@ for version in $PY_VERSIONS; do
     micromamba install -y -n "$ENV_NAME" -c conda-forge \
         pip git conda mamba "libmambapy<=1.9.9" \
         numpy scipy cython joblib fakeredis threadpoolctl matplotlib pytest \
-        compilers meson-python cmake ninja pkg-config tomli hypothesis
+        compilers meson-python cmake ninja pkg-config tomli
+
+    # install hypothesis<7 if python<3.9
+    if [ "$version" -lt "3.9" ]; then
+        micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir "hypothesis<7" >/dev/null 2>&1 || true
+    else
+        micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir "hypothesis" >/dev/null 2>&1 || true
+    fi
 
     # Keep ASV consistent
     micromamba run -n "$ENV_NAME" bash -lc "python -m pip install --upgrade pip setuptools wheel"
