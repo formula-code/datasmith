@@ -76,6 +76,7 @@ def update_cr(cr: ContextRegistry) -> ContextRegistry:
         new_v.env_building_data = DockerContext().env_building_data
         new_v.base_building_data = DockerContext().base_building_data
         new_v.run_building_data = DockerContext().run_building_data
+        new_v.profile_data = DockerContext().profile_data
         new_reg[k] = new_v
 
     cr.registry = new_reg

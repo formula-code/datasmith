@@ -20,16 +20,16 @@ from tqdm import tqdm
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.docker.context import ContextRegistry, DockerContext, Task, build_base_image
 from datasmith.docker.orchestrator import (
+    batch_orchestrate,
     build_repo_sha_image,
     get_docker_client,
-    orchestrate,
 )
 from datasmith.execution.collect_commits_offline import find_parent_releases
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
-logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
-# logger = configure_logging(level=logging.DEBUG)
+# logger = configure_logging(level=logging.DEBUG, stream=open(Path(__file__).with_suffix(".log"), "w"))
+logger = configure_logging(level=logging.DEBUG)
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,6 +94,37 @@ def parse_args() -> argparse.Namespace:
         default=-1,
         help="Cap SHAs per repo (keeps your small-scale test). -1 = no limit.",
     )
+    parser.add_argument("--aws-region", type=str, default=os.getenv("AWS_REGION", "us-west-2"))
+    parser.add_argument(
+        "--aws-s3-bucket",
+        type=str,
+        help="S3 bucket for remote build I/O",
+        default=os.getenv("AWS_S3_BUCKET", "datasmith-bucket-1"),
+    )
+    parser.add_argument("--aws-subnet-id", type=str, default=os.getenv("AWS_SUBNET_ID", "subnet-12345678"))
+    parser.add_argument(
+        "--aws-sg-id",
+        action="append",
+        help="Security group id(s). May be passed multiple times.",
+        default=[os.getenv("AWS_SECURITY_GROUP_ID", None)],
+    )
+    parser.add_argument(
+        "--aws-iam-instance-profile",
+        type=str,
+        default=os.getenv("AWS_IAM_INSTANCE_PROFILE_NAME", "datasmith-batch-execution-role"),
+    )
+    parser.add_argument("--aws-ami-id", type=str, default=os.getenv("AWS_AMI_ID", "ami-0023921b4fcd5382b"))
+    parser.add_argument("--aws-instance-type", type=str, default=os.getenv("AWS_INSTANCE_TYPE", "c6i.large"))
+    parser.add_argument("--aws-spot-max-price", type=str, default=None)
+    parser.add_argument("--aws-max-batch-retries", type=int, default=1)
+    parser.add_argument(
+        "--use-aws-batch",
+        action="store_true",
+        help="Use AWS batch execution instead of local execution for both build and benchmark",
+    )
+    parser.add_argument("--aws-batch-max-tasks-per-instance", type=int, default=100)
+    parser.add_argument("--aws-batch-execution-timeout-s", type=int, default=2 * 60 * 60)
+    parser.add_argument("--aws-batch-poll-interval-s", type=int, default=30)
     return parser.parse_args()
 
 
@@ -119,7 +150,7 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             sha = row["sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
-                logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
+                # logger.debug(f"Skipping {repo_name} commit {sha} as it does not have ASV benchmarks.")
                 continue
             owner, repo = repo_name.split("/")
             commit_date_unix: float = (
@@ -144,6 +175,7 @@ def is_benchmarked(task: Task, interim_path: Path, output_dir: Path) -> bool:
 
 def main(args: argparse.Namespace) -> None:  # noqa: C901
     client = get_docker_client(args.max_concurrency)
+
     all_states = process_inputs(args)
     context_registry = ContextRegistry.load_from_file(path=args.context_registry)
     interim_path = Path(os.environ["CACHE_LOCATION"]).parent / "interim"  # Look here for cached docker contexts
@@ -218,22 +250,48 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
         logger.info("No tasks to benchmark. Exiting.")
         return
 
-    # build the containers.
-    builds = []
-    with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
-        futures = [
-            pool.submit(build_repo_sha_image, client, ctx, task, args.force_rebuild, run_id="CANARY-BUILD")
-            for (task, ctx) in to_benchmark
-        ]
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Building containers"):
-            builds.append(fut.result())
-    to_benchmark = [t for (t, b) in zip(to_benchmark, builds) if b.rc == 0]
-    logger.info("Successfully built %d containers", len(to_benchmark))
+    # Skip local build phase if using AWS batch execution
+    if not args.use_aws_batch:
+        # build the containers.
+        builds = []
+        with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+            futures = [
+                pool.submit(build_repo_sha_image, client, ctx, task, args.force_rebuild, run_id="CANARY-BUILD")
+                for (task, ctx) in to_benchmark
+            ]
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="Building containers"):
+                builds.append(fut.result())
+        to_benchmark = [t for (t, b) in zip(to_benchmark, builds) if b.rc == 0]
+        logger.info("Successfully built %d containers", len(to_benchmark))
+    else:
+        logger.info("Skipping local build phase - will build on AWS instances")
 
     machine_args: dict[str, str] = asv.machine.Machine.get_defaults()  # pyright: ignore[reportAttributeAccessIssue]
     machine_args["num_cpu"] = str(args.num_cores)
+
+    # Prepare AWS batch config if using AWS batch execution
+    aws_batch_config = None
+    if args.use_aws_batch:
+        aws_batch_config = {
+            "region": args.aws_region,
+            "s3_bucket": args.aws_s3_bucket,
+            "s3_prefix": "datasmith-batch-execution",
+            "subnet_id": args.aws_subnet_id,
+            "security_group_ids": args.aws_sg_id,
+            "iam_instance_profile_name": args.aws_iam_instance_profile,
+            "ami_id": args.aws_ami_id,
+            "instance_type": args.aws_instance_type,
+            "key_name": None,
+            "spot_max_price": args.aws_spot_max_price,
+            "tags": {"project": "datasmith", "role": "batch-execution"},
+            "max_tasks_per_instance": args.aws_batch_max_tasks_per_instance,
+            "batch_timeout_s": args.aws_batch_execution_timeout_s,
+            "poll_interval_s": args.aws_batch_poll_interval_s,
+            "max_batch_retries": args.aws_max_batch_retries,
+        }
+
     files_by_image: dict[Task, dict[str, str]] = asyncio.run(
-        orchestrate(
+        batch_orchestrate(
             contexts=to_benchmark,
             asv_args=asv_args,
             machine_args=machine_args,
@@ -241,6 +299,8 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
             n_cores=n_cores,
             output_dir=args.output_dir.absolute(),
             client=client,
+            use_aws_batch=args.use_aws_batch,
+            aws_batch_config=aws_batch_config,
         )
     )
     # Add already benchmarked files to the results

@@ -11,11 +11,11 @@ from typing import Callable
 
 import pandas as pd
 from git import Commit, GitCommandError, Repo
+from tqdm.auto import tqdm
 
 from datasmith import logger
 from datasmith.agents.perf_judge import PerfClassifier
 from datasmith.execution.utils import _get_commit_info_offline, clone_repo, get_change_summary, has_core_file
-from tqdm.auto import tqdm
 
 _PR_MERGE_PATTERNS: tuple[re.Pattern[str], ...] = (
     # standard "Merge pull request #123 ..."

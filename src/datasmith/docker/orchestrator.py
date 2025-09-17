@@ -21,23 +21,10 @@ from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.models.containers import Container
 from requests.exceptions import ReadTimeout
 
-from datasmith.docker.context import BuildResult, DockerContext, Task
+from datasmith.docker.context import BuildResult, DockerContext, Task, _new_api_client
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
-
-
-def _new_api_client_from(client: docker.DockerClient, *, timeout: int = 600) -> docker.APIClient:
-    """Fresh low-level client per worker to avoid connection contention; longer timeout for start."""
-    try:
-        base_url = client.api.base_url
-    except Exception:
-        base_url = None
-    try:
-        api_version = client.version().get("ApiVersion", "auto")
-    except Exception:
-        api_version = "auto"
-    return docker.APIClient(base_url=base_url, version=api_version, timeout=timeout)
 
 
 # helpers: reproducible, minimally .dockerignore-aware tar of a directory
@@ -380,6 +367,8 @@ async def run_container(  # noqa: C901
     """
     assert task.sha is not None, "Task.sha must be set"  # noqa: S101
 
+    output_dir = output_dir.resolve()
+
     cpuset = ",".join(map(str, cores)) if not isinstance(cores, str) else cores
     num_cores = len(cpuset.split(","))
 
@@ -423,7 +412,7 @@ async def run_container(  # noqa: C901
         run_dir.mkdir(parents=True, exist_ok=True)
 
         # Low-level client per-call avoids session/socket contention
-        api = _new_api_client_from(client, timeout=600)
+        api = _new_api_client(client, timeout=600)
 
         # HostConfig and create_container; only set network_mode when provided
         network_mode = os.environ.get("DOCKER_NETWORK_MODE", "") or None
@@ -435,11 +424,19 @@ async def run_container(  # noqa: C901
 
         # Handle name conflicts explicitly
         container_id = None
+        # Run profile.sh explicitly with LOG_PATH under /output and empty ADDITIONAL_ASV_ARGS
+        profile_cmd = [
+            "/profile.sh",
+            "/output/profile",
+            f"--cpu-affinity {cpuset} --parallel {num_cores} --quick --dry-run",
+        ]
         try:
             container_resp = api.create_container(
                 image=task.get_image_name(),
                 name=task.get_container_name(),
-                environment=env,
+                entrypoint=profile_cmd,
+                # environment=env,
+                command=profile_cmd,
                 host_config=host_config,
             )
             container_id = container_resp.get("Id")
@@ -459,7 +456,9 @@ async def run_container(  # noqa: C901
                 container_resp = api.create_container(
                     image=task.get_image_name(),
                     name=task.get_container_name(),
-                    environment=env,
+                    # environment=env,
+                    entrypoint=profile_cmd,
+                    command=profile_cmd,
                     host_config=host_config,
                 )
                 container_id = container_resp.get("Id")
@@ -518,6 +517,9 @@ async def run_container(  # noqa: C901
                     files[str(p.relative_to(output_dir))] = p.read_text()
                 except UnicodeDecodeError:
                     files[str(p.relative_to(output_dir))] = f"<{p.stat().st_size} bytes>"
+
+        # add logs to files
+        files["logs"] = log_file.read_text()
 
         # cleanup
         try:
@@ -624,13 +626,14 @@ async def orchestrate(
             except Exception:
                 logger.exception("Container run failed for %s", task.get_container_name())
                 rc, files = 1, {}
-            status, files = ("OK", files) if rc == 0 else (f"FAIL({rc})", {})
+            status = "OK" if rc == 0 else f"FAIL({rc})"
+            files = files if rc == 0 else {}
+            print(status, files)
             logger.info("■ cores=%s → %s", cpuset_str, status)
             if len(files):
                 interim_path = Path(os.environ["CACHE_LOCATION"]).parent / "interim"
                 os.makedirs(interim_path, exist_ok=True)
-                with open(os.path.join(interim_path, f"{task.get_container_name()}.json"), "w") as f:
-                    json.dump(files, f)
+                (interim_path / f"{task.get_container_name()}.json").write_text(json.dumps(files))
             return (rc, files)
         finally:
             # Always release the core set, even on failure
@@ -673,3 +676,138 @@ async def orchestrate(
         logger.warning("%d container(s) failed", failures)
     logger.info("All benchmarks finished")
     return dict(zip([t for t, _ in contexts], files_by_image))
+
+
+async def batch_orchestrate(
+    contexts: Sequence[tuple[Task, DockerContext]],
+    asv_args: str,
+    machine_args: dict[str, str],
+    max_concurrency: int,
+    n_cores: int,
+    output_dir: Path,
+    client: docker.DockerClient | None,
+    *,
+    use_aws_batch: bool = False,
+    aws_batch_config: dict[str, Any] | None = None,
+    guard_min_free_gb: float = float(os.getenv("DATASMITH_MIN_FREE_GB", "1200")),
+    guard_interval_s: int = int(os.getenv("DATASMITH_GUARD_INTERVAL_S", "120")),
+    guard_hard_fail: bool = bool(int(os.getenv("DATASMITH_GUARD_HARD_FAIL", "0"))),
+    guard_data_root: str | None = None,
+) -> dict[Task, dict[str, str]]:
+    """
+    Orchestrate benchmark execution with optional AWS batch processing.
+
+    This function provides a unified interface that can either:
+    1. Run benchmarks locally using the existing orchestrate function
+    2. Run benchmarks on AWS EC2 instances in batches for scalability
+
+    Args:
+        contexts: List of (Task, DockerContext) pairs to execute
+        asv_args: ASV command line arguments
+        machine_args: ASV machine configuration
+        max_concurrency: Maximum number of concurrent local tasks (ignored for AWS)
+        n_cores: Number of CPU cores per task
+        output_dir: Directory to store results
+        client: Docker client (ignored for AWS)
+        use_aws_batch: If True, use AWS batch execution instead of local
+        aws_batch_config: Configuration for AWS batch execution
+        guard_min_free_gb: Minimum free disk space for local execution
+        guard_interval_s: Disk space check interval for local execution
+        guard_hard_fail: Whether to fail hard on low disk space
+        guard_data_root: Docker data root for disk space checks
+
+    Returns:
+        Dictionary mapping Task to benchmark result files
+    """
+    if not use_aws_batch:
+        # Use existing local orchestration
+        if client is None:
+            client = get_docker_client(max_concurrency)
+        return await orchestrate(
+            contexts=contexts,
+            asv_args=asv_args,
+            machine_args=machine_args,
+            max_concurrency=max_concurrency,
+            n_cores=n_cores,
+            output_dir=output_dir,
+            client=client,
+            guard_min_free_gb=guard_min_free_gb,
+            guard_interval_s=guard_interval_s,
+            guard_hard_fail=guard_hard_fail,
+            guard_data_root=guard_data_root,
+        )
+
+    # AWS batch execution
+    if not aws_batch_config:
+        raise ValueError("aws_batch_config is required when use_aws_batch=True")
+
+    from datasmith.docker.aws_batch_executor import AwsBatchConfig, AWSBatchExecutor
+
+    # Create AWS batch config
+    aws_cfg = AwsBatchConfig(
+        region=aws_batch_config["region"],
+        s3_bucket=aws_batch_config["s3_bucket"],
+        s3_prefix=aws_batch_config.get("s3_prefix", "datasmith-batch-execution"),
+        subnet_id=aws_batch_config["subnet_id"],
+        security_group_ids=aws_batch_config["security_group_ids"],
+        iam_instance_profile_name=aws_batch_config["iam_instance_profile_name"],
+        ami_id=aws_batch_config["ami_id"],
+        instance_type=aws_batch_config.get("instance_type", "c6i.xlarge"),
+        key_name=aws_batch_config.get("key_name"),
+        spot_max_price=aws_batch_config.get("spot_max_price"),
+        tags=aws_batch_config.get("tags", {}),
+        max_tasks_per_instance=aws_batch_config.get("max_tasks_per_instance", 100),
+        batch_timeout_s=aws_batch_config.get("batch_timeout_s", 2 * 60 * 60),
+        poll_interval_s=aws_batch_config.get("poll_interval_s", 30),
+        max_batch_retries=aws_batch_config.get("max_batch_retries", 1),
+        num_cores_per_task=n_cores,
+        asv_args=asv_args,
+    )
+
+    # Create batch executor
+    batch_executor = AWSBatchExecutor(aws_cfg)
+
+    # Execute batch
+    run_id = os.environ.get("DATASMITH_RUN_ID", uuid.uuid4().hex)
+    batch_results = batch_executor.execute_batch(
+        tasks=contexts,
+        machine_args=machine_args,
+        asv_args=asv_args,
+        run_id=run_id,
+    )
+
+    # Convert batch results to the expected format
+    files_by_image = {}
+    for batch_result in batch_results:
+        # Find the corresponding task
+        task = None
+        for t, _ in contexts:
+            assert t.sha is not None  # noqa: S101
+            if f"{run_id}-task-" in batch_result.task_id and t.sha in batch_result.task_id:
+                task = t
+                break
+
+        if task is None:
+            logger.warning("Could not find task for batch result %s", batch_result.task_id)
+            continue
+
+        # Store benchmark files
+        files_by_image[task] = batch_result.benchmark_files
+
+        # Save individual result to output directory
+        result_dir = output_dir / "results" / task.get_container_name()
+        result_dir.mkdir(parents=True, exist_ok=True)
+
+        for filename, content in batch_result.benchmark_files.items():
+            file_path = result_dir / filename
+            file_path.write_text(content)
+
+        # Save logs
+        log_file = output_dir / "logs" / f"{task.get_container_name()}.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.write_text(batch_result.benchmark_logs)
+
+        logger.info("Saved results for %s: %d files", task.get_container_name(), len(batch_result.benchmark_files))
+
+    logger.info("AWS batch execution completed: %d successful results", len(files_by_image))
+    return files_by_image

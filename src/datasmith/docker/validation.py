@@ -28,7 +28,7 @@ def format_cmds(image_name: str, owner: str, repo: str, sha: str, out_dir: Path)
     )
     run_cmd = (
         f"docker run --rm -v {shlex.quote(str((out_dir / 'results').absolute()))}:/output "
-        f"{shlex.quote(image_name)} asv run --quick --python=same --set-commit-hash={sha}"
+        f"{shlex.quote(image_name)} /profile.sh /output/profile "
     )
     return build_cmd, run_cmd
 
@@ -250,6 +250,7 @@ def validate_one(  # noqa: C901
             image=task.get_image_name(),
             detach=True,
             name=task.get_container_name(),
+            command=["/profile.sh", "/output/profile", ""],
             environment=env,
             volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
             network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),

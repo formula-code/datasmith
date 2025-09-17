@@ -44,7 +44,7 @@ if [ -n "$install_command" ]; then
   # if the install command contains "." (i.e. pip install .), remove the dot.
     cmd=$(echo "$cmd" | sed 's/ \.//g')
     echo "Executing: $cmd"
-    eval "$cmd"
+    eval "$cmd" || true
   done <<< "$install_command"
 fi
 

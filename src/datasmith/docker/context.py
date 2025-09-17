@@ -25,7 +25,7 @@ from datasmith.logging_config import get_logger
 logger = get_logger("docker.context")
 
 
-def _new_api_client(client: docker.DockerClient) -> docker.APIClient:
+def _new_api_client(client: docker.DockerClient, timeout: int = 600) -> docker.APIClient:
     """
     Create a fresh low-level APIClient for each build to avoid connection
     contention across threads and to align API versions with the daemon.
@@ -41,9 +41,9 @@ def _new_api_client(client: docker.DockerClient) -> docker.APIClient:
         api_version = "auto"
 
     try:
-        return docker.APIClient(base_url=base_url, version=api_version, timeout=600)
+        return docker.APIClient(base_url=base_url, version=api_version, timeout=timeout)
     except Exception:
-        return docker.APIClient(version="auto", timeout=600)
+        return docker.APIClient(version="auto", timeout=timeout)
 
 
 def build_base_image(client: docker.DockerClient, ctx: DockerContext) -> str:
@@ -164,12 +164,14 @@ class DockerContext:
     default_docker_build_run_loc = Path(__file__).parent / "docker_build_run.sh"
     default_docker_build_env_loc = Path(__file__).parent / "docker_build_env.sh"
     default_docker_build_pkg_loc = Path(__file__).parent / "docker_build_pkg.sh"
+    default_profile_loc = Path(__file__).parent / "profile.sh"
     dockerfile_data: str
     entrypoint_data: str
     env_building_data: str
     run_building_data: str
     base_building_data: str
     building_data: str
+    profile_data: str
 
     # Cached, reproducible tar bytes per (probe: bool). Immutable => thread-safe reuse.
     _context_tar_bytes: dict[bool, bytes]
@@ -182,6 +184,7 @@ class DockerContext:
         env_building_data: str | None = None,
         base_building_data: str | None = None,
         run_building_data: str | None = None,
+        profile_data: str | None = None,
     ) -> None:
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
@@ -195,6 +198,8 @@ class DockerContext:
             building_data = self.default_docker_build_pkg_loc.read_text()
         if run_building_data is None:
             run_building_data = self.default_docker_build_run_loc.read_text()
+        if profile_data is None:
+            profile_data = self.default_profile_loc.read_text()
 
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
@@ -202,6 +207,7 @@ class DockerContext:
         self.base_building_data = base_building_data
         self.run_building_data = run_building_data
         self.building_data = building_data
+        self.profile_data = profile_data
 
         self._context_tar_bytes = {}
 
@@ -228,6 +234,7 @@ class DockerContext:
             DockerContext.add_bytes(tar, "docker_build_env.sh", self.env_building_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "docker_build_run.sh", self.run_building_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "docker_build_base.sh", self.base_building_data.encode("utf-8"), mode=0o755)
+            DockerContext.add_bytes(tar, "profile.sh", self.profile_data.encode("utf-8"), mode=0o755)
             if not probe:
                 DockerContext.add_bytes(tar, "docker_build_pkg.sh", self.building_data.encode("utf-8"), mode=0o755)
         buf.seek(0)
@@ -499,6 +506,8 @@ class DockerContext:
             "building_data": self.building_data,
             "env_building_data": self.env_building_data,
             "base_building_data": self.base_building_data,
+            "run_building_data": self.run_building_data,
+            "profile_data": self.profile_data,
         }
 
     @classmethod
@@ -513,6 +522,8 @@ class DockerContext:
             building_data=data.get("building_data", None),
             env_building_data=data.get("env_building_data", None),
             base_building_data=data.get("base_building_data", None),
+            run_building_data=data.get("run_building_data", None),
+            profile_data=data.get("profile_data", None),
         )
 
     def __hash__(self) -> int:
@@ -522,6 +533,8 @@ class DockerContext:
             self.building_data,
             self.env_building_data,
             self.base_building_data,
+            self.run_building_data,
+            self.profile_data,
         ))
 
 

@@ -18,9 +18,9 @@ from datasmith.docker.orchestrator import get_docker_client
 from datasmith.docker.validation import Task, _err_lock
 from datasmith.logging_config import configure_logging
 
-# configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
+configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
-configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
+# configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
 
 # logger = configure_logging(level=10)
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".tiny.log"), "w"))  # noqa: SIM115

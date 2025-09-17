@@ -53,6 +53,8 @@ RUN chmod +x /workspace/repo/docker_build_env.sh && \
     /workspace/repo/docker_build_env.sh
 
 FROM env AS pkg
+COPY profile.sh /profile.sh
+RUN chmod +x /profile.sh
 
 # ---- PKG STAGE: build+test the package for each ASV Python ----
 COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh

@@ -3,10 +3,10 @@ from __future__ import annotations
 import typing
 
 import asv
+import numpy as np
 import pandas as pd
 import ruptures as rpt  # type: ignore[import-untyped]
 
-import numpy as np
 from datasmith.logging_config import get_logger
 
 logger = get_logger("detection.detect_breakpoints")
