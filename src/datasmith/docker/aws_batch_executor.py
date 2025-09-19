@@ -59,6 +59,10 @@ class AwsBatchConfig:
     max_cache_age_days: int = 30  # Clean up cache layers older than this
     max_cache_size_gb: int = 400  # Maximum total cache size
 
+    # Buildx configuration
+    use_buildx: bool = True  # Use docker buildx for advanced caching and multi-platform builds
+    buildx_builder_name: str = "aws-builder"  # Name for the buildx builder instance
+
 
 @dataclass
 class BatchTask:
@@ -442,21 +446,63 @@ for i in $(seq 0 $((TASK_COUNT - 1))); do
     BUILD_START=$(date +%s.%N)
     BUILD_LOG_FILE="build.log"
 
-    # Build Docker command with S3 cache support
-    DOCKER_BUILD_CMD="timeout $BATCH_TIMEOUT docker build -t $IMAGE_NAME . --build-arg REPO_URL=$REPO_URL --build-arg COMMIT_SHA=$SHA --build-arg ENV_PAYLOAD=\"$ENV_PAYLOAD\" --target $TAG"
+    # Check if we should use buildx
+    USE_BUILDX="{use_buildx}"
+    BUILDER_NAME="{buildx_builder_name}"
 
-    # Add S3 cache arguments if cache is enabled
-    if [ "{enable_s3_cache}" = "true" ]; then
-        CACHE_BUCKET="{cache_bucket}"
-        CACHE_PREFIX="{cache_prefix}"
-        CACHE_REGION="{cache_region}"
+    if [ "$USE_BUILDX" = "true" ]; then
+        echo "Setting up docker buildx builder: $BUILDER_NAME"
 
-        # Generate cache mount configuration
-        CACHE_MOUNT="type=s3,bucket=$CACHE_BUCKET,region=$CACHE_REGION,prefix=$CACHE_PREFIX/layers/$OWNER-$REPO-$SHA"
+        # Create buildx builder if it doesn't exist
+        if ! docker buildx ls | grep -q "$BUILDER_NAME"; then
+            echo "Creating buildx builder: $BUILDER_NAME"
+            docker buildx create --name "$BUILDER_NAME" --use --driver docker-container || {
+                echo "Failed to create buildx builder, falling back to default"
+                docker buildx use default
+            }
+        else
+            echo "Using existing buildx builder: $BUILDER_NAME"
+            docker buildx use "$BUILDER_NAME"
+        fi
 
-        DOCKER_BUILD_CMD="$DOCKER_BUILD_CMD --cache-from $CACHE_MOUNT --cache-to $CACHE_MOUNT,mode=max"
+        # Build Docker command with buildx and S3 cache support
+        DOCKER_BUILD_CMD="timeout $BATCH_TIMEOUT docker buildx build --load --progress=plain -t $IMAGE_NAME . --build-arg REPO_URL=$REPO_URL --build-arg COMMIT_SHA=$SHA --build-arg ENV_PAYLOAD=\"$ENV_PAYLOAD\" --target $TAG"
 
-        echo "Using S3 cache: bucket=$CACHE_BUCKET, prefix=$CACHE_PREFIX"
+        # Add S3 cache arguments if cache is enabled
+        if [ "{enable_s3_cache}" = "true" ]; then
+            CACHE_BUCKET="{cache_bucket}"
+            CACHE_PREFIX="{cache_prefix}"
+            CACHE_REGION="{cache_region}"
+
+            # Generate cache mount configuration for buildx
+            CACHE_FROM="type=s3,bucket=$CACHE_BUCKET,region=$CACHE_REGION,prefix=$CACHE_PREFIX/layers/$OWNER-$REPO-$SHA"
+            CACHE_TO="type=s3,bucket=$CACHE_BUCKET,region=$CACHE_REGION,prefix=$CACHE_PREFIX/layers/$OWNER-$REPO-$SHA,mode=max"
+
+            DOCKER_BUILD_CMD="$DOCKER_BUILD_CMD --cache-from $CACHE_FROM --cache-to $CACHE_TO"
+
+            echo "Using buildx with S3 cache: bucket=$CACHE_BUCKET, prefix=$CACHE_PREFIX"
+        else
+            echo "Using buildx without S3 cache"
+        fi
+    else
+        echo "Using standard docker build"
+
+        # Build Docker command with S3 cache support (legacy)
+        DOCKER_BUILD_CMD="timeout $BATCH_TIMEOUT docker build -t $IMAGE_NAME . --build-arg REPO_URL=$REPO_URL --build-arg COMMIT_SHA=$SHA --build-arg ENV_PAYLOAD=\"$ENV_PAYLOAD\" --target $TAG"
+
+        # Add S3 cache arguments if cache is enabled
+        if [ "{enable_s3_cache}" = "true" ]; then
+            CACHE_BUCKET="{cache_bucket}"
+            CACHE_PREFIX="{cache_prefix}"
+            CACHE_REGION="{cache_region}"
+
+            # Generate cache mount configuration
+            CACHE_MOUNT="type=s3,bucket=$CACHE_BUCKET,region=$CACHE_REGION,prefix=$CACHE_PREFIX/layers/$OWNER-$REPO-$SHA"
+
+            DOCKER_BUILD_CMD="$DOCKER_BUILD_CMD --cache-from $CACHE_MOUNT --cache-to $CACHE_MOUNT,mode=max"
+
+            echo "Using S3 cache: bucket=$CACHE_BUCKET, prefix=$CACHE_PREFIX"
+        fi
     fi
 
     if $DOCKER_BUILD_CMD > "$BUILD_LOG_FILE" 2>&1; then
@@ -619,6 +665,8 @@ shutdown -h now || poweroff || halt
             .replace("{cache_bucket}", self.cfg.cache_bucket or "")
             .replace("{cache_prefix}", self.cfg.cache_prefix)
             .replace("{cache_region}", self.cfg.cache_region or self.cfg.region)
+            .replace("{use_buildx}", str(self.cfg.use_buildx).lower())
+            .replace("{buildx_builder_name}", self.cfg.buildx_builder_name)
         )
 
     def _stream_user_data_logs(self, instance_id: str, batch_idx: int, run_id: str, last_position: int = 0) -> int:

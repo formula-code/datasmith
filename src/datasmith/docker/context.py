@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import tarfile
 import threading
 import time
@@ -347,6 +348,245 @@ class DockerContext:
         if not client.images.get(image_name):
             raise RuntimeError(f"Image '{image_name}' failed to build and is not found.")
 
+    def _build_with_buildx(  # noqa: C901
+        self,
+        client: docker.DockerClient,
+        image_name: str,
+        build_args: dict[str, str],
+        run_labels: dict[str, str] | None = None,
+        probe: bool = False,
+        *,
+        force: bool = False,
+        delete_img: bool = False,
+        timeout_s: float = float("inf"),
+        tail_chars: int = 4000,
+        pull: bool = False,
+        s3_cache_config: dict[str, str] | None = None,
+    ) -> BuildResult:
+        """
+        Build using docker buildx with advanced caching support.
+        Falls back to SDK build if buildx is not available.
+        """
+        run_labels = run_labels if run_labels else {}
+        _, target = self.process_image_name(image_name)
+        t0 = time.time()
+        success = False
+
+        try:
+            # Fast path: respect existing image when not forcing
+            try:
+                img = client.images.get(image_name)
+                if force:
+                    logger.info("Force rebuild requested. Removing '%s'.", image_name)
+                    with contextlib.suppress(Exception):
+                        client.images.remove(image=img.id, force=True)
+                else:
+                    logger.info("Docker image '%s' found locally (skip build).", image_name)
+                    success = True
+                    return BuildResult(
+                        ok=True,
+                        image_name=image_name,
+                        image_id=img.id,
+                        rc=0,
+                        duration_s=time.time() - t0,
+                        stderr_tail="",
+                        stdout_tail="",
+                    )
+            except ImageNotFound:
+                logger.info("Docker image '%s' not found locally. Building with buildx.", image_name)
+
+            # Check if buildx is available
+            def _check_buildx_available() -> None:
+                # Note: docker path is trusted system path
+                result = subprocess.run(  # noqa: S603
+                    ["/usr/bin/docker", "buildx", "version"], capture_output=True, text=True, timeout=10, check=False
+                )
+                if result.returncode != 0:
+                    raise RuntimeError("buildx not available")
+
+            try:
+                _check_buildx_available()
+            except (subprocess.TimeoutExpired, FileNotFoundError, RuntimeError) as exc:
+                raise RuntimeError("docker buildx not available") from exc
+
+            # Create build context tarball
+            tar_bytes = self._get_context_bytes(probe=probe)
+
+            # Build buildx command
+            # Note: cmd is constructed from trusted inputs (build args, image names, etc.)
+            cmd = ["/usr/bin/docker", "buildx", "build"]
+
+            # Add load flag to ensure image is available locally
+            cmd.extend(["--load"])
+
+            # Add progress flag for stable output
+            cmd.extend(["--progress=plain"])
+
+            # Add tag
+            cmd.extend(["-t", image_name])
+
+            # Add build args
+            for key, value in build_args.items():
+                cmd.extend(["--build-arg", f"{key}={value}"])
+            cmd.extend(["--build-arg", "BUILDKIT_INLINE_CACHE=1"])
+
+            # Add labels
+            for key, value in run_labels.items():
+                cmd.extend(["--label", f"{key}={value}"])
+
+            # Add target
+            cmd.extend(["--target", target])
+
+            # Add pull flag
+            if pull:
+                cmd.append("--pull")
+
+            # Add network mode
+            if network_mode := os.environ.get("DOCKER_NETWORK_MODE"):
+                cmd.extend(["--network", network_mode])
+
+            # Add cache configuration
+            cache_from_list = []
+            if base_image := os.environ.get("DOCKER_CACHE_FROM"):
+                logger.info("Using DOCKER_CACHE_FROM='%s' for build cache.", base_image)
+                cache_from_list.append(base_image)
+
+            if s3_cache_config:
+                s3_cache_mount = (
+                    f"type=s3,bucket={s3_cache_config['bucket']},"
+                    f"region={s3_cache_config['region']},"
+                    f"prefix={s3_cache_config['prefix']}"
+                )
+                cache_from_list.append(s3_cache_mount)
+                logger.info("Using S3 cache: %s", s3_cache_mount)
+
+            # Add cache-from flags
+            for cache_source in cache_from_list:
+                cmd.extend(["--cache-from", cache_source])
+
+            # Add cache-to for S3 cache (export cache for future builds)
+            if s3_cache_config:
+                s3_cache_to = f"type=s3,bucket={s3_cache_config['bucket']},region={s3_cache_config['region']},prefix={s3_cache_config['prefix']},mode=max"
+                cmd.extend(["--cache-to", s3_cache_to])
+
+            # Add context from stdin
+            cmd.append("-")
+
+            # Pretty log line for transparency
+            if build_args:
+                build_args_str = " --build-arg ".join(f"{k}='{v}'" for k, v in build_args.items())
+                logger.info("$ docker buildx build --load -t %s . --build-arg %s", image_name, build_args_str)
+            else:
+                logger.info("$ docker buildx build --load -t %s .", image_name)
+
+            # Execute buildx with timeout and streaming
+            stdout_buf: deque[str] = deque(maxlen=2000)
+            stderr_buf: deque[str] = deque(maxlen=2000)
+
+            # Note: cmd is constructed from trusted inputs (build args, image names, etc.)
+            with subprocess.Popen(  # noqa: S603
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=False,
+                bufsize=1,
+            ) as proc:
+                # Send tarball via stdin
+                if proc.stdin is not None:
+                    proc.stdin.write(tar_bytes)
+                    proc.stdin.close()
+                error_seen = None
+
+                try:
+                    while True:
+                        # Time check
+                        if time.time() - t0 > timeout_s:
+                            error_seen = "[TIMEOUT]"
+                            proc.terminate()
+                            break
+
+                        # Read output line by line
+                        if proc.stdout is None:
+                            break
+                        line_bytes = proc.stdout.readline()
+                        if not line_bytes:
+                            # Process finished
+                            break
+
+                        line = line_bytes.decode("utf-8", errors="ignore")
+                        stdout_buf.append(line)
+
+                        # Check for error patterns in output
+                        if "error" in line.lower() or "failed" in line.lower():
+                            stderr_buf.append(line)
+
+                except Exception as e:
+                    error_seen = f"Process error: {e}"
+                    proc.terminate()
+
+                # Wait for process to complete
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    error_seen = "[TIMEOUT]"
+
+            # Check final return code
+            if proc.returncode != 0 and not error_seen:
+                error_seen = f"buildx failed with exit code {proc.returncode}"
+
+            duration = time.time() - t0
+
+            # Success path: ensure image exists
+            if not error_seen:
+                try:
+                    img = client.images.get(image_name)
+                    logger.info("buildx build completed successfully for '%s' in %.1f sec.", image_name, duration)
+                    success = True
+                    return BuildResult(
+                        ok=True,
+                        image_name=image_name,
+                        image_id=img.id,
+                        rc=0,
+                        duration_s=duration,
+                        stderr_tail="".join(stderr_buf)[-tail_chars:],
+                        stdout_tail="".join(stdout_buf)[-tail_chars:],
+                    )
+                except ImageNotFound:
+                    error_seen = "buildx build completed but image not found"
+
+            # Failure
+            rc = 124 if error_seen == "[TIMEOUT]" else 1
+            logger.error(
+                "buildx build failed for '%s' in %.1f sec: [%s][%s]",
+                image_name,
+                duration,
+                error_seen or "unknown",
+                "".join(stdout_buf)[-100:] if stdout_buf else "",
+            )
+            success = False
+            return BuildResult(
+                ok=False,
+                image_name=image_name,
+                image_id=None,
+                rc=rc,
+                duration_s=duration,
+                stderr_tail="".join(stderr_buf)[-tail_chars:] or (error_seen or "")[-tail_chars:],
+                stdout_tail="".join(stdout_buf)[-tail_chars:],
+            )
+
+        finally:
+            if delete_img or (not success):
+                try:
+                    img = client.images.get(image_name)
+                    logger.debug("Deleting image '%s' after buildx build.", image_name)
+                    client.images.remove(image=img.id, force=True)
+                except ImageNotFound:
+                    pass
+                except DockerException:
+                    logger.exception("Failed to delete image '%s' after buildx build.", image_name)
+
     def build_container_streaming(  # noqa: C901
         self,
         client: docker.DockerClient,
@@ -361,21 +601,51 @@ class DockerContext:
         tail_chars: int = 4000,
         pull: bool = False,
         s3_cache_config: S3DockerCacheManager | dict[str, str] | None = None,
+        use_buildx: bool | None = None,
     ) -> BuildResult:
         """
-        SDK-only build with streamed logs, tail capture, and a wall-clock timeout.
+        Build with streamed logs, tail capture, and a wall-clock timeout.
         Returns a BuildResult and does NOT raise for typical failures (so callers can
         report immediately).
 
         Changes vs previous version:
         - Reuses a cached, reproducible tarball to avoid per-build tarring & cache drift.
         - Uses a fresh low-level API client per call to avoid connection contention in ThreadPools.
+        - Optional buildx support for advanced caching and multi-platform builds.
+
+        Args:
+            use_buildx: If True, use docker buildx; if False, use SDK; if None, auto-detect
         """
         if isinstance(s3_cache_config, S3DockerCacheManager):
             s3_cache_config = s3_cache_config.get_build_metadata(
                 dockerfile_content=self.dockerfile_data,
                 build_args=build_args,
             )
+
+        # Determine whether to use buildx
+        if use_buildx is None:
+            use_buildx = os.environ.get("DOCKER_USE_BUILDX", "").lower() in ("1", "true", "yes")
+
+        # Route to buildx if requested and available
+        if use_buildx:
+            try:
+                return self._build_with_buildx(
+                    client=client,
+                    image_name=image_name,
+                    build_args=build_args,
+                    run_labels=run_labels,
+                    probe=probe,
+                    force=force,
+                    delete_img=delete_img,
+                    timeout_s=timeout_s,
+                    tail_chars=tail_chars,
+                    pull=pull,
+                    s3_cache_config=s3_cache_config,
+                )
+            except Exception as e:
+                logger.warning("buildx build failed, falling back to SDK: %s", e)
+                # Fall through to SDK build
+
         run_labels = run_labels if run_labels else {}
         _, target = self.process_image_name(image_name)
         t0 = time.time()
