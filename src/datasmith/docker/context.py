@@ -19,6 +19,7 @@ from typing import Any, ClassVar
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound
 
+from datasmith.docker.s3_cache_manager import S3DockerCacheManager
 from datasmith.execution.utils import _get_commit_info
 from datasmith.logging_config import get_logger
 
@@ -82,6 +83,7 @@ class Task:
     repo: str
     sha: str | None = None
     commit_date: float = 0.0
+    env_payload: str = ""
     tag: str = "pkg"  # 'pkg' (env + package) or 'env' (env-only)
 
     @classmethod
@@ -106,7 +108,14 @@ class Task:
         """Return a new Task with the given tag."""
         if tag not in {"env", "pkg", "run", "base"}:
             raise ValueError(f"Tag must be either 'env', 'pkg', 'run', or 'base', got '{tag}'.")
-        return Task(owner=self.owner, repo=self.repo, sha=self.sha, commit_date=self.commit_date, tag=tag)
+        return Task(
+            owner=self.owner,
+            repo=self.repo,
+            sha=self.sha,
+            commit_date=self.commit_date,
+            tag=tag,
+            env_payload=self.env_payload,
+        )
 
     def get_image_name(self) -> str:
         """Return the Docker image name for this task (repo:tag)."""
@@ -174,6 +183,7 @@ class DockerContext:
     building_data: str
     profile_data: str
     run_tests_data: str
+    test_commands: str
 
     # Cached, reproducible tar bytes per (probe: bool). Immutable => thread-safe reuse.
     _context_tar_bytes: dict[bool, bytes]
@@ -188,6 +198,7 @@ class DockerContext:
         run_building_data: str | None = None,
         profile_data: str | None = None,
         run_tests_data: str | None = None,
+        test_commands: str | None = None,
     ) -> None:
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
@@ -205,6 +216,8 @@ class DockerContext:
             profile_data = self.default_profile_loc.read_text()
         if run_tests_data is None:
             run_tests_data = self.default_run_tests_loc.read_text()
+        if test_commands is None:
+            test_commands = ""
 
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
@@ -214,6 +227,7 @@ class DockerContext:
         self.building_data = building_data
         self.profile_data = profile_data
         self.run_tests_data = run_tests_data
+        self.test_commands = test_commands
 
         self._context_tar_bytes = {}
 
@@ -346,6 +360,7 @@ class DockerContext:
         timeout_s: float = float("inf"),
         tail_chars: int = 4000,
         pull: bool = False,
+        s3_cache_config: S3DockerCacheManager | dict[str, str] | None = None,
     ) -> BuildResult:
         """
         SDK-only build with streamed logs, tail capture, and a wall-clock timeout.
@@ -356,6 +371,11 @@ class DockerContext:
         - Reuses a cached, reproducible tarball to avoid per-build tarring & cache drift.
         - Uses a fresh low-level API client per call to avoid connection contention in ThreadPools.
         """
+        if isinstance(s3_cache_config, S3DockerCacheManager):
+            s3_cache_config = s3_cache_config.get_build_metadata(
+                dockerfile_content=self.dockerfile_data,
+                build_args=build_args,
+            )
         run_labels = run_labels if run_labels else {}
         _, target = self.process_image_name(image_name)
         t0 = time.time()
@@ -397,10 +417,22 @@ class DockerContext:
 
             # Pretty log line for transparency
             if build_args:
-                build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in build_args.items())
+                build_args_str = " --build-arg ".join(f"{k}='{v}'" for k, v in build_args.items())
                 logger.info("$ docker build -t %s . --build-arg %s", image_name, build_args_str)
             else:
                 logger.info("$ docker build -t %s .", image_name)
+
+            # Prepare cache configuration
+            cache_from_list = cache_from or []
+            if s3_cache_config:
+                # Add S3 cache mount to cache_from
+                s3_cache_mount = (
+                    f"type=s3,bucket={s3_cache_config['bucket']},"
+                    f"region={s3_cache_config['region']},"
+                    f"prefix={s3_cache_config['prefix']}"
+                )
+                cache_from_list.append(s3_cache_mount)
+                logger.info("Using S3 cache: %s", s3_cache_mount)
 
             try:
                 stream = api.build(
@@ -414,7 +446,7 @@ class DockerContext:
                     target=target,
                     labels=run_labels,
                     network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
-                    cache_from=cache_from,
+                    cache_from=cache_from_list,
                 )
             except DockerException:
                 logger.exception("Failed to initiate build for '%s'", image_name)
@@ -516,6 +548,7 @@ class DockerContext:
             "run_building_data": self.run_building_data,
             "profile_data": self.profile_data,
             "run_tests_data": self.run_tests_data,
+            "test_commands": self.test_commands,
         }
 
     @classmethod
@@ -533,6 +566,7 @@ class DockerContext:
             run_building_data=data.get("run_building_data", None),
             profile_data=data.get("profile_data", None),
             run_tests_data=data.get("run_tests_data", None),
+            test_commands=data.get("test_commands", None),
         )
 
     def __hash__(self) -> int:
@@ -545,6 +579,7 @@ class DockerContext:
             self.run_building_data,
             self.profile_data,
             self.run_tests_data,
+            self.test_commands,
         ))
 
 
@@ -640,7 +675,7 @@ class ContextRegistry:
 
         # if the tag is "env" and we already have a "pkg" version, warn the user
         # and instead of changing the context completely, overwrite all files
-        # except the building_data (which is pkg-specific)
+        # except the building_data and test_commands (which are pkg-specific)
         if t.tag == "env" and canonical in self.registry:
             existing = self.registry[canonical]
             context = DockerContext(
@@ -648,9 +683,10 @@ class ContextRegistry:
                 entrypoint_data=context.entrypoint_data,
                 env_building_data=context.env_building_data,
                 building_data=existing.building_data,
+                test_commands=existing.test_commands,
             )
             logger.warning(
-                f"Registering 'env' context for '{canonical}' which already has a 'pkg' version; preserving 'pkg' building_data."
+                f"Registering 'env' context for '{canonical}' which already has a 'pkg' version; preserving 'pkg' building_data and test_commands."
             )
         self.registry[canonical] = context
         logger.debug(f"Registered Docker context under canonical key: {canonical}")

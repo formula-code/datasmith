@@ -108,7 +108,7 @@ def merge_with_mtime(merged_json: dict, reg_json: dict, modified_time: float) ->
 
 
 def merge_registries(registries: list[Path]) -> dict:
-    merged_json = {}
+    merged_json: dict = {}
     for reg in registries:
         reg_json = json.loads(reg.read_text())
         modified_time = reg.stat().st_mtime

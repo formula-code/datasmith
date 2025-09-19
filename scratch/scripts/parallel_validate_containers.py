@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float]]]:
+def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float, str]]]:
     if args.dashboard:
         dashboard = BenchmarkCollection.load(args.dashboard)
         all_states = {}
@@ -140,10 +140,11 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             owner = owner.lower()
             repo = repo.lower()
             sha = sha.lower()
+            env_payload = ""  # Dashboard doesn't have env_payload, use empty string
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = {(sha, 0.0)}
+                all_states[(owner, repo)] = {(sha, 0.0, env_payload)}
             else:
-                all_states[(owner, repo)].add((sha, 0.0))
+                all_states[(owner, repo)].add((sha, 0.0, env_payload))
     elif args.commits:
         commits = (
             pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
@@ -160,10 +161,11 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             commit_date_unix: float = (
                 0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
             )
+            env_payload = row.get("env_payload", "")
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = [(sha, commit_date_unix)]
+                all_states[(owner, repo)] = [(sha, commit_date_unix, env_payload)]
             else:
-                all_states[(owner, repo)].append((sha, commit_date_unix))
+                all_states[(owner, repo)].append((sha, commit_date_unix, env_payload))
     else:
         raise ValueError("Either --dashboard or --commits must be provided.")
     return all_states
@@ -177,8 +179,8 @@ def main(args: argparse.Namespace) -> None:
     tasks: set[Task] = set()
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
-        for sha, date in limited:
-            task = Task(owner, repo, sha, commit_date=float(date))
+        for sha, date, env_payload in limited:
+            task = Task(owner, repo, sha, commit_date=float(date), env_payload=env_payload)
             if (task.with_tag("pkg") in context_registry) and (task.sha not in ignore_list):
                 tasks.add(task)
             else:

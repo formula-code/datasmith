@@ -128,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float]]]:
+def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float, str]]]:
     if args.dashboard:
         dashboard = BenchmarkCollection.load(args.dashboard)
         all_states = {}
@@ -136,10 +136,11 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             owner = owner.lower()
             repo = repo.lower()
             sha = sha.lower()
+            env_payload = ""  # Dashboard doesn't have env_payload, use empty string
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = {(sha, 0.0)}
+                all_states[(owner, repo)] = {(sha, 0.0, env_payload)}
             else:
-                all_states[(owner, repo)].add((sha, 0.0))
+                all_states[(owner, repo)].add((sha, 0.0, env_payload))
     elif args.commits:
         commits = (
             pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
@@ -156,10 +157,11 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             commit_date_unix: float = (
                 0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
             )
+            env_payload = row.get("env_payload", "")
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = [(sha, commit_date_unix)]
+                all_states[(owner, repo)] = [(sha, commit_date_unix, env_payload)]
             else:
-                all_states[(owner, repo)].append((sha, commit_date_unix))
+                all_states[(owner, repo)].append((sha, commit_date_unix, env_payload))
     else:
         raise ValueError("Either --dashboard or --commits must be provided.")
     return all_states
@@ -190,8 +192,8 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
     repo_commit_pairs = defaultdict(list)
     for (owner, repo), uniq in all_states.items():
         limited = list(uniq)[: max(0, args.limit_per_repo)] if args.limit_per_repo > 0 else list(uniq)
-        for sha, date in limited:
-            task = Task(owner, repo, sha, commit_date=date)
+        for sha, date, env_payload in limited:
+            task = Task(owner, repo, sha, commit_date=date, env_payload=env_payload)
             if task in context_registry:
                 tasks.append((task, context_registry.get(task)))
                 repo_commit_pairs[f"{owner}/{repo}"].append(task)
@@ -205,7 +207,9 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
         shas = [t.sha for t in tsks]
         parent_commits = find_parent_releases(repo_name, shas, add_first=True, incl_datetime=True)
         for i, (parent_sha, date) in enumerate(parent_commits):
-            parent_task = Task(owner=owner, repo=repo, sha=parent_sha, commit_date=date)  # pyright: ignore[reportArgumentType]
+            # Use the env_payload from the child task
+            env_payload = tsks[i].env_payload if i < len(tsks) else ""
+            parent_task = Task(owner=owner, repo=repo, sha=parent_sha, commit_date=date, env_payload=env_payload)  # pyright: ignore[reportArgumentType]
             # use the child context.
             ctx = context_registry.get(tsks[i])
             tasks.append((parent_task, ctx))
@@ -282,12 +286,14 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
             "ami_id": args.aws_ami_id,
             "instance_type": args.aws_instance_type,
             "key_name": None,
+            "stream_logs": True,
             "spot_max_price": args.aws_spot_max_price,
             "tags": {"project": "datasmith", "role": "batch-execution"},
             "max_tasks_per_instance": args.aws_batch_max_tasks_per_instance,
             "batch_timeout_s": args.aws_batch_execution_timeout_s,
             "poll_interval_s": args.aws_batch_poll_interval_s,
             "max_batch_retries": args.aws_max_batch_retries,
+            "log_output_dir": str(args.output_dir.absolute() / "remote_logs"),
         }
 
     files_by_image: dict[Task, dict[str, str]] = asyncio.run(

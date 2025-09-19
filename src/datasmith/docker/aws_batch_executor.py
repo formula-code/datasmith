@@ -8,11 +8,13 @@ import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import boto3
 
 from datasmith.docker.context import BuildResult, DockerContext, Task
+from datasmith.docker.s3_cache_manager import S3CacheConfig, S3DockerCacheManager
 from datasmith.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -36,6 +38,8 @@ class AwsBatchConfig:
     root_volume_gb: int = 100
     gp3_iops: int | None = None
     gp3_throughput: int | None = None
+    stream_logs: bool = True  # Enable real-time log streaming via SSM
+    log_output_dir: str = "output/batch_logs"  # Directory to store streamed logs
 
     # Batch tuning
     max_tasks_per_instance: int = 100  # Number of tasks (build + benchmark) per instance
@@ -46,6 +50,14 @@ class AwsBatchConfig:
     # Benchmark specific
     num_cores_per_task: int = 4  # CPU cores per benchmark task
     asv_args: str = "--append-samples -a rounds=2 -a repeat=2 --python=same"
+
+    # Docker layer caching
+    enable_s3_cache: bool = True  # Enable S3-based Docker layer caching
+    cache_bucket: str = ""  # S3 bucket for Docker layer cache (required if enable_s3_cache=True)
+    cache_prefix: str = "docker-cache"  # S3 prefix for cache objects
+    cache_region: str = ""  # S3 region for cache (defaults to same as region)
+    max_cache_age_days: int = 30  # Clean up cache layers older than this
+    max_cache_size_gb: int = 400  # Maximum total cache size
 
 
 @dataclass
@@ -88,6 +100,25 @@ class AWSBatchExecutor:
         self.s3 = boto3.client("s3", region_name=cfg.region)
         self.ec2 = boto3.client("ec2", region_name=cfg.region)
 
+        # Initialize S3 cache manager if enabled
+        self.cache_manager = None
+        if cfg.enable_s3_cache:
+            if not cfg.cache_bucket:
+                raise ValueError("cache_bucket must be specified when enable_s3_cache=True")
+
+            cache_region = cfg.cache_region or cfg.region
+            cache_config = S3CacheConfig(
+                bucket=cfg.cache_bucket,
+                prefix=cfg.cache_prefix,
+                region=cache_region,
+                max_cache_age_days=cfg.max_cache_age_days,
+                max_cache_size_gb=cfg.max_cache_size_gb,
+            )
+            self.cache_manager = S3DockerCacheManager(cache_config)
+            logger.info(
+                "Initialized S3 Docker cache manager with bucket=%s, prefix=%s", cfg.cache_bucket, cfg.cache_prefix
+            )
+
     def execute_batch(
         self,
         tasks: Sequence[tuple[Task, DockerContext]],
@@ -111,7 +142,7 @@ class AWSBatchExecutor:
         if not run_id:
             run_id = f"batch-{int(time.time())}-{random.randint(1000, 9999)}"  # noqa: S311
 
-        logger.info(f"Starting batch execution for {len(tasks)} tasks with run_id={run_id}")
+        logger.info("Starting batch execution for %d tasks with run_id=%s", len(tasks), run_id)
 
         # Prepare batch tasks
         batch_tasks = []
@@ -122,7 +153,7 @@ class AWSBatchExecutor:
                 machine_args=machine_args,
                 asv_args=asv_args,
                 num_cores=self.cfg.num_cores_per_task,
-                task_id=f"{run_id}-task-{i:04d}",
+                task_id=f"{run_id}-task-{i:03d}",
             )
             batch_tasks.append(batch_task)
 
@@ -132,12 +163,11 @@ class AWSBatchExecutor:
             batch = batch_tasks[i : i + self.cfg.max_tasks_per_instance]
             batches.append(batch)
 
-        logger.info(f"Split {len(tasks)} tasks into {len(batches)} batches")
+        logger.info("Split %d tasks into %d batches", len(tasks), len(batches))
 
         # Execute batches in parallel using ThreadPoolExecutor
         all_results = []
         with ThreadPoolExecutor(max_workers=min(len(batches), 10)) as executor:
-            # Submit all batches for parallel execution
             future_to_batch = {
                 executor.submit(self._execute_single_batch, batch, run_id, batch_idx): (batch_idx, batch)
                 for batch_idx, batch in enumerate(batches)
@@ -174,7 +204,7 @@ class AWSBatchExecutor:
                     ]
                     all_results.extend(failure_results)
 
-        logger.info(f"Completed batch execution: {len(all_results)} results")
+        logger.info("Completed batch execution: %d results", len(all_results))
         return all_results
 
     def _execute_single_batch(
@@ -192,8 +222,8 @@ class AWSBatchExecutor:
         instance_id = self._launch_batch_instance(batch, run_id, batch_idx, batch_data_key)
 
         try:
-            # Wait for results
-            results = self._wait_for_batch_results(batch, run_id, batch_idx)
+            # Wait for results while streaming logs
+            results = self._wait_for_batch_results(batch, run_id, batch_idx, instance_id)
             return results
         finally:
             # Clean up instance
@@ -248,7 +278,7 @@ class AWSBatchExecutor:
             ContentType="application/json",
         )
 
-        logger.info(f"Uploaded batch data to s3://{self.cfg.s3_bucket}/{batch_data_key}")
+        logger.info("Uploaded batch data to s3://%s/%s", self.cfg.s3_bucket, batch_data_key)
         return batch_data_key
 
     def _launch_batch_instance(
@@ -308,39 +338,39 @@ class AWSBatchExecutor:
             spec["KeyName"] = self.cfg.key_name
 
         resp = self.ec2.run_instances(MinCount=1, MaxCount=1, **spec)
-        instance_id = resp["Instances"][0]["InstanceId"]
+        instance_id: str = resp["Instances"][0]["InstanceId"]
 
         logger.info("Launched instance %s for batch %d", instance_id, batch_idx)
-        return instance_id  # type: ignore[no-any-return]
+        return instance_id
 
     def _generate_user_data(self, batch_data_key: str) -> str:
         """Generate user data script for EC2 instance (Amazon Linux 2 compatible)."""
-        return f"""#!/bin/bash
+        script = """#!/bin/bash
 set -eox pipefail
 
 # Log user-data to a file for debugging
 exec > >(tee -a /var/log/user-data.log) 2>&1
 
-retry() {{
-  local n=0
-  local max=5
-  local delay=5
-  while true; do
-    "$@" && break || {{
-      n=$((n+1))
-      if [ $n -ge $max ]; then
+retry() {
+    local n=0
+    local max=5
+    local delay=5
+    while true; do
+    "$@" && break || {
+        n=$((n+1))
+        if [ $n -ge $max ]; then
         echo "Command failed after $n attempts: $*"
         return 1
-      fi
-      echo "Retry $n/$max for: $*"; sleep $delay;
-    }}
-  done
-}}
+        fi
+        echo "Retry $n/$max for: $*"; sleep $delay;
+    }
+    done
+}
 
-        echo "==> Installing prerequisites (Amazon Linux 2)"
-        retry yum update -y
-        retry yum install -y jq git python3 python3-pip awscli bc
-        retry amazon-linux-extras install -y docker
+echo "==> Installing prerequisites (Amazon Linux 2)"
+retry yum update -y
+retry yum install -y jq git python3 python3-pip awscli bc
+retry amazon-linux-extras install -y docker
 
 echo "==> Enabling and starting Docker"
 systemctl enable docker || true
@@ -348,11 +378,11 @@ systemctl start docker || true
 
 # Wait for Docker to be ready
 for i in $(seq 1 10); do
-  if docker info >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
     break
-  fi
-  echo "Waiting for Docker daemon... ($i/10)"
-  sleep 2
+    fi
+    echo "Waiting for Docker daemon... ($i/10)"
+    sleep 2
 done
 
 echo "==> Installing Python packages"
@@ -363,7 +393,7 @@ mkdir -p /opt/datasmith
 cd /opt/datasmith
 
 echo "==> Downloading batch data"
-retry aws s3 cp "s3://{self.cfg.s3_bucket}/{batch_data_key}" batch-data.json
+retry aws s3 cp "s3://{s3_bucket}/{batch_data_key}" batch-data.json
 
 echo "==> Parsing batch data"
 BATCH_DATA=$(cat batch-data.json)
@@ -377,220 +407,362 @@ echo "Starting batch execution: run_id=$RUN_ID, batch_idx=$BATCH_IDX"
 
 TASK_COUNT=$(echo "$BATCH_DATA" | jq '.tasks | length')
 for i in $(seq 0 $((TASK_COUNT - 1))); do
-  echo "Processing task $((i + 1))/$TASK_COUNT"
+    echo "Processing task $((i + 1))/$TASK_COUNT"
 
-  TASK_DATA=$(echo "$BATCH_DATA" | jq ".tasks[$i]")
-  TASK_ID=$(echo "$TASK_DATA" | jq -r '.task_id')
-  OWNER=$(echo "$TASK_DATA" | jq -r '.task.owner' | tr '[:upper:]' '[:lower:]')
-  REPO=$(echo "$TASK_DATA" | jq -r '.task.repo' | tr '[:upper:]' '[:lower:]')
-  SHA=$(echo "$TASK_DATA" | jq -r '.task.sha' | tr '[:upper:]' '[:lower:]')
-  TAG=$(echo "$TASK_DATA" | jq -r '.task.tag' | tr '[:upper:]' '[:lower:]')
+    TASK_DATA=$(echo "$BATCH_DATA" | jq ".tasks[$i]")
+    TASK_ID=$(echo "$TASK_DATA" | jq -r '.task_id')
+    OWNER=$(echo "$TASK_DATA" | jq -r '.task.owner' | tr '[:upper:]' '[:lower:]')
+    REPO=$(echo "$TASK_DATA" | jq -r '.task.repo' | tr '[:upper:]' '[:lower:]')
+    SHA=$(echo "$TASK_DATA" | jq -r '.task.sha' | tr '[:upper:]' '[:lower:]')
+    TAG=$(echo "$TASK_DATA" | jq -r '.task.tag' | tr '[:upper:]' '[:lower:]')
+    ENV_PAYLOAD=$(echo "$TASK_DATA" | jq -r '.task.env_payload // ""')
 
-  mkdir -p "task-$TASK_ID"
-  cd "task-$TASK_ID"
+    mkdir -p "task-$TASK_ID"
+    cd "task-$TASK_ID"
 
-  echo "==> Writing Docker context files"
-  echo "$TASK_DATA" | jq -r '.context.dockerfile_data' > Dockerfile
-  echo "$TASK_DATA" | jq -r '.context.entrypoint_data' > entrypoint.sh
-  echo "$TASK_DATA" | jq -r '.context.building_data' > docker_build_pkg.sh
-  echo "$TASK_DATA" | jq -r '.context.env_building_data' > docker_build_env.sh
-  echo "$TASK_DATA" | jq -r '.context.base_building_data' > docker_build_base.sh
-  echo "$TASK_DATA" | jq -r '.context.run_building_data' > docker_build_run.sh
-  echo "$TASK_DATA" | jq -r '.context.profile_data' > profile.sh
-  echo "$TASK_DATA" | jq -r '.context.run_tests_data' > run_tests.sh
-  chmod +x entrypoint.sh docker_build_*.sh profile.sh run_tests.sh || true
+    echo "==> Writing Docker context files"
+    echo "$TASK_DATA" | jq -r '.context.dockerfile_data' > Dockerfile
+    echo "$TASK_DATA" | jq -r '.context.entrypoint_data' > entrypoint.sh
+    echo "$TASK_DATA" | jq -r '.context.building_data' > docker_build_pkg.sh
+    echo "$TASK_DATA" | jq -r '.context.env_building_data' > docker_build_env.sh
+    echo "$TASK_DATA" | jq -r '.context.base_building_data' > docker_build_base.sh
+    echo "$TASK_DATA" | jq -r '.context.run_building_data' > docker_build_run.sh
+    echo "$TASK_DATA" | jq -r '.context.profile_data' > profile.sh
+    echo "$TASK_DATA" | jq -r '.context.run_tests_data' > run_tests.sh
+    chmod +x entrypoint.sh docker_build_*.sh profile.sh run_tests.sh || true
 
-        echo "==> Building Docker image for $OWNER/$REPO@$SHA"
-        REPO_URL="https://github.com/$OWNER/$REPO.git"
-        IMAGE_NAME="$OWNER-$REPO-$SHA:$TAG"
+    echo "==> Building Docker image for $OWNER/$REPO@$SHA"
+    REPO_URL="https://github.com/$OWNER/$REPO.git"
+    IMAGE_NAME="$OWNER-$REPO-$SHA:$TAG"
 
-        # Capture build timing and logs
-        BUILD_START=$(date +%s.%N)
-        BUILD_LOG_FILE="build.log"
-        if timeout "$BATCH_TIMEOUT" docker build -t "$IMAGE_NAME" . \
-            --build-arg REPO_URL="$REPO_URL" \
-            --build-arg COMMIT_SHA="$SHA" \
-            --target "$TAG" > "$BUILD_LOG_FILE" 2>&1; then
-          BUILD_RC=0
-          BUILD_DURATION=$(echo "$(date +%s.%N) - $BUILD_START" | bc -l)
-          BUILD_STDOUT_TAIL=$(tail -c 1000 "$BUILD_LOG_FILE" | base64 | tr -d '\n')
-          BUILD_STDERR_TAIL=""
-          echo "Build completed successfully in $BUILD_DURATION seconds"
-        else
-          BUILD_RC=$?
-          BUILD_DURATION=$(echo "$(date +%s.%N) - $BUILD_START" | bc -l)
-          BUILD_STDOUT_TAIL=$(tail -c 1000 "$BUILD_LOG_FILE" | base64 | tr -d '\n')
-          BUILD_STDERR_TAIL=$(tail -c 1000 "$BUILD_LOG_FILE" | base64 | tr -d '\n')
-          echo "Build failed with exit code $BUILD_RC after $BUILD_DURATION seconds"
+    # Set up Docker BuildKit for advanced caching
+    export DOCKER_BUILDKIT=1
 
-          # Create failure result with proper JSON formatting
-          BUILD_LOG_CONTENT=$(base64 < "$BUILD_LOG_FILE" | tr -d '\n' | sed 's/"/\\"/g')
-          ESCAPED_STDERR_TAIL=$(echo "$BUILD_STDERR_TAIL" | sed 's/"/\\"/g')
-          ESCAPED_STDOUT_TAIL=$(echo "$BUILD_STDOUT_TAIL" | sed 's/"/\\"/g')
+    # Capture build timing and logs
+    BUILD_START=$(date +%s.%N)
+    BUILD_LOG_FILE="build.log"
 
-          # Create failure result JSON using a template file approach
-          cat > failure_template.json << 'EOF'
-{{
-  "task_id": "TASK_ID_PLACEHOLDER",
-  "build_result": {{
-    "ok": false,
-    "image_name": "",
-    "image_id": null,
-    "rc": BUILD_RC_PLACEHOLDER,
-    "duration_s": BUILD_DURATION_PLACEHOLDER,
-    "stderr_tail": "STDERR_TAIL_PLACEHOLDER",
-    "stdout_tail": "STDOUT_TAIL_PLACEHOLDER"
-  }},
-  "benchmark_exit_code": 1,
-  "benchmark_files": {{"build.log": "BUILD_LOG_CONTENT_PLACEHOLDER"}},
-  "benchmark_logs": "Build failed with exit code BUILD_RC_PLACEHOLDER",
-  "duration_s": BUILD_DURATION_PLACEHOLDER
-}}
-EOF
+    # Build Docker command with S3 cache support
+    DOCKER_BUILD_CMD="timeout $BATCH_TIMEOUT docker build -t $IMAGE_NAME . --build-arg REPO_URL=$REPO_URL --build-arg COMMIT_SHA=$SHA --build-arg ENV_PAYLOAD=\"$ENV_PAYLOAD\" --target $TAG"
 
-          # Replace placeholders with actual values
-          sed -i "s/TASK_ID_PLACEHOLDER/$TASK_ID/g" failure_template.json
-          sed -i "s/BUILD_RC_PLACEHOLDER/$BUILD_RC/g" failure_template.json
-          sed -i "s/BUILD_DURATION_PLACEHOLDER/$BUILD_DURATION/g" failure_template.json
-          sed -i "s/STDERR_TAIL_PLACEHOLDER/$ESCAPED_STDERR_TAIL/g" failure_template.json
-          sed -i "s/STDOUT_TAIL_PLACEHOLDER/$ESCAPED_STDOUT_TAIL/g" failure_template.json
-          sed -i "s/BUILD_LOG_CONTENT_PLACEHOLDER/$BUILD_LOG_CONTENT/g" failure_template.json
+    # Add S3 cache arguments if cache is enabled
+    if [ "{enable_s3_cache}" = "true" ]; then
+        CACHE_BUCKET="{cache_bucket}"
+        CACHE_PREFIX="{cache_prefix}"
+        CACHE_REGION="{cache_region}"
 
-          mv failure_template.json result.json
-          PADDED_BATCH_IDX=$(printf "%03d" "$BATCH_IDX")
-          retry aws s3 cp result.json "s3://{self.cfg.s3_bucket}/{self.cfg.s3_prefix}/results/$RUN_ID/batch-$PADDED_BATCH_IDX/$TASK_ID/result.json" || true
-          cd ..
-          continue
+        # Generate cache mount configuration
+        CACHE_MOUNT="type=s3,bucket=$CACHE_BUCKET,region=$CACHE_REGION,prefix=$CACHE_PREFIX/layers/$OWNER-$REPO-$SHA"
+
+        DOCKER_BUILD_CMD="$DOCKER_BUILD_CMD --cache-from $CACHE_MOUNT --cache-to $CACHE_MOUNT,mode=max"
+
+        echo "Using S3 cache: bucket=$CACHE_BUCKET, prefix=$CACHE_PREFIX"
+    fi
+
+    if $DOCKER_BUILD_CMD > "$BUILD_LOG_FILE" 2>&1; then
+    BUILD_RC=0
+    BUILD_DURATION=$(echo "$(date +%s.%N) - $BUILD_START" | bc -l)
+    BUILD_STDOUT_TAIL=$(tail -c 1000 "$BUILD_LOG_FILE" | base64 | tr -d '\n')
+    BUILD_STDERR_TAIL=""
+    echo "Build completed successfully in $BUILD_DURATION seconds"
+    else
+    BUILD_RC=$?
+    BUILD_DURATION=$(echo "$(date +%s.%N) - $BUILD_START" | bc -l)
+    BUILD_STDOUT_TAIL=$(tail -c 1000 "$BUILD_LOG_FILE" | base64 | tr -d '\n')
+    BUILD_STDERR_TAIL=$(tail -c 1000 "$BUILD_LOG_FILE" | base64 | tr -d '\n')
+    echo "Build failed with exit code $BUILD_RC after $BUILD_DURATION seconds"
+
+    # Create failure result.json with jq (compatible with older jq versions)
+    BUILD_LOG_B64=$(base64 -w 0 "$BUILD_LOG_FILE" 2>/dev/null || base64 "$BUILD_LOG_FILE" | tr -d '\n')
+    jq -n \
+        --arg task_id "$TASK_ID" \
+        --arg build_rc "$BUILD_RC" \
+        --arg build_duration "$BUILD_DURATION" \
+        --arg stderr_tail "$BUILD_STDERR_TAIL" \
+        --arg stdout_tail "$BUILD_STDOUT_TAIL" \
+        --arg build_log "$BUILD_LOG_B64" '
+    {
+        task_id: $task_id,
+        build_result: {
+        ok: false,
+        image_name: "",
+        image_id: null,
+        rc: ($build_rc|tonumber),
+        duration_s: ($build_duration|tonumber),
+        stderr_tail: $stderr_tail,
+        stdout_tail: $stdout_tail
+        },
+        benchmark_exit_code: 1,
+        benchmark_files: {
+        "build.log": $build_log
+        },
+        benchmark_logs: ("Build failed with exit code " + $build_rc),
+        duration_s: ($build_duration|tonumber)
+    }' > result.json
+
+    retry aws s3 cp result.json "s3://{s3_bucket}/{s3_prefix}/results/$RUN_ID/batch-$BATCH_IDX/$TASK_ID/result.json" || true
+    cd ..
+    continue
+    fi
+
+    echo "==> Running benchmark for $TASK_ID"
+    CONTAINER_NAME="benchmark-$TASK_ID"
+    mkdir -p output
+
+    # Capture benchmark timing and logs
+    BENCHMARK_START=$(date +%s.%N)
+    # We must not use --rm if we want to access container logs after the run,
+    # because --rm deletes the container immediately after exit.
+    if timeout "$BATCH_TIMEOUT" docker run \
+        --name "$CONTAINER_NAME" \
+        --cpus="$NUM_CORES" \
+        -v "$(pwd)/output:/output" \
+        --entrypoint /profile.sh \
+        "$IMAGE_NAME" \
+        /output/profile "" > benchmark.log 2>&1; then
+    BENCHMARK_EXIT_CODE=0
+    echo "Benchmark completed successfully"
+    else
+    BENCHMARK_EXIT_CODE=$?
+    echo "Benchmark failed with exit code $BENCHMARK_EXIT_CODE"
+    fi
+
+    BENCHMARK_DURATION=$(echo "$(date +%s.%N) - $BENCHMARK_START" | bc -l)
+
+    # Save container logs alongside outputs
+    docker logs "$CONTAINER_NAME" > output/container.log 2>&1 || true
+
+    # Clean up the container after logs are saved
+    docker rm "$CONTAINER_NAME" > /dev/null 2>&1 || true
+    echo "==> Collecting results for $TASK_ID (exit=$BENCHMARK_EXIT_CODE)"
+
+    # Calculate total duration
+    TOTAL_DURATION=$(echo "$BUILD_DURATION + $BENCHMARK_DURATION" | bc -l)
+
+    # Build success result.json incrementally with jq (no sed / huge args)
+    jq -n \
+    --arg task_id "$TASK_ID" \
+    --arg image_name "$IMAGE_NAME" \
+    --arg build_rc "$BUILD_RC" \
+    --arg build_duration "$BUILD_DURATION" \
+    --arg stderr_tail "$BUILD_STDERR_TAIL" \
+    --arg stdout_tail "$BUILD_STDOUT_TAIL" \
+    --arg bench_exit "$BENCHMARK_EXIT_CODE" \
+    --arg total_duration "$TOTAL_DURATION" \
+    '
+    {
+    task_id: $task_id,
+    build_result: {
+        ok: true,
+        image_name: $image_name,
+        image_id: null,
+        rc: ($build_rc|tonumber),
+        duration_s: ($build_duration|tonumber),
+        stderr_tail: $stderr_tail,
+        stdout_tail: $stdout_tail
+    },
+    benchmark_exit_code: ($bench_exit|tonumber),
+    benchmark_files: {},
+    benchmark_logs: "",
+    duration_s: ($total_duration|tonumber)
+    }' > result.json
+
+    # Add build.log (base64) if present
+    if [ -f "$BUILD_LOG_FILE" ]; then
+    BUILD_LOG_B64=$(base64 -w 0 "$BUILD_LOG_FILE" 2>/dev/null || base64 "$BUILD_LOG_FILE" | tr -d '\n')
+    jq --arg build_log "$BUILD_LOG_B64" \
+        '.benchmark_files += {"build.log": $build_log}' \
+        result.json > result.tmp && mv result.tmp result.json
+    fi
+
+    # Add benchmark.log (base64) and set benchmark_logs to its base64 content
+    if [ -f "benchmark.log" ]; then
+    BENCHMARK_LOG_B64=$(base64 -w 0 "benchmark.log" 2>/dev/null || base64 "benchmark.log" | tr -d '\n')
+    jq --arg benchmark_log "$BENCHMARK_LOG_B64" \
+        '.benchmark_files += {"benchmark.log": $benchmark_log} | .benchmark_logs = $benchmark_log' \
+        result.json > result.tmp && mv result.tmp result.json
+    fi
+
+    # Add any files from output/ (base64)
+    if [ -d "output" ]; then
+    for file in output/*; do
+        if [ -f "$file" ]; then
+        filename=$(basename "$file")
+        FILE_B64=$(base64 -w 0 "$file" 2>/dev/null || base64 "$file" | tr -d '\n')
+        jq --arg content "$FILE_B64" \
+            --arg name "$filename" \
+            '.benchmark_files += {($name): $content}' \
+            result.json > result.tmp && mv result.tmp result.json
         fi
+    done
+    fi
 
-        echo "==> Running benchmark for $TASK_ID"
-        CONTAINER_NAME="benchmark-$TASK_ID"
-        mkdir -p output
+    # Upload
+    retry aws s3 cp result.json "s3://{s3_bucket}/{s3_prefix}/results/$RUN_ID/batch-$BATCH_IDX/$TASK_ID/result.json" || true
 
-        # Capture benchmark timing and logs
-        BENCHMARK_START=$(date +%s.%N)
-        # We must not use --rm if we want to access container logs after the run,
-        # because --rm deletes the container immediately after exit.
-        if timeout "$BATCH_TIMEOUT" docker run \
-            --name "$CONTAINER_NAME" \
-            --cpus="$NUM_CORES" \
-            -v "$(pwd)/output:/output" \
-            --entrypoint /profile.sh \
-            "$IMAGE_NAME" \
-            /output/profile "" > benchmark.log 2>&1; then
-          BENCHMARK_EXIT_CODE=0
-          echo "Benchmark completed successfully"
-        else
-          BENCHMARK_EXIT_CODE=$?
-          echo "Benchmark failed with exit code $BENCHMARK_EXIT_CODE"
-        fi
-
-        BENCHMARK_DURATION=$(echo "$(date +%s.%N) - $BENCHMARK_START" | bc -l)
-        BENCHMARK_LOG_CONTENT=$(base64 < benchmark.log | tr -d '\n')
-
-        # Save container logs alongside outputs
-        docker logs "$CONTAINER_NAME" > output/container.log 2>&1 || true
-
-        # Clean up the container after logs are saved
-        docker rm "$CONTAINER_NAME" > /dev/null 2>&1 || true
-        echo "==> Collecting results for $TASK_ID (exit=$BENCHMARK_EXIT_CODE)"
-
-        # Build JSON files object properly
-        BENCHMARK_FILES_JSON="{{}}"
-
-        # Add build log to files
-        if [ -f "$BUILD_LOG_FILE" ]; then
-          BUILD_LOG_CONTENT=$(base64 < "$BUILD_LOG_FILE" | tr -d '\n' | sed 's/"/\\"/g')
-          BENCHMARK_FILES_JSON=$(echo "$BENCHMARK_FILES_JSON" | jq --arg content "$BUILD_LOG_CONTENT" '. + {{"build.log": $content}}')
-        fi
-
-        # Add benchmark log to files
-        if [ -f "benchmark.log" ]; then
-          BENCHMARK_LOG_FILE_CONTENT=$(base64 < benchmark.log | tr -d '\n' | sed 's/"/\\"/g')
-          BENCHMARK_FILES_JSON=$(echo "$BENCHMARK_FILES_JSON" | jq --arg content "$BENCHMARK_LOG_FILE_CONTENT" '. + {{"benchmark.log": $content}}')
-        fi
-
-        # Add output directory files
-        if [ -d "output" ]; then
-          for file in output/*; do
-            if [ -f "$file" ]; then
-              filename=$(basename "$file")
-              content=$(base64 < "$file" | tr -d '\n' | sed 's/"/\\"/g')
-              BENCHMARK_FILES_JSON=$(echo "$BENCHMARK_FILES_JSON" | jq --arg filename "$filename" --arg content "$content" '. + {{($filename): $content}}')
-            fi
-          done
-        fi
-
-        # Calculate total duration
-        TOTAL_DURATION=$(echo "$BUILD_DURATION + $BENCHMARK_DURATION" | bc -l)
-
-        # Escape variables for JSON
-        ESCAPED_IMAGE_NAME=$(echo "$IMAGE_NAME" | sed 's/"/\\"/g')
-        ESCAPED_STDERR_TAIL=$(echo "$BUILD_STDERR_TAIL" | sed 's/"/\\"/g')
-        ESCAPED_STDOUT_TAIL=$(echo "$BUILD_STDOUT_TAIL" | sed 's/"/\\"/g')
-        ESCAPED_BENCHMARK_LOGS=$(echo "$BENCHMARK_LOG_CONTENT" | sed 's/"/\\"/g')
-
-        # Create success result JSON using a template file approach
-        cat > success_template.json << 'EOF'
-{{
-  "task_id": "TASK_ID_PLACEHOLDER",
-  "build_result": {{
-    "ok": true,
-    "image_name": "IMAGE_NAME_PLACEHOLDER",
-    "image_id": null,
-    "rc": BUILD_RC_PLACEHOLDER,
-    "duration_s": BUILD_DURATION_PLACEHOLDER,
-    "stderr_tail": "STDERR_TAIL_PLACEHOLDER",
-    "stdout_tail": "STDOUT_TAIL_PLACEHOLDER"
-  }},
-  "benchmark_exit_code": BENCHMARK_EXIT_CODE_PLACEHOLDER,
-  "benchmark_files": BENCHMARK_FILES_JSON_PLACEHOLDER,
-  "benchmark_logs": "BENCHMARK_LOGS_PLACEHOLDER",
-  "duration_s": TOTAL_DURATION_PLACEHOLDER
-}}
-EOF
-
-        # Replace placeholders with actual values
-        sed -i "s/TASK_ID_PLACEHOLDER/$TASK_ID/g" success_template.json
-        sed -i "s/IMAGE_NAME_PLACEHOLDER/$ESCAPED_IMAGE_NAME/g" success_template.json
-        sed -i "s/BUILD_RC_PLACEHOLDER/$BUILD_RC/g" success_template.json
-        sed -i "s/BUILD_DURATION_PLACEHOLDER/$BUILD_DURATION/g" success_template.json
-        sed -i "s/STDERR_TAIL_PLACEHOLDER/$ESCAPED_STDERR_TAIL/g" success_template.json
-        sed -i "s/STDOUT_TAIL_PLACEHOLDER/$ESCAPED_STDOUT_TAIL/g" success_template.json
-        sed -i "s/BENCHMARK_EXIT_CODE_PLACEHOLDER/$BENCHMARK_EXIT_CODE/g" success_template.json
-        sed -i "s/BENCHMARK_FILES_JSON_PLACEHOLDER/$BENCHMARK_FILES_JSON/g" success_template.json
-        sed -i "s/BENCHMARK_LOGS_PLACEHOLDER/$ESCAPED_BENCHMARK_LOGS/g" success_template.json
-        sed -i "s/TOTAL_DURATION_PLACEHOLDER/$TOTAL_DURATION/g" success_template.json
-
-        mv success_template.json result.json
-
-  PADDED_BATCH_IDX=$(printf "%03d" "$BATCH_IDX")
-  retry aws s3 cp result.json "s3://{self.cfg.s3_bucket}/{self.cfg.s3_prefix}/results/$RUN_ID/batch-$PADDED_BATCH_IDX/$TASK_ID/result.json" || true
-
-  docker rmi "$IMAGE_NAME" || true
-  cd ..
+    docker rmi "$IMAGE_NAME" || true
+    cd ..
 done
 
 echo "Batch execution completed for run_id=$RUN_ID, batch_idx=$BATCH_IDX"
 # Allow S3 eventual consistency to settle
 sleep 10
 shutdown -h now || poweroff || halt
-"""  # noqa: S608
+    """
 
-    def _wait_for_batch_results(
+        # Replace placeholders in the script
+        return (
+            script.replace("{s3_bucket}", self.cfg.s3_bucket)
+            .replace("{s3_prefix}", self.cfg.s3_prefix)
+            .replace("{batch_data_key}", batch_data_key)
+            .replace("{enable_s3_cache}", str(self.cfg.enable_s3_cache).lower())
+            .replace("{cache_bucket}", self.cfg.cache_bucket or "")
+            .replace("{cache_prefix}", self.cfg.cache_prefix)
+            .replace("{cache_region}", self.cfg.cache_region or self.cfg.region)
+        )
+
+    def _stream_user_data_logs(self, instance_id: str, batch_idx: int, run_id: str, last_position: int = 0) -> int:
+        """Stream user-data logs from EC2 instance to output directory and return the last position read."""
+        try:
+            # Use AWS Systems Manager to execute commands on the instance
+            ssm = boto3.client("ssm", region_name=self.cfg.region)
+
+            s3_log_key = f"{self.cfg.s3_prefix}/logs/{run_id}/batch-{batch_idx:03d}-{instance_id}.log"
+
+            # Command to copy the log file to S3 to bypass the 24KB SSM output limit
+            # This overwrites the same file each time, keeping it up to date
+            command = f"aws s3 cp /var/log/user-data.log s3://{self.cfg.s3_bucket}/{s3_log_key} 2>/dev/null || echo 'Log file not found or S3 upload failed'"
+
+            response = ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters={"commands": [command]},
+                TimeoutSeconds=60,  # Increased timeout for S3 upload
+            )
+
+            command_id = response["Command"]["CommandId"]
+            time.sleep(3)  # Give it time to complete
+
+            # Wait for command to complete
+            tries = 15  # Increased tries for S3 upload
+            output = None
+            while tries > 0:
+                try:
+                    output = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+                    if output["Status"] not in ["Pending", "InProgress"]:
+                        break
+                except Exception:  # noqa: S110
+                    pass
+                time.sleep(2)
+                tries -= 1
+
+            if output and output["Status"] == "Success":
+                # Download the log file from S3
+                try:
+                    s3_response = self.s3.get_object(Bucket=self.cfg.s3_bucket, Key=s3_log_key)
+                    full_log_content = s3_response["Body"].read().decode("utf-8")
+
+                    # Create output directory for logs
+                    log_dir = Path(self.cfg.log_output_dir) / run_id
+                    log_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Write logs to batch-specific file
+                    log_file = log_dir / f"batch-{batch_idx:03d}-{instance_id}.log"
+
+                    # Always rewrite the entire file with the current content
+                    with open(log_file, "w", encoding="utf-8") as f:
+                        f.write(full_log_content)
+
+                    # Count total lines
+                    total_lines = len([line for line in full_log_content.split("\n") if line.strip()])
+                    if total_lines > 0:
+                        logger.info(
+                            "Updated log file with %d total lines from %s to %s (S3: s3://%s/%s)",
+                            total_lines,
+                            instance_id,
+                            log_file,
+                            self.cfg.s3_bucket,
+                            s3_log_key,
+                        )
+
+                    # Return the length of the full content as the new position
+                    return len(full_log_content.encode("utf-8"))
+
+                except Exception as e:
+                    logger.debug("Error downloading log file from S3 for %s: %s", instance_id, e)
+                    return last_position
+            else:
+                logger.debug(
+                    "SSM command failed for %s: %s",
+                    instance_id,
+                    output.get("Status", "Unknown") if output else "No output",
+                )
+                return last_position
+
+        except Exception as e:
+            # SSM agent may not be installed or IAM permissions may be missing
+            # This is expected and we should continue without log streaming
+            logger.debug("Error streaming user-data logs for %s: %s", instance_id, e)
+            return last_position
+
+    def _create_batch_summary_log(self, run_id: str, batch_idx: int, instance_id: str) -> Path:
+        """Create a summary log file for the batch execution."""
+        log_dir = Path(self.cfg.log_output_dir) / run_id
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        summary_file = log_dir / f"batch-{batch_idx:03d}-summary.log"
+
+        # Create the S3 log key for reference
+        s3_log_key = f"{self.cfg.s3_prefix}/logs/{run_id}/batch-{batch_idx:03d}-{instance_id}.log"
+
+        with open(summary_file, "w", encoding="utf-8") as f:
+            f.write("Batch Execution Summary\n")
+            f.write("======================\n")
+            f.write(f"Run ID: {run_id}\n")
+            f.write(f"Batch Index: {batch_idx}\n")
+            f.write(f"Instance ID: {instance_id}\n")
+            f.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n")
+            f.write(f"Log Directory: {log_dir}\n")
+            f.write(f"Instance Log: batch-{batch_idx:03d}-{instance_id}.log\n")
+            f.write(f"S3 Log File: s3://{self.cfg.s3_bucket}/{s3_log_key}\n")
+            f.write("\n")
+            f.write(f"Real-time logs are being streamed to: batch-{batch_idx:03d}-{instance_id}.log\n")
+            f.write(f"Persistent S3 log file: s3://{self.cfg.s3_bucket}/{s3_log_key}\n")
+            f.write(f"Use 'tail -f {summary_file}' to monitor this summary\n")
+            f.write(f"Use 'tail -f {log_dir}/batch-{batch_idx:03d}-{instance_id}.log' to see instance logs\n")
+            f.write(f"Use 'aws s3 cp s3://{self.cfg.s3_bucket}/{s3_log_key} -' to view S3 log directly\n")
+            f.write("\n")
+
+        return summary_file
+
+    def _wait_for_batch_results(  # noqa: C901
         self,
         batch: Sequence[BatchTask],
         run_id: str,
         batch_idx: int,
+        instance_id: str,
     ) -> list[BatchResult]:
-        """Wait for batch results to be uploaded to S3."""
+        """Wait for batch results to be uploaded to S3 while streaming user-data logs."""
 
         deadline = time.time() + self.cfg.batch_timeout_s
         results: dict[str, BatchResult] = {}
+        log_position = 0
 
-        logger.info("Waiting for %d results from batch %d", len(batch), batch_idx)
+        # Create summary log file
+        summary_file = self._create_batch_summary_log(run_id, batch_idx, instance_id)
+        logger.info(
+            "Waiting for %d results from batch %d (streaming logs from %s to %s)",
+            len(batch),
+            batch_idx,
+            instance_id,
+            summary_file.parent,
+        )
 
         while time.time() < deadline and len(results) < len(batch):
+            # Stream user-data logs during polling if enabled (do this first)
+            if self.cfg.stream_logs:
+                log_position = self._stream_user_data_logs(instance_id, batch_idx, run_id, log_position)
+
             for batch_task in batch:
                 if batch_task.task_id in results:
                     continue
@@ -632,6 +804,14 @@ shutdown -h now || poweroff || halt
                     results[batch_task.task_id] = result
                     logger.info("Received result for task %s", batch_task.task_id)
 
+                    # Update summary log
+                    with open(summary_file, "a", encoding="utf-8") as f:
+                        f.write(
+                            f"[{time.strftime('%H:%M:%S')}] Completed task {batch_task.task_id} "
+                            f"(build: {'✓' if result.build_result.ok else '✗'}, "
+                            f"benchmark: {'✓' if result.benchmark_exit_code == 0 else '✗'})\n"
+                        )
+
                 except self.s3.exceptions.NoSuchKey:
                     continue
                 except Exception as e:
@@ -641,10 +821,61 @@ shutdown -h now || poweroff || halt
             if len(results) < len(batch):
                 time.sleep(self.cfg.poll_interval_s)
 
+                if not self._is_instance_running(instance_id):
+                    logger.warning("Instance %s has terminated, stopping batch result polling", instance_id)
+                    break
+
+        # Determine the reason for incomplete results
+        instance_terminated = not self._is_instance_running(instance_id)
+
         if len(results) < len(batch):
-            logger.warning("Timeout waiting for batch results: got %d/%d", len(results), len(batch))
+            if instance_terminated:
+                logger.warning(
+                    "Instance terminated while waiting for batch results: got %d/%d", len(results), len(batch)
+                )
+            else:
+                logger.warning("Timeout waiting for batch results: got %d/%d", len(results), len(batch))
+
+        # Write final summary
+        with open(summary_file, "a", encoding="utf-8") as f:
+            f.write("\n")
+            f.write(f"Batch completed: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n")
+            f.write(f"Results: {len(results)}/{len(batch)} tasks completed\n")
+            if len(results) < len(batch):
+                if instance_terminated:
+                    f.write(f"Status: INSTANCE_TERMINATED - {len(batch) - len(results)} tasks did not complete\n")
+                else:
+                    f.write(f"Status: TIMEOUT - {len(batch) - len(results)} tasks did not complete\n")
+            else:
+                f.write("Status: SUCCESS - All tasks completed\n")
+            f.write(f"Log files available in: {summary_file.parent}\n")
 
         return list(results.values())
+
+    def _is_instance_running(self, instance_id: str) -> bool:
+        """Check if an EC2 instance is still running."""
+        try:
+            response = self.ec2.describe_instances(InstanceIds=[instance_id])
+            if not response["Reservations"]:
+                logger.warning("No reservations found for instance %s", instance_id)
+                return False
+
+            instance = response["Reservations"][0]["Instances"][0]
+            state = instance["State"]["Name"]
+
+            # Instance is considered running if it's in 'running' state
+            # Other states like 'stopping', 'stopped', 'terminating', 'terminated' mean it's not running
+            is_running = state == "running"
+
+            if not is_running:
+                logger.info("Instance %s is in state '%s' (not running)", instance_id, state)
+                return False
+            else:
+                return True
+        except Exception as e:
+            logger.warning("Error checking instance state for %s: %s", instance_id, e)
+            # If we can't check the state, assume it's still running to avoid false positives
+            return True
 
     def _terminate_instance(self, instance_id: str) -> None:
         """Terminate an EC2 instance."""
@@ -653,3 +884,23 @@ shutdown -h now || poweroff || halt
             logger.info("Terminated instance %s", instance_id)
         except Exception as e:
             logger.warning("Error terminating instance %s: %s", instance_id, e)
+
+    def cleanup_cache(self) -> dict[str, int]:
+        """Clean up old Docker layer cache entries."""
+        if not self.cache_manager:
+            logger.warning("S3 cache not enabled, skipping cleanup")
+            return {}
+
+        logger.info("Starting Docker layer cache cleanup")
+        stats = self.cache_manager.cleanup_old_cache()
+        logger.info("Cache cleanup completed: %s", stats)
+        return stats
+
+    def get_cache_stats(self) -> dict[str, Any]:
+        """Get Docker layer cache statistics."""
+        if not self.cache_manager:
+            return {"enabled": False}
+
+        stats = self.cache_manager.get_cache_stats()
+        stats["enabled"] = True
+        return stats

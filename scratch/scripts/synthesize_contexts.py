@@ -17,7 +17,7 @@ from datasmith.docker.context import ContextRegistry, DockerContext, build_base_
 from datasmith.docker.orchestrator import get_docker_client
 from datasmith.docker.validation import Task, _err_lock
 from datasmith.logging_config import configure_logging
-from scratch.notebooks.utils import update_cr
+from datasmith.notebooks.utils import update_cr
 
 # configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
@@ -78,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float]]]:
+def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[str, float, str]]]:
     if args.dashboard:
         dashboard = BenchmarkCollection.load(args.dashboard)
         all_states = {}
@@ -87,10 +87,11 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             sha = row.sha
             date_fmt = row.date  # 2019-10-19T11:32:20-04:00
             date_unit = 0.0 if date_fmt is None else datetime.datetime.fromisoformat(date_fmt).timestamp()  # pyright: ignore[reportArgumentType]
+            env_payload = getattr(row, "env_payload", "")
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = {(sha, date_unit)}
+                all_states[(owner, repo)] = {(sha, date_unit, env_payload)}
             else:
-                all_states[(owner, repo)].add((sha, date_unit))
+                all_states[(owner, repo)].add((sha, date_unit, env_payload))
     elif args.commits:
         commits = (
             pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
@@ -107,21 +108,26 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             commit_date_unix: float = (
                 0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
             )
+            env_payload = row.get("env_payload", "")
             if (owner, repo) not in all_states:
-                all_states[(owner, repo)] = [(sha, commit_date_unix)]
+                all_states[(owner, repo)] = [(sha, commit_date_unix, env_payload)]
             else:
-                all_states[(owner, repo)].append((sha, commit_date_unix))
+                all_states[(owner, repo)].append((sha, commit_date_unix, env_payload))
     else:
         raise ValueError("Either --dashboard or --commits must be provided.")
     return all_states
 
 
 def prepare_tasks(
-    all_states: dict[tuple[str, str], set[tuple[str, float]]], limit_per_repo: int, context_registry: ContextRegistry
+    all_states: dict[tuple[str, str], set[tuple[str, float, str]]],
+    limit_per_repo: int,
+    context_registry: ContextRegistry,
 ) -> list[Task]:
     all_tasks: list[Task] = []
     for (owner, repo), tup in all_states.items():
-        tasks = list({Task(owner, repo, sha, commit_date=date) for sha, date in tup})
+        tasks = list({
+            Task(owner, repo, sha, commit_date=date, env_payload=env_payload) for sha, date, env_payload in sorted(tup)
+        })
         # tasks = list(filter(lambda t: t not in context_registry, tasks))
         if limit_per_repo > 0:
             tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))

@@ -652,7 +652,7 @@ for version in $PY_VERSIONS; do
     # Generic toolchain useful for many compiled projects (installed once here)
     micromamba install -y -n "$ENV_NAME" -c conda-forge \
         pip git conda mamba "libmambapy<=1.9.9" \
-        numpy scipy cython joblib fakeredis threadpoolctl matplotlib pytest \
+        cython fakeredis threadpoolctl \
         compilers meson-python cmake ninja pkg-config tomli
 
     # install hypothesis<7 if python<3.9
@@ -663,7 +663,7 @@ for version in $PY_VERSIONS; do
     fi
 
     # Keep ASV consistent
-    micromamba run -n "$ENV_NAME" bash -lc "python -m pip install --upgrade pip setuptools wheel"
+    micromamba run -n "$ENV_NAME" bash -lc "python -m pip install --upgrade pip setuptools wheel pytest"
     micromamba run -n "$ENV_NAME" bash -lc "pip install --no-cache-dir git+https://github.com/airspeed-velocity/asv"
 done
 

@@ -423,7 +423,7 @@ async def run_container(  # noqa: C901
         res = ctx.build_container_streaming(
             client=client,
             image_name=task.get_image_name(),
-            build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha},
+            build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha, "ENV_PAYLOAD": task.env_payload},
             probe=False,
             force=False,
             timeout_s=1800,  # 30 minutes
@@ -787,6 +787,8 @@ async def batch_orchestrate(
         key_name=aws_batch_config.get("key_name"),
         spot_max_price=aws_batch_config.get("spot_max_price"),
         tags=aws_batch_config.get("tags", {}),
+        stream_logs=aws_batch_config.get("stream_logs", True),
+        log_output_dir=aws_batch_config.get("log_output_dir", "output/batch_logs"),
         max_tasks_per_instance=aws_batch_config.get("max_tasks_per_instance", 100),
         batch_timeout_s=aws_batch_config.get("batch_timeout_s", 2 * 60 * 60),
         poll_interval_s=aws_batch_config.get("poll_interval_s", 30),
