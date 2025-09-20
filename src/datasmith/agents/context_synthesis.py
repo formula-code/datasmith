@@ -133,7 +133,7 @@ def _run_quick_profile(
             labels=run_labels,
         )
         rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
-        logs = (container.logs() or b"").decode("utf-8", errors="replace")
+        logs = (container.logs() or b"").decode("utf-8", errors="replace").replace("\\n", "\n")
         if rc == 124:
             logger.debug("profile:timeout rc=124 treated as success")
             return (True, _preview(logs, 4000))
@@ -192,7 +192,7 @@ def _run_quick_tests(
             labels=run_labels,
         )
         rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
-        logs = (container.logs() or b"").decode("utf-8", errors="replace")
+        logs = (container.logs() or b"").decode("utf-8", errors="replace").replace("\\n", "\n")
         if rc == 124:
             logger.debug("tests:timeout rc=124 treated as success")
             return (True, _preview(logs, 4000))
@@ -739,6 +739,7 @@ def agent_build_and_validate(  # noqa: C901
             if build_res.ok:
                 with context_registry.get_lock():
                     context_registry.register(task.with_tag("pkg"), ctx)
+                context_registry.save_to_file(path=args.context_registry)
 
                 final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
                 _save_pickle(ctx, final_pickle)
@@ -835,16 +836,25 @@ def agent_build_and_validate(  # noqa: C901
             last = attempts[-1].build_result if attempts else None
             stderr_tail = (last.stderr_tail if last else "") or ""
             stdout_tail = (last.stdout_tail if last else "") or ""
-            if last and last.rc == 124:
-                failure_more = "build timeout"
+
+            if "profile_ok=" in stderr_tail:
+                location = "profiler"
+            elif "tests_ok=" in stderr_tail:
+                location = "pytest"
             else:
-                failure_more = f"build failed rc={last.rc}" if last else "build failed"
+                location = "build"
+
+            if last and last.rc == 124:
+                failure_more = f"{location} timeout"
+            else:
+                failure_more = f"{location} failed rc={last.rc}" if last else f"{location} failed"
 
             logger.debug(
-                "agent_build_and_validate: re-synthesis with last tails (stderr_len=%d, stdout_len=%d, failure=%s)",
+                "agent_build_and_validate: re-synthesis with last tails (stderr_len=%d, stdout_len=%d, failure=%s, location=%s)",
                 len(stderr_tail),
                 len(stdout_tail),
                 failure_more,
+                location,
             )
 
             try:
