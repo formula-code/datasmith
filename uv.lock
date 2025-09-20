@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.9, <4.0"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -1038,6 +1038,8 @@ dependencies = [
     { name = "asv" },
     { name = "boto3", version = "1.7.84", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "boto3", version = "1.40.30", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "botocore", version = "1.10.84", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "botocore", version = "1.40.30", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "docker" },
     { name = "dspy", version = "2.6.27", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "dspy", version = "3.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
@@ -1045,6 +1047,7 @@ dependencies = [
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
     { name = "numpy", version = "2.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "packaging" },
     { name = "pandas" },
     { name = "portkey-ai" },
     { name = "python-dotenv" },
@@ -1085,10 +1088,12 @@ dev = [
 requires-dist = [
     { name = "asv" },
     { name = "boto3", specifier = ">=1.7.84" },
+    { name = "botocore" },
     { name = "docker" },
     { name = "dspy", specifier = ">=2.6.27" },
     { name = "gitpython" },
     { name = "numpy" },
+    { name = "packaging" },
     { name = "pandas" },
     { name = "portkey-ai", specifier = ">=1.14.3" },
     { name = "python-dotenv", specifier = ">=1.1.1" },

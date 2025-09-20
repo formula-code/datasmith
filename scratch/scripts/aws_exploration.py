@@ -14,7 +14,7 @@ from datasmith.notebooks.utils import update_cr
 
 configure_logging(level=logging.INFO)
 
-cr = ContextRegistry.load_from_file(Path("scratch/filtered2_merged_context_registry_2025-09-16T03:26:41.179572.json"))
+cr = ContextRegistry.load_from_file(Path("scratch/artifacts/pipeflush/context_registry_filtered_perfonly.json"))
 
 test_tasks: list[tuple[Task, DockerContext]] = list(update_cr(cr).registry.items())
 all_owner_repos = defaultdict(list)

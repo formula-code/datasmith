@@ -4,8 +4,9 @@ Python module for collecting merge commits from a Git repository using the GitHu
 
 from urllib.parse import quote
 
-from datasmith.utils import _get_github_metadata
 from tqdm.auto import tqdm
+
+from datasmith.utils import _get_github_metadata
 
 
 def search_for_merge_commit(repo_name: str, pr_number: int) -> str | None:
