@@ -465,19 +465,14 @@ class DockerContext:
                 cmd.extend(["--cache-from", cache_source])
 
             # Add cache-to for S3 cache (export cache for future builds)
-            if s3_cache_config:
+            if s3_cache_config and os.environ.get("DOCKER_S3_CACHE_WRITE", "0") in ("1", "true", "yes"):
                 s3_cache_to = f"type=s3,bucket={s3_cache_config['bucket']},region={s3_cache_config['region']},prefix={s3_cache_config['prefix']},mode=max"
                 cmd.extend(["--cache-to", s3_cache_to])
 
             # Add context from stdin
             cmd.append("-")
 
-            # Pretty log line for transparency
-            if build_args:
-                build_args_str = " --build-arg ".join(f"{k}='{v}'" for k, v in build_args.items())
-                logger.info("$ docker buildx build --load -t %s . --build-arg %s", image_name, build_args_str)
-            else:
-                logger.info("$ docker buildx build --load -t %s .", image_name)
+            logger.info("$ %s", " ".join(cmd).replace("\n", " "))
 
             # Execute buildx with timeout and streaming
             stdout_buf: deque[str] = deque(maxlen=2000)
@@ -617,15 +612,20 @@ class DockerContext:
             use_buildx: If True, use docker buildx; if False, use SDK; if None, auto-detect
         """
         if isinstance(s3_cache_config, S3DockerCacheManager):
-            s3_cache_config = s3_cache_config.get_build_metadata(
+            s3_cache_config = s3_cache_config.get_cache_mount_config(
                 dockerfile_content=self.dockerfile_data,
                 build_args=build_args,
             )
+        elif (s3_cache_config is None) and (os.environ.get("AWS_S3_CACHE_BUCKET")):
+            s3_cache_config = {
+                "bucket": os.environ["AWS_S3_BUCKET_DOCKER"],
+                "region": os.environ.get("AWS_REGION", "us-east-1"),
+                "prefix": os.environ.get("AWS_S3_BUCKET_DOCKER_PREFIX", "docker-cache"),
+            }
 
         # Determine whether to use buildx
         if use_buildx is None:
             use_buildx = os.environ.get("DOCKER_USE_BUILDX", "").lower() in ("1", "true", "yes")
-
         # Route to buildx if requested and available
         if use_buildx:
             try:
