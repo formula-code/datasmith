@@ -451,7 +451,7 @@ class DockerContext:
                 logger.info("Using DOCKER_CACHE_FROM='%s' for build cache.", base_image)
                 cache_from_list.append(base_image)
 
-            if s3_cache_config:
+            if s3_cache_config and os.environ.get("DOCKER_S3_CACHE_READ", "0") in ("1", "true", "yes"):
                 s3_cache_mount = (
                     f"type=s3,bucket={s3_cache_config['bucket']},"
                     f"region={s3_cache_config['region']},"

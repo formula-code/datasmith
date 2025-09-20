@@ -114,10 +114,13 @@ def _preview(s: str, n: int = 160) -> str:
 def _run_quick_profile(
     client: docker.DockerClient,
     image_name: str,
-    run_labels: dict[str, str],
+    run_labels: dict[str, str] | None = None,
     timeout: int = 600,
 ) -> tuple[bool, str]:
     """Run a quick profiling sanity check using /profile.sh in the image."""
+    if run_labels is None:
+        run_labels = {}
+
     container = None
     quick_s = 45
     try:

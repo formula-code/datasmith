@@ -158,5 +158,13 @@ disable_error_code = ["no-any-unimported", "import-untyped"]
 module = "datasmith.execution.utils"
 disallow_untyped_defs = false
 
+[[tool.mypy.overrides]]
+module = "boto3.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "botocore.*"
+ignore_missing_imports = true
+
 [tool.poetry.dev-dependencies]
 types-boto3 = "*"

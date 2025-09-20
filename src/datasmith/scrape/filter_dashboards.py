@@ -5,10 +5,10 @@ Detect online and offline dashboards. Assumes access to data/bigquery_repos.csv
 import typing
 
 import pandas as pd
+from tqdm.auto import tqdm
 
 from datasmith.scrape.utils import _extract_repo_full_name
 from datasmith.utils import _get_github_metadata
-from tqdm.auto import tqdm
 
 
 def _get_repo_metadata(full_name: str | None) -> dict[str, typing.Any] | None:

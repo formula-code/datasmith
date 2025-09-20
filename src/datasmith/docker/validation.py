@@ -3,17 +3,16 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
-import os
 import shlex
 import threading
 from pathlib import Path
 
 import docker
-from docker.errors import ImageNotFound, NotFound
+from docker.errors import APIError, ImageNotFound, NotFound
 from docker.models.containers import Container
 
+from datasmith.agents.context_synthesis import _run_quick_profile
 from datasmith.docker.context import BuildResult, ContextRegistry, Task
-from datasmith.docker.orchestrator import log_container_output
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +90,7 @@ def _handle_build_error(
     image_name: str,
     build_stage: str,
 ) -> dict:
-    msg = f"$ {build_cmd}\n$ {run_cmd}\n[build FAILED rc={build_res.rc} in {build_res.duration_s:.1f}s]"
+    msg = f"$ {build_cmd}\n$[build FAILED rc={build_res.rc} in {build_res.duration_s:.1f}s]"
     if build_res.stderr_tail:
         msg += f"\n---- build stderr tail ----\n{build_res.stderr_tail}"
     append_error_line(args.output_dir / "errors.txt", msg)
@@ -238,58 +237,31 @@ def validate_one(  # noqa: C901
     # prepare env (clone default Machine args and set machine=sha)
     machine_args = dict(machine_defaults)
     machine_args["machine"] = task.sha
-    env = {
-        "ASV_ARGS": f"--quick --python=same --set-commit-hash={task.sha}",
-        "ASV_MACHINE_ARGS": " ".join([f"--{k}='{v}'" for k, v in machine_args.items()]),
-    }
+    # env = {
+    #     "ASV_ARGS": f"--quick --python=same --set-commit-hash={task.sha}",
+    #     "ASV_MACHINE_ARGS": " ".join([f"--{k}='{v}'" for k, v in machine_args.items()]),
+    # }
 
     container = None
-    files = {}
+    files: dict[str, str] = {}
     try:
-        logger.debug("validate_one: running container %s", task.get_container_name())
-        container = client.containers.run(
-            image=task.get_image_name(),
-            detach=True,
-            name=task.get_container_name(),
-            command=["/profile.sh", "/output/profile", ""],
-            environment=env,
-            volumes={str((args.output_dir / "results").absolute()): {"bind": "/output", "mode": "rw"}},
-            network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
-        )
-
-        # Wait with timeout; stop on timeout
-        exit_code, timed_out = wait_container_with_timeout(container, args.run_timeout)
-
-        # Collect logs tail
-        try:
-            raw_logs = container.logs(stdout=True, stderr=True)
-        except Exception:
-            raw_logs = b""
-
-        logs_tail = tail_chars(raw_logs, args.tail_chars)
-        rc = 124 if timed_out else (exit_code if exit_code is not None else 1)
-
-        # Archive logs/artifacts (your helper)
-        try:
-            files = log_container_output(container, archive="/output")
-        except Exception:
-            logger.exception("Failed to archive output for %s", task.get_image_name())
-
-        ok = rc == 0
-
-        # set stage to "run-{failed/ok/timeout}" + "build-{failed/ok/timeout}" for clarity
-        run_stage = "run"
-        if timed_out:
-            run_stage += "-timeout"
-        elif not ok:
-            run_stage += "-failed"
-        else:
-            run_stage += "-ok"
-
-        if not ok:
-            return _handle_run_error(
-                task, build_cmd, run_cmd, rc, logs_tail, args, task.get_image_name(), run_stage, build_stage, files
+        profile_ok, profile_preview = _run_quick_profile(client=client, image_name=task.get_image_name(), timeout=600)
+        if not profile_ok:
+            logger.warning(
+                "validate_one: failed container %s exited with code %s. Removing image.", task.get_container_name()
             )
+            # remove the image if the container failed
+            try:
+                client.images.remove(image=task.get_image_name(), force=True)
+            except ImageNotFound:
+                logger.warning("validate_one: image %s not found when trying to remove it.", task.get_image_name())
+            except APIError:
+                logger.exception("validate_one: error removing image %s", task.get_image_name())
+
+        run_stage = f"profile-{'ok' if profile_ok else 'failed'}"
+        logs_tail = profile_preview
+        ok = profile_ok and build_res.ok
+        rc = 0 if profile_ok else 1
 
         return {
             "owner": task.owner,
