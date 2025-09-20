@@ -367,7 +367,7 @@ def build_repo_sha_image(
     build_res: BuildResult = docker_ctx.build_container_streaming(
         client=client,
         image_name=task.get_image_name(),
-        build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha},
+        build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha, "ENV_PAYLOAD": task.env_payload},
         probe=False,
         force=False,
         timeout_s=15 * 60,  # 15 minutes

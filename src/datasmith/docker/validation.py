@@ -217,6 +217,7 @@ def validate_one(  # noqa: C901
         build_args={
             "REPO_URL": f"https://www.github.com/{task.owner}/{task.repo}",
             "COMMIT_SHA": task.sha,
+            "ENV_PAYLOAD": task.env_payload or "",
         },
         force=False,
         timeout_s=args.build_timeout,
