@@ -187,23 +187,23 @@ def validate_one(  # noqa: C901
         if client.images.get(task.get_image_name()):
             # remove the image
             logger.debug("validate_one: image %s already exists, removing image...", task.get_image_name())
-            client.images.remove(image=task.get_image_name(), force=True)
-            logger.debug("validate_one: removed image %s", task.get_image_name())
-            # return {
-            #     "owner": task.owner,
-            #     "repo": task.repo,
-            #     "sha": task.sha,
-            #     "image_name": task.get_image_name(),
-            #     "stage": "build-skipped",
-            #     "ok": True,
-            #     "rc": 0,
-            #     "duration_s": 0.0,
-            #     "cmd_build": f"docker image {task.get_image_name()} (skipped)",
-            #     "cmd_run": "",
-            #     "stderr_tail": "",
-            #     "stdout_tail": "",
-            #     "files": {},
-            # }
+            # client.images.remove(image=task.get_image_name(), force=True)
+            # logger.debug("validate_one: removed image %s", task.get_image_name())
+            return {
+                "owner": task.owner,
+                "repo": task.repo,
+                "sha": task.sha,
+                "image_name": task.get_image_name(),
+                "stage": "build-skipped",
+                "ok": True,
+                "rc": 0,
+                "duration_s": 0.0,
+                "cmd_build": f"docker image {task.get_image_name()} (skipped)",
+                "cmd_run": "",
+                "stderr_tail": "",
+                "stdout_tail": "",
+                "files": {},
+            }
     docker_ctx = context_registry.get(task)
     if docker_ctx == context_registry.get_default():
         _, docker_ctx = context_registry.get_similar(task)[0]
@@ -248,7 +248,7 @@ def validate_one(  # noqa: C901
         profile_ok, profile_preview = _run_quick_profile(client=client, image_name=task.get_image_name(), timeout=600)
         if not profile_ok:
             logger.warning(
-                "validate_one: failed container %s exited with code %s. Removing image.", task.get_container_name()
+                "validate_one: failed container %s exited with code. Removing image.", task.get_container_name()
             )
             # remove the image if the container failed
             try:
