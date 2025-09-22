@@ -693,8 +693,9 @@ class DockerContext:
                 logger.info("$ docker build -t %s .", image_name)
 
             # Prepare cache configuration
-            cache_from_list = cache_from or []
+            cache_from_list = None
             if s3_cache_config:
+                cache_from_list = cache_from if cache_from else []
                 # Add S3 cache mount to cache_from
                 s3_cache_mount = (
                     f"type=s3,bucket={s3_cache_config['bucket']},"

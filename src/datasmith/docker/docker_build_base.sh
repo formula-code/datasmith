@@ -656,8 +656,9 @@ for version in $PY_VERSIONS; do
         compilers meson-python cmake ninja pkg-config tomli
 
     # install hypothesis<7 if python<3.9
-    if [ "$version" -lt "3.9" ]; then
-        micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir "hypothesis<7" >/dev/null 2>&1 || true
+    PYTHON_LT_39=$(micromamba run -n "$ENV_NAME" python -c 'import sys; print(sys.version_info < (3,9))')
+    if [ "$PYTHON_LT_39" = "True" ]; then
+        micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir "hypothesis<5" >/dev/null 2>&1 || true
     else
         micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir "hypothesis" >/dev/null 2>&1 || true
     fi

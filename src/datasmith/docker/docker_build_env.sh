@@ -455,35 +455,65 @@ PY
 # make  /etc/asv_env/install_summary.txt
 mkdir -p /etc/asv_env
 touch /etc/asv_env/install_summary.txt
+# Tunables
+CHUNK_SIZE=20          # start chunk size
+PIP_OPTS=(--upgrade-strategy only-if-needed --prefer-binary)
+DRY_RUN_OPTS=(--dry-run -q)  # quiet dry-run to reduce IO
 for version in $PY_VERSIONS; do
   ENV_NAME="asv_${version}"
-  SKIPPED=()
-  INSTALLED=()
+  OK=()
+  BAD=()
 
+  # First pass: quick screen with a pip dry-run (fast, cached)
   while IFS= read -r pkg || [[ -n "$pkg" ]]; do
-    [ -z "$pkg" ] && continue
+    [[ -z "$pkg" ]] && continue
     echo ">> [$ENV_NAME] checking $pkg"
-    if timeout 30 micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir \
-         --upgrade-strategy only-if-needed -c "$PIP_CONSTRAINT" \
-         --dry-run "$pkg" >/dev/null 2>&1; then
-      if micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir \
-           --upgrade-strategy only-if-needed -c "$PIP_CONSTRAINT" "$pkg"; then
-        INSTALLED+=("$pkg")
-      else
-        echo "!! install failed for $pkg — skipping."
-        SKIPPED+=("$pkg")
-      fi
+    if timeout 20 micromamba run -n "$ENV_NAME" python -m pip install \
+         "${PIP_OPTS[@]}" -c "$PIP_CONSTRAINT" "${DRY_RUN_OPTS[@]}" "$pkg" >/dev/null 2>&1; then
+      OK+=("$pkg")
     else
       echo "!! timeout/violation on $pkg — skipping."
-      SKIPPED+=("$pkg")
+      BAD+=("$pkg")
     fi
   done < "$PKG_LIST_FILE"
-    #   write a summary of installs and skipped packages to /etc/asv_env/install_summary.txt
-    echo "Environment: $ENV_NAME" >> /etc/asv_env/install_summary.txt
-    echo "Installs: ${INSTALLED[@]}" >> /etc/asv_env/install_summary.txt
-    echo "Skipped: ${SKIPPED[@]}" >> /etc/asv_env/install_summary.txt
-done
 
+  # Try to install all OK in chunks; on conflict, bisect chunk
+  install_chunk() {
+    local -a chunk=("$@")
+    if ( micromamba run -n "$ENV_NAME" python -m pip install \
+           "${PIP_OPTS[@]}" -c "$PIP_CONSTRAINT" "${chunk[@]}" ); then
+      return 0
+    fi
+    # Conflict: split if more than one item; otherwise mark skipped
+    if (( ${#chunk[@]} > 1 )); then
+      local mid=$(( ${#chunk[@]} / 2 ))
+      install_chunk "${chunk[@]:0:$mid}" || true
+      install_chunk "${chunk[@]:$mid}" || true
+    else
+      echo "!! install failed for ${chunk[0]} — skipping."
+      BAD+=("${chunk[0]}")
+    fi
+  }
+
+  # Greedy install with backoff
+  idx=0
+  while (( idx < ${#OK[@]} )); do
+    chunk=( "${OK[@]:$idx:$CHUNK_SIZE}" )
+    (( ${#chunk[@]} == 0 )) && break
+    echo ">> [$ENV_NAME] installing ${#chunk[@]} packages..."
+    install_chunk "${chunk[@]}"
+    idx=$(( idx + CHUNK_SIZE ))
+  done
+
+  # Summary
+  {
+    echo "Environment: $ENV_NAME"
+    echo -n "Installs: "
+    micromamba run -n "$ENV_NAME" python -m pip list --format=freeze | cut -d= -f1 | tr '\n' ' '
+    echo
+    echo "Skipped: ${BAD[*]}"
+  } >> /etc/asv_env/install_summary.txt
+done
 
 
 # Install any ASV-defined install_command (unchanged)

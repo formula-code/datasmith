@@ -19,9 +19,9 @@ logger = get_logger(__name__)
 class S3CacheConfig:
     """Configuration for S3-based Docker layer caching."""
 
-    bucket: str = os.environ["AWS_S3_BUCKET_DOCKER"]
+    bucket: str = os.environ.get("AWS_S3_BUCKET_DOCKER", "")
     prefix: str = "docker-cache"
-    region: str = os.environ["AWS_REGION"]
+    region: str = os.environ.get("AWS_REGION", "us-east-1")
     max_cache_age_days: int = 30  # Clean up cache layers older than this
     max_cache_size_gb: int = 100  # Maximum total cache size
     compression: bool = True  # Use gzip compression for cache metadata
