@@ -163,6 +163,7 @@ def prepare_tasks(
             Task(owner, repo, sha, commit_date=date, env_payload=env_payload) for sha, date, env_payload in sorted(tup)
         })
         tasks = list(filter(lambda t: t.sha not in all_shas, tasks))
+        tasks = list(filter(lambda t: t.with_tag("pkg") not in context_registry, tasks))
         if limit_per_repo > 0:
             tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))
         all_tasks.extend(tasks)

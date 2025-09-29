@@ -39,7 +39,7 @@ FROM base AS env
 
 ARG REPO_URL
 ARG COMMIT_SHA
-ARG ENV_PAYLOAD=""
+ARG ENV_PAYLOAD="{}"
 
 # Entrypoint is inherited by pkg
 COPY entrypoint.sh /entrypoint.sh
@@ -53,10 +53,8 @@ LABEL vcs.url="$REPO_URL" vcs.ref="$COMMIT_SHA"
 
 # ---- ENV STAGE: create envs, persist vars, install smoke tool ----
 COPY docker_build_env.sh /workspace/repo/docker_build_env.sh
-COPY <<EOF /tmp/env_payload.json
-${ENV_PAYLOAD}
-EOF
 RUN chmod +x /workspace/repo/docker_build_env.sh && \
+    echo "${ENV_PAYLOAD}" > /tmp/env_payload.json && \
     /workspace/repo/docker_build_env.sh --env-payload /tmp/env_payload.json
 
 FROM env AS pkg

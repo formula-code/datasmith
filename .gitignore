@@ -198,6 +198,7 @@ benchmark_results/
 scratch/artifacts/
 scratch/example-docker-task
 scratch/rsync-backups/
+scratch/artifacts/tarballs/
 asv-output/
 output
 *context_registry*

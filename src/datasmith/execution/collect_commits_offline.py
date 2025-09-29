@@ -68,6 +68,8 @@ def find_parent_commits(
             commit = repo.commit(commit_sha)
             # Add parent commits if they exist
             parents = commit.parents
+            # sort parents by commit date, most recent first
+            parents = sorted(parents, key=lambda c: c.committed_datetime, reverse=True)
             if add_first and len(parents):
                 # only keep the first parent.
                 parents = [parents[0]]

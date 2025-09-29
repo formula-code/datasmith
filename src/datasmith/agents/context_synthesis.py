@@ -566,7 +566,11 @@ def build_once_with_context(
     res = context.build_container_streaming(
         client=client,
         image_name=task.get_image_name(),
-        build_args={"REPO_URL": repo_url, "COMMIT_SHA": sha, "ENV_PAYLOAD": task.env_payload},
+        build_args={
+            "REPO_URL": repo_url,
+            "COMMIT_SHA": sha,
+            "ENV_PAYLOAD": task.env_payload if len(task.env_payload) else "{}",
+        },
         probe=probe,
         force=force,
         timeout_s=timeout_s,
@@ -619,9 +623,9 @@ def agent_build_and_validate(  # noqa: C901
     # Gather defaults + similar contexts
     default_building_template = context_registry.get_default(tag="env")[1].building_data
     similar_contexts = context_registry.get_similar(task.with_tag("env"))
-    # remove from similar_contexts
-    with context_registry.get_lock():
-        del context_registry.registry[task.with_tag("pkg")]
+    # # remove from similar_contexts
+    # with context_registry.get_lock():
+    #     del context_registry.registry[task.with_tag("pkg")]
 
     # Choose an ENV context for the probe build (most similar if possible)
     if similar_contexts:
