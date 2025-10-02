@@ -10,6 +10,7 @@ from datasmith.execution.collect_commits_offline import (
     find_parent_releases,
     find_tagged_releases,
 )
+from datasmith.execution.filter_commits import crude_perf_filter
 from datasmith.logging_config import configure_logging
 
 configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
@@ -32,12 +33,11 @@ def parse_args() -> argparse.Namespace:
 def main(args: argparse.Namespace) -> None:
     df = pd.read_parquet(args.commits) if args.commits.suffix == ".parquet" else pd.read_json(args.commits, lines=True)
     filtered_df = df[
-        (df["kind"] == "commit")
-        & (
-            (df["message"].str.lower().str.contains("#|gh-|pr|issue", regex=True))
-            | (df["message"].str.lower().str.startswith(("perf", "enh", "speed", "fast", "slow", "benchmark")))
-        )
+        (df["kind"] == "commit") & (df["message"].str.lower().str.contains("#|gh-|pr|issue", regex=True))
     ].copy(deep=True)
+    logger.info(f"Loaded {len(df)} commits, {len(filtered_df)} after initial filtering.")
+    filtered_df = crude_perf_filter(filtered_df)
+    logger.info(f"{len(filtered_df)} commits after fuzzy performance-related filtering.")
 
     perf_classifier = PerfClassifier()
     all_shas = set()

@@ -160,79 +160,6 @@ export SAVED_SETUPPY_CMD="${setuppy_cmd}"
 EOF
 }
 
-
-lock_repo_to_current_commit() {
-  set -euo pipefail
-
-  # 0) Sanity checks
-  git rev-parse --git-dir >/dev/null 2>&1 || { echo "Not a git repo"; return 1; }
-  if git worktree list 2>/dev/null | awk 'NR>1{exit 1}'; then :; else
-    echo "Multiple worktrees detected. Aborting for strictness."; return 1
-  fi
-
-  BR=$(
-    git symbolic-ref --short HEAD 2>/dev/null \
-    || git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | cut -d/ -f2- \
-    || git remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF}' \
-    || echo main
-  )
-
-  # 2) Pin $BR to the current commit and detach from upstream
-  HEAD_SHA="$(git rev-parse --verify HEAD)"
-  git checkout -B "$BR" "$HEAD_SHA"
-  git branch --unset-upstream 2>/dev/null || true
-
-  # 3) (Optional) Remove ALL remotes — leave commented so ASV can fetch if needed
-  # for r in $(git remote); do git remote remove "$r"; done
-
-  # 4) Delete ALL refs except the current branch tip
-  #    (branches, tags, remotes, stash, notes, everything)
-  while IFS= read -r ref; do
-    [[ "$ref" == "refs/heads/$BR" ]] && continue
-    git update-ref -d "$ref" || true
-  done < <(git for-each-ref --format='%(refname)')
-
-  # Explicitly nuke stash and notes namespaces (in case they were packed)
-  git update-ref -d refs/stash 2>/dev/null || true
-  while IFS= read -r nref; do git update-ref -d "$nref" || true; done \
-    < <(git for-each-ref --format='%(refname)' refs/notes)
-
-  # 5) Remove alternates (could reintroduce hidden objects)
-  if [[ -f .git/objects/info/alternates ]]; then
-    rm -f .git/objects/info/alternates
-  fi
-
-  # 6) Expire ALL reflogs and delete the logs directory for good measure
-  git reflog expire --expire=now --expire-unreachable=now --all || true
-  rm -rf .git/logs || true
-
-  # 7) ***Do NOT prune unreachable objects***
-  #    Keep objects so raw SHAs remain resolvable for ASV.
-  #    Also disable future auto-pruning.
-  git config gc.auto 0
-  git config gc.pruneExpire never
-  git config gc.worktreePruneExpire never
-  # You may still repack reachable objects without pruning unreachable ones:
-  git repack -Ad --write-bitmap-index || true
-  # DO NOT run: git gc --prune=now --aggressive
-  # DO NOT run: git prune --expire=now
-
-  # 8) Verification: ensure no ref points to a descendant of HEAD
-  if while IFS= read -r ref; do
-       [[ "$ref" == "refs/heads/$BR" ]] && continue
-       if git merge-base --is-ancestor "$HEAD_SHA" "$(git rev-parse "$ref")"; then
-         echo "$ref"
-         exit 0
-       fi
-     done < <(git for-each-ref --format='%(refname)') ; then
-     : # no output means OK
-   else
-     echo "Error: some refs still point ahead of HEAD. Aborting."
-     return 1
-  fi
-
-}
-
 # -------------------------- ENV DISCOVERY --------------------------
 
 URL=$(git remote -v | grep "(fetch)" | awk '{print $2}')
@@ -308,9 +235,6 @@ for v in $PY_VERSIONS; do
     [ -n "$IMPORT_NAME" ] && micromamba remove -n "$e" -y "$IMPORT_NAME" || true
 done
 
-lock_repo_to_current_commit
-
-# -------------------------- NEW: USE PROVIDED ARTIFACTS --------------------------
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 export PIP_CONSTRAINT="${CONSTRAINTS_PATH}"
 PKG_LIST_FILE="${TO_INSTALL_PATH}"
