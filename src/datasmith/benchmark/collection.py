@@ -8,7 +8,8 @@ from typing import cast
 
 import pandas as pd
 
-from datasmith.docker.context import ContextRegistry, Task
+from datasmith.core.models import Task
+from datasmith.docker.context import ContextRegistry
 
 
 @dataclass(slots=True)

@@ -120,7 +120,7 @@ _BAD_REPOS = {
     "posthog-posthog",
     "scverse-scanpy",
     "stac-utils-pystac",
-    "royerlab-ultrack"
+    "royerlab-ultrack",
 }
 
 
@@ -145,11 +145,13 @@ def basic_message_filter(msg: str) -> bool:
         return True
     return not _NEGATIVE_RE.search(msg)
 
-def is_delinquient_repo(s):
-    s = s.lower().replace("/", "-")
-    return bool(any(x in s for x in _BAD_REPOS))
 
-def crude_perf_filter(df : pd.DataFrame) -> pd.DataFrame:
+def is_delinquient_repo(repo_name: str) -> bool:
+    normalized = repo_name.lower().replace("/", "-")
+    return any(bad in normalized for bad in _BAD_REPOS)
+
+
+def crude_perf_filter(df: pd.DataFrame) -> pd.DataFrame:
     """Filter commits DataFrame to likely performance-related ones."""
     filtered_df = df.copy(deep=True)
 
@@ -157,12 +159,12 @@ def crude_perf_filter(df : pd.DataFrame) -> pd.DataFrame:
     filtered_df["n_files_changed"] = filtered_df["files_changed"].str.split("\n").apply(len)
     filtered_df["is_perf"] = filtered_df["message"].apply(basic_message_filter)
 
-    filtered_df = filtered_df[
-        (filtered_df["is_perf"])
+    mask = (
+        filtered_df["is_perf"]
         & (filtered_df["total_changes"] < 4000)
         & (filtered_df["n_files_changed"] < 500)
         & (filtered_df["patch"].str.len() < 20000)
         & (~filtered_df["repo_name"].apply(is_delinquient_repo))
-    ]
+    )
 
-    return filtered_df
+    return filtered_df.loc[mask].copy(deep=True)

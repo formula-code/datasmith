@@ -5,9 +5,9 @@ from collections.abc import Generator
 
 import requests
 
+from datasmith.core.api.http_utils import build_headers, request_with_backoff
 from datasmith.logging_config import get_logger
 from datasmith.scrape.utils import SEARCH_URL
-from datasmith.utils import _build_headers, _request_with_backoff
 
 logger = get_logger("scrape.detect_dashboards")
 
@@ -22,13 +22,13 @@ def search_pages(
     jitter: float = 0.3,
 ) -> Generator[str, None, None]:
     seen: set[str] = set()
-    headers = _build_headers(name="github")
+    headers = build_headers(name="github")
 
     with requests.Session() as sess:
         sess.headers.update(headers)
         for page in range(1, max_pages + 1):
             url = f"{SEARCH_URL}?q={query}&per_page={per_page}&page={page}"
-            data = _request_with_backoff(
+            data = request_with_backoff(
                 url=url,
                 site_name="github",
                 session=sess,

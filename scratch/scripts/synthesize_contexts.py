@@ -13,9 +13,10 @@ import pandas as pd
 from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.context_synthesis import agent_build_and_validate
 from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.core.models import Task
 from datasmith.docker.context import ContextRegistry, DockerContext, build_base_image
 from datasmith.docker.orchestrator import get_docker_client
-from datasmith.docker.validation import Task, _err_lock
+from datasmith.docker.validation import _err_lock
 from datasmith.logging_config import configure_logging
 from datasmith.notebooks.utils import update_cr
 

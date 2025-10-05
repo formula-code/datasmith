@@ -6,8 +6,9 @@ from pathlib import Path
 
 import asv
 
+from datasmith.core.models import Task
 from datasmith.docker.aws_batch_executor import AwsBatchConfig, AWSBatchExecutor
-from datasmith.docker.context import ContextRegistry, DockerContext, Task
+from datasmith.docker.context import ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import _compute_deterministic_run_id
 from datasmith.logging_config import configure_logging
 from datasmith.notebooks.utils import update_cr

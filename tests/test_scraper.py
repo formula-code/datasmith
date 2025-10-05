@@ -40,12 +40,12 @@ import pandas as pd
 import pytest
 import requests
 
+from datasmith.core.api.http_utils import request_with_backoff
 from datasmith.detection.detect_breakpoints import detect_all_breakpoints, get_detection_method
 from datasmith.scrape.code_coverage import generate_coverage_dataframe
 from datasmith.scrape.detect_dashboards import search_pages
 from datasmith.scrape.filter_dashboards import enrich_repos, filter_dashboards
 from datasmith.scrape.scrape_dashboards import make_benchmark_from_html
-from datasmith.utils import _request_with_backoff
 
 
 class TestMakeBenchmarkFromHtml:
@@ -313,7 +313,7 @@ class TestRepositoryFiltering:
 
 class TestRequestWithBackoff:
     @patch("time.sleep")
-    @patch("datasmith.utils._build_headers")
+    @patch("datasmith.core.api.http_utils.build_headers")
     def test_request_success(self, mock_headers: Mock, mock_sleep: Mock) -> None:
         """Test successful request without retries."""
         mock_headers.return_value = {"Authorization": "Bearer token"}
@@ -325,14 +325,14 @@ class TestRequestWithBackoff:
             mock_get.return_value = mock_response
 
             session = requests.Session()
-            response = _request_with_backoff(url="https://api.github.com/test", site_name="github", session=session)
+            response = request_with_backoff(url="https://api.github.com/test", site_name="github", session=session)
 
             assert response.status_code == 200
             mock_sleep.assert_called()  # Should still throttle
 
     @patch("time.sleep")
     @patch("time.time")
-    @patch("datasmith.utils._build_headers")
+    @patch("datasmith.core.api.http_utils.build_headers")
     def test_request_rate_limited(self, mock_headers: Mock, mock_time: Mock, mock_sleep: Mock) -> None:
         """Test retry behavior on rate limiting."""
         mock_headers.return_value = {"Authorization": "Bearer token"}
@@ -351,7 +351,7 @@ class TestRequestWithBackoff:
             mock_get.side_effect = [rate_limited_response, success_response]
 
             session = requests.Session()
-            response = _request_with_backoff(
+            response = request_with_backoff(
                 url="https://api.github.com/test", site_name="github", session=session, max_retries=2
             )
 

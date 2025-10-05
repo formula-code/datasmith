@@ -7,8 +7,8 @@ import typing
 import pandas as pd
 from tqdm.auto import tqdm
 
-from datasmith.scrape.utils import _extract_repo_full_name
-from datasmith.utils import _get_github_metadata
+from datasmith.core.api.github_client import get_github_metadata
+from datasmith.core.file_utils import extract_repo_full_name
 
 
 def _get_repo_metadata(full_name: str | None) -> dict[str, typing.Any] | None:
@@ -19,37 +19,37 @@ def _get_repo_metadata(full_name: str | None) -> dict[str, typing.Any] | None:
     if not full_name:
         return None
 
-    metadata: dict[str, typing.Any] | None = _get_github_metadata(endpoint=f"/repos/{full_name}")
+    metadata: dict[str, typing.Any] | None = get_github_metadata(endpoint=f"/repos/{full_name}")
     return metadata
 
 
 def is_forked(url: str) -> bool:
     """Return *True* if the repository is a fork of another repo."""
-    meta = _get_repo_metadata(_extract_repo_full_name(url))
+    meta = _get_repo_metadata(extract_repo_full_name(url))
     return bool(meta and meta.get("fork"))
 
 
 def is_archived(url: str) -> bool:
     """Return *True* if the repository is archived or disabled."""
-    meta = _get_repo_metadata(_extract_repo_full_name(url))
+    meta = _get_repo_metadata(extract_repo_full_name(url))
     return bool(meta and (meta.get("archived") or meta.get("disabled")))
 
 
 def is_accessible(url: str) -> bool:
     """Return *True* if the repository exists and the GitHub API returned 200."""
-    meta = _get_repo_metadata(_extract_repo_full_name(url))
+    meta = _get_repo_metadata(extract_repo_full_name(url))
     return meta is not None
 
 
 def watchers_count(url: str) -> int | None:
     """Return the number of *watchers* (subscribers) the repository has."""
-    meta = _get_repo_metadata(_extract_repo_full_name(url))
+    meta = _get_repo_metadata(extract_repo_full_name(url))
     return meta.get("subscribers_count") if meta else None
 
 
 def stars_count(url: str) -> int | None:
     """Return the number of *stars* (stargazers) the repository has."""
-    meta = _get_repo_metadata(_extract_repo_full_name(url))
+    meta = _get_repo_metadata(extract_repo_full_name(url))
     return meta.get("stargazers_count") if meta else None
 
 
@@ -62,7 +62,7 @@ def _repo_summary(url: str) -> dict:
     fork_parent (str|None), forked_at (ISO8601|None),
     watchers (int|None), stars (int|None)
     """
-    meta = _get_repo_metadata(_extract_repo_full_name(url))
+    meta = _get_repo_metadata(extract_repo_full_name(url))
     if not meta:  # unreachable or HTTP 404, 403, etc.
         return {
             "is_accessible": False,

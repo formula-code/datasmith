@@ -8,9 +8,9 @@ from collections.abc import Generator
 import pandas as pd
 import tqdm
 
+from datasmith.core.api.codecov_client import get_codecov_metadata
 from datasmith.execution.utils import _get_commit_info
 from datasmith.scrape.utils import _parse_commit_url
-from datasmith.utils import _get_codecov_metadata
 
 
 def _normalize_path(p: str) -> str:
@@ -25,7 +25,7 @@ def _commit_file_coverages(owner: str, repo: str, sha: str) -> dict[str, float |
     """
     base_endpoint = f"/{owner}/repos/{repo}"
 
-    totals = _get_codecov_metadata(
+    totals = get_codecov_metadata(
         endpoint=f"{base_endpoint}/totals",
         params={"sha": sha},
     )
@@ -60,7 +60,7 @@ def _file_coverage_with_fallback(owner: str, repo: str, sha: str, path: str) -> 
         return cached
 
     # Fallback: dedicated file report (one call, still much less frequent than before)
-    report = _get_codecov_metadata(
+    report = get_codecov_metadata(
         endpoint=f"/{owner}/repos/{repo}/file_report/{urllib.parse.quote(path_n, safe='/')}",
         params={"sha": sha},
     )

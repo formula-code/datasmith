@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import configparser
+import contextlib
 import datetime as dt
 import io
 import os
@@ -11,41 +12,49 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, cast
 
+import tomllib as _toml
 from asv.config import Config
 from git import Commit, Repo
 
-# tomllib is stdlib in 3.11+, fallback to tomli otherwise
-try:
-    import tomllib as _toml
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as _toml  # type: ignore
+from datasmith.core.cache import CACHE_LOCATION, cache_completion
+from datasmith.logging_config import get_logger
 
-# ---- Helpers & data models ----------------------------------------------------
+logger = get_logger(__name__)
+
 
 @dataclass
 class Candidate:
     root_relpath: str
-    pyproject_path: Optional[Path] = None
-    setup_cfg_path: Optional[Path] = None
-    setup_py_path: Optional[Path] = None
+    pyproject_path: Path | None = None
+    setup_cfg_path: Path | None = None
+    setup_py_path: Path | None = None
     req_files: list[Path] = field(default_factory=list)
     env_yamls: list[Path] = field(default_factory=list)  # environment.yml/.yaml
 
 
 @dataclass
 class CandidateMeta:
-    name: Optional[str] = None         # PyPI name
-    version: Optional[str] = None
-    import_name: Optional[str] = None  # importable module (when we can guess)
-    requires_python: Optional[str] = None
-    core_deps: set[str] = field(default_factory=set)     # runtime
+    name: str | None = None  # PyPI name
+    version: str | None = None
+    import_name: str | None = None  # importable module (when we can guess)
+    requires_python: str | None = None
+    core_deps: set[str] = field(default_factory=set)  # runtime
     extras: dict[str, set[str]] = field(default_factory=dict)
     build_requires: set[str] = field(default_factory=set)  # [build-system].requires
+
+
+@dataclass
+class _ASVCfgAggregate:
+    pythons: set[tuple[int, ...]] = field(default_factory=set)
+    build_commands: set[str] = field(default_factory=set)
+    install_commands: set[str] = field(default_factory=set)
+    matrix: dict[str, set[str]] = field(default_factory=dict)
 
 
 _ASV_REGEX = re.compile(r"(^|/)\.?asv[^/]*\.jsonc?$")
@@ -54,6 +63,8 @@ _PYPROJECT = "pyproject.toml"
 _SETUP_CFG = "setup.cfg"
 _SETUP_PY = "setup.py"
 _ENV_YML_NAMES = {"environment.yml", "environment.yaml"}
+_GIT_CACHE_DIR = Path(os.getenv("GIT_CACHE_DIR", str(Path(CACHE_LOCATION).parent / "git"))).expanduser()
+_GIT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
@@ -90,21 +101,139 @@ _CONDA_SYSTEM_PACKAGES = {
     "flex",
 }
 
-# ---- Small utilities ----------------------------------------------------------
+
+def _repo_key(repo_name: str) -> str:
+    return repo_name.replace("/", "__")
+
+
+def _base_clone_path(repo_name: str) -> Path:
+    return _GIT_CACHE_DIR / "base_clones" / _repo_key(repo_name)
+
+
+def _mirror_path(repo_name: str) -> Path:
+    return _GIT_CACHE_DIR / "mirrors" / f"{_repo_key(repo_name)}.git"
+
+
+def _ensure_base_clone(repo_name: str) -> Repo:
+    """
+    Ensure a non-bare base clone exists (partial clone). Suitable for adding worktrees.
+    """
+    url = f"https://github.com/{repo_name}.git"
+    path = _base_clone_path(repo_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        # Non-bare partial clone keeps blobs lazy; great for fast checkouts at many SHAs.
+        repo = Repo.clone_from(url, path, multi_options=["--filter=blob:none"])
+    else:
+        repo = Repo(path)
+        # Keep it fresh
+        with suppress(Exception):
+            repo.remote().fetch(prune=True)
+    return repo
+
+
+def _ensure_mirror(repo_name: str) -> Path:
+    """
+    Ensure a local bare mirror exists (used for fast reference clones fallback).
+    """
+    url = f"https://github.com/{repo_name}.git"
+    mpath = _mirror_path(repo_name)
+    mpath.parent.mkdir(parents=True, exist_ok=True)
+    if not mpath.exists():
+        Repo.clone_from(url, mpath, mirror=True, multi_options=["--filter=blob:none"])
+    else:
+        with suppress(Exception):
+            Repo(mpath).remote().update(prune=True)
+    return mpath
+
+
+def _ensure_commit_available(repo: Repo, sha: str) -> None:
+    """
+    Make sure the repo has the object for `sha`. If not, fetch just that SHA.
+    """
+    with suppress(Exception):
+        repo.commit(sha)
+        return
+    # Try to fetch the specific object (GitHub supports this)
+    repo.git.fetch("origin", sha)
+
+
+def _prepare_repo_checkout(repo_name: str, sha: str, tmp_root: Path) -> tuple[Repo, Path, Callable[[], None]]:
+    """
+    Prefer a worktree from a cached base clone; fall back to a reference clone against a local mirror.
+    Returns (repo, working_tree_path, cleanup_callback).
+    """
+    # 1) Worktree path (preferred)
+    base_repo = None
+    wt_dir = tmp_root / "wt"
+    try:
+        base_repo = _ensure_base_clone(repo_name)
+        _ensure_commit_available(base_repo, sha)
+        base_repo.git.worktree("add", "--detach", str(wt_dir), sha)
+        wt_repo = Repo(wt_dir)
+
+        def _cleanup_worktree() -> None:
+            with suppress(Exception):
+                base_repo.git.worktree("remove", "--force", str(wt_dir))
+
+        return wt_repo, wt_dir, _cleanup_worktree  # noqa: TRY300
+    except Exception as e:
+        # Fall back to a fresh clone referencing a local mirror
+        logger.debug(f"Worktree path failed; falling back to reference clone: {e}")
+
+    # 2) Reference clone fallback
+    repo_dir = tmp_root / "repo"
+    mirror = _ensure_mirror(repo_name)
+    url = f"https://github.com/{repo_name}.git"
+    repo = Repo.clone_from(
+        url,
+        to_path=repo_dir,
+        reference=str(mirror),  # --reference=<mirror>
+        multi_options=["--filter=blob:none", "--no-tags"],
+    )
+    _ensure_commit_available(repo, sha)
+    with suppress(Exception):
+        repo.git.checkout(sha)
+
+    def _cleanup_refclone() -> None:
+        # TempDirectory will remove the files; nothing special required
+        return None
+
+    return repo, repo_dir, _cleanup_refclone
+
+
+def _parse_extras_segment(token: str) -> list[str]:
+    if "[" not in token or not token.endswith("]"):
+        return []
+    segment = token[token.rfind("[") + 1 : -1]
+    if not segment:
+        return []
+    return [part.strip() for part in segment.split(",") if part.strip()]
+
 
 def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
+
 
 def _rfc3339(ts: dt.datetime) -> str:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=dt.timezone.utc)
     return ts.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
+
 def _base_tmp_for_commit(commit: Commit) -> Path:
-    repo_root = Path(commit.repo.working_tree_dir)  # pyright: ignore[reportArgumentType]
+    worktree = commit.repo.working_tree_dir
+    if worktree is None:
+        raise ValueError("Commit repository has no working tree directory")
+    repo_root = Path(worktree)
     return repo_root.parent
 
-def _materialize_blobs(commit: Commit, predicate, out_dirname: str) -> dict[str, Path]:
+
+def _materialize_blobs(
+    commit: Commit,
+    predicate: Callable[[str], bool],
+    out_dirname: str,
+) -> dict[str, Path]:
     """
     Copy matching blobs from <commit> into a temp folder under the clone tempdir,
     preserving relative paths. Returns a mapping {repo_relpath -> local Path}.
@@ -112,28 +241,38 @@ def _materialize_blobs(commit: Commit, predicate, out_dirname: str) -> dict[str,
     base = _base_tmp_for_commit(commit) / out_dirname
     base.mkdir(parents=True, exist_ok=True)
     out: dict[str, Path] = {}
-    for item in commit.tree.traverse():
-        if item.type != "blob":
+    for raw_item in commit.tree.traverse():
+        item = cast(Any, raw_item)
+        if getattr(item, "type", None) != "blob":
             continue
-        relpath = item.path
+        relpath = cast(str, getattr(item, "path", ""))
         if predicate(relpath):
             dst = base / relpath
             dst.parent.mkdir(parents=True, exist_ok=True)
-            with io.BytesIO(item.data_stream.read()) as src, open(dst, "wb") as f:
+            data_stream = getattr(item, "data_stream", None)
+            if data_stream is None:
+                continue
+            with io.BytesIO(data_stream.read()) as src, open(dst, "wb") as f:
                 f.write(src.read())
             out[relpath] = dst
     return out
 
-def _read_blob_text(commit: Commit, relpath: str, default: str | None = None) -> Optional[str]:
+
+def _read_blob_text(commit: Commit, relpath: str, default: str | None = None) -> str | None:
     try:
-        blob = commit.tree / relpath
-        if blob.type != "blob":
+        blob = cast(Any, commit.tree / relpath)
+        if getattr(blob, "type", None) != "blob":
             return default
-        return (blob.data_stream.read()).decode("utf-8", errors="replace")
+        data_stream = getattr(blob, "data_stream", None)
+        if data_stream is None:
+            return default
+        raw_bytes = data_stream.read()
+        if not isinstance(raw_bytes, (bytes, bytearray)):
+            return default
+        return bytes(raw_bytes).decode("utf-8", errors="replace")
     except Exception:
         return default
 
-# ---- Parsers ------------------------------------------------------------------
 
 def _parse_requirements_txt(path: Path) -> set[str]:
     out: set[str] = set()
@@ -144,8 +283,10 @@ def _parse_requirements_txt(path: Path) -> set[str]:
         out.add(line)
     return out
 
+
 def _parse_pyproject(path: Path) -> CandidateMeta:
-    data = _toml.loads(path.read_text(encoding="utf-8", errors="replace"))
+    raw = _toml.loads(path.read_text(encoding="utf-8", errors="replace"))
+    data = cast(dict[str, Any], raw)
     meta = CandidateMeta()
     proj = data.get("project") or {}
     if proj:
@@ -173,6 +314,7 @@ def _parse_pyproject(path: Path) -> CandidateMeta:
     # importable module name heuristic: sometimes in tool.spin or package dir
     # Not strictly needed; we infer from sources later.
     return meta
+
 
 def _parse_setup_cfg(path: Path) -> CandidateMeta:
     cfg = configparser.ConfigParser()
@@ -205,7 +347,8 @@ def _parse_setup_cfg(path: Path) -> CandidateMeta:
                     meta.extras[extra] = set(arr)
     return meta
 
-def _parse_conda_env_yaml(path: Path) -> set[str]:
+
+def _parse_conda_env_yaml(path: Path) -> set[str]:  # noqa: C901
     """
     Extremely light parser for environment.yml/.yaml. We collect:
       - pip subsection strings as-is
@@ -250,9 +393,8 @@ def _parse_conda_env_yaml(path: Path) -> set[str]:
                 out.add(name)
     return out
 
-# ---- Discovery ----------------------------------------------------------------
 
-def _discover_candidates(commit: Commit) -> dict[str, Candidate]:
+def _discover_candidates(commit: Commit) -> dict[str, Candidate]:  # noqa: C901
     """
     Discover packaging roots and requirement/conda files across the repo at this commit.
     """
@@ -263,9 +405,7 @@ def _discover_candidates(commit: Commit) -> dict[str, Candidate]:
             return True
         if base in _ENV_YML_NAMES:
             return True
-        if _REQ_TXT_REGEX.search(rel):
-            return True
-        return False
+        return bool(_REQ_TXT_REGEX.search(rel))
 
     blob_map = _materialize_blobs(commit, predicate, out_dirname="_pkg_blobs")
     candidates: dict[str, Candidate] = {}
@@ -292,6 +432,7 @@ def _discover_candidates(commit: Commit) -> dict[str, Candidate]:
 
     return candidates
 
+
 def _analyze_candidate_meta(cand: Candidate) -> CandidateMeta:
     meta = CandidateMeta()
     # Prefer pyproject for name/version/deps and build requires
@@ -316,7 +457,8 @@ def _analyze_candidate_meta(cand: Candidate) -> CandidateMeta:
         meta.core_deps.update(_parse_conda_env_yaml(y))
     return meta
 
-def _select_primary_candidate(
+
+def _select_primary_candidate(  # noqa: C901
     repo_name: str, candidates: dict[str, Candidate], install_cmds: set[str], analyzed: dict[str, CandidateMeta]
 ) -> str:
     """
@@ -354,20 +496,18 @@ def _select_primary_candidate(
             return root
     return sorted(candidates.keys(), key=lambda s: (len(Path(s).parts), s))[0]
 
-# ---- ASV finder ---------------------------------------------------------------
 
 def asv_finder(commit: Commit) -> list[Path]:
     mats = _materialize_blobs(commit, lambda rel: bool(_ASV_REGEX.search(rel)), out_dirname="_asv_blobs")
     return list(mats.values())
 
-# ---- uv integration -----------------------------------------------------------
 
 def _run_uv(
     args: list[str],
     *,
-    input_text: Optional[str] = None,
-    cwd: Optional[Path] = None,
-    extra_env: Optional[dict[str, str]] = None,
+    input_text: str | None = None,
+    cwd: Path | None = None,
+    extra_env: dict[str, str] | None = None,
     check: bool = False,
 ) -> subprocess.CompletedProcess:
     env = os.environ.copy()
@@ -375,11 +515,10 @@ def _run_uv(
     env.setdefault("NO_COLOR", "1")
     if extra_env:
         env.update(extra_env)
-    cp = subprocess.run(
-        ["uv", *args],
+    cp = subprocess.run(  # noqa: S603
+        ["uv", *args],  # noqa: S607
         input=input_text.encode("utf-8") if input_text is not None else None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         cwd=str(cwd) if cwd else None,
         env=env,
     )
@@ -389,7 +528,8 @@ def _run_uv(
         )
     return cp
 
-def _uv_compile(requirements: Iterable[str], *, python_version: Optional[str], cutoff_rfc3339: Optional[str]) -> list[str]:
+
+def _uv_compile(requirements: Iterable[str], *, python_version: str | None, cutoff_rfc3339: str | None) -> list[str]:
     """
     Use `uv pip compile` to resolve to pinned requirements.
     Reads from stdin (using '-') and prints the compiled file to stdout.
@@ -401,7 +541,7 @@ def _uv_compile(requirements: Iterable[str], *, python_version: Optional[str], c
     args = ["pip", "compile", "-"]
     if python_version:
         args.extend(["--python", python_version])
-    extra_env = {}
+    extra_env: dict[str, str] = {}
     if cutoff_rfc3339:
         extra_env["UV_EXCLUDE_NEWER"] = cutoff_rfc3339
     cp = _run_uv(args, input_text=req_text, extra_env=extra_env)
@@ -416,7 +556,10 @@ def _uv_compile(requirements: Iterable[str], *, python_version: Optional[str], c
             out.append(s)
     return out
 
-def _uv_dry_run_install(pinned: Iterable[str], *, python_version: Optional[str], venv_path: Optional[Path] = None) -> tuple[bool, str]:
+
+def _uv_dry_run_install(
+    pinned: Iterable[str], *, python_version: str | None, venv_path: Path | None = None
+) -> tuple[bool, str]:
     text_lines = [x for x in pinned if x.strip()]
     if not text_lines:
         # Nothing to install; treat as OK but say why.
@@ -436,7 +579,8 @@ def _uv_dry_run_install(pinned: Iterable[str], *, python_version: Optional[str],
     log = _strip_ansi(cp.stdout.decode() + "\n" + cp.stderr.decode())
     return ok, log
 
-def _uv_build_and_read_metadata(project_dir: Path) -> tuple[Optional[str], Optional[str], list[str], Optional[str]]:
+
+def _uv_build_and_read_metadata(project_dir: Path) -> tuple[str | None, str | None, list[str], str | None]:
     """
     Run `uv build` in the project directory, then read Name/Version/Requires-Dist/Requires-Python
     from the wheel METADATA.
@@ -452,7 +596,7 @@ def _uv_build_and_read_metadata(project_dir: Path) -> tuple[Optional[str], Optio
         return None, None, [], None
     name, version = None, None
     requires_dist: list[str] = []
-    requires_python: Optional[str] = None
+    requires_python: str | None = None
     with zipfile.ZipFile(wheels[-1]) as zf:
         meta_name = next((n for n in zf.namelist() if n.endswith(".dist-info/METADATA")), None)
         if not meta_name:
@@ -469,14 +613,14 @@ def _uv_build_and_read_metadata(project_dir: Path) -> tuple[Optional[str], Optio
                 requires_python = line.split("Requires-Python:", 1)[1].strip()
     return name, version, requires_dist, requires_python
 
-# ---- Import scan fallback -----------------------------------------------------
 
 try:
     _STDLIB = set(sys.stdlib_module_names)  # Python 3.10+
 except Exception:  # pragma: no cover
     _STDLIB = set()
 
-def _top_level_imports_under(root: Path) -> set[str]:
+
+def _top_level_imports_under(root: Path) -> set[str]:  # noqa: C901
     """
     Parse all .py files under root (excluding common non-runtime dirs) and
     return top-level imported module names (first segment).
@@ -489,11 +633,13 @@ def _top_level_imports_under(root: Path) -> set[str]:
             continue
         try:
             src = path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to read {path}: {e}")
             continue
         try:
             tree = ast.parse(src, filename=str(path))
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to parse {path}: {e}")
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -509,7 +655,8 @@ def _top_level_imports_under(root: Path) -> set[str]:
                     names.add(mod)
     return names
 
-def _infer_runtime_from_imports(project_dir: Path, own_import_name: Optional[str]) -> set[str]:
+
+def _infer_runtime_from_imports(project_dir: Path, own_import_name: str | None) -> set[str]:
     """
     Convert top-level imports to likely PyPI packages, filtering stdlib and self-import.
     """
@@ -529,28 +676,40 @@ def _infer_runtime_from_imports(project_dir: Path, own_import_name: Optional[str
         out.add(pkg)
     return out
 
-def _extract_requested_extras(install_cmds: Iterable[str], matrix: dict | None, available: Iterable[str]) -> set[str]:
-    extras_available = set(available)
+
+def _extras_from_install_commands(install_cmds: Iterable[str], extras_available: set[str]) -> set[str]:
     requested: set[str] = set()
     for cmd in install_cmds:
         if not cmd:
             continue
         for token in shlex.split(cmd):
-            m = re.search(r"\.\[([^\]]+)\]$", token) or re.search(r"[A-Za-z0-9_.-]+\[([^\]]+)\]$", token)
-            if m:
-                for ex in m.group(1).split(","):
-                    ex = ex.strip()
-                    if ex in extras_available:
-                        requested.add(ex)
-    if isinstance(matrix, dict):
-        for v in matrix.values():
-            if isinstance(v, (list, tuple, set)):
-                for x in v:
-                    if isinstance(x, str) and x in extras_available:
-                        requested.add(x)
-            elif isinstance(v, str) and v in extras_available:
-                requested.add(v)
+            for extra in _parse_extras_segment(token):
+                if extra in extras_available:
+                    requested.add(extra)
     return requested
+
+
+def _extras_from_matrix(matrix: Mapping[str, set[str]] | None, extras_available: set[str]) -> set[str]:
+    if not matrix:
+        return set()
+    requested: set[str] = set()
+    for values in matrix.values():
+        for value in values:
+            if value in extras_available:
+                requested.add(value)
+    return requested
+
+
+def _extract_requested_extras(
+    install_cmds: Iterable[str],
+    matrix: Mapping[str, set[str]] | None,
+    available: Iterable[str],
+) -> set[str]:
+    extras_available = set(available)
+    requested = _extras_from_install_commands(install_cmds, extras_available)
+    requested.update(_extras_from_matrix(matrix, extras_available))
+    return requested
+
 
 def _resolve_requirements_file(commit: Commit, rel_path: str, seen: set[str]) -> set[str]:
     """
@@ -588,6 +747,7 @@ def _resolve_requirements_file(commit: Commit, rel_path: str, seen: set[str]) ->
 
     return requirements
 
+
 def _normalize_requirement(req: str, commit: Commit | None = None) -> list[str]:
     """
     Attempt to normalize/recover a requirement string into valid PyPI requirements.
@@ -604,13 +764,15 @@ def _normalize_requirement(req: str, commit: Commit | None = None) -> list[str]:
     # If it passes validation, return it
     return [req]
 
+
 def _split_shell_command(cmd: str) -> list[str]:
     """
     Split a shell command on operators like &&, ||, ; into separate commands.
     """
     # Split on shell command separators
-    parts = re.split(r'\s*(?:&&|\|\||;)\s*', cmd)
+    parts = re.split(r"\s*(?:&&|\|\||;)\s*", cmd)
     return [p.strip() for p in parts if p.strip()]
+
 
 def _filter_pypi_packages(requirements: Iterable[str]) -> list[str]:
     """
@@ -623,7 +785,7 @@ def _filter_pypi_packages(requirements: Iterable[str]) -> list[str]:
             continue
         req = req.strip()
         # Extract package name (before any version specifier or extras)
-        pkg_name = re.split(r"[<>=!;\s\[]", req, 1)[0].strip().lower()
+        pkg_name = re.split(r"[<>=!;\s\[]", req, maxsplit=1)[0].strip().lower()
 
         # Skip python version specifiers
         if pkg_name in {"python", "pip", "setuptools", "wheel"}:
@@ -636,6 +798,7 @@ def _filter_pypi_packages(requirements: Iterable[str]) -> list[str]:
         filtered.append(req)
 
     return filtered
+
 
 def _is_valid_pypi_requirement(req: str) -> bool:
     """
@@ -668,21 +831,22 @@ def _is_valid_pypi_requirement(req: str) -> bool:
 
     # Extract package name (before version specifiers, extras, etc.)
     pkg_match = re.match(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)", req)
-    if not pkg_match:
-        return False
-
     # Valid package name found
-    return True
+    return bool(pkg_match)
 
-# ---- Main entry ---------------------------------------------------------------
 
-def analyze_commit(sha: str, repo_name: str) -> dict | None:
-    commit_info = None
+@cache_completion(CACHE_LOCATION, table_name="commit_analysis")
+def analyze_commit(sha: str, repo_name: str) -> dict[str, Any] | None:  # noqa: C901
+    commit_info: dict[str, Any] | None = None
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpfile_pth = Path(tmpdir) / "repo"
-        # Clone without specifying branch to use the repo's default branch
-        with Repo.clone_from(f"https://github.com/{repo_name}.git", to_path=tmpfile_pth) as repo:
+        tmp_path = Path(tmpdir)
+        # Use cached base clone + worktree (fast). Fallback to reference clone if needed.
+        repo, tmpfile_pth, _cleanup_checkout = _prepare_repo_checkout(repo_name, sha, tmp_path)
+        try:
             commit = repo.commit(sha)
+            # For worktrees we're already at `sha`; for ref-clones, ensure checkout but don't fail hard.
+            with suppress(Exception):
+                repo.git.checkout(sha)
 
             # A) ASV configs
             asv_cfg_files = asv_finder(commit)
@@ -692,49 +856,44 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
             # Load valid ASV configs, skip malformed ones
             asv_cfgs = []
             for cfg_file in asv_cfg_files:
-                try:
+                with contextlib.suppress(Exception):
                     asv_cfgs.append(Config.load(cfg_file))
-                except Exception:
-                    # Skip malformed/incomplete ASV config files
-                    continue
 
             if not asv_cfgs:
                 return None
 
-            cfg_items = {"pythons": set(), "build_command": set(), "install_command": set(), "matrix": {}}
+            cfg_items = _ASVCfgAggregate()
             for cfg in asv_cfgs:
-                pythons = set()
+                pythons: set[tuple[int, ...]] = set()
                 for py in getattr(cfg, "pythons", []) or []:
-                    try:
+                    with contextlib.suppress(Exception):
                         pythons.add(tuple(map(int, str(py).split("."))))
-                    except Exception:
-                        pass
-                cfg_items["pythons"].update(pythons)
+                cfg_items.pythons.update(pythons)
                 bc = getattr(cfg, "build_command", None)
                 ic = getattr(cfg, "install_command", None)
                 if bc:
                     if isinstance(bc, (list, tuple)):
                         bc = " && ".join(bc)
-                    cfg_items["build_command"].add(bc)
+                    cfg_items.build_commands.add(str(bc))
                 if ic:
                     if isinstance(ic, (list, tuple)):
                         ic = " && ".join(ic)
-                    cfg_items["install_command"].add(ic)
+                    cfg_items.install_commands.add(str(ic))
                 mx = getattr(cfg, "matrix", None) or {}
                 for k, v in mx.items():
-                    cfg_items["matrix"].setdefault(k, set())
+                    values = cfg_items.matrix.setdefault(k, set())
                     if isinstance(v, (list, tuple, set)):
-                        cfg_items["matrix"][k].update(map(str, v))
+                        values.update(map(str, v))
                     else:
-                        cfg_items["matrix"][k].add(str(v))
+                        values.add(str(v))
 
             # B) Choose Python version
-            if (not cfg_items["pythons"]) or all(py < (3, 7) for py in cfg_items["pythons"]):
+            if (not cfg_items.pythons) or all(py < (3, 7) for py in cfg_items.pythons):
                 return None
-            python_version = ".".join(map(str, max(cfg_items["pythons"])))
+            python_version = ".".join(map(str, max(cfg_items.pythons)))
 
             # Create virtual environment for dry-run testing
-            venv_path = Path(tmpdir) / "venv"
+            venv_path: Path | None = Path(tmpdir) / "venv"
             venv_cp = _run_uv(["venv", str(venv_path), "--python", python_version])
             if venv_cp.returncode != 0:
                 # If venv creation fails, we can't do dry-run testing
@@ -745,8 +904,7 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
             if not candidates:
                 return None
             analyzed: dict[str, CandidateMeta] = {root: _analyze_candidate_meta(c) for root, c in candidates.items()}
-            primary_root = _select_primary_candidate(repo_name, candidates, cfg_items["install_command"], analyzed)
-            primary_cand = candidates[primary_root]
+            primary_root = _select_primary_candidate(repo_name, candidates, cfg_items.install_commands, analyzed)
             primary_meta = analyzed[primary_root]
 
             # D) Aggregate base requirements (unresolved, human-intent)
@@ -757,18 +915,19 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
 
             # Requested extras -> include their deps if declared
             requested_extras = _extract_requested_extras(
-                cfg_items["install_command"], cfg_items.get("matrix"), primary_meta.extras.keys()
+                cfg_items.install_commands, cfg_items.matrix, primary_meta.extras.keys()
             )
             for ex in requested_extras:
                 base_requirements.update(primary_meta.extras.get(ex, set()))
 
             # From ASV install_command (-r files and direct tokens)
-            for install_cmd in cfg_items["install_command"]:
+            for install_cmd in cfg_items.install_commands:
                 # Split on shell operators first
                 for cmd_part in _split_shell_command(install_cmd):
                     try:
                         tokens = shlex.split(cmd_part)
                     except Exception:
+                        logger.exception("Failed to split command %s", {cmd_part})
                         continue
 
                     # -r includes - use recursive resolver
@@ -800,7 +959,7 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
                         base_requirements.update(normalized)
 
             # matrix values that look like requirements
-            for _, vals in cfg_items["matrix"].items():
+            for vals in cfg_items.matrix.values():
                 for v in vals:
                     s = str(v).strip()
                     if s and not s.startswith("-"):
@@ -809,7 +968,6 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
 
             # E) Build and read wheel metadata for authoritative runtime deps
             #    (and possibly updated name/version)
-            repo.git.checkout(sha)
             project_dir = tmpfile_pth / primary_root
             pkg_name, pkg_version, wheel_requires, wheel_requires_python = _uv_build_and_read_metadata(project_dir)
 
@@ -832,7 +990,7 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
                 runtime_inferred = _infer_runtime_from_imports(project_dir, own_import_name=own_import)
 
                 # optionally promote build-system requirements that are actually imported
-                build_names = {re.split(r"[<>=!; ]", breq, 1)[0] for breq in primary_meta.build_requires}
+                build_names = {re.split(r"[<>=!; ]", breq, maxsplit=1)[0] for breq in primary_meta.build_requires}
                 promote = {x for x in runtime_inferred if x in build_names}
                 runtime_candidates.update(runtime_inferred)
                 runtime_candidates.update(promote)
@@ -870,7 +1028,9 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
                     resolution_strategy = f"unresolved: {e.__class__.__name__}"
 
             # H) Validate via dry-run
-            can_install, dry_run_log = _uv_dry_run_install(resolved_dependencies, python_version=python_version, venv_path=venv_path)
+            can_install, dry_run_log = _uv_dry_run_install(
+                resolved_dependencies, python_version=python_version, venv_path=venv_path
+            )
 
             # I) Final identity
             pkg_name_out = primary_meta.name
@@ -882,8 +1042,8 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
                 "package_name": pkg_name_out,
                 "package_version": pkg_version_out,
                 "python_version": python_version,
-                "build_command": list(cfg_items["build_command"]),
-                "install_command": list(cfg_items["install_command"]),
+                "build_command": list(cfg_items.build_commands),
+                "install_command": list(cfg_items.install_commands),
                 "final_dependencies": list(resolved_dependencies),
                 "can_install": can_install,
                 "dry_run_log": dry_run_log,
@@ -891,7 +1051,9 @@ def analyze_commit(sha: str, repo_name: str) -> dict | None:
                 "resolution_strategy": resolution_strategy,
             }
 
-        return commit_info
+            return commit_info
+        finally:
+            _cleanup_checkout()
 
 
 # Example usage:

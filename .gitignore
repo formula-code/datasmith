@@ -201,6 +201,6 @@ scratch/rsync-backups/
 scratch/artifacts/tarballs/
 asv-output/
 output
-*context_registry*
+*context_registry.json*
 # Database files
 *.db

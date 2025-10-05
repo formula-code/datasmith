@@ -6,20 +6,20 @@ import datetime
 import io
 import json
 import os
-import re
 import subprocess
 import tarfile
 import threading
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound
 
+from datasmith.core.models.build import BuildResult
+from datasmith.core.models.task import Task
 from datasmith.docker.s3_cache_manager import S3DockerCacheManager
 from datasmith.execution.utils import _get_commit_info
 from datasmith.logging_config import get_logger
@@ -65,98 +65,6 @@ def build_base_image(client: docker.DockerClient, ctx: DockerContext) -> str:
         logger.exception("Failed to build base image %s error=%s", base_tag, res.stderr_tail)
         raise RuntimeError("Failed to build base image")
     return base_tag
-
-
-@dataclass
-class BuildResult:
-    ok: bool
-    image_name: str
-    image_id: str | None
-    rc: int  # 0 ok, 124 timeout, 1 generic failure
-    duration_s: float
-    stderr_tail: str  # tail of error-ish build logs
-    stdout_tail: str  # tail of normal build stream (may help triage)
-
-
-@dataclass(frozen=True)
-class Task:
-    owner: str
-    repo: str
-    sha: str | None = None
-    commit_date: float = 0.0
-    env_payload: str = ""
-    tag: str = "pkg"  # 'pkg' (env + package) or 'env' (env-only)
-
-    @classmethod
-    def default_task(cls) -> Task:
-        return cls(owner="default", repo="default", sha=None, tag="pkg")
-
-    @staticmethod
-    def _sanitize_component(s: str) -> str:
-        """
-        Sanitize a component for Docker image/container naming:
-        - lowercase
-        - keep only [a-z0-9._-]
-        - collapse invalid runs to '-'
-        - strip leading/trailing separators
-        """
-        s = s.lower()
-        s = re.sub(r"[^a-z0-9._-]+", "-", s)
-        s = s.strip("._-")
-        return s or "unknown"
-
-    def with_tag(self, tag: str) -> Task:
-        """Return a new Task with the given tag."""
-        if tag not in {"env", "pkg", "run", "base"}:
-            raise ValueError(f"Tag must be either 'env', 'pkg', 'run', or 'base', got '{tag}'.")
-        return Task(
-            owner=self.owner,
-            repo=self.repo,
-            sha=self.sha,
-            commit_date=self.commit_date,
-            tag=tag,
-            env_payload=self.env_payload,
-        )
-
-    def get_image_name(self) -> str:
-        """Return the Docker image name for this task (repo:tag)."""
-        assert self.tag in {"env", "pkg", "run", "base"}, "Tag must be either 'env', 'pkg', 'run', or 'base'."  # noqa: S101
-
-        owner = self._sanitize_component(self.owner)
-        repo = self._sanitize_component(self.repo)
-        sha_part = f"-{self._sanitize_component(self.sha)}" if self.sha else ""
-
-        # New scheme: "owner-repo[-sha]:{tag}"
-        image_repo = f"{owner}-{repo}{sha_part}"
-        return f"{image_repo}:{self.tag}"
-
-    def get_container_name(self) -> str:
-        """Return a suitable (deterministic) Docker container name for this task."""
-        assert self.tag in {"env", "pkg", "run", "base"}, "Tag must be either 'env', 'pkg', 'run', or 'base'."  # noqa: S101
-
-        owner = self._sanitize_component(self.owner)
-        repo = self._sanitize_component(self.repo)
-        sha_part = f"-{self._sanitize_component(self.sha)}" if self.sha else ""
-        tag_part = f"-{self._sanitize_component(self.tag)}"
-
-        # Container names cannot contain ':'; allowed: [a-zA-Z0-9][a-zA-Z0-9_.-]
-        # We keep it lowercase and deterministic.
-        name = f"{owner}-{repo}{sha_part}{tag_part}"
-
-        # Ensure starts with an alphanumeric character
-        if not re.match(r"^[a-z0-9]", name):
-            name = f"c-{name}"
-
-        # Be conservative on length (Docker allows long names, but trim to 128 chars)
-        return name[:128]
-
-    def __eq__(self, value: object) -> bool:
-        if not isinstance(value, Task):
-            return NotImplemented
-        return self.owner == value.owner and self.repo == value.repo and self.sha == value.sha and self.tag == value.tag
-
-    def __hash__(self) -> int:
-        return hash((self.owner, self.repo, self.sha, self.tag))
 
 
 class DockerContext:

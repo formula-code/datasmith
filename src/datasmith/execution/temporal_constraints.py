@@ -21,7 +21,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from datasmith.utils import CACHE_LOCATION, cache_completion
+from datasmith.core.cache import CACHE_LOCATION, cache_completion
 
 # ----------------------------- helpers & types -----------------------------
 

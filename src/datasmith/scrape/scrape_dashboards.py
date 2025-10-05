@@ -15,7 +15,7 @@ from git import Repo
 from tqdm import tqdm
 
 from datasmith.benchmark.collection import BenchmarkCollection
-from datasmith.docker.context import Task
+from datasmith.core.models import Task
 from datasmith.logging_config import get_logger
 from datasmith.scrape.utils import dl_and_open
 

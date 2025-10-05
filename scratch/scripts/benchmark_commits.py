@@ -18,7 +18,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from datasmith.benchmark.collection import BenchmarkCollection
-from datasmith.docker.context import ContextRegistry, DockerContext, Task, build_base_image
+from datasmith.core.models import Task
+from datasmith.docker.context import ContextRegistry, DockerContext, build_base_image
 from datasmith.docker.orchestrator import (
     batch_orchestrate,
     build_repo_sha_image,
@@ -195,7 +196,11 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
         for sha, date, env_payload in limited:
             task = Task(owner, repo, sha, commit_date=date, env_payload=env_payload)
             if task in context_registry:
-                tasks.append((task, context_registry.get(task)))
+                ctx, task_instance = context_registry.get_with_task_instance(task)
+                if task_instance and isinstance(task_instance.metadata, dict):
+                    env_payload = str(task_instance.metadata.get("env_payload", env_payload))
+                task = Task(owner, repo, sha, commit_date=date, env_payload=env_payload)
+                tasks.append((task, ctx))
                 repo_commit_pairs[f"{owner}/{repo}"].append(task)
                 # also add the parent commit.
             # else:
@@ -209,10 +214,11 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
         for i, (parent_sha, date) in enumerate(parent_commits):
             # Use the env_payload from the child task
             env_payload = tsks[i].env_payload if i < len(tsks) else ""
+            child_ctx, child_instance = context_registry.get_with_task_instance(tsks[i])
+            if child_instance and isinstance(child_instance.metadata, dict):
+                env_payload = str(child_instance.metadata.get("env_payload", env_payload))
             parent_task = Task(owner=owner, repo=repo, sha=parent_sha, commit_date=date, env_payload=env_payload)  # pyright: ignore[reportArgumentType]
-            # use the child context.
-            ctx = context_registry.get(tsks[i])
-            tasks.append((parent_task, ctx))
+            tasks.append((parent_task, child_ctx))
 
     max_concurrency = (
         args.max_concurrency if args.max_concurrency != -1 else max(4, math.floor(0.5 * (os.cpu_count() or 1)))

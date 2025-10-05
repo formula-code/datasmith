@@ -1,384 +1,52 @@
-import functools
-import os
-import pickle
-import random
+"""Legacy compatibility layer forwarding to datasmith.core."""
+
+from __future__ import annotations
+
 import re
-import sqlite3
-import threading
-import time
-import typing
-from typing import cast
 
-import requests
-import simple_useragent as sua  # type: ignore[import-untyped]
-from requests.adapters import HTTPAdapter
-from requests.exceptions import HTTPError, RequestException, Timeout
+from datasmith.core.api.codecov_client import get_codecov_metadata as _get_codecov_metadata
+from datasmith.core.api.github_client import (
+    get_github_metadata as _get_github_metadata,
+)
+from datasmith.core.api.github_client import (
+    get_github_metadata_graphql as _get_github_metadata_graphql,
+)
+from datasmith.core.api.http_utils import (
+    build_headers as _build_headers,
+)
+from datasmith.core.api.http_utils import (
+    get_session,
+    prepare_url,
+)
+from datasmith.core.api.http_utils import (
+    request_with_backoff as _request_with_backoff,
+)
+from datasmith.core.cache import CACHE_LOCATION, cache_completion, get_db_connection
+from datasmith.core.file_utils import (
+    dl_and_open,
+)
+from datasmith.core.file_utils import (
+    extract_repo_full_name as _extract_repo_full_name,
+)
+from datasmith.core.file_utils import (
+    parse_commit_url as _parse_commit_url,
+)
 
-from datasmith import logger
-
-LIST_UA = sua.get_list(shuffle=True, force_cached=True)
-CACHE_LOCATION = os.getenv("CACHE_LOCATION")
-if not CACHE_LOCATION:
-    logger.warning("CACHE_LOCATION environment variable not set. Using default 'cache.db'.")
-    CACHE_LOCATION = "cache.db"
-
-
-_cache_lock = threading.Lock()  # Lock for database operations
 find_json_block = re.compile(r"```json(.*?)```", re.DOTALL)
 
-
-def get_session() -> requests.Session:
-    """Get a requests session with connection pooling."""
-    session = requests.Session()
-    adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=0)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
-
-
-def _build_github_headers(diff_api: bool = False) -> dict[str, str]:
-    if "GH_TOKEN" not in os.environ:
-        logger.warning("No GH_TOKEN environment variable found. Rate limits may apply.")
-    token = os.environ.get("GH_TOKEN", None)
-    header = "application/vnd.github.v3.diff" if diff_api else "application/vnd.github+json"
-    return {
-        "Accept": header,
-        "User-Agent": random.choice(LIST_UA),  # noqa: S311
-        **({"Authorization": f"Bearer {token}"} if token else {}),
-    }
-
-
-def _build_codecov_headers() -> dict[str, str]:
-    """
-    Build headers for Codecov API requests.
-    """
-    if "CODECOV_TOKEN" not in os.environ:
-        logger.warning("No CODECOV_TOKEN environment variable found. Rate limits may apply.")
-    token = os.environ.get("CODECOV_TOKEN", None)
-    return {
-        "Accept": "application/json",
-        "User-Agent": LIST_UA[0],
-        **({"Authorization": f"Bearer {token}"} if token else {}),
-    }
-
-
-configured_headers: dict[str, typing.Callable[..., dict[str, str]]] = {
-    "github": _build_github_headers,
-    "codecov": _build_codecov_headers,
-}
-
-
-def _build_headers(name: str, **kwargs: typing.Any) -> dict[str, str]:
-    if name not in configured_headers:
-        raise ValueError(f"Unknown header type: {name}. Available types: {', '.join(configured_headers.keys())}")
-
-    return configured_headers[name](**kwargs)
-
-
-@typing.no_type_check
-def cache_completion(db_loc: str, table_name: str = "cache"):
-    """Decorator to cache function results in a SQLite database.
-
-    Passing `bypass_cache=True` to the wrapped function forces a fresh
-    computation *and* overwrites the stored value for the same
-    positional / keyword arguments (with `bypass_cache` ignored when
-    hashing the arguments).
-    """
-    # Validate table_name to avoid SQL-injection risks
-    if not re.match(r"^\w+$", table_name):
-        raise ValueError("table_name must be alphanumeric/underscore only")
-
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapped(*args, **kwargs):
-            # -- Handle bypass flag -----------------------------------------
-            bypass = kwargs.pop("bypass_cache", False)
-            # We DON'T include the flag in the cache key so that it maps to
-            # the same row whether or not the user asks to bypass.
-            key_kwargs = kwargs.copy()
-
-            # ----------------------------------------------------------------
-            c, conn = get_db_connection(db_loc)  # or (c, conn) if your helper returns that order
-            function_name = func.__name__
-
-            create_table_sql = (
-                f"CREATE TABLE IF NOT EXISTS {table_name} ("
-                "function_name TEXT,"
-                "argument_blob BLOB,"
-                "result_blob   BLOB,"
-                "PRIMARY KEY (function_name, argument_blob)"
-                ")"
-            )
-            with _cache_lock:
-                c.execute(create_table_sql)
-                conn.commit()
-
-            args_blob = pickle.dumps((function_name, args, key_kwargs))
-
-            # ----------------- Try to read from cache -----------------------
-            if not bypass:
-                with _cache_lock:
-                    c.execute(
-                        f"""SELECT result_blob FROM {table_name}
-                            WHERE function_name = ? AND argument_blob = ?""",  # noqa: S608
-                        (function_name, args_blob),
-                    )
-                    row = c.fetchone()
-                    if row is not None:
-                        conn.close()
-                        return pickle.loads(row[0])  # noqa: S301
-
-            # ----------------- Compute fresh result -------------------------
-            result = (
-                func(*args, **kwargs, bypass_cache=bypass)
-                if "bypass_cache" in func.__code__.co_varnames
-                else func(*args, **kwargs)
-            )
-            result_blob = pickle.dumps(result)
-
-            # ----------------- Upsert into cache ----------------------------
-            with _cache_lock:
-                # INSERT OR REPLACE does the “overwrite” when the row exists
-                c.execute(
-                    f"""INSERT OR REPLACE INTO {table_name}
-                        (function_name, argument_blob, result_blob)
-                        VALUES (?, ?, ?)""",  # noqa: S608
-                    (function_name, args_blob, result_blob),
-                )
-                conn.commit()
-            conn.close()
-            return result
-
-        return wrapped
-
-    return decorator
-
-
-RPS = {"github": 20, "codecov": 20}
-_last_call = {"github": 0.0, "codecov": 0.0}
-
-
-def _request_with_backoff(
-    url: str,
-    site_name: str,
-    session: requests.Session = get_session(),  # noqa: B008
-    base_delay: float = 1.0,
-    max_retries: int = 5,
-    max_backoff: float = 60.0,
-    header_kwargs: dict | None = None,
-) -> requests.Response:
-    """
-    GET ``url`` with retry, exponential back-off, client-side throttling,
-    and GitHub-aware rate-limit handling.
-    """
-    if header_kwargs is None:
-        header_kwargs = {}
-    delay = base_delay
-    last_exception = None
-    for _ in range(1, max_retries + 1):
-        # conditional throttle
-        now = time.time()
-        min_interval = 1.0 / RPS.get(site_name, 2)
-        since = now - _last_call.get(site_name, 0.0)
-        if since < min_interval:
-            time.sleep(min_interval - since)
-        _last_call[site_name] = time.time()
-
-        try:
-            resp = session.get(url, headers=_build_headers(site_name, **header_kwargs), timeout=15)
-            if resp.status_code in (403, 429):
-                ra = resp.headers.get("Retry-After")
-                if ra:
-                    sleep_for = float(ra)
-                else:
-                    sleep_for = min(delay, max_backoff)
-                    delay *= 2
-                resp.close()
-                time.sleep(sleep_for)
-                continue
-            resp.raise_for_status()
-        except (Timeout, requests.ConnectionError, HTTPError) as exc:
-            last_exception = exc
-            time.sleep(min(delay, max_backoff))
-            delay *= 2
-        else:
-            return resp
-    raise last_exception or RuntimeError("Unknown error")
-
-
-def get_db_connection(db_loc: str) -> tuple[sqlite3.Cursor, sqlite3.Connection]:
-    """Get a SQLite database connection and cursor."""
-    conn = sqlite3.connect(db_loc, timeout=30, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL;")  # enables readers during writes
-    conn.execute("PRAGMA synchronous=NORMAL;")  # good balance of safety/speed
-    conn.execute("PRAGMA busy_timeout=30000;")  # wait up to 30s if locked
-    c = conn.cursor()
-    return c, conn
-
-
-def prepare_url(base_url: str, params: dict[str, str] | None = None) -> str:
-    """
-    Prepare a URL with query parameters.
-    """
-    r = requests.Request("GET", base_url, params=params)
-    prepared = r.prepare()
-    if prepared.url is None:
-        raise ValueError(f"Invalid URL: {base_url} with params {params}")
-    return prepared.url
-
-
-@cache_completion(CACHE_LOCATION, "github_metadata")
-def _get_github_metadata(endpoint: str, params: dict[str, str] | None = None) -> dict[str, typing.Any] | None:
-    """
-    Call the GitHub REST API for a specific endpoint and return the JSON.
-    Falls back to *None* when the endpoint cannot be reached.
-
-    Examples
-    --------
-    >>> _get_github_metadata(endpoint="repos/scipy/scipy")
-    {'id': 123456, 'name': 'scipy', ...}
-    """
-    if not endpoint:
-        return None
-    endpoint = endpoint.lstrip("/")
-    header_kwargs = {"diff_api": True} if params and params.get("diff_api", "false").lower() == "true" else {}
-    # pop the diff_api param so it doesn't go into the URL
-    if params and "diff_api" in params:
-        params.pop("diff_api")
-    api_url = prepare_url(f"https://api.github.com/{endpoint}", params=params)
-    try:
-        r = _request_with_backoff(api_url, site_name="github", header_kwargs=header_kwargs)
-    except HTTPError as e:
-        status = getattr(e.response, "status_code", None)
-        if status in (404, 451, 410):
-            return None
-        logger.error("Failed to fetch %s: %s %s", api_url, status, e, exc_info=True)
-        return None
-    except RequestException as e:
-        logger.error("Error fetching %s: %s", api_url, e, exc_info=True)
-        return None
-    except RuntimeError as e:
-        logger.error("Runtime error fetching %s: %s", api_url, e, exc_info=True)
-        return None
-
-    if header_kwargs.get("diff_api", False):
-        # for diff API, return the text as a single-item dict
-        return {"diff": r.text}
-    return cast(dict[str, typing.Any], r.json())
-
-
-def _post_with_backoff(
-    url: str,
-    site_name: str,
-    payload: dict[str, typing.Any],
-    *,
-    session: requests.Session = get_session(),  # noqa: B008
-    rps: int = 2,
-    base_delay: float = 1.0,
-    max_retries: int = 5,
-    max_backoff: float = 60.0,
-) -> requests.Response:
-    """POST *payload* to *url* with the same resilience features used for REST."""
-    delay = base_delay
-    last_exc: requests.RequestException | None = None
-
-    for _ in range(1, max_retries + 1):
-        # --- client-side throttle ---
-        time.sleep(max(0.0, 1 / rps))
-
-        try:
-            resp = session.post(
-                url,
-                headers=_build_headers(site_name),
-                json=payload,
-                timeout=15,
-            )
-
-            if resp.status_code in (403, 429):
-                # --- primary or secondary rate limit ---
-                remaining = resp.headers.get("X-RateLimit-Remaining", "1")
-                reset_at = resp.headers.get("X-RateLimit-Reset")
-                if remaining == "0" and reset_at:
-                    sleep_for = max(0.0, float(reset_at) - time.time())
-                else:
-                    sleep_for = min(delay, max_backoff)
-                resp.close()
-                time.sleep(sleep_for + random.uniform(0, 1))  # noqa: S311
-                delay *= 2
-                continue
-
-            resp.raise_for_status()
-            return resp  # noqa: TRY300
-
-        except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
-            last_exc = exc
-            time.sleep(min(delay, max_backoff) + random.uniform(0, 1))  # noqa: S311
-            delay *= 2
-
-    raise last_exc or RuntimeError("Unknown error calling GitHub GraphQL API")
-
-
-@cache_completion(CACHE_LOCATION, "github_metadata_graphql")
-def _get_github_metadata_graphql(
-    query: str,
-    variables: dict[str, typing.Any] | None = None,
-) -> dict[str, typing.Any] | None:
-    """
-    Execute *query* against the GitHub GraphQL endpoint and return the ``data``
-    block, or *None* on any non-recoverable error.
-    """
-    payload = {"query": query, "variables": variables or {}}
-    try:
-        resp = _post_with_backoff(
-            url="https://api.github.com/graphql",
-            site_name="github",
-            payload=payload,
-        )
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", None)
-        if status in (404, 451, 410):
-            return None
-        logger.error("GraphQL HTTP error %s for query %s", status, query, exc_info=True)
-        return None
-    except requests.RequestException as e:
-        logger.error("GraphQL request error for query %s: %s", query, e, exc_info=True)
-        return None
-    except RuntimeError as e:
-        logger.error("GraphQL runtime error: %s", e, exc_info=True)
-        return None
-
-    data = resp.json()
-    if "errors" in data:  # GraphQL-level errors
-        logger.error("GraphQL errors: %s", data["errors"])
-        return None
-    return typing.cast(dict[str, typing.Any], data.get("data", {}))
-
-
-@cache_completion(CACHE_LOCATION, "codecov_metadata")
-def _get_codecov_metadata(endpoint: str, params: dict[str, str] | None = None) -> dict[str, typing.Any] | None:
-    """
-    Call the Codecov API for a specific endpoint and return the JSON.
-    Falls back to *None* when the endpoint cannot be reached.
-    """
-    if not endpoint:
-        return None
-    if not params:
-        params = {}
-    if "format" not in params:
-        params["format"] = "json"
-
-    endpoint = endpoint.lstrip("/")
-    api_url = prepare_url(f"https://api.codecov.io/api/v2/gh/{endpoint}", params=params)
-    try:
-        r = _request_with_backoff(api_url, site_name="codecov")
-    except HTTPError as e:
-        status = getattr(e.response, "status_code", None)
-        if status in (404, 451, 410):
-            return None
-        logger.error("Failed to fetch %s: %s %s", api_url, status, e, exc_info=True)
-        return None
-    except RequestException as e:
-        logger.error("Error fetching %s: %s", api_url, e, exc_info=True)
-        return None
-
-    return cast(dict[str, typing.Any], r.json())
+__all__ = [
+    "CACHE_LOCATION",
+    "_build_headers",
+    "_extract_repo_full_name",
+    "_get_codecov_metadata",
+    "_get_github_metadata",
+    "_get_github_metadata_graphql",
+    "_parse_commit_url",
+    "_request_with_backoff",
+    "cache_completion",
+    "dl_and_open",
+    "find_json_block",
+    "get_db_connection",
+    "get_session",
+    "prepare_url",
+]

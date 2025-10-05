@@ -16,9 +16,10 @@ import docker
 import dspy
 from docker.errors import APIError, ImageNotFound, NotFound
 
-from datasmith.agents.tool_executor import ContainerToolExecutor
+from datasmith.agents.tools.container import ContainerToolExecutor
 from datasmith.agents.utils import _TEST_SUITE_IMPORT_OVERRIDES
-from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext, Task
+from datasmith.core.models import BuildResult, Task
+from datasmith.docker.context import ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import gen_run_labels
 
 logger = logging.getLogger(__name__)

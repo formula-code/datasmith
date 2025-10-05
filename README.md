@@ -38,6 +38,85 @@ scratch/artifacts
 └── backup/                     # Optional BACKUP_DIR for long‑term storage
 ```
 
+## Docker Builder
+
+Datasmith uses a **Templated Docker Builder** to create reproducible build environments for benchmarking tasks. The builder replaces flat shell scripts with a structured, template-driven system that provides:
+
+- **3-tier layer caching**: 5-10x storage/bandwidth reduction (inspired by SWE-Bench)
+- **Reproducibility**: Pinned base images, frozen packages, provenance tracking
+- **LLM-safe workflows**: Validated editable regions for agent-driven builds
+- **Clean separation**: Lightweight task definitions vs. implementation details
+
+### Quick Start
+
+```python
+from datasmith.docker.builder import Builder, TaskInstance, RepoMetadata
+
+# Define a task
+repo = RepoMetadata(owner="numpy", name="numpy")
+task = TaskInstance(
+    id="numpy__numpy-20590",
+    repo=repo,
+    commit_sha="abc123def456",
+    python_version="3.10",
+)
+
+# Build context with layer caching
+builder = Builder()
+context = builder.build_from_task(task)
+tarball = context.build_tarball(
+    cache_from=[
+        "ecr.io/datasmith/base:latest",
+        "ecr.io/datasmith/env:py310",
+    ]
+)
+```
+
+### CLI Usage
+
+```bash
+# Validate task definition
+python -m datasmith.docker.builder validate --task task.json
+
+# Render build context
+python -m datasmith.docker.builder render \
+  --task task.json \
+  --out-dir build/
+
+# Compare with baseline
+python -m datasmith.docker.builder diff \
+  --task task.json \
+  --baseline legacy/ \
+  --show-diff
+```
+
+### Documentation
+
+- **[Builder README](src/datasmith/docker/builder/README.md)**: Architecture, API reference, usage examples
+- **[CLI Reference](src/datasmith/docker/builder/CLI.md)**: Command-line interface documentation
+- **[Migration Guide](docs/MIGRATION_GUIDE.md)**: Migrating from legacy system
+- **[Architecture Spec](TEMPLATED_BUILDER.md)**: Detailed design document
+
+### Key Features
+
+**Layer Caching**:
+- **Base layer** (~500MB): System packages, shared by all tasks
+- **Environment layer** (~300MB each): Python matrix, shared by tasks with same Python version
+- **Instance layer** (~200MB each): Task-specific setup
+
+**Storage savings**: From ~2TB (1000 × 2GB) to ~218GB (9x reduction)
+
+**Reproducibility**:
+- Pinned base images (SHA256 digests)
+- Frozen system packages
+- Build provenance metadata
+- Lockfile verification
+
+**Integration**:
+- Backward compatible with existing orchestrators/validators
+- No changes needed for current consumers
+- Drop-in replacement via compatibility layer
+
 
 ## Dataset building
 
@@ -190,7 +269,7 @@ $ python scratch/scripts/collect_and_filter_commits.py \
 $ python scratch/scripts/collect_perf_commits.py \
        --commits  scratch/artifacts/pipeflush/commits_filtered.parquet \
        --outfile    scratch/artifacts/pipeflush/commits_perfonly.jsonl \
-       --max-workers 16
+       --max-workers -1
 ```
 
 

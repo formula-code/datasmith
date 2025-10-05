@@ -10,9 +10,10 @@ import asv
 import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.core.models import Task
 from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client
-from datasmith.docker.validation import Task, _err_lock, validate_one
+from datasmith.docker.validation import DockerValidator, ValidationConfig
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url
 
@@ -182,7 +183,10 @@ def main(args: argparse.Namespace) -> None:
         for sha, date, env_payload in limited:
             task = Task(owner, repo, sha, commit_date=float(date), env_payload=env_payload)
             if (task.with_tag("pkg") in context_registry) and (task.sha not in ignore_list):
-                tasks.add(task)
+                _, task_instance = context_registry.get_with_task_instance(task)
+                if task_instance and isinstance(task_instance.metadata, dict):
+                    env_payload = str(task_instance.metadata.get("env_payload", env_payload))
+                tasks.add(Task(owner, repo, sha, commit_date=float(date), env_payload=env_payload))
             else:
                 logger.debug(f"main: skipping {task} not in context registry")
     tasks = list(tasks)
@@ -197,26 +201,36 @@ def main(args: argparse.Namespace) -> None:
         k: str(v.replace(" ", "_").replace("'", "").replace('"', "")) for k, v in machine_defaults.items()
     }
 
+    config = ValidationConfig(
+        output_dir=args.output_dir,
+        build_timeout=args.build_timeout,
+        run_timeout=args.run_timeout,
+        tail_chars=args.tail_chars,
+    )
+    validator = DockerValidator(
+        client=client,
+        context_registry=context_registry,
+        machine_defaults=machine_defaults,
+        config=config,
+    )
+
     logger.info("Starting parallel validation of %d tasks with %d workers", len(tasks), args.max_workers)
     results: list[dict] = []
 
     if args.max_workers < 1:
         for t in tasks:
-            rec = validate_one(t.with_tag(args.target), args, client, context_registry, machine_defaults)
+            rec = validator.validate_task(t.with_tag(args.target))
             results.append(rec)
-            with _err_lock, open(args.output_dir / "logs.jsonl", "a") as jf:
+            with validator.error_lock, open(args.output_dir / "logs.jsonl", "a") as jf:
                 jf.write(json.dumps(rec) + "\n")
         return
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
-            futures = [
-                ex.submit(validate_one, t.with_tag(args.target), args, client, context_registry, machine_defaults)
-                for t in tasks
-            ]
+            futures = [ex.submit(validator.validate_task, t.with_tag(args.target)) for t in tasks]
             for fut in as_completed(futures):
                 rec = fut.result()
                 results.append(rec)
-                with _err_lock, open(args.output_dir / "logs.jsonl", "a") as jf:
+                with validator.error_lock, open(args.output_dir / "logs.jsonl", "a") as jf:
                     jf.write(json.dumps(rec) + "\n")
 
     # Rollup (minimal, quick to read)

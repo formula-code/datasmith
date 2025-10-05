@@ -11,6 +11,7 @@ import asv
 import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.core.models import Task
 from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client, log_container_output
 from datasmith.logging_config import configure_logging
@@ -100,8 +101,10 @@ def main(args: argparse.Namespace) -> None:
     )
     for (owner, repo), uniq_shas in all_states.items():
         for sha in list(uniq_shas):
+            task_key = Task(owner=owner, repo=repo, sha=sha, tag="pkg")
+            docker_ctx = context_registry.get(task_key)
+            env_payload = str(task_key.env_payload) or ""
             image_name = f"asv/{owner}/{repo}/{sha}".lower()
-            docker_ctx = context_registry[image_name]
             try:
                 docker_ctx.build_container(
                     client=client,
@@ -109,6 +112,7 @@ def main(args: argparse.Namespace) -> None:
                     build_args={
                         "REPO_URL": f"https://www.github.com/{owner}/{repo}",
                         "COMMIT_SHA": sha,
+                        "ENV_PAYLOAD": env_payload,
                     },
                     force=True,
                 )
