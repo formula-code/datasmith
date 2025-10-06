@@ -12,8 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
 
+try:
+    import tomllib as _toml
+except ImportError:
+    import tomli as _toml  # type: ignore[no-redef]
+
 import requests
-import tomllib as _toml
 from git import Repo
 from packaging.markers import default_environment
 from packaging.requirements import Requirement

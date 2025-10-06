@@ -6,13 +6,10 @@ import hashlib
 import io
 import json
 import os
-import shutil
-import stat
 import sys
 import tarfile
 import time
 from collections.abc import Sequence
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +19,7 @@ from docker.models.containers import Container
 from requests.exceptions import ReadTimeout
 
 from datasmith.docker.context import BuildResult, DockerContext, Task, _new_api_client
+from datasmith.docker.disk_management import docker_data_root, guard_loop
 from datasmith.logging_config import get_logger
 
 logger = get_logger("docker.orchestrator")
@@ -56,211 +54,12 @@ def _compute_deterministic_run_id(
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:32]
 
 
-# helpers: reproducible, minimally .dockerignore-aware tar of a directory
-def _read_dockerignore(root: Path) -> tuple[list[str], list[str]]:
-    path = root / ".dockerignore"
-    if not path.exists():
-        return [], []
-    ignores: list[str] = []
-    negates: list[str] = []
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("!"):
-            negates.append(line[1:].strip())
-        else:
-            ignores.append(line)
-    # Always ignore .git if not explicitly negated
-    if ".git" not in ignores:
-        ignores.append(".git")
-    return ignores, negates
-
-
-def _path_matches_any(rel_posix: str, pats: list[str]) -> bool:
-    # naive but effective: support *, ?, ** via fnmatch; also treat dir/ as prefix
-    for p in pats:
-        if p.endswith("/") and (rel_posix == p[:-1] or rel_posix.startswith(p)):
-            return True
-        if fnmatch(rel_posix, p) or fnmatch("/" + rel_posix, p):
-            return True
-    return False
-
-
-def _dir_context_tar_bytes(root_dir: str, dockerfile_name: str = "Dockerfile") -> bytes:  # noqa: C901
-    root = Path(root_dir).resolve()
-    ignores, negates = _read_dockerignore(root)
-
-    def is_included(p: Path) -> bool:
-        rel = p.relative_to(root).as_posix()
-        if rel == "":
-            return True
-        ignored = _path_matches_any(rel, ignores)
-        if ignored and _path_matches_any(rel, negates):
-            ignored = False
-        return not ignored
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        # walk deterministically
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirpath_p = Path(dirpath)
-            # sort for deterministic order
-            dirnames.sort()
-            filenames.sort()
-            # ensure directory entries are added with stable metadata
-            rel_dir = dirpath_p.relative_to(root).as_posix()
-            if rel_dir != "" and is_included(dirpath_p):
-                ti = tarfile.TarInfo(name=rel_dir)
-                ti.type = tarfile.DIRTYPE
-                ti.mode = 0o755
-                ti.mtime = 0
-                ti.uid = ti.gid = 0
-                ti.uname = ti.gname = ""
-                tar.addfile(ti)
-
-            # files
-            for name in filenames:
-                p = dirpath_p / name
-                if not is_included(p):
-                    continue
-                rel = p.relative_to(root).as_posix()
-
-                try:
-                    st = os.lstat(p)
-                except FileNotFoundError:
-                    continue  # raced; skip
-
-                if stat.S_ISLNK(st.st_mode):
-                    # preserve symlink
-                    ti = tarfile.TarInfo(name=rel)
-                    ti.type = tarfile.SYMTYPE
-                    ti.linkname = os.readlink(p)
-                    ti.mode = 0o777
-                    ti.mtime = 0
-                    ti.uid = ti.gid = 0
-                    ti.uname = ti.gname = ""
-                    tar.addfile(ti)
-                elif stat.S_ISREG(st.st_mode):
-                    ti = tarfile.TarInfo(name=rel)
-                    ti.size = st.st_size
-                    ti.mode = stat.S_IMODE(st.st_mode) or 0o644
-                    ti.mtime = 0
-                    ti.uid = ti.gid = 0
-                    ti.uname = ti.gname = ""
-                    with open(p, "rb") as f:
-                        tar.addfile(ti, fileobj=f)
-                # other types (sockets, pipes) are skipped
-
-        # Ensure the Dockerfile exists at root with canonical name
-        df = root / dockerfile_name
-        if df.exists() and dockerfile_name != "Dockerfile":
-            # duplicate/alias to "Dockerfile" for the builder
-            with open(df, "rb") as f:
-                data = f.read()
-            ti = tarfile.TarInfo(name="Dockerfile")
-            ti.size = len(data)
-            ti.mode = 0o644
-            ti.mtime = 0
-            ti.uid = ti.gid = 0
-            ti.uname = ti.gname = ""
-            tar.addfile(ti, io.BytesIO(data))
-    buf.seek(0)
-    return buf.getvalue()
-
-
 def gen_run_labels(t: Task, runid: str) -> dict[str, str]:
     return {
         "datasmith.run": runid,
         "datasmith.task": f"{t.owner}/{t.repo}",
         "datasmith.sha": t.sha if t.sha else "unknown",
     }
-
-
-def _docker_data_root() -> str:
-    # Override if you keep Docker data somewhere else
-    return os.environ.get("DOCKER_DATA_ROOT", "/var/lib/docker")
-
-
-def _free_gb(path: str) -> float:
-    try:
-        usage = shutil.disk_usage(path)
-        return usage.free / (1024**3)
-    except FileNotFoundError:
-        # Fallback: if path doesn't exist, skip guard
-        return float("inf")
-
-
-def _soft_prune(client: docker.DockerClient, run_id: str | None) -> None:
-    # Prune stopped containers older than 1h
-    try:
-        client.containers.prune(filters={"until": "1h"})
-    except Exception:
-        logger.exception("containers.prune failed")
-
-    # Prune dangling/unused images; filter by run label if available
-    try:
-        flt: dict[str, Any] = {"until": "1h"}
-        if run_id:
-            flt["label"] = [f"datasmith.run={run_id}"]  # pyright: ignore[reportArgumentType]
-        report = client.images.prune(filters=flt)
-        logger.info("images.prune reclaimed %s bytes", report.get("SpaceReclaimed", 0))
-    except Exception:
-        logger.exception("images.prune failed")
-
-    # Optional: BuildKit cache prune (API may not exist on older docker-py)
-    try:
-        if hasattr(client.api, "prune_builds"):
-            client.api.prune_builds(filters={"until": "24h"})
-    except Exception:
-        logger.debug("build cache prune not available or failed", exc_info=True)
-
-
-async def _guard_and_prune(
-    client: docker.DockerClient,
-    min_free_gb: float,
-    data_root: str,
-    run_id: str | None,
-    hard_fail: bool,
-) -> None:
-    free = _free_gb(data_root)
-    if free >= min_free_gb:
-        return
-
-    logger.warning("Low disk on %s: %.1f GB free < %.1f GB. Pruning…", data_root, free, min_free_gb)
-    # Run pruning in a thread to keep the event loop responsive
-    await asyncio.to_thread(_soft_prune, client, run_id)
-    free2 = _free_gb(data_root)
-    logger.info("After prune: %.1f GB free (target: %.1f GB)", free2, min_free_gb)
-
-    if hard_fail and free2 < min_free_gb:
-        raise SystemExit(f"Insufficient disk space after prune: {free2:.1f} GB free (need {min_free_gb:.1f} GB).")
-
-
-async def _guard_loop(
-    client: docker.DockerClient,
-    min_free_gb: float,
-    data_root: str,
-    run_id: str | None,
-    interval_s: int,
-    hard_fail: bool,
-    stop_event: asyncio.Event,
-) -> None:
-    # First check immediately
-    try:
-        await _guard_and_prune(client, min_free_gb, data_root, run_id, hard_fail)
-    except SystemExit:
-        raise
-    except Exception:
-        logger.exception("Initial disk guard failed")
-
-    # Then periodic checks
-    while not stop_event.is_set():
-        with contextlib.suppress(SystemExit, Exception):
-            await _guard_and_prune(client, min_free_gb, data_root, run_id, hard_fail)
-
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
 
 def get_docker_client(max_concurrency: int = 10) -> docker.DockerClient:
@@ -628,7 +427,7 @@ async def orchestrate(
     run_id = os.environ.get("DATASMITH_RUN_ID") or _compute_deterministic_run_id(
         [(t, ctx) for t, ctx in contexts], asv_args=asv_args, machine_args=machine_args, n_cores=n_cores
     )
-    data_root = guard_data_root or _docker_data_root()
+    data_root = guard_data_root or docker_data_root()
     # Build one contiguous block of `n_cores` for each worker slot
     core_sets = [list(range(i * n_cores, (i + 1) * n_cores)) for i in range(max_concurrency)]
 
@@ -673,7 +472,7 @@ async def orchestrate(
     tasks = [asyncio.create_task(worker(t, ctx)) for t, ctx in contexts]
     stop_event = asyncio.Event()
     guard_task = asyncio.create_task(
-        _guard_loop(
+        guard_loop(
             client=client,
             min_free_gb=guard_min_free_gb,
             data_root=data_root,

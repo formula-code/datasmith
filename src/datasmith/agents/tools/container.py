@@ -292,8 +292,11 @@ class PersistentContainer:
             if rel_pyproject:
                 try:
                     import tomllib
-                except Exception:
-                    tomllib = None
+                except ImportError:
+                    try:
+                        import tomli as tomllib  # type: ignore[import-not-found, no-redef]
+                    except ImportError:
+                        tomllib = None  # type: ignore[assignment]
                 try:
                     data = open(os.path.join(root, rel_pyproject), 'rb').read()
                     if tomllib:
