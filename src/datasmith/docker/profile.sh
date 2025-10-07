@@ -37,16 +37,7 @@ TARBALL="${LOG_DIR}.tar.gz"
 BASE_SHA_FILE="${LOG_DIR}/sha.txt"
 BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
 
-source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
-
-# if ENV_NAME is not set, set it to the first version in ASV_PY_VERSIONS
-if [ -z "${ENV_NAME:-}" ]; then
-  ENV_NAME="asv_$(echo "$ASV_PY_VERSIONS" | awk '{print $1}')"
-  set +u
-  micromamba activate "$ENV_NAME"
-  set -u
-fi
 
 CURR_DIR="$(pwd)"
 cd /workspace/repo
@@ -56,7 +47,6 @@ mkdir -p "$LOG_DIR" "$RESULTS_DIR" "$HTML_DIR"
 COMMIT_SHA="$(git rev-parse HEAD)"
 MACHINE="dockertest"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-CONF_NAME="$(find . -type f -name "asv.*.json" | head -n 1)"
 
 # compute the paths as you already do
 TEST_CONF="$(dirname "$CONF_NAME")/asv.test.conf.json"
@@ -129,7 +119,9 @@ cd "$OLD_DIR"
 echo "$COMMIT_SHA" > "$BASE_SHA_FILE"
 
 # Bundle everything once
-tar -czf "$TARBALL" "$LOG_DIR" "$TEST_CONF"
+tar -czf "$TARBALL" \
+  -C "$(dirname "$LOG_DIR")" "$(basename "$LOG_DIR")" \
+  -C "$(dirname "$TEST_CONF")" "$(basename "$TEST_CONF")"
 
 echo "[profile] Baseline written to $TARBALL"
 

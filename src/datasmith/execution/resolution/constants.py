@@ -11,8 +11,9 @@ from datasmith.core.cache import CACHE_LOCATION
 
 # Regular expressions
 ASV_REGEX = re.compile(r"(^|/)\.?asv[^/]*\.jsonc?$")
-REQ_TXT_REGEX = re.compile(r"(^|/)(requirements(\.[-\w]+)?|constraints(\.[-\w]+)?)\.txt$")
+REQ_TXT_REGEX = re.compile(r"(^|/)(?:constraints(?:\.[-\w]+)?|requirements.*)\.txt$")
 ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+EXTRA_MARKER_RE = re.compile(r';\s*extra\s*==\s*["\']([^"\']+)["\']')
 
 # File names
 PYPROJECT = "pyproject.toml"
@@ -121,6 +122,56 @@ NOT_REQUIREMENTS = {
     "system",
     "tunits",
     "vcr",
+    "0-29-21",
+    "0-29-33",
+    "1-11-2",
+    "1-12",
+    "1-14-0",
+    "1-23-5",
+    "1-8-1",
+    "3-0",
+    "3-0-0a11",
+    "3-1-2",
+    "59-2-0",
+    "c-distances-openmp",
+    "column-parsers",
+    "copy-reg",
+    "cpickle",
+    "cryptodome",
+    "cupyx",
+    "h5r",
+    "h5s",
+    "h5t",
+    "givens-elimination",
+    "imp",
+    "libreader",
+    "nattype",
+    "omniscidbe",
+    "openjpeg",
+    "patoolib",
+    "peerplaysbase",
+    "probabilistic-direction-getter",
+    "pyhdk",
+    "pymake",
+    "pyqt",
+    "sksparse",
+    "splitting",
+    "stringio",
+    "uninstall",
+    "urlparse",
+    "0-29-30",
+    "1-9-1",
+    "2-2",
+    "3-0-5",
+    "3-2-0",
+    "backports",
+    "cdms2",
+    "flatted",
+    "h5z",
+    "pnetdicom",
+    "pypocketfft",
+    "vectorized",
+    "voyager-ext",
 }
 
 # Well-known PyPI packages (allowlist for common names)

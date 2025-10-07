@@ -19,16 +19,16 @@ EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 #       preferably with no build isolation, then run health checks.
 #
 # Below this comment, you should do whatever is necessary to build the project without errors. Including (but not limited to):
-# - Add extra conda/pip dependencies needed to build this project.
+# - Add extra conda dependencies or use uv pip to install needed to build this project.
 # - Run repo-specific pre-steps (e.g., submodules, generating Cython, env vars).
-# - Run arbitrary micromamba/pip commands in the target env.
+# - Run arbitrary micromamba/uv pip commands in the target env.
 # - Set CFLAGS/CXXFLAGS/LDFLAGS if needed for this repo. (e.g. Add -Wno-error=incompatible-pointer-types to CFLAGS)
 # - Change files in the repo if needed (e.g., fix a missing #include).
 # - Anything else needed to get a successful editable install.
 #
 # MUST:
 # - Keep this script idempotent.
-# - Use: `pip install --no-build-isolation -v -e .` or `pip install -e .` or equivalent.
+# - Use: `uv pip install --no-build-isolation -v -e .` or `uv pip install -e .` or equivalent.
 # - Do not modify the SETUP CODE or helper functions below.
 # - Critically: Prepare for quick verification steps that will run after build:
 #   - A lightweight profiling sanity check should be able to start without immediate error.
@@ -51,6 +51,13 @@ die()  { printf "\033[1;31m[fail]\033[0m %s\n" "$*" >&2; exit 1; }
 # Conservative default parallelism (override if the repo benefits)
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 export NPY_NUM_BUILD_JOBS="${NPY_NUM_BUILD_JOBS:-2}"
+
+# Extract commit date and set UV_EXCLUDE_NEWER for time-consistent package resolution
+COMMIT_DATE=$(git log -1 --format=%cI 2>/dev/null || echo "")
+if [[ -n "$COMMIT_DATE" ]]; then
+    export UV_EXCLUDE_NEWER="$COMMIT_DATE"
+    echo "Using UV_EXCLUDE_NEWER=$UV_EXCLUDE_NEWER for time-capped resolution"
+fi
 
 # -----------------------------
 # Build & test across envs

@@ -92,7 +92,6 @@ class DockerContext:
     building_data: str
     profile_data: str
     run_tests_data: str
-    test_commands: str
 
     # Cached, reproducible tar bytes per (probe: bool). Immutable => thread-safe reuse.
     _context_tar_bytes: dict[bool, bytes]
@@ -107,7 +106,6 @@ class DockerContext:
         run_building_data: str | None = None,
         profile_data: str | None = None,
         run_tests_data: str | None = None,
-        test_commands: str | None = None,
     ) -> None:
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
@@ -125,8 +123,6 @@ class DockerContext:
             profile_data = self.default_profile_loc.read_text()
         if run_tests_data is None:
             run_tests_data = self.default_run_tests_loc.read_text()
-        if test_commands is None:
-            test_commands = ""
 
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
@@ -136,7 +132,6 @@ class DockerContext:
         self.building_data = building_data
         self.profile_data = profile_data
         self.run_tests_data = run_tests_data
-        self.test_commands = test_commands
 
         self._context_tar_bytes = {}
 
@@ -727,7 +722,6 @@ class DockerContext:
             "run_building_data": self.run_building_data,
             "profile_data": self.profile_data,
             "run_tests_data": self.run_tests_data,
-            "test_commands": self.test_commands,
         }
 
     @classmethod
@@ -745,7 +739,6 @@ class DockerContext:
             run_building_data=data.get("run_building_data", None),
             profile_data=data.get("profile_data", None),
             run_tests_data=data.get("run_tests_data", None),
-            test_commands=data.get("test_commands", None),
         )
 
     def __hash__(self) -> int:
@@ -758,7 +751,6 @@ class DockerContext:
             self.run_building_data,
             self.profile_data,
             self.run_tests_data,
-            self.test_commands,
         ))
 
 
@@ -854,7 +846,7 @@ class ContextRegistry:
 
         # if the tag is "env" and we already have a "pkg" version, warn the user
         # and instead of changing the context completely, overwrite all files
-        # except the building_data and test_commands (which are pkg-specific)
+        # except the building_data (which are pkg-specific)
         if t.tag == "env" and canonical in self.registry:
             existing = self.registry[canonical]
             context = DockerContext(
@@ -862,10 +854,13 @@ class ContextRegistry:
                 entrypoint_data=context.entrypoint_data,
                 env_building_data=context.env_building_data,
                 building_data=existing.building_data,
-                test_commands=existing.test_commands,
+                base_building_data=context.base_building_data,
+                run_building_data=context.run_building_data,
+                profile_data=context.profile_data,
+                run_tests_data=existing.run_tests_data,
             )
             logger.warning(
-                f"Registering 'env' context for '{canonical}' which already has a 'pkg' version; preserving 'pkg' building_data and test_commands."
+                f"Registering 'env' context for '{canonical}' which already has a 'pkg' version; preserving 'pkg' building_data."
             )
         self.registry[canonical] = context
         logger.debug(f"Registered Docker context under canonical key: {canonical}")

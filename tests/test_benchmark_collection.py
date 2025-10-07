@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
+from datasmith.core.models import Task
 
 
 def _make_collection() -> BenchmarkCollection:
@@ -46,11 +47,13 @@ def _make_collection() -> BenchmarkCollection:
         "tags": [],
         "pages": [],
     }
+    task = Task(owner="demo", repo="demo-repo", sha="abc1234", tag="pkg")
     return BenchmarkCollection(
         base_url="file:///tmp/html",
         collected_at=now,
         modified_at=now,
         param_keys=["machine"],
+        task=task,
         index_data=index_data,
         benchmarks=benchmarks,
         summaries=summaries,

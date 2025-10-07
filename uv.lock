@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.9, <4.0"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -1088,6 +1088,7 @@ dependencies = [
     { name = "ruptures" },
     { name = "simple-useragent" },
     { name = "tiktoken" },
+    { name = "tomli" },
     { name = "tqdm" },
 ]
 
@@ -1134,6 +1135,7 @@ requires-dist = [
     { name = "ruptures" },
     { name = "simple-useragent" },
     { name = "tiktoken" },
+    { name = "tomli", specifier = ">=2.2.1" },
     { name = "tqdm" },
 ]
 

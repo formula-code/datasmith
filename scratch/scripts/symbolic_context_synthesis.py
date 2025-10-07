@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from datasmith.core.models import Task
-from datasmith.docker.context import ContextRegistry, DockerContext, build_base_image
+from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client
 from datasmith.execution.resolution import analyze_commit
 from datasmith.logging_config import configure_logging
@@ -37,8 +37,8 @@ def symbolic_build_and_validate(
     3. Single attempt (no iterative fixing)
     """
     analysis = analyze_commit(task.sha, f"{task.owner}/{task.repo}")
-    if not analysis or "can_install" not in analysis or not analysis["can_install"]:
-        analysis = analyze_commit(task.sha, f"{task.owner}/{task.repo}", bypass_cache=True)
+    # if not analysis or "can_install" not in analysis or not analysis["can_install"]:
+    #     analysis = analyze_commit(task.sha, f"{task.owner}/{task.repo}", bypass_cache=True)
     logger.debug("Analysis result: %s", analysis)
     return analysis
     # run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
@@ -364,9 +364,9 @@ def main(args: argparse.Namespace) -> None:
     )
 
     # Build base image
-    logger.info("Building base image...")
-    base_tag = build_base_image(client, DockerContext())
-    logger.debug("Base image: %s", base_tag)
+    # logger.info("Building base image...")
+    # base_tag = build_base_image(client, DockerContext())
+    # logger.debug("Base image: %s", base_tag)
 
     # Prepare tasks
     tasks = prepare_tasks(all_states, args.limit_per_repo, context_registry)

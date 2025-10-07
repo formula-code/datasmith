@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import docker
 import dspy
@@ -27,6 +27,7 @@ from datasmith.docker.cleanup import fast_cleanup_run_artifacts, remove_containe
 from datasmith.docker.context import ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import gen_run_labels
 from datasmith.docker.validation import build_and_validate as build_and_validate_impl
+from datasmith.execution.resolution import analyze_commit
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,6 @@ class BuildScriptProgram(dspy.Module):
         messages_log = ""
         toolbelt = self._toolbelt_text()
         iter_script: str | None = None
-        iter_pytest_options: str | None = None
         for step_idx in range(max_steps):
             out = self.step(
                 owner_repo=owner_repo,
@@ -193,7 +193,6 @@ class BuildScriptProgram(dspy.Module):
             action_input = (out.action_input or "").strip()  # pyright: ignore[reportAttributeAccessIssue]
             if action in ("none", "finish") and (out.docker_build_script or "").strip():  # pyright: ignore[reportAttributeAccessIssue]
                 iter_script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
-                iter_pytest_options = ""
                 break
 
             # Tool dispatch
@@ -211,9 +210,7 @@ class BuildScriptProgram(dspy.Module):
                 break
 
         script = (iter_script or "").strip()
-        pytest_options = (iter_pytest_options or "").strip()
         logger.debug("DSPy: candidate script preview: %s", script[-240:] if script else "")
-        logger.debug("DSPy: candidate pytest options: %s", pytest_options)
 
         must_haves = ["/etc/profile.d/asv_utils.sh", "/etc/profile.d/asv_build_vars.sh"]
         ok_template = all(m in script for m in must_haves)
@@ -223,10 +220,9 @@ class BuildScriptProgram(dspy.Module):
             raise RuntimeError(f"Generated script is missing required template anchors: {must_haves}")
         if not no_bad:
             raise RuntimeError(f"Generated script contains disallowed fragments: {must_not_haves}")
-        logger.info("DSPy: finalized script length=%d, pytest_options='%s'", len(script), pytest_options)
+        logger.info("DSPy: finalized script length=%d", len(script))
         assert isinstance(script, str), "type mismatch"  # noqa: S101
-        assert isinstance(pytest_options, str), "type mismatch"  # noqa: S101
-        return script, pytest_options
+        return script, messages_log
 
 
 def synthesize_script(
@@ -238,7 +234,7 @@ def synthesize_script(
     failure_more: str,
     tool_exec: ContainerToolExecutor,
     max_steps: int = 4,
-) -> tuple[str, str]:
+) -> str:
     """Synthesize a build script using the agent program.
 
     Args:
@@ -252,7 +248,7 @@ def synthesize_script(
         max_steps: Maximum agent steps
 
     Returns:
-        Tuple of (script, pytest_options)
+        Tuple of (script)
     """
     logger.info(
         "synthesize_script: task=%s/%s@%s, last_script=%s",
@@ -277,15 +273,14 @@ def synthesize_script(
             tool_executor=tool_exec,
             max_steps=max_steps,
         )
-        script, pytest_options = cast(tuple[str, str], result)
+        script = cast(str, result)
         script = str(script)
-        pytest_options = str(pytest_options)
-        logger.info("synthesize_script: script length=%d, pytest_options='%s'", len(script), pytest_options)
+        logger.info("synthesize_script: script length=%d", len(script))
     except Exception:
         logger.exception("synthesize_script: error")
-        return "", ""
+        return ""
 
-    return script, pytest_options
+    return script
 
 
 def build_once_with_context(
@@ -336,6 +331,7 @@ def build_once_with_context(
             "REPO_URL": repo_url,
             "COMMIT_SHA": sha,
             "ENV_PAYLOAD": task.env_payload if len(task.env_payload) else "{}",
+            "PY_VERSION": task.python_version or "",
         },
         probe=probe,
         force=force,
@@ -420,6 +416,17 @@ def agent_build_and_validate(  # noqa: C901
     """
     run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
     assert task.sha is not None, "task.sha must be set"  # noqa: S101
+    sha: str = task.sha
+    task_analysis = analyze_commit(sha, f"{task.owner}/{task.repo}") or {}
+
+    task = Task(
+        owner=task.owner,
+        repo=task.repo,
+        sha=sha,
+        commit_date=task.commit_date,
+        python_version=task_analysis.get("python_version", task.python_version or ""),
+        env_payload=task_analysis.get("final_dependencies", task.env_payload or ""),
+    )
 
     # Gather defaults + similar contexts
     default_building_template = context_registry.get_default(tag="env")[1].building_data
@@ -441,15 +448,12 @@ def agent_build_and_validate(  # noqa: C901
 
     # Build-package script candidates: try every similar context's building_data first.
     script_candidates = [ctx.building_data for _, ctx in (similar_contexts or [])]
-    test_commands_candidates = [ctx.test_commands for _, ctx in (similar_contexts or [])]
     if not script_candidates:
         script_candidates = [default_building_template]
-        test_commands_candidates = [""]
 
     # keep the first max_similar_candidates entries
     if hasattr(args, "max_similar_candidates") and args.max_similar_candidates > 0:
         script_candidates = script_candidates[: args.max_similar_candidates]
-        test_commands_candidates = test_commands_candidates[: args.max_similar_candidates]
 
     logger.info(
         "agent_build_and_validate: start for %s/%s@%s (max_attempts=%d, candidates=%d)",
@@ -472,7 +476,7 @@ def agent_build_and_validate(  # noqa: C901
             task=task.with_tag("env"),
             context=probe_context,
             repo_url=repo_url,
-            sha=task.sha,
+            sha=sha,
             timeout_s=args.build_timeout,
             tail_chars=args.tail_chars,
             probe=True,
@@ -510,14 +514,14 @@ def agent_build_and_validate(  # noqa: C901
         attempt_idx = 0
 
         # Phase 1: try all similar-context scripts (no agent yet)
-        for cand_idx, (script, test_commands) in enumerate(zip(script_candidates, test_commands_candidates), start=1):
+        for cand_idx, script in enumerate(script_candidates, start=1):
             logger.info(
                 "agent_build_and_validate: trying similar-context candidate %d/%d",
                 cand_idx,
                 len(script_candidates),
             )
 
-            ctx = DockerContext(building_data=script, test_commands=test_commands)
+            ctx = DockerContext(building_data=script)
 
             # Save attempt pickle (skip index 0 for parity with old behavior)
             if attempt_idx >= 1:
@@ -530,7 +534,7 @@ def agent_build_and_validate(  # noqa: C901
                 task=task,
                 context=ctx,
                 repo_url=repo_url,
-                sha=task.sha,
+                sha=sha,
                 run_labels=run_labels,
                 args=args,
             )
@@ -550,7 +554,7 @@ def agent_build_and_validate(  # noqa: C901
                 if result is None:
                     raise RuntimeError("Unexpected: result is None after successful build")
 
-                result_dict = {
+                result_dict: dict[str, Any] = {
                     "owner": task.owner,
                     "repo": task.repo,
                     "sha": task.sha,
@@ -659,7 +663,7 @@ def agent_build_and_validate(  # noqa: C901
             )
 
             try:
-                script, pytest_options = synthesize_script(
+                script = synthesize_script(
                     program,
                     task,
                     attempts[-1].building_data if attempts else default_building_template,
@@ -683,7 +687,7 @@ def agent_build_and_validate(  # noqa: C901
                 attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data="", build_result=build_res))
                 break  # exit agent loop
 
-            ctx = DockerContext(building_data=script, test_commands=pytest_options)
+            ctx = DockerContext(building_data=script)
 
             if attempt_idx >= 1:
                 attempt_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-attempt-{attempt_idx}.pkl"
@@ -695,7 +699,7 @@ def agent_build_and_validate(  # noqa: C901
                 task=task,
                 context=ctx,
                 repo_url=repo_url,
-                sha=task.sha,
+                sha=sha,
                 run_labels=run_labels,
                 args=args,
             )

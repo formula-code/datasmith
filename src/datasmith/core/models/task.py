@@ -15,6 +15,7 @@ class Task:
     sha: str | None = None
     commit_date: float = 0.0
     env_payload: str = ""
+    python_version: str = ""
     tag: str = "pkg"  # 'pkg', 'env', 'run', or 'base'
 
     @classmethod
@@ -41,6 +42,7 @@ class Task:
             commit_date=self.commit_date,
             tag=tag,
             env_payload=self.env_payload,
+            python_version=self.python_version,
         )
 
     def get_image_name(self) -> str:
@@ -69,6 +71,14 @@ class Task:
         if not re.match(r"^[a-z0-9]", name):
             name = f"c-{name}"
         return name[:128]
+
+    def __eq__(self, value: object) -> bool:
+        if not isinstance(value, Task):
+            return NotImplemented
+        return self.owner == value.owner and self.repo == value.repo and self.sha == value.sha and self.tag == value.tag
+
+    def __hash__(self) -> int:
+        return hash((self.owner, self.repo, self.sha, self.tag))
 
 
 __all__ = ["Task"]

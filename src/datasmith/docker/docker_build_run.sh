@@ -100,6 +100,8 @@ lock_repo_to_current_commit() {
 
 }
 
+HEAD_SHA="$(git rev-parse --verify HEAD)"
+
 lock_repo_to_current_commit
 
 
@@ -110,6 +112,7 @@ export CONF_NAME=$CONF_NAME
 export ROOT_PATH=$ROOT_PATH
 export REPO_ROOT=$REPO_ROOT
 export ASV_PY_VERSIONS="$ASV_PY_VERSIONS"
+export HEAD_SHA=$HEAD_SHA
 EOF
 
 # cat > resolve_mpl_numpy.py << 'PY'

@@ -32,6 +32,7 @@ dependencies = [
     "ruptures",
     "simple-useragent",
     "tiktoken",
+    "tomli>=2.2.1",
     "tqdm",
 ]
 
@@ -81,6 +82,7 @@ show_error_codes = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+anyio_backends = ["asyncio"]
 
 [tool.ruff]
 target-version = "py39"

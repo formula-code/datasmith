@@ -1,11 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
 ARG BASE_IMAGE=buildpack-deps:jammy
+ARG PY_VERSION=""                     # passed at build time, used inside stages
+
 FROM ${BASE_IMAGE} AS base
+# Re-declare any ARGs you need in this stage
+ARG PY_VERSION=""
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        jq cmake ninja-build && \
+        jq cmake ninja-build libopenmpi-dev libgeos-dev && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
@@ -26,16 +30,23 @@ RUN micromamba install -y -p $MAMBA_ROOT_PREFIX -c conda-forge \
 RUN mkdir -p /workspace /output
 WORKDIR /workspace
 
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
 
 COPY docker_build_base.sh /workspace/docker_build_base.sh
 RUN chmod +x /workspace/docker_build_base.sh && \
-    /workspace/docker_build_base.sh
+    if [ -n "${PY_VERSION}" ]; then \
+        /workspace/docker_build_base.sh --py-version "${PY_VERSION}"; \
+    else \
+        /workspace/docker_build_base.sh; \
+    fi
 
 RUN micromamba clean --all --yes
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
+# ---------- ENV STAGE ----------
 FROM base AS env
+ARG PY_VERSION=""
 
 ARG REPO_URL
 ARG COMMIT_SHA
@@ -57,7 +68,9 @@ RUN chmod +x /workspace/repo/docker_build_env.sh && \
     echo "${ENV_PAYLOAD}" > /tmp/env_payload.json && \
     /workspace/repo/docker_build_env.sh --env-payload /tmp/env_payload.json
 
+# ---------- PKG STAGE ----------
 FROM env AS pkg
+ARG PY_VERSION=""
 
 # ---- PKG STAGE: build+test the package for each ASV Python ----
 COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh

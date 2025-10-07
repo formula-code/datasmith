@@ -204,3 +204,5 @@ output
 *context_registry.json*
 # Database files
 *.db
+scratch/artifacts/git/
+scratch/notebooks/git/

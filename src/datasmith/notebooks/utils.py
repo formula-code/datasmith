@@ -112,6 +112,5 @@ def merge_registries(registries: list[Path]) -> dict:
     for reg in registries:
         reg_json = json.loads(reg.read_text())
         modified_time = reg.stat().st_mtime
-        print(f"{reg} : {len(reg_json['contexts'])} entries")
         merge_with_mtime(merged_json, reg_json, modified_time)
     return merged_json

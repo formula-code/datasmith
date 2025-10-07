@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .constants import ANSI_RE
+from .package_filters import fix_marker_spacing
 from .python_manager import run_uv
 
 
@@ -39,7 +40,8 @@ def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutof
     Raises:
         RuntimeError: If uv pip compile fails
     """
-    reqs = sorted({r.strip() for r in requirements if r and r.strip()})
+    # Fix marker spacing for all requirements
+    reqs = sorted({fix_marker_spacing(r.strip()) for r in requirements if r and r.strip()})
     if not reqs:
         return []
     req_text = "\n".join(reqs) + "\n"
@@ -76,7 +78,8 @@ def uv_dry_run_install(
     Returns:
         Tuple of (success: bool, log: str)
     """
-    text_lines = [x for x in pinned if x.strip()]
+    # Fix marker spacing for all requirements
+    text_lines = [fix_marker_spacing(x) for x in pinned if x.strip()]
     if not text_lines:
         # Nothing to install; treat as OK but say why.
         return True, "No runtime dependencies."
@@ -140,7 +143,10 @@ def uv_build_and_read_metadata(project_dir: Path) -> tuple[str | None, str | Non
             elif line.startswith("Version: "):
                 version = line.split("Version:", 1)[1].strip()
             elif line.startswith("Requires-Dist: "):
-                requires_dist.append(line.split("Requires-Dist:", 1)[1].strip())
+                req = line.split("Requires-Dist:", 1)[1].strip()
+                # Fix marker spacing issues (e.g., "andextra" -> " and extra")
+                req = fix_marker_spacing(req)
+                requires_dist.append(req)
             elif line.startswith("Requires-Python: "):
                 requires_python = line.split("Requires-Python:", 1)[1].strip()
     return name, version, requires_dist, requires_python

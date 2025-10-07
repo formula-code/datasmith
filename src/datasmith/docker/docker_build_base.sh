@@ -1,6 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REQUESTED_PY_VERSION="${PY_VERSION-}"
+
+usage() {
+    local status=${1:-1}
+    echo "Usage: $0 [--py-version <major.minor>|<major.minor>]" >&2
+    exit "$status"
+}
+
+while (($#)); do
+    case "$1" in
+        --py-version)
+            if (($# < 2)); then
+                echo "--py-version flag requires a value" >&2
+                usage
+            fi
+            REQUESTED_PY_VERSION="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage 0
+            ;;
+        *)
+            if [[ -z "$REQUESTED_PY_VERSION" ]]; then
+                REQUESTED_PY_VERSION="$1"
+                shift
+            else
+                echo "Unexpected argument: $1" >&2
+                usage
+            fi
+            ;;
+    esac
+done
+
+if [[ -n "$REQUESTED_PY_VERSION" ]]; then
+    if [[ ! "$REQUESTED_PY_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo "Invalid Python version '$REQUESTED_PY_VERSION'; expected format <major>.<minor> (e.g. 3.8)" >&2
+        exit 1
+    fi
+fi
+
 # -------- Helpers installed for all shells --------
 install_profile_helpers() {
     cat >/etc/profile.d/asv_utils.sh <<'EOF'
@@ -31,12 +71,25 @@ asv_conf_name() {
     [[ -n "$f" ]] && basename "$f" || return 1
 }
 
+write_vars() {
+    local key="$1"
+    local value="$2"
+    mkdir -p /etc/asv_env
+    cat >>/etc/profile.d/asv_build_vars.sh <<'EOF_BASH'
+export "${key}"="${value}"
+EOF_BASH
+}
+
 # Build performance knobs (overridable)
 export MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
 export NPY_NUM_BUILD_JOBS="${NPY_NUM_BUILD_JOBS:-$(nproc)}"
 
-# Shared pip cache to speed repeated editable builds
+# Shared uv cache to speed repeated builds
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/opt/uvcache}"
+mkdir -p "$UV_CACHE_DIR"
+
+# Legacy pip cache (keeping for compatibility)
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/opt/pipcache}"
 mkdir -p "$PIP_CACHE_DIR"
 EOF
@@ -45,17 +98,14 @@ EOF
 # -------- Persisted build variables --------
 write_build_vars() {
     local py_versions="$1"
-    local import_name="$2"
 
     mkdir -p /etc/asv_env
     echo "$py_versions" > /etc/asv_env/py_versions
-    echo "$import_name" > /etc/asv_env/import_name
 
     # Exported for every future shell (pkg script, interactive, etc.)
-    cat >/etc/profile.d/asv_build_vars.sh <<EOF
+    cat >>/etc/profile.d/asv_build_vars.sh <<EOF
 # Auto-generated during docker_build_env.sh
 export ASV_PY_VERSIONS="${py_versions}"
-export IMPORT_NAME="${import_name}"
 EOF
 }
 
@@ -641,7 +691,14 @@ micromamba activate base
 micromamba install -y -n base -c conda-forge python tomli setuptools >/dev/null
 
 # Create the per-version envs with common build deps & ASV
-PY_VERSIONS="3.7 3.8 3.9 3.10 3.11 3.12"
+if [[ -n "$REQUESTED_PY_VERSION" ]]; then
+    PY_VERSIONS="$REQUESTED_PY_VERSION"
+    write_build_vars "$PY_VERSIONS"
+    echo "[docker_build_base] Restricting micromamba env creation to Python $PY_VERSIONS"
+else
+    PY_VERSIONS="3.7 3.8 3.9 3.10 3.11 3.12"
+    echo "[docker_build_base] Building micromamba envs for Python versions: $PY_VERSIONS"
+fi
 for version in $PY_VERSIONS; do
     ENV_NAME="asv_${version}"
 
@@ -657,15 +714,18 @@ for version in $PY_VERSIONS; do
 
     # install hypothesis<7 if python<3.9
     PYTHON_LT_39=$(micromamba run -n "$ENV_NAME" python -c 'import sys; print(sys.version_info < (3,9))')
+    PYTHON_BIN="/opt/conda/envs/$ENV_NAME/bin/python"
     if [ "$PYTHON_LT_39" = "True" ]; then
-        micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir "hypothesis<5" >/dev/null 2>&1 || true
+        # uv pip install --python "$PYTHON_BIN" "Cython<3" "setuptools<70" "wheel>=0.38" >/dev/null 2>&1 || true
+        uv pip install --python "$PYTHON_BIN" "hypothesis<5" >/dev/null 2>&1 || true
+        # uv pip install --python "$PYTHON_BIN" --upgrade pip "setuptools>79" wheel pytest asv
+        uv pip install --python "$PYTHON_BIN" --upgrade asv
     else
-        micromamba run -n "$ENV_NAME" python -m pip install --no-cache-dir "hypothesis" >/dev/null 2>&1 || true
+        uv pip install --python "$PYTHON_BIN" "hypothesis" >/dev/null 2>&1 || true
+        # uv pip install --python "$PYTHON_BIN" --upgrade pip "setuptools>79" wheel pytest
+        uv pip install --python "$PYTHON_BIN" git+https://github.com/airspeed-velocity/asv
     fi
 
-    # Keep ASV consistent
-    micromamba run -n "$ENV_NAME" bash -lc "python -m pip install --upgrade pip setuptools wheel pytest"
-    micromamba run -n "$ENV_NAME" bash -lc "pip install --no-cache-dir git+https://github.com/airspeed-velocity/asv"
 done
 
 echo "Base environment setup complete."

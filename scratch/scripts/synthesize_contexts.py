@@ -28,40 +28,6 @@ configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".tiny.log"), "w"))  # noqa: SIM115
 
 
-all_shas = {
-    "00a45b4dca164105b50ba29e1735e96b573b639c",
-    "068c7c9ae12291f8709a3be2d81700b61df8c015",
-    "15743f6505e12785f5f151789f04fa11f9ab4589",
-    "3663fe84d7463070803d5b1dc487d37c42094b30",
-    "39ee806830bb5bd57fcdf767ee3a2f630f069e03",
-    "4aee6e2646f4d147ae4be05719b8191aca24192d",
-    "4c5f4ca89dc74727c846d2707df84d00f0a39883",
-    "4fcc4ce4f6c57568fcb694d4d22a27468bdd5f4f",
-    "55b55afb2b6a8d1cc1d69ba1de0b4a370fa34c3a",
-    "5fecd231b5f39087590a2959ac49feedfbc798c1",
-    "61aa5a01eb35ce4370102d1fb8b1cf0491c6020c",
-    "6291f668fc0f308e4f048d23ac42e6f3c9f4a1b1",
-    "63249f2aa95ef0b0300ea2f1cc68200cc8b13484",
-    "701537ecca85a333449814c82ac2b78db5f534a8",
-    "75ce25ee3718cef767ca41dcbbf724a28bbe60a5",
-    "86e807db0e73ba53cd58b2b297c8e8dd197af471",
-    "88e4ef0bb461de1df6a06e2d27ec4e36063f49cf",
-    "89898a689c8309ee8c06796b215d606234aad69f",
-    "94c82b75276fa0045aa6e4b9dc447b0a45b7060b",
-    "9ce31f7b61bd03877727ebf0ea94fd1505da61e7",
-    "9dff11652b4d27641f951ce305f7b6eb924fd270",
-    "af930a9aa4f55361a66051ac9ef151cda3742bf8",
-    "b059f2221166b4dea32ff242862e7d0ffe207112",
-    "b9a22d5e1d68e5de5976c4c586e930d372d21234",
-    "c691058d7a264ddef5748dca46d90ef0180024b8",
-    "d065d9264eea7f0ab991c8d87fd1ced6fd173849",
-    "ec5cc654af0b41c40fe1f296235883cfaaa485ec",
-    "ee5d94e0a05da11272a4af1cd731f9822565048e",
-    "f35d24de56e509a02dc05e2827e20058e8ddd9b5",
-    "f7db40403e903711f53f461b5cf3a1eb1213123d",
-}
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="validate_containers",
@@ -163,7 +129,6 @@ def prepare_tasks(
         tasks = list({
             Task(owner, repo, sha, commit_date=date, env_payload=env_payload) for sha, date, env_payload in sorted(tup)
         })
-        tasks = list(filter(lambda t: t.sha not in all_shas, tasks))
         tasks = list(filter(lambda t: t.with_tag("pkg") not in context_registry, tasks))
         if limit_per_repo > 0:
             tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))

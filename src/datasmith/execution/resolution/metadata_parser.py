@@ -119,6 +119,241 @@ def parse_setup_cfg(path: Path) -> CandidateMeta:
     return meta
 
 
+def parse_setup_py(path: Path) -> CandidateMeta:  # noqa: C901
+    """
+    Heuristic, safe parser for setup.py that attempts to statically evaluate
+    simple literals used in the setup(...) call.
+
+    Extracts:
+      - name (str)
+      - version (str)
+      - python_requires (str)
+      - install_requires (list[str]) -> core_deps
+      - extras_require (dict[str, list[str]]) -> extras
+      - setup_requires (list[str]) -> build_requires
+
+    Notes:
+      - Does NOT execute code. Only evaluates simple AST literals, lists/tuples,
+        dicts, names referencing previously-defined simple literals, and basic
+        concatenations (list/tuple + list/tuple, str + str).
+      - If setup() receives **kwargs where the name resolves to a dict of simple
+        literals, they will be merged.
+      - If something is too dynamic (e.g., file I/O, comprehensions with calls),
+        it will be skipped gracefully.
+    """
+    import ast
+
+    meta = CandidateMeta()
+
+    try:
+        src = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return meta
+
+    try:
+        tree = ast.parse(src, filename=str(path))
+    except Exception:
+        # If the file isn't valid Python, bail gracefully.
+        return meta
+
+    # Simple environment of variable -> value, populated by Assign nodes
+    env: dict[str, Any] = {}
+
+    def safe_eval(node: ast.AST, depth: int = 0) -> Any:  # noqa: C901
+        """
+        Evaluate a very restricted subset of Python AST nodes to Python values.
+        This is intentionally conservative. If we can't be sure, we raise ValueError.
+        """
+        if depth > 100:
+            raise ValueError("Too deep")
+
+        if isinstance(node, ast.Constant):  # py3.8+: numbers, strings, bool, None
+            return node.value
+
+        # For <3.8 compatibility nodes (rare nowadays, but cheap to support)
+        if hasattr(ast, "Str") and isinstance(node, ast.Str):
+            return node.s
+        if hasattr(ast, "Num") and isinstance(node, ast.Num):
+            return node.n
+        if hasattr(ast, "NameConstant") and isinstance(node, ast.NameConstant):
+            return node.value
+
+        if isinstance(node, ast.Name):
+            if node.id in env:
+                return env[node.id]
+            raise ValueError(f"Unknown name {node.id}")
+
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            elts = []
+            for e in node.elts:
+                elts.append(safe_eval(e, depth + 1))
+            # We standardize to Python lists for sequences
+            return list(elts)
+
+        if isinstance(node, ast.Dict):
+            out: dict[Any, Any] = {}
+            for k, v in zip(node.keys, node.values):
+                if k is None:
+                    raise ValueError("Dict unpacking not allowed here")
+                key = safe_eval(k, depth + 1)
+                val = safe_eval(v, depth + 1)
+                out[key] = val
+            return out
+
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            v = safe_eval(node.operand, depth + 1)
+            if isinstance(v, (int, float)) and isinstance(node.op, ast.USub):
+                return -v
+            if isinstance(v, (int, float)) and isinstance(node.op, ast.UAdd):
+                return +v
+            raise ValueError("Unsupported unary op")
+
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = safe_eval(node.left, depth + 1)
+            right = safe_eval(node.right, depth + 1)
+            # Support str + str and list + list
+            if isinstance(left, str) and isinstance(right, str):
+                return left + right
+            if isinstance(left, list) and isinstance(right, list):
+                return left + right
+            # Also allow tuple+tuple -> list
+            if isinstance(left, tuple) and isinstance(right, tuple):
+                return list(left + right)
+            raise ValueError("Unsupported addition types")
+
+        if isinstance(node, ast.Call):
+            # Do not execute calls; allow only literal tuple/list/dict constructors like list([...])
+            # but only when all args are safe literals and there are no keywords.
+            # This is very conservative and often returns ValueError.
+            func = node.func
+            func_name = None
+            if isinstance(func, ast.Name):
+                func_name = func.id
+            elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                func_name = f"{func.value.id}.{func.attr}"
+            # Common harmless constructors when used plainly: list([...]), tuple([...]), dict({...})
+            if func_name in {"list", "tuple"} and not node.keywords and len(node.args) == 1:
+                seq = safe_eval(node.args[0], depth + 1)
+                if isinstance(seq, list):
+                    return list(seq) if func_name == "list" else list(seq)  # normalize to list  # noqa: RUF034
+            if func_name == "dict" and not node.keywords:  # noqa: SIM102
+                # dict([("a", 1), ("b", 2)]) — only support when arg is literal list of pairs
+                if len(node.args) == 1:
+                    seq = safe_eval(node.args[0], depth + 1)
+                    out = {}
+                    if isinstance(seq, list):
+                        for item in seq:
+                            if isinstance(item, (list, tuple)) and len(item) == 2:
+                                out[item[0]] = item[1]
+                            else:
+                                raise ValueError("Unsupported dict constructor form")
+                        return out
+            raise ValueError("Calls are not safely evaluable")
+
+        if isinstance(node, ast.JoinedStr):
+            # f-strings — only allow if all values are constant strings
+            s: list[str] = []
+            for v in node.values:
+                if isinstance(v, ast.Str):
+                    s.append(str(v.s))
+                elif isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    s.append(v.value)
+                else:
+                    raise TypeError("Non-literal in f-string")
+            return "".join(s)
+
+        # Anything else is considered unsafe/unsupported
+        raise ValueError("Unsupported AST node")
+
+    # Populate env with very simple assignments of literals (including lists/dicts)
+    for node in tree.body:
+        try:
+            if isinstance(node, ast.Assign):
+                # Support a = <literal>, a, b = <tuple-of-literals>
+                val = safe_eval(node.value)
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        env[target.id] = val
+                    elif isinstance(target, (ast.Tuple, ast.List)):  # noqa: SIM102
+                        # tuple unpacking of simple names
+                        if isinstance(val, (list, tuple)) and len(target.elts) == len(val):
+                            for elt, v in zip(target.elts, val):
+                                if isinstance(elt, ast.Name):
+                                    env[elt.id] = v
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+                env[node.target.id] = safe_eval(node.value)
+        except Exception:  # noqa: S112
+            # If we can't safely evaluate an assignment, skip it.
+            continue
+
+    def is_setup_call(call: ast.Call) -> bool:
+        # Match setup(...) or setuptools.setup(...)
+        f = call.func
+        if isinstance(f, ast.Name):
+            return f.id == "setup"
+        if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+            return f.attr == "setup"
+        return False
+
+    def merge_kwargs_from_starstar(val: Any, into: dict[str, Any]) -> None:
+        if isinstance(val, str) and val in env and isinstance(env[val], dict):
+            for k, v in env[val].items():
+                into.setdefault(k, v)
+        elif isinstance(val, dict):
+            for k, v in val.items():
+                into.setdefault(k, v)
+
+    # Find the last setup(...) call in the file (commonly the effective one)
+    setup_kwargs: dict[str, Any] = {}
+    for ast_node in ast.walk(tree):
+        if isinstance(ast_node, ast.Call) and is_setup_call(ast_node):
+            kwargs: dict[str, Any] = {}
+            # collect explicit keyword args
+            for kw in ast_node.keywords:
+                try:
+                    if kw.arg is None:
+                        # **kwargs expansion
+                        v = safe_eval(kw.value)
+                        merge_kwargs_from_starstar(v, kwargs)
+                    else:
+                        kwargs[kw.arg] = safe_eval(kw.value)
+                except Exception:  # noqa: S112
+                    # Skip anything we can't safely evaluate
+                    continue
+            # prefer later setup() in case there are multiple
+            setup_kwargs = kwargs
+
+    # Map kwargs to meta
+    if setup_kwargs:
+        name = setup_kwargs.get("name")
+        if isinstance(name, str):
+            meta.name = name
+
+        version = setup_kwargs.get("version")
+        if isinstance(version, str):
+            meta.version = version
+
+        pyreq = setup_kwargs.get("python_requires")
+        if isinstance(pyreq, str):
+            meta.requires_python = pyreq
+
+        install_requires = setup_kwargs.get("install_requires")
+        if isinstance(install_requires, (list, tuple)):
+            meta.core_deps.update([x for x in install_requires if isinstance(x, str)])
+
+        extras_require = setup_kwargs.get("extras_require")
+        if isinstance(extras_require, dict):
+            for k, v in extras_require.items():
+                if isinstance(k, str) and isinstance(v, (list, tuple)):
+                    meta.extras[k] = {x for x in v if isinstance(x, str)}
+
+        setup_requires = setup_kwargs.get("setup_requires")
+        if isinstance(setup_requires, (list, tuple)):
+            meta.build_requires.update([x for x in setup_requires if isinstance(x, str)])
+
+    return meta
+
+
 def parse_conda_env_yaml(path: Path) -> set[str]:  # noqa: C901
     """
     Extremely light parser for environment.yml/.yaml. We collect:
@@ -239,10 +474,19 @@ def analyze_candidate_meta(cand: Candidate) -> CandidateMeta:
         meta.core_deps.update(m2.core_deps)
         for k, v in m2.extras.items():
             meta.extras.setdefault(k, set()).update(v)
+    if cand.setup_py_path and cand.setup_py_path.exists():
+        m3 = parse_setup_py(cand.setup_py_path)
+        meta.name = meta.name or m3.name
+        meta.version = meta.version or m3.version
+        meta.requires_python = meta.requires_python or m3.requires_python
+        meta.core_deps.update(m3.core_deps)
+        for k, v in m3.extras.items():
+            meta.extras.setdefault(k, set()).update(v)
+        meta.build_requires.update(m3.build_requires)
     # requirements*.txt: only obvious runtime ones (skip dev/test/docs)
     for req in cand.req_files:
-        if any(token in req.name for token in ("dev", "test", "docs")):
-            continue
+        # if any(token in req.name for token in ("dev", "test", "docs")):
+        #     continue
         meta.core_deps.update(parse_requirements_txt(req))
     # environment.yml hints
     for y in cand.env_yamls:
