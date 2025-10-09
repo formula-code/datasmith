@@ -106,7 +106,7 @@ lock_repo_to_current_commit
 
 
 # Persist env variables for future shells and auto-activate
-cat >/etc/profile.d/asv_build_vars.sh <<EOF
+cat >>/etc/profile.d/asv_build_vars.sh <<EOF
 export ENV_NAME=$ENV_NAME
 export CONF_NAME=$CONF_NAME
 export ROOT_PATH=$ROOT_PATH

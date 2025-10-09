@@ -208,13 +208,14 @@ done
 cd /workspace/repo
 
 # Extract commit date and set UV_EXCLUDE_NEWER for time-consistent package resolution
-COMMIT_DATE=$(git log -1 --format=%cI 2>/dev/null || echo "")
-if [[ -n "$COMMIT_DATE" ]]; then
-    export UV_EXCLUDE_NEWER="$COMMIT_DATE"
-    echo "Using UV_EXCLUDE_NEWER=$UV_EXCLUDE_NEWER for time-capped resolution"
-fi
+# COMMIT_DATE=$(git log -1 --format=%cI 2>/dev/null || echo "")
+# if [[ -n "$COMMIT_DATE" ]]; then
+#     COMMIT_DATE_BUFFER=$(date -d "$COMMIT_DATE +1 year" -Iseconds)
+#     export UV_EXCLUDE_NEWER="$COMMIT_DATE_BUFFER"
+#     echo "Using UV_EXCLUDE_NEWER=$UV_EXCLUDE_NEWER for time-capped resolution"
+# fi
 
-write_vars "UV_EXCLUDE_NEWER" "$UV_EXCLUDE_NEWER"
+# write_vars "UV_EXCLUDE_NEWER" "$UV_EXCLUDE_NEWER"
 
 # Derive package name (for uninstall sweep)
 if [ -f pyproject.toml ]; then
@@ -455,13 +456,14 @@ export UV_NO_PROGRESS=1
 # print(" ".join(install_command))
 # PY
 # )
-
+UV_OPTS=(--upgrade)
 for version in $PY_VERSIONS; do
     ENV_NAME="asv_${version}"
     PYTHON_BIN="/opt/conda/envs/$ENV_NAME/bin/python"
     echo "Installing dependencies in $ENV_NAME from $DEPENDENCIES_PATH"
     if [ -s "$DEPENDENCIES_PATH" ]; then
-        uv pip install --python "$PYTHON_BIN" "${UV_OPTS[@]}" -r "$DEPENDENCIES_PATH"
+        uv pip install --python "$PYTHON_BIN" wheel &&\
+         uv pip install  --no-build-isolation --python "$PYTHON_BIN" "${UV_OPTS[@]}" -r "$DEPENDENCIES_PATH"
 #     if [ -n "$install_command" ]; then
 #       echo "Running install commands from $CONF_NAME in $ENV_NAME:"
 #       echo "$install_command"

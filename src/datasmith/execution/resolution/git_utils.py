@@ -55,9 +55,9 @@ def _default_worktree_ttl_seconds() -> int | None:
     return value if value > 0 else None
 
 
-DEFAULT_MAX_WORKTREES_PER_REPO = _env_non_negative_int("DATASMITH_GIT_MAX_WORKTREES_PER_REPO", 32)
+DEFAULT_MAX_WORKTREES_PER_REPO = _env_non_negative_int("DATASMITH_GIT_MAX_WORKTREES_PER_REPO", 128)
 DEFAULT_WORKTREE_TTL_SECONDS = _default_worktree_ttl_seconds()
-DEFAULT_WORKTREE_MIN_FREE_GB = _env_non_negative_float("DATASMITH_GIT_WORKTREE_MIN_FREE_GB", 64.0)
+DEFAULT_WORKTREE_MIN_FREE_GB = _env_non_negative_float("DATASMITH_GIT_WORKTREE_MIN_FREE_GB", 256.0)
 
 logger = get_logger(__name__)
 

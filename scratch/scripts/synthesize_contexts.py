@@ -187,9 +187,9 @@ def main(args: argparse.Namespace) -> None:
             with _err_lock, open(args.output_dir / "results.jsonl", "a", encoding="utf-8") as jf:
                 jf.write(json.dumps(res) + "\n")
 
-            # if int(res["rc"]) != 1:
-            logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
-            context_registry.save_to_file(path=args.context_registry)
+            if int(res["rc"]) != 1:
+                logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
+                context_registry.save_to_file(path=args.context_registry)
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
             futures = [

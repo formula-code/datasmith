@@ -81,6 +81,8 @@ import shlex
 import subprocess
 import time
 from glob import glob
+import sys, json
+import pytest
 
 # --------------------------- Utilities ---------------------------
 
@@ -712,8 +714,18 @@ if __name__ == "__main__":
     with open("/logs/test_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, sort_keys=True)
     # exit with error if total tests is zero.
+    ecode = int(output['results'].get('exit_code', 1))
+    try:
+        exit_name = pytest.ExitCode(ecode).name  # e.g., TESTS_FAILED, NO_TESTS_COLLECTED
+    except Exception:
+        exit_name = str(ecode)
+
+    print(f"PYTEST_EXIT: {exit_name} ({ecode})")
+
+    # keep your guards, but propagate
     if output['results']['summary']['total'] == 0:
-        exit(1)
+        sys.exit(1)
+    sys.exit(ecode)
 EOF
 
 if [ ! -f jinja_patch_plugin_pandas.py ]; then
@@ -735,5 +747,6 @@ _patch()
 PY
 fi
 
+uv pip install -U pytest
 python formulacode_testrunner.py --all --base ${FORMULACODE_BASE_COMMIT} --extra-args "-p jinja_patch_plugin_pandas"
 exit $?

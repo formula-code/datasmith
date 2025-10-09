@@ -16,6 +16,7 @@ class BuildResult:
     duration_s: float
     stderr_tail: str
     stdout_tail: str
+    failure_stage: str | None = None  # None (success), "build", "profile", "tests"
 
 
 __all__ = ["BuildResult"]

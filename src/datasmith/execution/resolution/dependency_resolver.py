@@ -48,6 +48,7 @@ def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutof
     args = ["pip", "compile", "-"]
     if python_version:
         args.extend(["--python", python_version])
+    args.append("--upgrade")
     extra_env: dict[str, str] = {}
     if cutoff_rfc3339:
         extra_env["UV_EXCLUDE_NEWER"] = cutoff_rfc3339

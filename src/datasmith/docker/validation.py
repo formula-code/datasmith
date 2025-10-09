@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import glob
 import logging
 import shlex
+import shutil
+import tarfile
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -20,6 +24,88 @@ from datasmith.docker.context import BuildResult, ContextRegistry, DockerContext
 logger = logging.getLogger(__name__)
 
 _err_lock = threading.Lock()
+
+
+def _safe_rmtree(path: Path, client: docker.DockerClient | None = None) -> None:
+    """Safely remove a directory tree, handling Docker-created root-owned files.
+
+    When Docker containers write to volume-mounted directories, they often create
+    files owned by root. This function attempts normal removal first, then uses
+    Docker to clean up root-owned files if needed.
+
+    Args:
+        path: Directory path to remove
+        client: Optional Docker client to use for cleanup (uses new client if not provided)
+    """
+    try:
+        shutil.rmtree(path)
+    except PermissionError:
+        # Docker created root-owned files - use Docker to remove them as root
+        logger.debug("Permission error removing %s, using Docker to cleanup root-owned files", path)
+        try:
+            # Use Docker to remove the files as root
+            if client is None:
+                client = docker.from_env()
+
+            _ = client.containers.run(
+                image="alpine:latest",
+                command=["rm", "-rf", "/cleanup"],
+                volumes={str(path.absolute()): {"bind": "/cleanup", "mode": "rw"}},
+                remove=True,
+                detach=False,
+            )
+            # Now try to remove the (hopefully empty) directory
+            shutil.rmtree(path, ignore_errors=True)
+        except Exception as e:
+            # If all else fails, just log and continue - temp dirs will be cleaned by OS eventually
+            logger.warning("Failed to remove temporary directory %s: %s", path, e)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+def extract_asv_benchmarks_from_tarballs(output_dir: Path) -> str | None:
+    """Extract and read asv_benchmarks.txt from all tar.gz files in output_dir.
+
+    Args:
+        output_dir: Directory containing tar.gz files
+
+    Returns:
+        Contents of asv_benchmarks.txt if found, None otherwise
+    """
+    # Find all tar.gz files in the output directory
+    tarball_pattern = str(output_dir / "*.tar.gz")
+    tarballs = glob.glob(tarball_pattern)
+
+    if not tarballs:
+        logger.debug("No tar.gz files found in %s", output_dir)
+        return None
+
+    # Extract each tarball and look for asv_benchmarks.txt
+    for tarball_path in tarballs:
+        try:
+            logger.debug("Extracting tarball: %s", tarball_path)
+            with tarfile.open(tarball_path, "r:gz") as tar:
+                # Extract all files to a temporary location within output_dir
+                extract_dir = output_dir / "extracted"
+                extract_dir.mkdir(exist_ok=True)
+                tar.extractall(path=extract_dir, filter="data")
+
+                # Look for asv_benchmarks.txt in the extracted files
+                benchmark_files = glob.glob(str(extract_dir / "**/asv_benchmarks.txt"), recursive=True)
+                if benchmark_files:
+                    benchmark_file = Path(benchmark_files[0])
+                    logger.debug("Found asv_benchmarks.txt: %s", benchmark_file)
+                    return benchmark_file.read_text()
+
+        except Exception as e:
+            logger.warning("Failed to extract/read tarball %s: %s", tarball_path, e)
+            continue
+
+    logger.debug("No asv_benchmarks.txt found in any tarball")
+    return None
 
 
 # ============================================================================
@@ -45,9 +131,10 @@ class ProfileValidationResult:
     """Result from profile validation."""
 
     ok: bool
-    output: str
+    stdout: str
+    stderr: str
     duration_s: float
-    error: str | None = None
+    benchmarks: str = ""
 
 
 @dataclass
@@ -55,10 +142,10 @@ class TestValidationResult:
     """Result from test validation."""
 
     ok: bool
-    output: str
+    stdout: str
+    stderr: str
     duration_s: float
     suite_name: str
-    error: str | None = None
 
 
 @dataclass
@@ -128,57 +215,78 @@ class DockerValidator:
         quick_s = self.config.quick_timeout
         start_time = time.time()
 
+        # Create temporary directory for output - manually managed to handle Docker root-owned files
+        tmpdir_path = Path(tempfile.mkdtemp())
+
         try:
             cmd = [f'timeout -k 5 {quick_s}s /profile.sh /output/profile ""']
             logger.debug("profile:spawn cmd=%s", " ".join(cmd))
 
+            # Mount the temporary directory to /output in the container
             container = self.client.containers.run(
                 image=image_name,
                 command=cmd,
                 entrypoint=["/bin/bash", "-lc"],
                 detach=True,
                 labels=run_labels,
+                volumes={str(tmpdir_path): {"bind": "/output", "mode": "rw"}},
             )
 
             rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
-            logs = (container.logs() or b"").decode("utf-8", errors="replace").replace("\\n", "\n")
+            # Collect stdout and stderr separately
+            stdout = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
+            stderr = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
             duration = time.time() - start_time
+
+            # Extract benchmark results from tarballs
+            benchmark_content = extract_asv_benchmarks_from_tarballs(tmpdir_path)
+            if benchmark_content:
+                logger.debug("Successfully extracted asv_benchmarks.txt (%d chars)", len(benchmark_content))
 
             if rc == 124:
                 logger.debug("profile:timeout rc=124 treated as success")
                 return ProfileValidationResult(
                     ok=True,
-                    output=_preview(logs, 4000),
+                    stdout=_preview(stdout, 4000),
+                    stderr=_preview(stderr, 4000),
                     duration_s=duration,
+                    benchmarks=benchmark_content or "",
                 )
 
             if rc != 0:
-                logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(logs, 240))
+                logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(stderr, 240))
                 return ProfileValidationResult(
                     ok=False,
-                    output=_preview(logs, 4000),
+                    stdout=_preview(stdout, 4000),
+                    stderr=_preview(stderr, 4000),
                     duration_s=duration,
-                    error=f"Profile validation failed with rc={rc}",
+                    benchmarks=benchmark_content or "",
                 )
 
             return ProfileValidationResult(
                 ok=True,
-                output=_preview(logs, 4000),
+                stdout=_preview(stdout, 4000),
+                stderr=_preview(stderr, 4000),
                 duration_s=duration,
+                benchmarks=benchmark_content or "",
             )
 
         except Exception as e:
             duration = time.time() - start_time
             return ProfileValidationResult(
                 ok=False,
-                output="",
+                stdout="",
+                stderr=f"exception: {e}",
                 duration_s=duration,
-                error=f"exception: {e}",
             )
         finally:
+            # Clean up container
             with contextlib.suppress(Exception):
                 if container is not None:
                     container.remove(force=True)
+
+            # Clean up temp directory using our safe removal function
+            _safe_rmtree(tmpdir_path, self.client)
 
     def validate_tests(
         self,
@@ -219,31 +327,35 @@ class DockerValidator:
             )
 
             rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
-            logs = (container.logs() or b"").decode("utf-8", errors="replace").replace("\\n", "\n")
+            # Collect stdout and stderr separately
+            stdout = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
+            stderr = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
             duration = time.time() - start_time
 
             if rc == 124:
                 logger.debug("tests:timeout rc=124 treated as success")
                 return TestValidationResult(
                     ok=True,
-                    output=_preview(logs, 4000),
+                    stdout=_preview(stdout, 4000),
+                    stderr=_preview(stderr, 4000),
                     duration_s=duration,
                     suite_name=suite,
                 )
 
             if rc != 0:
-                logger.debug("tests:failed rc=%s stderr_tail: %s", rc, _preview(logs, 240))
+                logger.debug("tests:failed rc=%s stderr_tail: %s", rc, _preview(stderr, 240))
                 return TestValidationResult(
                     ok=False,
-                    output=_preview(logs, 4000),
+                    stdout=_preview(stdout, 4000),
+                    stderr=_preview(stderr, 4000),
                     duration_s=duration,
                     suite_name=suite,
-                    error=f"Test validation failed with rc={rc}",
                 )
 
             return TestValidationResult(
                 ok=True,
-                output=_preview(logs, 4000),
+                stdout=_preview(stdout, 4000),
+                stderr=_preview(stderr, 4000),
                 duration_s=duration,
                 suite_name=suite,
             )
@@ -252,10 +364,10 @@ class DockerValidator:
             duration = time.time() - start_time
             return TestValidationResult(
                 ok=False,
-                output="",
+                stdout="",
+                stderr=f"exception: {e}",
                 duration_s=duration,
                 suite_name=suite,
-                error=f"exception: {e}",
             )
         finally:
             with contextlib.suppress(Exception):
@@ -339,8 +451,8 @@ class DockerValidator:
         self,
         task: Task,
         context: DockerContext,
-        repo_url: str,
-        sha: str,
+        # repo_url: str,
+        # sha: str,
         run_labels: dict[str, str],
         build_once_fn: Callable[..., BuildResult],
     ) -> BuildResult:
@@ -357,24 +469,124 @@ class DockerValidator:
         Returns:
             BuildResult with build and validation outcome
         """
-        # Create args namespace from config
-        args = argparse.Namespace(
-            build_timeout=self.config.build_timeout,
-            tail_chars=self.config.tail_chars,
-        )
+        logger.info("build_and_validate: building image '%s'", task.get_image_name())
+        logger.debug("build:start image=%s", task.get_image_name())
+        _t_build_start = time.time()
 
-        # Delegate to the module-level build_and_validate function
-        # This maintains backward compatibility
-        return build_and_validate(
+        # Build the Docker image
+        build_res = build_once_fn(
             client=self.client,
             task=task,
             context=context,
-            repo_url=repo_url,
-            sha=sha,
+            repo_url=f"https://www.github.com/{task.owner}/{task.repo}",
+            sha=task.sha or "",
+            timeout_s=self.config.build_timeout,
+            tail_chars=self.config.tail_chars * 2,
+            force=False,  # always rebuild to pick up new script
             run_labels=run_labels,
-            args=args,
-            build_once_fn=build_once_fn,
         )
+        logger.debug(
+            "build:done ok=%s rc=%s duration=%.1fs",
+            build_res.ok,
+            build_res.rc,
+            time.time() - _t_build_start,
+        )
+
+        # If build failed, return the build result as-is
+        if not build_res.ok:
+            return build_res
+
+        # Build succeeded, now validate with profiling and testing
+        logger.info("build_and_validate: build ok; verifying profile+tests before recording attempt")
+
+        # Validate profile
+        logger.debug("profile:start")
+        _t_profile_start = time.time()
+        profile_result = self.validate_profile(
+            image_name=task.get_image_name(),
+            run_labels=run_labels,
+            timeout=min(self.config.build_timeout, self.config.profile_timeout),
+        )
+        logger.debug("profile:done ok=%s duration=%.1fs", profile_result.ok, time.time() - _t_profile_start)
+
+        # Validate tests (only if profile succeeded)
+        if not profile_result.ok:
+            tests_result = None
+        else:
+            logger.debug("tests:start")
+            _t_tests_start = time.time()
+            tests_result = self.validate_tests(
+                image_name=task.get_image_name(),
+                repo_name=task.repo,
+                run_labels=run_labels,
+                timeout=min(self.config.build_timeout, self.config.test_timeout),
+            )
+            logger.debug("tests:done ok=%s duration=%.1fs", tests_result.ok, time.time() - _t_tests_start)
+
+        # Check if validation passed - precedence: build > profile > test
+        if not profile_result.ok:
+            logger.warning("build_and_validate: profile validation failed")
+            # Return only profile logs (the failing step)
+            return BuildResult(
+                ok=False,
+                image_id=build_res.image_id,
+                image_name=build_res.image_name,
+                rc=1,
+                duration_s=build_res.duration_s,
+                stderr_tail=profile_result.stderr,
+                stdout_tail=profile_result.stdout,
+                failure_stage="profile",
+            )
+        elif tests_result is not None and not tests_result.ok:
+            logger.warning("build_and_validate: test validation failed")
+            # Return only test logs (the failing step)
+            return BuildResult(
+                ok=False,
+                image_id=build_res.image_id,
+                image_name=build_res.image_name,
+                rc=1,
+                duration_s=build_res.duration_s,
+                stderr_tail=tests_result.stderr,
+                stdout_tail=tests_result.stdout,
+                failure_stage="tests",
+            )
+        else:
+            logger.info("build_and_validate: verification passed (profile and tests)")
+            # On success, concatenate all three pairs of logs
+            combined_stdout = []
+            combined_stderr = []
+
+            # Build logs
+            combined_stdout.append("=== BUILD ===")
+            combined_stdout.append(build_res.stdout_tail if build_res.stdout_tail else "(no stdout)")
+            combined_stderr.append("=== BUILD ===")
+            combined_stderr.append(build_res.stderr_tail if build_res.stderr_tail else "(no stderr)")
+
+            # Profile logs
+            combined_stdout.append("\n=== PROFILE VALIDATION ===")
+            combined_stdout.append(profile_result.stdout)
+            if profile_result.benchmarks:
+                combined_stdout.append("\n--- Benchmarks ---")
+                combined_stdout.append(profile_result.benchmarks)
+            combined_stderr.append("\n=== PROFILE VALIDATION ===")
+            combined_stderr.append(profile_result.stderr)
+
+            # Test logs
+            if tests_result is not None:
+                combined_stdout.append("\n=== TEST VALIDATION ===")
+                combined_stdout.append(tests_result.stdout)
+                combined_stderr.append("\n=== TEST VALIDATION ===")
+                combined_stderr.append(tests_result.stderr)
+
+            return BuildResult(
+                ok=True,
+                image_id=build_res.image_id,
+                image_name=build_res.image_name,
+                rc=0,
+                duration_s=build_res.duration_s,
+                stderr_tail="\n".join(combined_stderr),
+                stdout_tail="\n".join(combined_stdout),
+            )
 
     @staticmethod
     def _resolve_test_suite_name(repo_name: str) -> str:
@@ -420,8 +632,12 @@ def _run_quick_profile(
     image_name: str,
     run_labels: dict[str, str] | None = None,
     timeout: int = 600,
-) -> tuple[bool, str]:
-    """Run a quick profiling sanity check using /profile.sh in the image."""
+) -> tuple[bool, str, str]:
+    """Run a quick profiling sanity check using /profile.sh in the image.
+
+    Returns:
+        Tuple of (success, stdout, stderr)
+    """
     if run_labels is None:
         run_labels = {}
 
@@ -440,15 +656,16 @@ def _run_quick_profile(
             labels=run_labels,
         )
         rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
-        logs = (container.logs() or b"").decode("utf-8", errors="replace").replace("\\n", "\n")
+        stdout = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
+        stderr = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
         if rc == 124:
             logger.debug("profile:timeout rc=124 treated as success")
-            return (True, _preview(logs, 4000))
+            return (True, _preview(stdout, 4000), _preview(stderr, 4000))
         if rc != 0:
-            logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(logs, 240))
-        return (rc == 0, _preview(logs, 4000))
+            logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(stderr, 240))
+        return (rc == 0, _preview(stdout, 4000), _preview(stderr, 4000))
     except Exception as e:
-        return (False, f"exception: {e}")
+        return (False, "", f"exception: {e}")
     finally:
         with contextlib.suppress(Exception):
             if container is not None:
@@ -461,9 +678,13 @@ def _run_quick_tests(
     repo_name: str,
     run_labels: dict[str, str],
     timeout: int = 900,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     """Run a quick test sanity check using /run_tests.sh in the image.
+
     Semantics preserved: feedparser install, 45s timeout, -q -k filter, rc==124 => success.
+
+    Returns:
+        Tuple of (success, stdout, stderr)
     """
     suite = _resolve_test_suite_name(repo_name)
     container = None
@@ -485,15 +706,16 @@ def _run_quick_tests(
             labels=run_labels,
         )
         rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
-        logs = (container.logs() or b"").decode("utf-8", errors="replace").replace("\\n", "\n")
+        stdout = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
+        stderr = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
         if rc == 124:
             logger.debug("tests:timeout rc=124 treated as success")
-            return (True, _preview(logs, 4000))
+            return (True, _preview(stdout, 4000), _preview(stderr, 4000))
         if rc != 0:
-            logger.debug("tests:failed rc=%s stderr_tail: %s", rc, _preview(logs, 240))
-        return (rc == 0, _preview(logs, 4000))
+            logger.debug("tests:failed rc=%s stderr_tail: %s", rc, _preview(stderr, 240))
+        return (rc == 0, _preview(stdout, 4000), _preview(stderr, 4000))
     except Exception as e:
-        return (False, f"exception: {e}")
+        return (False, "", f"exception: {e}")
     finally:
         with contextlib.suppress(Exception):
             if container is not None:
@@ -560,7 +782,7 @@ def build_and_validate(
     logger.info("build_and_validate: build ok; verifying profile+tests before recording attempt")
     logger.debug("profile:start")
     _t_profile_start = time.time()
-    profile_ok, profile_preview = _run_quick_profile(
+    profile_ok, profile_stdout, profile_stderr = _run_quick_profile(
         client=client,
         image_name=task.with_tag("pkg").get_image_name(),
         run_labels=run_labels,
@@ -570,11 +792,12 @@ def build_and_validate(
 
     if not profile_ok:
         tests_ok = False
-        tests_preview = "SKIPPED"
+        tests_stdout = ""
+        tests_stderr = ""
     else:
         logger.debug("tests:start")
         _t_tests_start = time.time()
-        tests_ok, tests_preview = _run_quick_tests(
+        tests_ok, tests_stdout, tests_stderr = _run_quick_tests(
             client=client,
             image_name=task.with_tag("pkg").get_image_name(),
             repo_name=task.repo,
@@ -583,29 +806,66 @@ def build_and_validate(
         )
         logger.debug("tests:done ok=%s duration=%.1fs", tests_ok, time.time() - _t_tests_start)
 
-    logger.warning(
-        "build_and_validate: verification failed (profile_ok=%s, tests_ok=%s)",
-        profile_ok,
-        tests_ok,
-    )
+    # Check if validation passed - precedence: build > profile > test
     if not profile_ok:
-        combined_preview = []
-        combined_preview.append(f"[profile_ok={profile_ok}] {profile_preview}")
-        if tests_preview != "SKIPPED":
-            combined_preview.append(f"[tests_ok={tests_ok}] {tests_preview}")
-        preview_text = " | ".join(combined_preview)
+        logger.warning("build_and_validate: profile validation failed")
+        # Return only profile logs (the failing step)
         return BuildResult(
             ok=False,
             image_id=build_res.image_id,
             image_name=build_res.image_name,
             rc=1,
             duration_s=build_res.duration_s,
-            stderr_tail=preview_text,
-            stdout_tail="",
+            stderr_tail=profile_stderr,
+            stdout_tail=profile_stdout,
+            failure_stage="profile",
+        )
+    elif not tests_ok:
+        logger.warning("build_and_validate: test validation failed")
+        # Return only test logs (the failing step)
+        return BuildResult(
+            ok=False,
+            image_id=build_res.image_id,
+            image_name=build_res.image_name,
+            rc=1,
+            duration_s=build_res.duration_s,
+            stderr_tail=tests_stderr,
+            stdout_tail=tests_stdout,
+            failure_stage="tests",
         )
     else:
         logger.info("build_and_validate: verification passed (profile and tests)")
-        return build_res
+        # On success, concatenate all three pairs of logs
+        combined_stdout = []
+        combined_stderr = []
+
+        # Build logs
+        combined_stdout.append("=== BUILD ===")
+        combined_stdout.append(build_res.stdout_tail if build_res.stdout_tail else "(no stdout)")
+        combined_stderr.append("=== BUILD ===")
+        combined_stderr.append(build_res.stderr_tail if build_res.stderr_tail else "(no stderr)")
+
+        # Profile logs
+        combined_stdout.append("\n=== PROFILE VALIDATION ===")
+        combined_stdout.append(profile_stdout)
+        combined_stderr.append("\n=== PROFILE VALIDATION ===")
+        combined_stderr.append(profile_stderr)
+
+        # Test logs
+        combined_stdout.append("\n=== TEST VALIDATION ===")
+        combined_stdout.append(tests_stdout)
+        combined_stderr.append("\n=== TEST VALIDATION ===")
+        combined_stderr.append(tests_stderr)
+
+        return BuildResult(
+            ok=True,
+            image_id=build_res.image_id,
+            image_name=build_res.image_name,
+            rc=0,
+            duration_s=build_res.duration_s,
+            stderr_tail="\n".join(combined_stderr),
+            stdout_tail="\n".join(combined_stdout),
+        )
 
 
 def format_cmds(image_name: str, owner: str, repo: str, sha: str, out_dir: Path) -> tuple[str, str]:
@@ -828,7 +1088,9 @@ def validate_one(  # noqa: C901
     container = None
     files: dict[str, str] = {}
     try:
-        profile_ok, profile_preview = _run_quick_profile(client=client, image_name=task.get_image_name(), timeout=600)
+        profile_ok, profile_stdout, profile_stderr = _run_quick_profile(
+            client=client, image_name=task.get_image_name(), timeout=600
+        )
         if not profile_ok:
             logger.warning(
                 "validate_one: failed container %s exited with code. Removing image.", task.get_container_name()
@@ -842,7 +1104,6 @@ def validate_one(  # noqa: C901
                 logger.exception("validate_one: error removing image %s", task.get_image_name())
 
         run_stage = f"profile-{'ok' if profile_ok else 'failed'}"
-        logs_tail = profile_preview
         ok = profile_ok and build_res.ok
         rc = 0 if profile_ok else 1
 
@@ -857,8 +1118,8 @@ def validate_one(  # noqa: C901
             "duration_s": None,
             "cmd_build": build_cmd,
             "cmd_run": run_cmd,
-            "stderr_tail": logs_tail,
-            "stdout_tail": "",
+            "stderr_tail": profile_stderr,
+            "stdout_tail": profile_stdout,
             "files": files,
         }
     except Exception:

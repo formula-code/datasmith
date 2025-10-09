@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
 import pickle
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -26,10 +28,12 @@ from datasmith.core.models import BuildResult, Task
 from datasmith.docker.cleanup import fast_cleanup_run_artifacts, remove_containers_by_label
 from datasmith.docker.context import ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import gen_run_labels
+from datasmith.docker.validation import DockerValidator, ValidationConfig
 from datasmith.docker.validation import build_and_validate as build_and_validate_impl
 from datasmith.execution.resolution import analyze_commit
 
 logger = logging.getLogger(__name__)
+RE_PY_EXTRACT = re.compile(r"python[=<>!~]*([\d\.]+)")
 
 
 @dataclass
@@ -418,14 +422,40 @@ def agent_build_and_validate(  # noqa: C901
     assert task.sha is not None, "task.sha must be set"  # noqa: S101
     sha: str = task.sha
     task_analysis = analyze_commit(sha, f"{task.owner}/{task.repo}") or {}
+    if not task_analysis or not task_analysis.get("can_install", False):
+        logger.warning("agent_build_and_validate: task cannot be installed")
+        return {
+            "ok": False,
+            "rc": 1,
+            "stage": "analysis",
+            "owner": task.owner,
+            "repo": task.repo,
+            "sha": task.sha,
+            "image_name": task.with_tag("pkg").get_image_name(),
+            "duration_s": 0.0,
+            "stderr_tail": json.dumps(task_analysis) if task_analysis else "No analysis",
+            "stdout_tail": task_analysis.get("dry_run_log", ""),
+            "attempts": [],
+            "context_pickle": None,
+        }
+
+    python_version = ""
+    if task_analysis.get("resolution_strategy"):
+        m = RE_PY_EXTRACT.search(task_analysis["resolution_strategy"])
+        if m:
+            python_version = m.group(1)
+    if not python_version:
+        python_version = task_analysis.get("python_version", "")
+    if not python_version and task.python_version:
+        python_version = task.python_version
 
     task = Task(
         owner=task.owner,
         repo=task.repo,
-        sha=sha,
+        sha=task.sha,
         commit_date=task.commit_date,
-        python_version=task_analysis.get("python_version", task.python_version or ""),
-        env_payload=task_analysis.get("final_dependencies", task.env_payload or ""),
+        python_version=python_version,
+        env_payload=json.dumps({"dependencies": task_analysis.get("final_dependencies", "")}) or task.env_payload,
     )
 
     # Gather defaults + similar contexts
@@ -509,6 +539,20 @@ def agent_build_and_validate(  # noqa: C901
         run_labels=run_labels,
     )
 
+    validation_config = ValidationConfig(
+        output_dir=args.output_dir,
+        build_timeout=args.build_timeout,
+        run_timeout=args.run_timeout,
+        tail_chars=args.tail_chars,
+    )
+
+    validator = DockerValidator(
+        client=client,
+        context_registry=context_registry,
+        machine_defaults=machine_defaults,
+        config=validation_config,
+    )
+
     try:
         attempts: list[AttemptRecord] = []
         attempt_idx = 0
@@ -529,14 +573,22 @@ def agent_build_and_validate(  # noqa: C901
                 _save_pickle(ctx, attempt_pickle)
 
             # Build and validate package image
-            build_res = build_and_validate(
-                client=client,
-                task=task,
+            # build_res = build_and_validate(
+            #     client=client,
+            #     task=task,
+            #     context=ctx,
+            #     repo_url=repo_url,
+            #     sha=sha,
+            #     run_labels=run_labels,
+            #     args=args,
+            # )
+            build_res = validator.build_and_validate(
+                task=task.with_tag("run"),
                 context=ctx,
-                repo_url=repo_url,
-                sha=sha,
+                # repo_url=repo_url,
+                # sha=sha,
                 run_labels=run_labels,
-                args=args,
+                build_once_fn=build_once_with_context,
             )
 
             attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
@@ -587,13 +639,10 @@ def agent_build_and_validate(  # noqa: C901
                 result_dict["context_pickle"] = str(final_pickle)
                 return result_dict
 
-            # Early exit if failure is unrelated to docker_build_pkg.sh
-            is_verification_failure = False
-            try:
-                st = build_res.stderr_tail or ""
-                is_verification_failure = "[profile_ok=" in st
-            except Exception:
-                is_verification_failure = False
+            # Early exit if failure is unrelated to docker_build_pkg.sh or validation
+            # Check failure_stage to determine if this was a validation failure (profile/tests)
+            # or a build infrastructure failure
+            is_verification_failure = build_res.failure_stage in ("profile", "tests")
             if (
                 (not build_res.ok)
                 and (build_res.stderr_tail)
@@ -601,7 +650,7 @@ def agent_build_and_validate(  # noqa: C901
                 and (not is_verification_failure)
             ):
                 logger.error(
-                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh; not worth iterating"
+                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh or validation; not worth iterating"
                 )
                 return {
                     "ok": False,
@@ -694,14 +743,22 @@ def agent_build_and_validate(  # noqa: C901
                 _save_pickle(ctx, attempt_pickle)
 
             # Build and validate package image
-            build_res = build_and_validate(
-                client=client,
+            # build_res = build_and_validate(
+            #     client=client,
+            #     task=task,
+            #     context=ctx,
+            #     repo_url=repo_url,
+            #     sha=sha,
+            #     run_labels=run_labels,
+            #     args=args,
+            # )
+            build_res = validator.build_and_validate(
                 task=task,
                 context=ctx,
-                repo_url=repo_url,
-                sha=sha,
+                # repo_url=repo_url,
+                # sha=sha,
                 run_labels=run_labels,
-                args=args,
+                build_once_fn=build_once_with_context,
             )
 
             attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
@@ -750,13 +807,10 @@ def agent_build_and_validate(  # noqa: C901
                 result_dict["context_pickle"] = str(final_pickle)
                 return result_dict
 
-            # Early exit if failure is unrelated to docker_build_pkg.sh
-            is_verification_failure = False
-            try:
-                st = build_res.stderr_tail or ""
-                is_verification_failure = "[profile_ok=" in st
-            except Exception:
-                is_verification_failure = False
+            # Early exit if failure is unrelated to docker_build_pkg.sh or validation
+            # Check failure_stage to determine if this was a validation failure (profile/tests)
+            # or a build infrastructure failure
+            is_verification_failure = build_res.failure_stage in ("profile", "tests")
             if (
                 (not build_res.ok)
                 and (build_res.stderr_tail)
@@ -764,7 +818,7 @@ def agent_build_and_validate(  # noqa: C901
                 and (not is_verification_failure)
             ):
                 logger.error(
-                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh; not worth iterating"
+                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh or validation; not worth iterating"
                 )
                 return {
                     "ok": False,

@@ -36,8 +36,8 @@ def symbolic_build_and_validate(
     2. Injects them via env_payload (no custom script generation)
     3. Single attempt (no iterative fixing)
     """
-    analysis = analyze_commit(task.sha, f"{task.owner}/{task.repo}")
-    # if not analysis or "can_install" not in analysis or not analysis["can_install"]:
+    analysis = analyze_commit(task.sha, f"{task.owner}/{task.repo}", bypass_cache=True)
+    # if "can_install" not in analysis or not analysis["can_install"]:
     #     analysis = analyze_commit(task.sha, f"{task.owner}/{task.repo}", bypass_cache=True)
     logger.debug("Analysis result: %s", analysis)
     return analysis
