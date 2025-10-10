@@ -1,4 +1,6 @@
 import time
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from datasmith.core.file_utils import (
     dl_and_open as _core_dl_and_open,
@@ -27,6 +29,36 @@ def polite_sleep(seconds: float) -> None:
         progress_logger.update_progress(f"⏳  Waiting {remaining:4.0f} s …")
         time.sleep(min(remaining, 1))
     progress_logger.finish_progress()
+
+
+def _parse_pr_url(url: str) -> tuple[str, str, str]:
+    parsed = urlparse(url.strip())
+
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme!r}")
+
+    # Normalize API URLs if needed
+    if parsed.hostname == "api.github.com":
+        # e.g. https://api.github.com/repos/owner/repo/pulls/123
+        path = parsed.path.replace("/repos/", "/").replace("/pulls/", "/pull/")
+        parsed = parsed._replace(netloc="github.com", path=path)
+
+    if parsed.hostname not in {"github.com", "www.github.com"}:
+        raise ValueError(f"Not a GitHub URL: {url!r}")
+
+    path = unquote(parsed.path)
+    parts = [p for p in Path(path).parts if p != "/"]
+
+    # Expected: /owner/repo/pull/<number>
+    if len(parts) < 4 or parts[2] != "pull":
+        raise ValueError(f"Not a GitHub PR URL: {url!r}")
+
+    owner, repo, pr_num = parts[0], parts[1], parts[3]
+
+    if not pr_num.isdigit() or int(pr_num) <= 0:
+        raise ValueError(f"Invalid PR number: {pr_num!r}")
+
+    return owner, repo, pr_num
 
 
 def _extract_repo_full_name(url: str) -> str | None:

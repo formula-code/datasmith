@@ -162,7 +162,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
             project_dir = tmpfile_pth / primary_root
             all_sources = [
                 s
-                for s in (primary_cand.setup_py_path, primary_cand.setup_cfg_path, primary_cand.pyproject_path)
+                for s in (primary_cand.setup_py_path, primary_cand.pyproject_path, primary_cand.setup_cfg_path)
                 if s and s.exists()
             ]
             if len(all_sources):
@@ -170,7 +170,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                 # uv pip install --all-extras {primary_meta.source}
                 for source in all_sources:
                     skip_source = False  # Flag to skip to next source on fundamental errors
-                    for py_ver in (".".join(map(str, t)) for t in candidate_python_versions):
+                    for py_ver in (".".join(map(str, t)) for t in candidate_python_versions[:3]):
                         if skip_source:
                             break
                         for strict_cutoff in (True, False):

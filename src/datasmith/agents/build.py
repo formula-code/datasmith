@@ -37,55 +37,6 @@ logger = logging.getLogger(__name__)
 RE_PY_EXTRACT = re.compile(r"python[=<>!~]*([\d\.]+)")
 
 
-def _sanitize_script(script: str) -> str:
-    """Fix common LLM output issues in bash scripts.
-
-    Args:
-        script: Raw script string from LLM
-
-    Returns:
-        Sanitized script with common issues fixed
-
-    Raises:
-        ValueError: If script is invalid or missing required elements
-    """
-    if not script or not script.strip():
-        raise ValueError("Script is empty")
-
-    # Critical fix: Replace literal \n with actual newlines
-    # This happens when LLM outputs escaped newlines instead of actual ones
-    if "\\n" in script and script.count("\n") < 10:
-        logger.warning("_sanitize_script: Found literal \\n sequences, converting to newlines")
-        script = script.replace("\\n", "\n")
-
-    # Remove markdown code blocks if present (despite instruction not to use them)
-    if "```bash" in script or "```sh" in script:
-        logger.warning("_sanitize_script: Removing markdown code blocks from script")
-        script = re.sub(r"```(?:bash|sh)\n?", "", script)
-        script = re.sub(r"```\n?$", "", script.rstrip())
-
-    # Remove any leading/trailing whitespace
-    script = script.strip()
-
-    # Validate shebang is present
-    if not script.startswith("#!/"):
-        raise ValueError("Script missing shebang (must start with #!/bin/bash or #!/usr/bin/env bash)")
-
-    # Validate script contains required sourcing statements
-    required_sources = ["/etc/profile.d/asv_utils.sh", "/etc/profile.d/asv_build_vars.sh"]
-    for required in required_sources:
-        if required not in script:
-            logger.warning("_sanitize_script: Script missing expected source: %s", required)
-
-    # Check for common syntax issues that would cause immediate bash failure
-    lines = script.split("\n")
-    for i, line in enumerate(lines[:5], 1):  # Check first 5 lines
-        if line and not line.startswith("#") and ": not found" in line:
-            raise ValueError(f"Script appears malformed (line {i} contains ': not found')")
-
-    return script
-
-
 @dataclass
 class AttemptRecord:
     """Record of a single build attempt with its result."""
@@ -250,13 +201,6 @@ class BuildScriptProgram(dspy.Module):
             action_input = (out.action_input or "").strip()  # pyright: ignore[reportAttributeAccessIssue]
             if action in ("none", "finish") and (out.docker_build_script or "").strip():  # pyright: ignore[reportAttributeAccessIssue]
                 iter_script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
-                # Sanitize the final script before returning
-                try:
-                    iter_script = _sanitize_script(iter_script)
-                    logger.debug("BuildScriptProgram: script sanitized successfully")
-                except ValueError as e:
-                    logger.warning("BuildScriptProgram: sanitization failed: %s - using original script", e)
-                    # Don't fail the entire process, just log the warning and use original
                 break
 
             # Tool dispatch
@@ -340,14 +284,6 @@ def synthesize_script(
         script = cast(str, result)
         script = str(script)
         logger.info("synthesize_script: raw script length=%d", len(script))
-
-        # Sanitize the script to fix common LLM output issues
-        try:
-            script = _sanitize_script(script)
-            logger.info("synthesize_script: sanitized script length=%d", len(script))
-        except ValueError:
-            logger.exception("synthesize_script: sanitization failed")
-            return ""
 
     except Exception:
         logger.exception("synthesize_script: error")
@@ -520,7 +456,7 @@ def agent_build_and_validate(  # noqa: C901
 
     logger.info(
         "agent_build_and_validate: task analysis: python_versions=%s, final_dependencies=%s",
-        task_analysis.get("python_versions"),
+        task_analysis.get("python_version"),
         task_analysis.get("final_dependencies"),
     )
 

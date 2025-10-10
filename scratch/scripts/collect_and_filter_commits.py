@@ -10,7 +10,7 @@ import pandas as pd
 from git import Repo
 from tqdm.auto import tqdm
 
-from datasmith.execution.collect_commits_offline import collect_commits
+from datasmith.execution.collect_commits import collect_merge_shas
 from datasmith.execution.utils import _get_commit_info_offline, clone_repo, find_file_in_tree, has_core_file
 from datasmith.logging_config import configure_logging
 
@@ -52,12 +52,11 @@ def main() -> None:
 
     benchmarks = benchmarks.sort_values("stars", ascending=False, ignore_index=True).head(args.max_repos)
 
-    with ThreadPoolExecutor(max_workers=args.threads) as tp:
-        benchmarks["asv_conf_path"] = list(
-            tqdm(tp.map(_asv_conf_worker, benchmarks["repo_name"]), total=len(benchmarks), desc="Scanning repos")
-        )
-
-    benchmarks = benchmarks.dropna(subset=["asv_conf_path"])
+    # with ThreadPoolExecutor(max_workers=args.threads) as tp:
+    #     benchmarks["asv_conf_path"] = list(
+    #         tqdm(tp.map(_asv_conf_worker, benchmarks["repo_name"]), total=len(benchmarks), desc="Scanning repos")
+    #     )
+    # benchmarks = benchmarks.dropna(subset=["asv_conf_path"])
 
     if benchmarks.empty:
         # Nothing to do. create empty output to keep downstream happy.
@@ -85,10 +84,12 @@ def main() -> None:
             for f in tqdm(as_completed(futures), total=len(futures), desc="Cloning repos"):
                 repo_name, repo = f.result()
                 all_repos[repo_name] = repo
-                kind_commit_shas = collect_commits(repo)
-                for kind, commit_sha in kind_commit_shas:
+                # kind_commit_shas = collect_commits(repo)
+                merge_shas = collect_merge_shas(repo_name)
+
+                for commit_sha in set(merge_shas):
                     commit_info_args.append((repo, commit_sha))
-                    commit2kind[commit_sha] = kind
+                    commit2kind[commit_sha] = "commit"
                     commit2repo[commit_sha] = repo_name
 
         if args.procs < 0:

@@ -261,7 +261,7 @@ Given the list of repositories, we find the subset of commits that have already 
 # Needs to be a parquet file because the filtered commits are often very large.
 $ python scratch/scripts/collect_and_filter_commits.py \
        --filtered-benchmarks-pth scratch/artifacts/pipeflush/repos_valid.csv \
-       --output-pth scratch/artifacts/pipeflush/commits_filtered.parquet \
+       --output-pth scratch/artifacts/pipeflush/merge_commits_filtered.parquet \
        --max-repos 350 \
        --threads   32 \
        --procs     32
