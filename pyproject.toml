@@ -23,6 +23,7 @@ dependencies = [
     "docker",
     "dspy>=2.6.27",
     "gitpython",
+    "json5",
     "numpy",
     "packaging>=25.0",
     "pandas",

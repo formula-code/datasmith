@@ -20,20 +20,12 @@ from datasmith.agents.build import (
     synthesize_script,
 )
 from datasmith.docker.cleanup import fast_cleanup_run_artifacts, remove_containers_by_label
-from datasmith.docker.validation import (
-    _run_quick_profile,
-    _run_quick_tests,
-    build_and_validate,
-)
 
 __all__ = [
     "AttemptRecord",
     "BuildScriptAgentStep",
     "BuildScriptProgram",
-    "_run_quick_profile",
-    "_run_quick_tests",
     "agent_build_and_validate",
-    "build_and_validate",
     "build_once_with_context",
     "fast_cleanup_run_artifacts",
     "remove_containers_by_label",

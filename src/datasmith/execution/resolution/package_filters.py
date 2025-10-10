@@ -224,10 +224,6 @@ def filter_pypi_packages(requirements: Iterable[str]) -> list[str]:
         # Extract package name (before any version specifier or extras)
         pkg_name = re.split(r"[<>=!;\s\[]", req, maxsplit=1)[0].strip().lower()
 
-        # Skip python version specifiers
-        if pkg_name in {"python", "pip", "setuptools", "wheel"}:
-            continue
-
         # Skip conda-only/system packages
         if pkg_name in CONDA_SYSTEM_PACKAGES:
             continue

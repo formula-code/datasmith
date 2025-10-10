@@ -24,6 +24,47 @@ def rfc3339(ts: dt.datetime) -> str:
     return ts.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def uv_compile_from_pyproject(
+    pyproject_path: Path, python_version: str | None, cutoff_rfc3339: str | None
+) -> list[str]:
+    """
+    Use `uv pip compile` to resolve to pinned requirements.
+    Reads from pyproject.toml and prints the compiled file to stdout.
+
+    Args:
+        pyproject_path: Path to pyproject.toml file
+        python_version: Python version to compile for (e.g., "3.8")
+        cutoff_rfc3339: RFC3339 timestamp to exclude packages newer than this date
+
+    Returns:
+        List of pinned requirement strings
+
+    Raises:
+        RuntimeError: If uv pip compile fails
+    """
+    # Fix marker spacing for all requirements
+    if not pyproject_path.exists():
+        return []
+    args = ["pip", "compile", str(pyproject_path.resolve())]
+    if python_version:
+        args.extend(["--python", python_version])
+    args.append("--all-extras")
+    extra_env: dict[str, str] = {}
+    if cutoff_rfc3339:
+        extra_env["UV_EXCLUDE_NEWER"] = cutoff_rfc3339
+    cp = run_uv(args, input_text=None, extra_env=extra_env, cwd=pyproject_path.parent)
+    if cp.returncode != 0:
+        # Bubble up the actual error text
+        raise RuntimeError(f"uv pip compile failed:\n{cp.stderr.decode() or cp.stdout.decode()}")
+    out: list[str] = []
+    for raw in cp.stdout.decode().splitlines():
+        s = strip_ansi(raw).strip()
+        # ignore comments (including those that had ANSI colours)
+        if s and not s.startswith("#"):
+            out.append(s)
+    return out
+
+
 def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutoff_rfc3339: str | None) -> list[str]:
     """
     Use `uv pip compile` to resolve to pinned requirements.
@@ -48,6 +89,7 @@ def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutof
     args = ["pip", "compile", "-"]
     if python_version:
         args.extend(["--python", python_version])
+    args.append("--upgrade")
     extra_env: dict[str, str] = {}
     if cutoff_rfc3339:
         extra_env["UV_EXCLUDE_NEWER"] = cutoff_rfc3339

@@ -72,12 +72,10 @@ asv_conf_name() {
 }
 
 write_vars() {
-    local key="$1"
-    local value="$2"
-    mkdir -p /etc/asv_env
-    cat >>/etc/profile.d/asv_build_vars.sh <<'EOF_BASH'
-export "${key}"="${value}"
-EOF_BASH
+  local key="$1" value="${2-}"          # default to empty if unset to avoid set -u crash
+  mkdir -p /etc/asv_env
+  # Safely append a properly quoted export line:
+  printf 'export %s=%q\n' "$key" "$value" >> /etc/profile.d/asv_build_vars.sh
 }
 
 # Build performance knobs (overridable)
@@ -717,11 +715,11 @@ for version in $PY_VERSIONS; do
     PYTHON_BIN="/opt/conda/envs/$ENV_NAME/bin/python"
     if [ "$PYTHON_LT_39" = "True" ]; then
         # uv pip install --python "$PYTHON_BIN" "Cython<3" "setuptools<70" "wheel>=0.38" >/dev/null 2>&1 || true
-        uv pip install --python "$PYTHON_BIN" "hypothesis<5" >/dev/null 2>&1 || true
+        uv pip install --python "$PYTHON_BIN" "hypothesis<5" pytest versioneer >/dev/null 2>&1 || true
         # uv pip install --python "$PYTHON_BIN" --upgrade pip "setuptools>79" wheel pytest asv
         uv pip install --python "$PYTHON_BIN" --upgrade asv
     else
-        uv pip install --python "$PYTHON_BIN" "hypothesis" >/dev/null 2>&1 || true
+        uv pip install --python "$PYTHON_BIN" hypothesis pytest versioneer >/dev/null 2>&1 || true
         # uv pip install --python "$PYTHON_BIN" --upgrade pip "setuptools>79" wheel pytest
         uv pip install --python "$PYTHON_BIN" git+https://github.com/airspeed-velocity/asv
     fi

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
 import pickle
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -26,10 +28,62 @@ from datasmith.core.models import BuildResult, Task
 from datasmith.docker.cleanup import fast_cleanup_run_artifacts, remove_containers_by_label
 from datasmith.docker.context import ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import gen_run_labels
-from datasmith.docker.validation import build_and_validate as build_and_validate_impl
+from datasmith.docker.validation import DockerValidator, ValidationConfig
+
+# from datasmith.docker.validation import build_and_validate as build_and_validate_impl
 from datasmith.execution.resolution import analyze_commit
 
 logger = logging.getLogger(__name__)
+RE_PY_EXTRACT = re.compile(r"python[=<>!~]*([\d\.]+)")
+
+
+def _sanitize_script(script: str) -> str:
+    """Fix common LLM output issues in bash scripts.
+
+    Args:
+        script: Raw script string from LLM
+
+    Returns:
+        Sanitized script with common issues fixed
+
+    Raises:
+        ValueError: If script is invalid or missing required elements
+    """
+    if not script or not script.strip():
+        raise ValueError("Script is empty")
+
+    # Critical fix: Replace literal \n with actual newlines
+    # This happens when LLM outputs escaped newlines instead of actual ones
+    if "\\n" in script and script.count("\n") < 10:
+        logger.warning("_sanitize_script: Found literal \\n sequences, converting to newlines")
+        script = script.replace("\\n", "\n")
+
+    # Remove markdown code blocks if present (despite instruction not to use them)
+    if "```bash" in script or "```sh" in script:
+        logger.warning("_sanitize_script: Removing markdown code blocks from script")
+        script = re.sub(r"```(?:bash|sh)\n?", "", script)
+        script = re.sub(r"```\n?$", "", script.rstrip())
+
+    # Remove any leading/trailing whitespace
+    script = script.strip()
+
+    # Validate shebang is present
+    if not script.startswith("#!/"):
+        raise ValueError("Script missing shebang (must start with #!/bin/bash or #!/usr/bin/env bash)")
+
+    # Validate script contains required sourcing statements
+    required_sources = ["/etc/profile.d/asv_utils.sh", "/etc/profile.d/asv_build_vars.sh"]
+    for required in required_sources:
+        if required not in script:
+            logger.warning("_sanitize_script: Script missing expected source: %s", required)
+
+    # Check for common syntax issues that would cause immediate bash failure
+    lines = script.split("\n")
+    for i, line in enumerate(lines[:5], 1):  # Check first 5 lines
+        if line and not line.startswith("#") and ": not found" in line:
+            raise ValueError(f"Script appears malformed (line {i} contains ': not found')")
+
+    return script
 
 
 @dataclass
@@ -95,6 +149,9 @@ class BuildScriptAgentStep(dspy.Signature):
         - The script MUST be idempotent and safe to run in Docker.
         - No user prompts, all non-interactive.
         - Do not surround with Markdown tags like ```bash ... ```.
+        - CRITICAL: Scripts MUST use actual newline characters, NOT escaped \\n sequences.
+        - CRITICAL: Scripts MUST be valid executable bash without syntax errors.
+        - CRITICAL: Do NOT output literal backslash-n (\\n) in the script - use actual line breaks.
         - Critically: After editable install, the environment must be READY for quick verification:
           - A lightweight profiling sanity check should be able to start (not error immediately) with the project importable.
           - A lightweight pytest sanity check should be able to start (not error immediately), even for projects that require running from a subdirectory (e.g., SciPy).
@@ -193,6 +250,13 @@ class BuildScriptProgram(dspy.Module):
             action_input = (out.action_input or "").strip()  # pyright: ignore[reportAttributeAccessIssue]
             if action in ("none", "finish") and (out.docker_build_script or "").strip():  # pyright: ignore[reportAttributeAccessIssue]
                 iter_script = out.docker_build_script.strip()  # pyright: ignore[reportAttributeAccessIssue]
+                # Sanitize the final script before returning
+                try:
+                    iter_script = _sanitize_script(iter_script)
+                    logger.debug("BuildScriptProgram: script sanitized successfully")
+                except ValueError as e:
+                    logger.warning("BuildScriptProgram: sanitization failed: %s - using original script", e)
+                    # Don't fail the entire process, just log the warning and use original
                 break
 
             # Tool dispatch
@@ -275,7 +339,16 @@ def synthesize_script(
         )
         script = cast(str, result)
         script = str(script)
-        logger.info("synthesize_script: script length=%d", len(script))
+        logger.info("synthesize_script: raw script length=%d", len(script))
+
+        # Sanitize the script to fix common LLM output issues
+        try:
+            script = _sanitize_script(script)
+            logger.info("synthesize_script: sanitized script length=%d", len(script))
+        except ValueError:
+            logger.exception("synthesize_script: sanitization failed")
+            return ""
+
     except Exception:
         logger.exception("synthesize_script: error")
         return ""
@@ -352,42 +425,42 @@ def build_once_with_context(
     return res
 
 
-def build_and_validate(
-    client: docker.DockerClient,
-    task: Task,
-    context: DockerContext,
-    repo_url: str,
-    sha: str,
-    run_labels: dict[str, str],
-    args: argparse.Namespace,
-) -> BuildResult:
-    """Build and validate a container (wrapper that injects build_once_with_context).
+# def build_and_validate(
+#     client: docker.DockerClient,
+#     task: Task,
+#     context: DockerContext,
+#     repo_url: str,
+#     sha: str,
+#     run_labels: dict[str, str],
+#     args: argparse.Namespace,
+# ) -> BuildResult:
+#     """Build and validate a container (wrapper that injects build_once_with_context).
 
-    This is a thin wrapper around the validation module's build_and_validate
-    that injects the build_once_with_context function to avoid circular imports.
+#     This is a thin wrapper around the validation module's build_and_validate
+#     that injects the build_once_with_context function to avoid circular imports.
 
-    Args:
-        client: Docker client
-        task: Task to build and validate
-        context: DockerContext with build configuration
-        repo_url: Repository URL
-        sha: Commit SHA
-        run_labels: Labels for the container run
-        args: Command-line arguments
+#     Args:
+#         client: Docker client
+#         task: Task to build and validate
+#         context: DockerContext with build configuration
+#         repo_url: Repository URL
+#         sha: Commit SHA
+#         run_labels: Labels for the container run
+#         args: Command-line arguments
 
-    Returns:
-        BuildResult with validation outcome
-    """
-    return build_and_validate_impl(
-        client=client,
-        task=task,
-        context=context,
-        repo_url=repo_url,
-        sha=sha,
-        run_labels=run_labels,
-        args=args,
-        build_once_fn=build_once_with_context,
-    )
+#     Returns:
+#         BuildResult with validation outcome
+#     """
+#     return build_and_validate_impl(
+#         client=client,
+#         task=task,
+#         context=context,
+#         repo_url=repo_url,
+#         sha=sha,
+#         run_labels=run_labels,
+#         args=args,
+#         build_once_fn=build_once_with_context,
+#     )
 
 
 def agent_build_and_validate(  # noqa: C901
@@ -417,15 +490,47 @@ def agent_build_and_validate(  # noqa: C901
     run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
     assert task.sha is not None, "task.sha must be set"  # noqa: S101
     sha: str = task.sha
-    task_analysis = analyze_commit(sha, f"{task.owner}/{task.repo}") or {}
+    task_analysis = analyze_commit(sha, f"{task.owner}/{task.repo}", bypass_cache=True) or {}
+    if not task_analysis or not task_analysis.get("can_install", False):
+        logger.warning("agent_build_and_validate: task cannot be installed")
+        return {
+            "ok": False,
+            "rc": 1,
+            "stage": "analysis",
+            "owner": task.owner,
+            "repo": task.repo,
+            "sha": task.sha,
+            "image_name": task.with_tag("pkg").get_image_name(),
+            "duration_s": 0.0,
+            "stderr_tail": json.dumps(task_analysis) if task_analysis else "No analysis",
+            "stdout_tail": task_analysis.get("dry_run_log", ""),
+            "attempts": [],
+            "context_pickle": None,
+        }
+
+    python_version = ""
+    if task_analysis.get("resolution_strategy"):
+        m = RE_PY_EXTRACT.search(task_analysis["resolution_strategy"])
+        if m:
+            python_version = m.group(1)
+    if not python_version:
+        python_version = task_analysis.get("python_version", "")
+    if not python_version and task.python_version:
+        python_version = task.python_version
+
+    logger.info(
+        "agent_build_and_validate: task analysis: python_versions=%s, final_dependencies=%s",
+        task_analysis.get("python_versions"),
+        task_analysis.get("final_dependencies"),
+    )
 
     task = Task(
         owner=task.owner,
         repo=task.repo,
-        sha=sha,
+        sha=task.sha,
         commit_date=task.commit_date,
-        python_version=task_analysis.get("python_version", task.python_version or ""),
-        env_payload=task_analysis.get("final_dependencies", task.env_payload or ""),
+        python_version=python_version,
+        env_payload=json.dumps({"dependencies": task_analysis.get("final_dependencies", "")}) or task.env_payload,
     )
 
     # Gather defaults + similar contexts
@@ -509,6 +614,20 @@ def agent_build_and_validate(  # noqa: C901
         run_labels=run_labels,
     )
 
+    validation_config = ValidationConfig(
+        output_dir=args.output_dir,
+        build_timeout=args.build_timeout,
+        run_timeout=args.run_timeout,
+        tail_chars=args.tail_chars,
+    )
+
+    validator = DockerValidator(
+        client=client,
+        context_registry=context_registry,
+        machine_defaults=machine_defaults,
+        config=validation_config,
+    )
+
     try:
         attempts: list[AttemptRecord] = []
         attempt_idx = 0
@@ -529,14 +648,22 @@ def agent_build_and_validate(  # noqa: C901
                 _save_pickle(ctx, attempt_pickle)
 
             # Build and validate package image
-            build_res = build_and_validate(
-                client=client,
-                task=task,
+            # build_res = build_and_validate(
+            #     client=client,
+            #     task=task,
+            #     context=ctx,
+            #     repo_url=repo_url,
+            #     sha=sha,
+            #     run_labels=run_labels,
+            #     args=args,
+            # )
+            build_res = validator.build_and_validate(
+                task=task.with_tag("run"),
                 context=ctx,
-                repo_url=repo_url,
-                sha=sha,
+                # repo_url=repo_url,
+                # sha=sha,
                 run_labels=run_labels,
-                args=args,
+                build_once_fn=build_once_with_context,
             )
 
             attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
@@ -587,13 +714,29 @@ def agent_build_and_validate(  # noqa: C901
                 result_dict["context_pickle"] = str(final_pickle)
                 return result_dict
 
-            # Early exit if failure is unrelated to docker_build_pkg.sh
-            is_verification_failure = False
-            try:
-                st = build_res.stderr_tail or ""
-                is_verification_failure = "[profile_ok=" in st
-            except Exception:
-                is_verification_failure = False
+            # Detect malformed scripts early (syntax errors, escaped newlines)
+            if not build_res.ok and build_res.stderr_tail:
+                stderr_lower = build_res.stderr_tail.lower()
+                # Check for common script syntax errors
+                if "docker_build_pkg.sh" in build_res.stderr_tail and any(
+                    indicator in stderr_lower
+                    for indicator in [
+                        "syntax error",
+                        ": not found",
+                        "unexpected token",
+                        "line 1:",  # Often indicates malformed script
+                    ]
+                ):
+                    logger.error(
+                        "agent_build_and_validate: detected malformed docker_build_pkg.sh script (syntax error) in candidate %d; "
+                        "script likely has invalid bash syntax",
+                        cand_idx,
+                    )
+
+            # Early exit if failure is unrelated to docker_build_pkg.sh or validation
+            # Check failure_stage to determine if this was a validation failure (profile/tests)
+            # or a build infrastructure failure
+            is_verification_failure = build_res.failure_stage in ("profile", "tests")
             if (
                 (not build_res.ok)
                 and (build_res.stderr_tail)
@@ -601,7 +744,7 @@ def agent_build_and_validate(  # noqa: C901
                 and (not is_verification_failure)
             ):
                 logger.error(
-                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh; not worth iterating"
+                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh or validation; not worth iterating"
                 )
                 return {
                     "ok": False,
@@ -694,14 +837,22 @@ def agent_build_and_validate(  # noqa: C901
                 _save_pickle(ctx, attempt_pickle)
 
             # Build and validate package image
-            build_res = build_and_validate(
-                client=client,
-                task=task,
+            # build_res = build_and_validate(
+            #     client=client,
+            #     task=task,
+            #     context=ctx,
+            #     repo_url=repo_url,
+            #     sha=sha,
+            #     run_labels=run_labels,
+            #     args=args,
+            # )
+            build_res = validator.build_and_validate(
+                task=task.with_tag("run"),
                 context=ctx,
-                repo_url=repo_url,
-                sha=sha,
+                # repo_url=repo_url,
+                # sha=sha,
                 run_labels=run_labels,
-                args=args,
+                build_once_fn=build_once_with_context,
             )
 
             attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
@@ -750,13 +901,10 @@ def agent_build_and_validate(  # noqa: C901
                 result_dict["context_pickle"] = str(final_pickle)
                 return result_dict
 
-            # Early exit if failure is unrelated to docker_build_pkg.sh
-            is_verification_failure = False
-            try:
-                st = build_res.stderr_tail or ""
-                is_verification_failure = "[profile_ok=" in st
-            except Exception:
-                is_verification_failure = False
+            # Early exit if failure is unrelated to docker_build_pkg.sh or validation
+            # Check failure_stage to determine if this was a validation failure (profile/tests)
+            # or a build infrastructure failure
+            is_verification_failure = build_res.failure_stage in ("profile", "tests")
             if (
                 (not build_res.ok)
                 and (build_res.stderr_tail)
@@ -764,7 +912,7 @@ def agent_build_and_validate(  # noqa: C901
                 and (not is_verification_failure)
             ):
                 logger.error(
-                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh; not worth iterating"
+                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh or validation; not worth iterating"
                 )
                 return {
                     "ok": False,
@@ -837,8 +985,10 @@ def agent_build_and_validate(  # noqa: C901
             for name in [
                 task.with_tag("env").get_container_name(),
                 task.with_tag("pkg").get_container_name(),
+                task.with_tag("run").get_container_name(),
                 f"{task.with_tag('env').get_container_name()}-{run_id[:8]}",
                 f"{task.with_tag('pkg').get_container_name()}-{run_id[:8]}",
+                f"{task.with_tag('run').get_container_name()}-{run_id[:8]}",
             ]:
                 with contextlib.suppress(Exception, NotFound):
                     c = client.containers.get(name)
@@ -851,6 +1001,7 @@ def agent_build_and_validate(  # noqa: C901
                 extra_image_refs=[
                     task.with_tag("env").get_image_name(),
                     task.with_tag("pkg").get_image_name(),
+                    task.with_tag("run").get_image_name(),
                 ],
             )
 

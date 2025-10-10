@@ -5,17 +5,24 @@ from __future__ import annotations
 import contextlib
 import re
 import shlex
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from asv.config import Config
+import json5
 
 from datasmith.core.cache import CACHE_LOCATION, cache_completion
 from datasmith.logging_config import get_logger
 
 from .constants import ALLOWLIST_COMMON_PYPI
-from .dependency_resolver import rfc3339, uv_build_and_read_metadata, uv_compile, uv_dry_run_install
+from .dependency_resolver import (
+    rfc3339,
+    uv_build_and_read_metadata,
+    uv_compile,
+    uv_compile_from_pyproject,
+    uv_dry_run_install,
+)
 from .git_utils import asv_finder, prepare_repo_checkout
 from .import_analyzer import infer_runtime_from_imports
 from .metadata_parser import analyze_candidate_meta, discover_candidates, select_primary_candidate
@@ -65,6 +72,17 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
         - excluded_other: other excluded packages
     """
     commit_info: dict[str, Any] | None = None
+
+    # Declare shared variables at function scope with proper types
+    python_version: str | None = None
+    resolved_dependencies: list[str] = []
+    resolution_strategy: str | None = None
+    can_install: bool = False
+    dry_run_log: str = ""
+    excluded_missing_on_pypi: dict[str, str] = {}
+    excluded_exists_incompatible: dict[str, str] = {}
+    excluded_other: dict[str, str] = {}
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         # Use cached base clone + worktree (fast). Fallback to reference clone if needed.
@@ -84,10 +102,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
             asv_cfgs = []
             for cfg_file in asv_cfg_files:
                 with contextlib.suppress(Exception):
-                    asv_cfgs.append(Config.load(cfg_file))
-
-            if not asv_cfgs:
-                return None
+                    asv_cfgs.append(json5.loads(cfg_file.read_text()))
 
             cfg_items = ASVCfgAggregate()
             for cfg in asv_cfgs:
@@ -114,6 +129,9 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                     else:
                         values.add(str(v))
 
+            if not cfg_items.pythons:
+                cfg_items.pythons.update({(3, 8), (3, 9), (3, 10), (3, 11), (3, 12)})
+
             # B) Choose Python version candidates (filtered by commit date)
             # Python 3.7 and below are excluded (EOL, not available in uv)
             if (not cfg_items.pythons) or all(py < (3, 8) for py in cfg_items.pythons):
@@ -122,6 +140,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
 
             # Filter Python versions based on commit date to avoid anachronisms
             authored = commit.authored_datetime
+            cutoff = rfc3339(authored)
             candidate_python_versions = filter_python_versions_by_commit_date(cfg_items.pythons, authored)
 
             if not candidate_python_versions:
@@ -138,6 +157,101 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
             analyzed: dict[str, Any] = {root: analyze_candidate_meta(c) for root, c in candidates.items()}
             primary_root = select_primary_candidate(repo_name, candidates, cfg_items.install_commands, analyzed)
             primary_meta = analyzed[primary_root]
+            primary_cand = candidates[primary_root]
+            # Get the full path to the project directory in the worktree
+            project_dir = tmpfile_pth / primary_root
+            all_sources = [
+                s
+                for s in (primary_cand.setup_py_path, primary_cand.setup_cfg_path, primary_cand.pyproject_path)
+                if s and s.exists()
+            ]
+            if len(all_sources):
+                # directly call uv compile with --all-extras.
+                # uv pip install --all-extras {primary_meta.source}
+                for source in all_sources:
+                    skip_source = False  # Flag to skip to next source on fundamental errors
+                    for py_ver in (".".join(map(str, t)) for t in candidate_python_versions):
+                        if skip_source:
+                            break
+                        for strict_cutoff in (True, False):
+                            # Include source name in venv path to avoid collisions across sources
+                            source_name = source.name.replace(".", "_")
+                            candidate_venv_path = Path(tmpdir) / f"venv_{source_name}_{py_ver.replace('.', '_')}"
+                            try:
+                                venv_cp = run_uv(["venv", str(candidate_venv_path), "--python", py_ver])
+                                if venv_cp.returncode != 0:
+                                    logger.debug(
+                                        f"Failed to create venv with Python {py_ver}: {venv_cp.stderr.decode()}"
+                                    )
+                                    continue
+
+                                # Verify the venv has a working Python executable
+                                python_exe = candidate_venv_path / "bin" / "python"
+                                if not python_exe.exists():
+                                    python_exe = candidate_venv_path / "Scripts" / "python.exe"  # Windows
+
+                                if not python_exe.exists():
+                                    logger.debug(f"Venv created but Python executable not found for version {py_ver}")
+                                    shutil.rmtree(candidate_venv_path, ignore_errors=True)
+                                    continue
+
+                                # Use the pyproject.toml from the full worktree, not from _pkg_blobs
+                                resolved = uv_compile_from_pyproject(
+                                    project_dir / source.name,
+                                    python_version=python_exe.as_posix(),
+                                    cutoff_rfc3339=cutoff if strict_cutoff else None,
+                                )
+                            except Exception as e:
+                                shutil.rmtree(candidate_venv_path, ignore_errors=True)
+                                logger.warning(
+                                    f"uv_compile_from_pyproject failed for Python {py_ver} with cutoff {'strict' if strict_cutoff else 'none'}: {e}"
+                                )
+                                if "--no-build-isolation" in str(e):
+                                    # Fundamental error with this source file, skip to next source
+                                    skip_source = True
+                                    break
+                                continue
+                            strat = f"{'cutoff=strict' if strict_cutoff else 'cutoff=none'}, extras=on, python={py_ver}, source={source.name}"
+
+                            if len(resolved) > 0:
+                                candidate_can_install, candidate_dry_run_log = uv_dry_run_install(
+                                    resolved, python_version=py_ver, venv_path=candidate_venv_path
+                                )
+
+                                if candidate_can_install:
+                                    shutil.rmtree(candidate_venv_path, ignore_errors=True)
+                                    pkg_name_out = primary_meta.name
+                                    pkg_version_out = primary_meta.version
+                                    python_version = py_ver
+                                    resolved_dependencies = resolved
+                                    resolution_strategy = strat
+                                    can_install = candidate_can_install
+                                    dry_run_log = candidate_dry_run_log
+                                    excluded_missing_on_pypi = {}
+                                    excluded_exists_incompatible = {}
+                                    excluded_other = {}
+                                    commit_info = {
+                                        "sha": sha,
+                                        "repo_name": repo_name,
+                                        "package_name": pkg_name_out,
+                                        "package_version": pkg_version_out,
+                                        "python_version": python_version,
+                                        "build_command": list(cfg_items.build_commands),
+                                        "install_command": list(cfg_items.install_commands),
+                                        "final_dependencies": list(dict.fromkeys(resolved_dependencies)),
+                                        "can_install": can_install,
+                                        "dry_run_log": dry_run_log,
+                                        "primary_root": primary_root,
+                                        "resolution_strategy": resolution_strategy,
+                                        "excluded_missing_on_pypi": excluded_missing_on_pypi,
+                                        "excluded_exists_incompatible": excluded_exists_incompatible,
+                                        "excluded_other": excluded_other,
+                                    }
+
+                                    return commit_info
+                                else:
+                                    # Clean up venv when dry-run fails to avoid resource accumulation
+                                    shutil.rmtree(candidate_venv_path, ignore_errors=True)
 
             # D) Aggregate base requirements (unresolved, human-intent)
             base_requirements: set[str] = set()
@@ -174,8 +288,8 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                         if tok in {"-r", "--requirement"} and i + 1 < len(tokens):
                             rel = tokens[i + 1]
                             skip_next = True
-                            resolved = resolve_requirements_file(commit, rel, set())
-                            base_requirements.update(resolved)
+                            requirements_from_file = resolve_requirements_file(commit, rel, set())
+                            base_requirements.update(requirements_from_file)
                             continue
 
                     # direct tokens (skip flags and -r args)
@@ -249,16 +363,8 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                     r for r in runtime_candidates if extract_pkg_name(r) in ALLOWLIST_COMMON_PYPI
                 })
 
-            # G) Try resolution with multiple Python versions, fallback on ABI errors
-            cutoff = rfc3339(authored)
-
             # We'll try each Python version until we find one that works
-            python_version = None
-            resolved_dependencies: list[str] = []
-            resolution_strategy = None
-            can_install = False
-            dry_run_log = ""
-
+            # Variables are already declared at function scope, just reset values
             found_flag = False
 
             for use_cleaned_pinned in (False, True):
@@ -464,10 +570,10 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
             pkg_name_out = primary_meta.name
             pkg_version_out = primary_meta.version
 
-            # Classification dicts are intentionally conservative now
-            excluded_missing_on_pypi: dict[str, str] = {}
-            excluded_exists_incompatible: dict[str, str] = {}
-            excluded_other: dict[str, str] = {}
+            # Classification dicts are intentionally conservative now (already declared at function scope)
+            excluded_missing_on_pypi = {}
+            excluded_exists_incompatible = {}
+            excluded_other = {}
 
             commit_info = {
                 "sha": sha,

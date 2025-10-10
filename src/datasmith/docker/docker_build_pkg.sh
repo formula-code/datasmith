@@ -33,9 +33,6 @@ EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 # - Critically: Prepare for quick verification steps that will run after build:
 #   - A lightweight profiling sanity check should be able to start without immediate error.
 #   - A lightweight pytest sanity check should be able to start without immediate error.
-#     * Some projects (e.g., SciPy) require running pytest from a subdir (e.g., `scipy/`).
-#   - Install minimal test/benchmark extras or dev requirements so that import and basic pytest discovery succeed.
-#   - Prefer fast readiness (lightweight deps) over exhaustive installs.
 #
 # DO NOT:
 # - Change env names or Python versions outside MODEL EDIT AREA.
@@ -51,13 +48,6 @@ die()  { printf "\033[1;31m[fail]\033[0m %s\n" "$*" >&2; exit 1; }
 # Conservative default parallelism (override if the repo benefits)
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 export NPY_NUM_BUILD_JOBS="${NPY_NUM_BUILD_JOBS:-2}"
-
-# Extract commit date and set UV_EXCLUDE_NEWER for time-consistent package resolution
-COMMIT_DATE=$(git log -1 --format=%cI 2>/dev/null || echo "")
-if [[ -n "$COMMIT_DATE" ]]; then
-    export UV_EXCLUDE_NEWER="$COMMIT_DATE"
-    echo "Using UV_EXCLUDE_NEWER=$UV_EXCLUDE_NEWER for time-capped resolution"
-fi
 
 # -----------------------------
 # Build & test across envs

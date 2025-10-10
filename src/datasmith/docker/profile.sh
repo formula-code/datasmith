@@ -99,6 +99,7 @@ echo "[profile] Running ASV baseline on $COMMIT_SHA"
 OLD_DIR="$(pwd)"
 REAL_TEST_CONF="$(realpath "$TEST_CONF")"
 cd "$(dirname "$TEST_CONF")"
+micromamba run -n "$ENV_NAME" uv pip install -U asv
 micromamba run -n "$ENV_NAME" asv machine --yes --config "$REAL_TEST_CONF" \
   --machine "$MACHINE" \
   --num_cpu "1" \
@@ -117,13 +118,6 @@ cd "$OLD_DIR"
 
 # Record base SHA for robust compare later
 echo "$COMMIT_SHA" > "$BASE_SHA_FILE"
-
-# Bundle everything once
-tar -czf "$TARBALL" \
-  -C "$(dirname "$LOG_DIR")" "$(basename "$LOG_DIR")" \
-  -C "$(dirname "$TEST_CONF")" "$(basename "$TEST_CONF")"
-
-echo "[profile] Baseline written to $TARBALL"
 
 echo "[profile] Write the list of benchmarks to /workspace/repo/asv_benchmarks.txt"
 cat > get_benchmarks.py << 'EOF'
@@ -146,6 +140,13 @@ if [ ! -f /workspace/repo/asv_benchmarks.txt ]; then
   micromamba run -n "$ENV_NAME" python get_benchmarks.py "$TEST_CONF" --out_file /workspace/repo/asv_benchmarks.txt
   echo "[profile] Write the list of benchmarks to /workspace/repo/asv_benchmarks.txt"
 fi
+
+# Bundle everything once if $LOG_DIR and $TEST_CONF exist
+if [ -d "$LOG_DIR" ] && [ -f "$TEST_CONF" ] && [ -s /workspace/repo/asv_benchmarks.txt ]; then
+  tar -czf "$TARBALL" $LOG_DIR $(realpath $TEST_CONF) /workspace/repo/asv_benchmarks.txt || true
+  echo "[profile] Baseline written to $TARBALL"
+fi
+
 
 echo "[profile] Cleaning up intermediate files..."
 
@@ -170,4 +171,4 @@ rm -rf "$RESULTS_DIR" "$HTML_DIR" "$LOG_DIR"
 rm -f "$BASE_SHA_FILE"
 
 cd "$CURR_DIR"
-echo "[profile] Cleanup complete. Remaining artifact: $TARBALL"
+echo "[profile] Cleanup complete."
