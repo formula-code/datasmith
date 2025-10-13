@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from git import BadName, Commit, GitCommandError, Repo
+from git import BadName, Commit, Repo
 from requests.exceptions import HTTPError
 
 from datasmith import logger
@@ -88,12 +88,15 @@ def get_commit_info_offline(repo: Repo, commit_sha: str) -> dict[str, Any]:
         commit = repo.commit(commit_sha)
     except (BadName, ValueError):
         logger.exception("Maybe commit not found: %s", commit_sha)
-        repo.git.fetch("--no-filter", "--quiet", "origin", commit_sha)
-        commit = repo.commit(commit_sha)
-    except GitCommandError:
+        try:
+            repo.git.fetch("--no-filter", "--quiet", "origin", commit_sha)
+            commit = repo.commit(commit_sha)
+        except Exception:
+            logger.exception("Failed to fetch commit from remote: %s", commit_sha)
+            return default
+    except Exception:
         logger.exception("Error fetching commit info: %s", commit_sha)
         return default
-
     stats = commit.stats
     patch = (
         repo.git.format_patch("--stdout", "-1", commit.hexsha)

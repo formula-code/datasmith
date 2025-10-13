@@ -52,31 +52,19 @@ def main() -> None:
 
     benchmarks = benchmarks.sort_values("stars", ascending=False, ignore_index=True).head(args.max_repos)
 
-    # with ThreadPoolExecutor(max_workers=args.threads) as tp:
-    #     benchmarks["asv_conf_path"] = list(
-    #         tqdm(tp.map(_asv_conf_worker, benchmarks["repo_name"]), total=len(benchmarks), desc="Scanning repos")
-    #     )
-    # benchmarks = benchmarks.dropna(subset=["asv_conf_path"])
-
     if benchmarks.empty:
         # Nothing to do. create empty output to keep downstream happy.
         Path(args.output_pth).write_text("", encoding="utf-8")
         logger.warning("No repositories with asv.conf.json found. Exiting.")
         return
 
-    # with open(args.merged_commits_pth, encoding="utf-8") as f:
-    #     commits = pd.DataFrame([json.loads(line.strip().replace("'", '"').replace("None", "null")) for line in f])
-
-    # commits = commits.merge(benchmarks, how="right", on="repo_name")
-    # commits = commits.dropna(subset=["commit_sha"])
-
-    # all_repo_names = set(commits["repo_name"])
-    all_repo_names = set(benchmarks["repo_name"])
+    all_repo_names = list(set(benchmarks["repo_name"]))
 
     # download all repos to a temp dir
     with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
         commit2kind = {}
         commit2repo = {}
+        commit2pr = {}
         all_repos = {}
         commit_info_args: list[tuple[Repo, str]] = []
         with ThreadPoolExecutor(max_workers=args.threads) as tp:
@@ -85,7 +73,9 @@ def main() -> None:
                 repo_name, repo = f.result()
                 all_repos[repo_name] = repo
                 # kind_commit_shas = collect_commits(repo)
-                merge_shas = collect_merge_shas(repo_name)
+                merge_prs = collect_merge_shas(repo_name)
+                commit2pr.update({pr.get("merge_commit_sha"): pr for pr in merge_prs})
+                merge_shas = [pr.get("merge_commit_sha") for pr in merge_prs if pr.get("merge_commit_sha")]
 
                 for commit_sha in set(merge_shas):
                     commit_info_args.append((repo, commit_sha))
@@ -121,6 +111,10 @@ def main() -> None:
 
     commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
     commits_merged["repo_name"] = commits_merged["sha"].map(commit2repo)
+    # commits_merged["pr"] = commits_merged["sha"].map(commit2pr)
+    # commit2pr returns a dict that is json-serializable, so we can expand it into multiple columns
+    pr_expanded = commits_merged["sha"].map(commit2pr).apply(pd.Series)
+    commits_merged = pd.concat([commits_merged, pr_expanded.add_prefix("pr_")], axis=1)
 
     out_path = Path(args.output_pth)
     if not out_path.parent.exists():

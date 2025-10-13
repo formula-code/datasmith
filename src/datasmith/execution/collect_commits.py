@@ -92,7 +92,7 @@ def search_commits(
     return merge_commits
 
 
-def collect_merge_shas(repo: str) -> list[tuple[str, str]]:
+def collect_merge_shas(repo: str) -> list[dict]:
     """
     Return (merge_commit_sha, merged_at) for PRs that are closed AND have a non-null merge_commit_sha.
     Optimizations:
@@ -120,7 +120,7 @@ def collect_merge_shas(repo: str) -> list[tuple[str, str]]:
         if merged_at and merge_sha:
             sha = str(merge_sha).strip()
             if sha and sha not in seen:
-                out.append((sha, str(merged_at)))
+                out.append(pr)
                 seen.add(sha)
 
     logger.info("Collected %d merged PR SHAs (non-null) from %s.", len(out), repo)

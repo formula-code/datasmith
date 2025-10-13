@@ -151,7 +151,7 @@ def is_delinquient_repo(repo_name: str) -> bool:
     return any(bad in normalized for bad in _BAD_REPOS)
 
 
-def crude_perf_filter(df: pd.DataFrame) -> pd.DataFrame:
+def crude_perf_filter(df: pd.DataFrame, filter_repos: bool = True) -> pd.DataFrame:
     """Filter commits DataFrame to likely performance-related ones."""
     filtered_df = df.copy(deep=True)
 
@@ -164,7 +164,8 @@ def crude_perf_filter(df: pd.DataFrame) -> pd.DataFrame:
         & (filtered_df["total_changes"] < 4000)
         & (filtered_df["n_files_changed"] < 500)
         & (filtered_df["patch"].str.len() < 20000)
-        & (~filtered_df["repo_name"].apply(is_delinquient_repo))
     )
+    if filter_repos:
+        mask &= ~filtered_df["repo_name"].apply(is_delinquient_repo)
 
     return filtered_df.loc[mask].copy(deep=True)

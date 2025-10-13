@@ -33,6 +33,9 @@ def _build_github_headers(diff_api: bool = False) -> dict[str, str]:
     if "GH_TOKEN" not in os.environ:
         logger.warning("No GH_TOKEN environment variable found. Rate limits may apply.")
     token = os.environ.get("GH_TOKEN")
+    if token2 := os.environ.get("GH_TOKEN2"):
+        # randomly use one of two tokens if available to double rate limit
+        token = random.choice([token, token2])  # noqa: S311
     accept = "application/vnd.github.v3.diff" if diff_api else "application/vnd.github+json"
     return {
         "Accept": accept,
