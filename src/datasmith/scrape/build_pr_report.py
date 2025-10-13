@@ -13,10 +13,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
+import requests
 import tiktoken
 import tqdm
 
 from datasmith.agents.config import configure_agent_backends
+from datasmith.agents.perf_judge import PerfClassifier
 from datasmith.agents.summ_judge import ClassifyJudge, LLMCommentSummarizer, LLMStructurer
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import _parse_commit_url, _parse_pr_url
@@ -32,6 +34,7 @@ MAX_LINKS_TO_FOLLOW = 60  # safety cap for level-2 traversal
 ISSUE_STRUCTURER = LLMStructurer()
 COMMENT_SUMMARIZER = LLMCommentSummarizer()
 CLASSIFY_JUDGE = ClassifyJudge()
+PERF_CLASSIFIER = PerfClassifier()
 
 # Dataframe with git commits to generate reports for
 
@@ -227,6 +230,49 @@ def anonymize_github_issue(text: str) -> str:
     return text
 
 
+def get_pr_change_summary_from_url(owner, repo, pr_number) -> str:
+    api = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
+
+    headers = {"Accept": "application/vnd.github+json"}
+    lines = [
+        "| File | Status | Lines Added | Lines Removed | Total Changes |",
+        "|------|--------|-------------|---------------|---------------|",
+    ]
+    total_add = total_del = total_changes = 0
+    page = 1
+
+    while True:
+        resp = requests.get(api, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
+        resp.raise_for_status()
+        files = resp.json()
+        if not files:
+            break
+
+        for f in files:
+            status = f.get("status", "")
+            filename = f.get("filename", "")
+            if status == "renamed" and f.get("previous_filename"):
+                filename = f"{f['previous_filename']} ➜ {f['filename']}"
+
+            added = f.get("additions", 0)
+            deleted = f.get("deletions", 0)
+            changes = f.get("changes", added + deleted)
+
+            lines.append(f"| {filename} | {status} | {added} | {deleted} | {changes} |")
+
+            total_add += added
+            total_del += deleted
+            total_changes += changes
+
+        # pagination: check if there's another page
+        if 'rel="next"' not in resp.headers.get("Link", ""):
+            break
+        page += 1
+
+    lines.append(f"| **TOTAL** |  | **{total_add}** | **{total_del}** | **{total_changes}** |")
+    return "\n".join(lines)
+
+
 def problem_statement(owner: str, repo: str, num: int) -> str:
     """Returns a summary of the main issue of the pull request."""
     pr = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{num}")
@@ -344,7 +390,7 @@ def _process_linked_resources(comment_links: set[str], visited_links: set[str]) 
 
 def build_report(
     owner: str, repo: str, num: int, patch: str, llm: bool, add_classification: bool = False
-) -> tuple[str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, bool]:
     out_parts = []
     visited_links: set[str] = {""}
     logger.debug("got meta-data")
@@ -366,7 +412,21 @@ def build_report(
     # Build problem statement
     issue_history = problem_statement(owner, repo, num)
     if issue_history == "NOT_A_VALID_PR":
-        return "NOT_A_VALID_PR", "", "", "", ""
+        return "NOT_A_VALID_PR", "", "", "", "", False
+
+    # Check if the issue is a performance issue
+    is_performance_commit = False
+    if llm:
+        file_change = get_pr_change_summary_from_url(owner, repo, num)
+        is_performance_commit, json_response = PERF_CLASSIFIER.get_response(
+            message=issue_history, file_change_summary=file_change
+        )
+        if is_performance_commit:
+            out_parts.append("\n### Performance Issue")
+            out_parts.append(json_response)
+        else:
+            logger.debug("NOT A PERFORMANCE COMMIT")
+            return "NOT_A_PERFORMANCE_COMMIT", "", "", "", "", False
 
     problem_stat = ""
     if llm:
@@ -390,7 +450,7 @@ def build_report(
         out_parts.append(diff)
         logger.debug("got difficulty")
 
-    return "\n\n".join(out_parts), problem_stat, comment_summary, cat, diff
+    return "\n\n".join(out_parts), problem_stat, comment_summary, cat, diff, is_performance_commit
 
 
 def save_markdown(report: str, filepath: str) -> None:
@@ -426,7 +486,7 @@ def breakpoints_scrape_comments(
     for gt_url in tqdm.tqdm(merged_df.gt_url.unique(), desc="Reports", unit="commit"):
         owner, repo, sha = _parse_commit_url(gt_url)
         logger.debug("Patch required for full usuage")
-        report, _, _, _, _ = build_report(owner, repo, int(sha), "", llm=False)
+        report, _, _, _, _, _ = build_report(owner, repo, int(sha), "", llm=False)
         commit_hash = urllib.parse.urlparse(gt_url).path.split("/")[-1]
         n_tokens = len(encoding.encode(report))
         reports.append({
@@ -476,7 +536,7 @@ def build(df: pd.DataFrame, args: argparse.Namespace) -> None:
         owner = name.split("-", 2)[0]
         repo = name.split("-", 2)[1]
         try:
-            report, prob_stat, hints, classif, diffi = build_report(
+            report, prob_stat, hints, classif, diffi, perf = build_report(
                 owner, repo, int(df["base_commit"][i]), df["patch"][i], args.summarize_llm
             )
         except Exception:
@@ -495,10 +555,10 @@ def build(df: pd.DataFrame, args: argparse.Namespace) -> None:
         json.dump(result_map, f, indent=4)
 
 
-def build_pr_report(link: str, summarize_llm: bool, add_classification: bool) -> str | None:
+def build_pr_report(link: str, summarize_llm: bool, add_classification: bool) -> tuple[str, str, str, str, str, bool]:
     owner, repo, num = _parse_pr_url(link)
     # logger.debug(problem_statement(owner=owner, repo=repo, num=num))
-    report, prob_stat, hints, classif, diffi = build_report(
+    report, prob_stat, hints, classif, diffi, perf = build_report(
         owner=owner,
         repo=repo,
         num=int(num),
@@ -507,7 +567,7 @@ def build_pr_report(link: str, summarize_llm: bool, add_classification: bool) ->
         add_classification=add_classification,
     )
 
-    return report
+    return report, prob_stat, hints, classif, diffi, perf
     # if report == "NOT_A_VALID_PR":
     #     logger.debug(f"{link}: NOT_A_VALID_PR")
     #     return
@@ -523,33 +583,25 @@ if __name__ == "__main__":
         default="/mnt/sdd1/atharvas/formulacode/datasmith/scratch/artifacts/processed/downloads/useful_enriched.tbformat_2025-09-13T23:38:29.017709.parquet",
         help="location of dataframe with the commits",
     )
-    (
-        parser.add_argument(
-            "--save_location",
-            default="/mnt/sdd1/akanksha/formulacode/datasmith/src/datasmith/scrape/data",
-            help="location to save instruction markdown and json with problem statement and hints",
-        ),
+    parser.add_argument(
+        "--save_location",
+        default="/mnt/sdd1/akanksha/formulacode/datasmith/src/datasmith/scrape/data",
+        help="location to save instruction markdown and json with problem statement and hints",
     )
-    (
-        parser.add_argument(
-            "--markdown",
-            default=True,
-            help="boolean (marks whether to create markdown file or not)",
-        ),
+    parser.add_argument(
+        "--markdown",
+        default=True,
+        help="boolean (marks whether to create markdown file or not)",
     )
-    (
-        parser.add_argument(
-            "--summarize_llm",
-            default=True,
-            help="boolean (marks whether to use llm summarization or just heuristics)",
-        )
+    parser.add_argument(
+        "--summarize_llm",
+        default=True,
+        help="boolean (marks whether to use llm summarization or just heuristics)",
     )
-    (
-        parser.add_argument(
-            "--link",
-            default="https://github.com/astropy/astropy/pull/16088",
-            help="to test individual links",
-        )
+    parser.add_argument(
+        "--link",
+        default="https://github.com/astropy/astropy/pull/16088",
+        help="to test individual links",
     )
     args = parser.parse_args()
 
@@ -598,6 +650,8 @@ if __name__ == "__main__":
     # build(df, args)
 
     # _______________________________________________________________________________________
-    report = build_pr_report(args.link, args.summarize_llm, add_classification=False)
+    report, prob_stat, hints, classif, diffi, perf = build_pr_report(
+        args.link, args.summarize_llm, add_classification=False
+    )
     if report and "NOT_A_VALID_PR" not in report and Path(args.save_location).exists():
         save_markdown(report, f"{args.save_location}/pr_report_{args.link}.md")
