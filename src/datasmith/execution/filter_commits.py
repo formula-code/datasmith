@@ -36,9 +36,9 @@ _NEGATIVE_PATTERNS: Final = [
     r"^\s*revert\b",
     r"^\s*(?:release|prepare(?:d)? release)\b|\bchangelog\b|\btag(?:ging)?\b",
     r"\bbump(?:ing)?\b|\bversions?\b",  # now matches "version" & "versions"
-    r"\bupdate\s+versions?\b",  # e.g. "Update versions for 12.0.1"
+    # r"\bupdate\s+versions?\b",  # e.g. "Update versions for 12.0.1"
     r"\[(?:\s*)release(?:\s*)\]",  # e.g. "[Release] ..."
-    r"^\s*(?:minor|major|patch)\s*:?\s*\[?release\]?",  # e.g. "MINOR: [Release] ..."
+    r"^\s*(?:minor)\s*:?\s*\[?release\]?",  # e.g. "MINOR: [Release] ..."
     # Docs / typing / formatting / CI
     r"\bdocs?(?:umentation)?\b|\breadme\b|\bdocstring\b",
     r"\btype\s+comments?\b|\btype\s+annotations?\b|\btyping\b|\bmypy\b|\bpyright\b|\bpytype\b",
@@ -161,9 +161,10 @@ def crude_perf_filter(df: pd.DataFrame, filter_repos: bool = True) -> pd.DataFra
 
     mask = (
         filtered_df["is_perf"]
-        & (filtered_df["total_changes"] < 4000)
+        & (filtered_df["total_changes"] < 40000)
         & (filtered_df["n_files_changed"] < 500)
-        & (filtered_df["patch"].str.len() < 20000)
+        & (filtered_df["n_patch_tokens"] >= 5)
+        & (filtered_df["n_patch_tokens"] < 80000)
     )
     if filter_repos:
         mask &= ~filtered_df["repo_name"].apply(is_delinquient_repo)
