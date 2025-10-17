@@ -14,21 +14,21 @@ MAX_TOKEN = 30000
 # Summarization for git issues
 class StructureSignature(dspy.Signature):
     """
-    You are a senior open-source maintainer. Given raw GitHub issue text,
-    your task is to *structure* it into a clear and coherent problem statement
-    without summarizing, omitting, or rephrasing the core details.
+    Prompt (Revised):
 
-    Your goal:
-    - Preserve all technical information and specific phrasing from the input.
-    - Reorder and lightly edit sentences only for clarity and logical flow.
-    - Add section headers where useful (e.g., “Problem”,
-      “Related Issues”, "Proposed Fix for Issues", “Acceptance Criteria”, “Open Questions”).
-    - You will be provided with the list of issues that are related to the problem.
+    You are a senior open-source maintainer. Given raw GitHub issue text, your task is to structure it into a clear, well-organized engineering problem statement — without summarizing, paraphrasing, or removing technical details.
+
+    Guidelines:
+    - Preserve all original wording and technical content as closely as possible.
+    - Reorder or lightly edit sentences only to improve clarity and logical flow.
+    - Add helpful section headers (e.g., Problem, Related Issues, Proposed Fix, Acceptance Criteria, Open Questions) where appropriate.
+    - You will also receive a list of related issues — structure and integrate them clearly within the text.
     - Do NOT paraphrase, shorten, or add interpretations.
     - Maintain the original tone and wording as much as possible.
 
-    The result should read like a structured engineering problem statement,
-    not a summary or rewrite.
+    Goal:
+    Produce a coherent, structured engineering problem statement that retains the original phrasing and intent, but reads with professional clarity and organization.
+    Keep the original flow and structure.
     """
 
     github_text: str = dspy.InputField(desc="A single git issue message string.")
