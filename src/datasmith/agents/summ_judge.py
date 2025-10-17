@@ -21,8 +21,9 @@ class StructureSignature(dspy.Signature):
     Your goal:
     - Preserve all technical information and specific phrasing from the input.
     - Reorder and lightly edit sentences only for clarity and logical flow.
-    - Add section headers where useful (e.g., “Problem”, “Proposed Fix”,
-      “Related Issues”, “Acceptance Criteria”, “Open Questions”).
+    - Add section headers where useful (e.g., “Problem”,
+      “Related Issues”, "Proposed Fix for Issues", “Acceptance Criteria”, “Open Questions”).
+    - You will be provided with the list of issues that are related to the problem.
     - Do NOT paraphrase, shorten, or add interpretations.
     - Maintain the original tone and wording as much as possible.
 
@@ -31,6 +32,7 @@ class StructureSignature(dspy.Signature):
     """
 
     github_text: str = dspy.InputField(desc="A single git issue message string.")
+    related_issues: str = dspy.InputField(desc="Github descriptions of related issues and their references.")
     structured_issue: str = dspy.OutputField(desc="Plain-text summary of the message.")
 
 
@@ -39,8 +41,8 @@ class LLMStructurer(dspy.Module):
         super().__init__()
         self.predict = dspy.Predict(StructureSignature)
 
-    def forward(self, message: str) -> object | Any:
-        out = self.predict(github_text=message)
+    def forward(self, message: str, related_issues: str) -> object | Any:
+        out = self.predict(github_text=message, related_issues=related_issues)
         return out
 
 

@@ -1,27 +1,21 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import re
 import textwrap
-import typing
-import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import pandas as pd
 import requests
-import tiktoken
-import tqdm
 
+# import tiktoken
 from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.perf_judge import PerfClassifier
 from datasmith.agents.summ_judge import ClassifyJudge, LLMCommentSummarizer, LLMStructurer
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.utils import _parse_commit_url, _parse_pr_url
+from datasmith.scrape.utils import _parse_pr_url
 from datasmith.utils import _get_github_metadata
 
 logger = configure_logging()
@@ -80,10 +74,43 @@ def pr_meta(owner: str, repo: str, num: int) -> dict[str, Any]:
     return {}
 
 
+def issue_timeline(owner: str, repo: str, num: int) -> list[dict[str, Any]]:
+    """
+    Retrieve the full GitHub issue timeline (all events, including cross-references)
+    with pagination support.
+    """
+    all_events: list[dict[str, Any]] = []
+    endpoint = f"/repos/{owner}/{repo}/issues/{num}/timeline"
+    timeline_page = _get_github_metadata(endpoint=endpoint)
+
+    if timeline_page and isinstance(timeline_page, list):
+        all_events.extend(timeline_page)
+    else:
+        return []
+    cross_refs = [e for e in all_events if e.get("event") == "cross-referenced"]
+    return cross_refs
+
+
 def issue_comments(owner: str, repo: str, num: int) -> list[dict[str, Any]]:
-    issue_metadata = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/issues/{num}/comments?per_page=100")
-    if issue_metadata and isinstance(issue_metadata, list):
-        return issue_metadata
+    all_comments: list[dict[str, Any]] = []
+    page = 1
+
+    while True:
+        endpoint = f"/repos/{owner}/{repo}/issues/{num}/comments?per_page=100&page={page}"
+        issue_metadata = _get_github_metadata(endpoint=endpoint)
+
+        if issue_metadata and isinstance(issue_metadata, list):
+            all_comments.extend(issue_metadata)
+        else:
+            break
+
+        # Stop when fewer than 100 results?
+        if len(issue_metadata) < 100:
+            break
+        page += 1
+
+    if all_comments:
+        return all_comments
     return []
 
 
@@ -273,28 +300,25 @@ def get_pr_change_summary_from_url(owner, repo, pr_number) -> str:
     return "\n".join(lines)
 
 
-def problem_statement(owner: str, repo: str, num: int) -> str:
+def problem_statement(owner: str, repo: str, num: int) -> tuple[str, str]:
     """Returns a summary of the main issue of the pull request."""
     pr = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{num}")
-    out_parts = []
     if not pr or not isinstance(pr, dict):
-        out_parts.append("_This pull request is not valid._")
-        return "\n\n".join(out_parts)
-    problem_stat = []
+        return "NOT_A_VALID_PR", ""
     issue_url = pr["issue_url"]
-    problem_stat.append(summarize(issue_url))
+    git_problem_str, git_issue_str = summarize(issue_url)
 
-    return " ".join(str(x) for x in problem_stat)
+    return git_problem_str, git_issue_str
 
 
-def summarize(issue_url: str) -> str:
+def summarize(issue_url: str) -> tuple[str, str]:
     """Takes in a URL and provides a summary of the comments in it.
     Used as helpr function to generate problem_statement and hints.
     Purely heuristc in nature (No LLM calls being made.)
     """
     parsed = urlparse(issue_url)
     endpoint = parsed.path.lstrip("/")
-    issue = _get_github_metadata(endpoint)
+    issue = _get_github_metadata(endpoint)  # THIS IS THE PR ITSELF
     description = ""
     if issue and isinstance(issue, dict) and issue["body"]:
         description += issue["body"]
@@ -305,30 +329,46 @@ def summarize(issue_url: str) -> str:
     owner, repo = parts[1], parts[2]
 
     prob_stat = [description + "\n"]
+    issue_stat = []
 
     # Extracting all issue numbers
     issues = re.findall(r"#(\d+)", description)
     logger.debug(description)
     if issues == []:
-        return "NOT_A_VALID_PR"
-    for iss in issues:
+        return "NOT_A_VALID_PR", ""
+    for i, iss in enumerate(issues):
         endpoint = f"/repos/{owner}/{repo}/issues/{iss}"
         issue_thread = _get_github_metadata(endpoint)
         stat = ""
         if issue_thread and isinstance(issue_thread, dict):
-            stat = f"Issue {iss}:" + issue_thread["title"] + "\n"
-        prob_stat.append(stat)
+            issue_comments_list = issue_comments(owner, repo, iss)
+            stat = f"Issue {i}:" + issue_thread["title"] + "\n"
+            stat = (
+                stat
+                + f"Issue {i} comments:"
+                + "\n".join(comment.get("body", "") for comment in issue_comments_list)
+                + "\n"
+            )
+            stat = (
+                stat
+                + f"Issue {i} cross-referenced comments:"
+                + "\n".join(comment["source"]["issue"]["body"] for comment in issue_timeline(owner, repo, iss))
+                + "\n"
+            )
+        issue_stat.append(stat)
 
-    git_issue_str = " ".join(str(x) for x in prob_stat)
+    git_problem_str = " ".join(str(x) for x in prob_stat)
+    git_problem_str = anonymize_github_issue(git_problem_str)
+    git_issue_str = " ".join(str(x) for x in issue_stat)
     git_issue_str = anonymize_github_issue(git_issue_str)
     # classify whether performance improving or not.
 
-    return git_issue_str
+    return git_problem_str, git_issue_str
 
 
-def summarize_llm(issue_history: str) -> str:
+def summarize_llm(issue_history: str, issue_stat: str) -> str:
     try:
-        pred = ISSUE_STRUCTURER(issue_history)
+        pred = ISSUE_STRUCTURER(issue_history, issue_stat)
         # pred is a dspy.Prediction with attribute .summary
         summ = getattr(pred, "structured_issue", "NOT FOUND")
         return str(summ).strip()
@@ -400,17 +440,20 @@ def build_report(
 
     # Summarize comments if LLM is enabled
     comment_summary = ""
+    out_parts.append("\n### Hints\n")
     if llm:
-        out_parts.append("\n### Hints\n")
         comment_summary = summarize_comments("\n\n".join(github_comments))
         out_parts.append(comment_summary)
+    else:
+        print(github_comments, "GITHUB_COMMENTS")
+        comment_summary = "\n\n".join(github_comments)
     logger.debug("got comment summary")
 
     # Process linked resources
     out_parts.extend(_process_linked_resources(comment_links, visited_links))
 
     # Build problem statement
-    issue_history = problem_statement(owner, repo, num)
+    issue_history, issue_stat = problem_statement(owner, repo, num)
     if issue_history == "NOT_A_VALID_PR":
         return "NOT_A_VALID_PR", "", "", "", "", False
 
@@ -419,7 +462,7 @@ def build_report(
     if llm:
         file_change = get_pr_change_summary_from_url(owner, repo, num)
         is_performance_commit, json_response = PERF_CLASSIFIER.get_response(
-            message=issue_history, file_change_summary=file_change
+            message=issue_history, file_change_summary=file_change, git_patch=patch
         )
         if is_performance_commit:
             out_parts.append("\n### Performance Issue")
@@ -431,7 +474,7 @@ def build_report(
     problem_stat = ""
     if llm:
         out_parts.append("\n### LLM Generated summary")
-        problem_stat = summarize_llm(issue_history)
+        problem_stat = summarize_llm(issue_history, issue_stat)
         out_parts.append(problem_stat)
     else:
         out_parts.append("\n### Problem Statement\n")
@@ -460,47 +503,47 @@ def save_markdown(report: str, filepath: str) -> None:
     path.write_text(report, encoding="utf-8")
 
 
-def breakpoints_scrape_comments(
-    breakpoints_df: pd.DataFrame, coverage_df: pd.DataFrame, index_data: dict[str, typing.Any]
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Generate GitHub commit reports and return an enriched *merged* DataFrame.
+# def breakpoints_scrape_comments(
+#     breakpoints_df: pd.DataFrame, coverage_df: pd.DataFrame, index_data: dict[str, typing.Any]
+# ) -> tuple[pd.DataFrame, pd.DataFrame]:
+#     """Generate GitHub commit reports and return an enriched *merged* DataFrame.
 
-    * `coverage_df` **must** exist - it is produced by `--compute-coverage`.
-    * Each report is saved as `<reports_dir>/<commit_hash>.md`.
-    * The returned DataFrame includes an `n_tokens` column.
-    """
-    bp = breakpoints_df.copy()
-    bp["gt_url"] = bp["gt_hash"].astype(str).map(lambda h: urllib.parse.urljoin(index_data["show_commit_url"], h))
+#     * `coverage_df` **must** exist - it is produced by `--compute-coverage`.
+#     * Each report is saved as `<reports_dir>/<commit_hash>.md`.
+#     * The returned DataFrame includes an `n_tokens` column.
+#     """
+#     bp = breakpoints_df.copy()
+#     bp["gt_url"] = bp["gt_hash"].astype(str).map(lambda h: urllib.parse.urljoin(index_data["show_commit_url"], h))
 
-    if coverage_df is not None:
-        # Average coverage per commit for the ground-truth hash
-        gt_hashes = coverage_df.dropna().query("typ == 'gt_hash'").groupby(["url"])["coverage"].mean().reset_index()
-        merged_df = bp.merge(gt_hashes, how="inner", left_on="gt_url", right_on="url")
-    else:
-        merged_df = bp.copy()
+#     if coverage_df is not None:
+#         # Average coverage per commit for the ground-truth hash
+#         gt_hashes = coverage_df.dropna().query("typ == 'gt_hash'").groupby(["url"])["coverage"].mean().reset_index()
+#         merged_df = bp.merge(gt_hashes, how="inner", left_on="gt_url", right_on="url")
+#     else:
+#         merged_df = bp.copy()
 
-    # ---------------------------------------------------------------- reports
-    reports = []
-    encoding = tiktoken.encoding_for_model("gpt-4o-mini")
-    url2token: dict[str, int] = {}
-    for gt_url in tqdm.tqdm(merged_df.gt_url.unique(), desc="Reports", unit="commit"):
-        owner, repo, sha = _parse_commit_url(gt_url)
-        logger.debug("Patch required for full usuage")
-        report, _, _, _, _, _ = build_report(owner, repo, int(sha), "", llm=False)
-        commit_hash = urllib.parse.urlparse(gt_url).path.split("/")[-1]
-        n_tokens = len(encoding.encode(report))
-        reports.append({
-            "commit_hash": commit_hash,
-            "report": report,
-            "gt_url": gt_url,
-            "n_tokens": n_tokens,
-        })
+#     # ---------------------------------------------------------------- reports
+#     reports = []
+#     encoding = tiktoken.encoding_for_model("gpt-4o-mini")
+#     url2token: dict[str, int] = {}
+#     for gt_url in tqdm.tqdm(merged_df.gt_url.unique(), desc="Reports", unit="commit"):
+#         owner, repo, sha = _parse_commit_url(gt_url)
+#         logger.debug("Patch required for full usuage")
+#         report, _, _, _, _, _ = build_report(owner, repo, int(sha), "", llm=False)
+#         commit_hash = urllib.parse.urlparse(gt_url).path.split("/")[-1]
+#         n_tokens = len(encoding.encode(report))
+#         reports.append({
+#             "commit_hash": commit_hash,
+#             "report": report,
+#             "gt_url": gt_url,
+#             "n_tokens": n_tokens,
+#         })
 
-        url2token[gt_url] = n_tokens
+#         url2token[gt_url] = n_tokens
 
-    merged_df["n_tokens"] = merged_df["gt_url"].map(url2token)
-    reports_df = pd.DataFrame(reports)
-    return merged_df, reports_df
+#     merged_df["n_tokens"] = merged_df["gt_url"].map(url2token)
+#     reports_df = pd.DataFrame(reports)
+#     return merged_df, reports_df
 
 
 def classification(problem_desc: str, owner: str, repo: str, git_patch: str) -> tuple[str, str]:
@@ -527,42 +570,44 @@ def classification(problem_desc: str, owner: str, repo: str, git_patch: str) -> 
         return f"[classification failed: {e}]", ""
 
 
-def build(df: pd.DataFrame, args: argparse.Namespace) -> None:
-    result_map: dict[str, dict[str, str]] = {}
-    mark = args.markdown
-    save_folder = args.save_location
-    for i in range(len(df)):
-        name = df["container_name"][i]
-        owner = name.split("-", 2)[0]
-        repo = name.split("-", 2)[1]
-        try:
-            report, prob_stat, hints, classif, diffi, perf = build_report(
-                owner, repo, int(df["base_commit"][i]), df["patch"][i], args.summarize_llm
-            )
-        except Exception:
-            logger.debug("ERROR")
-            continue
-        if mark:
-            save_markdown(report, f"{args.save_location}/commit_report_{i}.md")
-        result_map[df["base_commit"][i]] = {
-            "problem_statement": prob_stat,
-            "hints": hints,
-            "classification": classif,
-            "difficulty": diffi,
-        }
-    full_path = os.path.join(save_folder, "data.json")
-    with open(full_path, "w") as f:
-        json.dump(result_map, f, indent=4)
+# def build(df: pd.DataFrame, args: argparse.Namespace) -> None:
+#     result_map: dict[str, dict[str, str]] = {}
+#     mark = args.markdown
+#     save_folder = args.save_location
+#     for i in range(len(df)):
+#         name = df["container_name"][i]
+#         owner = name.split("-", 2)[0]
+#         repo = name.split("-", 2)[1]
+#         try:
+#             report, prob_stat, hints, classif, diffi, perf = build_report(
+#                 owner, repo, int(df["base_commit"][i]), df["patch"][i], args.summarize_llm
+#             )
+#         except Exception:
+#             logger.debug("ERROR")
+#             continue
+#         if mark:
+#             save_markdown(report, f"{args.save_location}/commit_report_{i}.md")
+#         result_map[df["base_commit"][i]] = {
+#             "problem_statement": prob_stat,
+#             "hints": hints,
+#             "classification": classif,
+#             "difficulty": diffi,
+#         }
+#     full_path = os.path.join(save_folder, "data.json")
+#     with open(full_path, "w") as f:
+#         json.dump(result_map, f, indent=4)
 
 
-def build_pr_report(link: str, summarize_llm: bool, add_classification: bool) -> tuple[str, str, str, str, str, bool]:
+def build_pr_report(
+    link: str, summarize_llm: bool, add_classification: bool, patch: str
+) -> tuple[str, str, str, str, str, bool]:
     owner, repo, num = _parse_pr_url(link)
     # logger.debug(problem_statement(owner=owner, repo=repo, num=num))
     report, prob_stat, hints, classif, diffi, perf = build_report(
         owner=owner,
         repo=repo,
         num=int(num),
-        patch="",
+        patch=patch,
         llm=summarize_llm,
         add_classification=add_classification,
     )
@@ -651,7 +696,7 @@ if __name__ == "__main__":
 
     # _______________________________________________________________________________________
     report, prob_stat, hints, classif, diffi, perf = build_pr_report(
-        args.link, args.summarize_llm, add_classification=False
+        args.link, args.summarize_llm, add_classification=False, patch=args.patch
     )
     if report and "NOT_A_VALID_PR" not in report and Path(args.save_location).exists():
         save_markdown(report, f"{args.save_location}/pr_report_{args.link}.md")

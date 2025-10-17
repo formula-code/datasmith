@@ -119,6 +119,10 @@ class JudgeSignature(dspy.Signature):
         desc="A markdown table summarizing all the files changed in the commit along with lines added/removed.",
         default="",
     )
+    git_patch = dspy.InputField(
+        desc="The git patch of the commit.",
+        default="",
+    )
     debug_json = dspy.OutputField(
         desc="JSON dump of the model's internal state, useful for debugging.",
         default=None,
@@ -130,8 +134,8 @@ class LLMJudge(dspy.Module):
         super().__init__()
         self.predict = dspy.Predict(JudgeSignature)
 
-    def forward(self, message: str, file_change_summary: str) -> dspy.Prediction:
-        prediction = self.predict(message=message, file_change_summary=file_change_summary)
+    def forward(self, message: str, file_change_summary: str, git_patch: str) -> dspy.Prediction:
+        prediction = self.predict(message=message, file_change_summary=file_change_summary, git_patch=git_patch)
         out: str = prediction.get("debug_json", None)  # pyright: ignore[reportAttributeAccessIssue]
         try:
             data = json.loads(out)
@@ -159,7 +163,7 @@ class PerfClassifier(dspy.Module):
         super().__init__()
         self.judge = LLMJudge()
 
-    def forward(self, message: str, file_change_summary: str = "") -> dspy.Prediction:
+    def forward(self, message: str, file_change_summary: str = "", git_patch: str = "") -> dspy.Prediction:
         # prior_label, prior_conf, prior_flags = heuristic_prior(message)
         # if prior_label is True and prior_conf >= 55:
         #     result = {
@@ -171,7 +175,9 @@ class PerfClassifier(dspy.Module):
         #     return dspy.Prediction(json=json.dumps(result))
 
         # Ask LLM judge
-        judged = json.loads(self.judge(message=message, file_change_summary=file_change_summary).json)  # pyright: ignore[reportAttributeAccessIssue]
+        judged = json.loads(
+            self.judge(message=message, file_change_summary=file_change_summary, git_patch=git_patch).json
+        )  # pyright: ignore[reportAttributeAccessIssue]
 
         tests_only = "tests-only" in judged.get("flags", [])
         if judged["label"] == "YES":
@@ -191,11 +197,11 @@ class PerfClassifier(dspy.Module):
             judged["flags"] = list(dict.fromkeys([*judged.get("flags", []), "infra"]))
         return dspy.Prediction(json=json.dumps(judged))
 
-    def get_response(self, message: str, file_change_summary: str = "") -> tuple[bool, str]:
+    def get_response(self, message: str, file_change_summary: str = "", git_patch: str = "") -> tuple[bool, str]:
         """
         Get the label for a commit message.
         """
-        json_str = self(message=message, file_change_summary=file_change_summary).json  # pyright: ignore[reportAttributeAccessIssue]
+        json_str = self(message=message, file_change_summary=file_change_summary, git_patch=git_patch).json  # pyright: ignore[reportAttributeAccessIssue]
         response = json.loads(json_str)
         return (response["label"] == "YES", json_str)
 
