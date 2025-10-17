@@ -112,7 +112,7 @@ def collect_merge_shas(repo: str) -> list[dict]:
 
     prs = _paginate_github(f"repos/{repo}/pulls", params=params, per_page=100, max_pages=100)
 
-    out: list[tuple[str, str]] = []
+    out: list[dict] = []
     seen: set[str] = set()
     for pr in prs:
         merged_at = pr.get("merged_at")
