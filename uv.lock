@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.9, <4.0"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -1077,6 +1077,7 @@ dependencies = [
     { name = "dspy", version = "2.6.27", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "dspy", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "gitpython" },
+    { name = "jinja2" },
     { name = "json5" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
@@ -1127,6 +1128,7 @@ requires-dist = [
     { name = "docker" },
     { name = "dspy", specifier = ">=2.6.27" },
     { name = "gitpython" },
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "json5" },
     { name = "numpy" },
     { name = "packaging", specifier = ">=25.0" },

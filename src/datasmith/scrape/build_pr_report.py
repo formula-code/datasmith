@@ -257,7 +257,7 @@ def anonymize_github_issue(text: str) -> str:
     return text
 
 
-def get_pr_change_summary_from_url(owner, repo, pr_number) -> str:
+def get_pr_change_summary_from_url(owner: str, repo: str, pr_number: int) -> str:
     api = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
 
     headers = {"Accept": "application/vnd.github+json"}
