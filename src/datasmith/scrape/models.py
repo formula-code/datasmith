@@ -19,6 +19,7 @@ class ReportResult:
     """
 
     report_md: str
+    report_data: dict
     problem_statement: str
     hints: str
     classification: str

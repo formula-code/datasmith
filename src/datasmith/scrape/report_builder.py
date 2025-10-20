@@ -12,7 +12,8 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.perf_judge import PerfClassifier
-from datasmith.agents.summ_judge import ClassifyJudge, LLMCommentSummarizer, LLMStructurer
+from datasmith.agents.summ_judge import ClassifyJudge
+from datasmith.agents.problem_extractor import ProblemExtractor
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.build_pr_report import (
     anonymize_github_issue,
@@ -157,20 +158,21 @@ class ReportBuilder:
             )
 
         # Initialize LLM agents if enabled
-        self.issue_structurer: LLMStructurer | None
-        self.comment_summarizer: LLMCommentSummarizer | None
+        self.problem_extractor: ProblemExtractor | None
         self.classify_judge: ClassifyJudge | None
         self.perf_classifier: PerfClassifier | None
 
         if self.enable_llm_backends:
             configure_agent_backends(PORTKEY_MODEL_NAME=model_name)
-            self.issue_structurer = LLMStructurer()
-            self.comment_summarizer = LLMCommentSummarizer()
+            self.problem_extractor = ProblemExtractor(
+                validate_lcs=True,  # Enable LCS validation
+                min_lcs=0.85,  # 85% verbatim threshold
+                log_validation=True,  # Log validation metrics
+            )
             self.classify_judge = ClassifyJudge()
             self.perf_classifier = PerfClassifier()
         else:
-            self.issue_structurer = None
-            self.comment_summarizer = None
+            self.problem_extractor = None
             self.classify_judge = None
             self.perf_classifier = None
 
@@ -178,7 +180,7 @@ class ReportBuilder:
         template_dir = Path(__file__).parent / "templates"
         self.jinja_env = Environment(
             loader=FileSystemLoader(template_dir),
-            autoescape=select_autoescape(default=True),  #
+            autoescape=False,  #
             trim_blocks=True,
         )
 
@@ -312,47 +314,90 @@ class ReportBuilder:
 
         return link_summaries
 
-    def _summarize_comments(self, github_comments: str) -> str:
-        """Summarize comments using LLM or return raw comments.
+    def _extract_discussion(self, github_comments: str) -> str:
+        """Extract (not summarize) key discussion points from comments.
+
+        Uses extractive approach to maintain 85%+ LCS ratio with source material.
+        Preserves technical details, code snippets, and disagreements verbatim.
 
         Args:
             github_comments: Concatenated comment text
 
         Returns:
-            Summarized or raw comment text
+            Extracted discussion or raw comments if extraction disabled
         """
-        if not self.summarize_llm:
+        if not self.summarize_llm:  # Keep flag name for backward compatibility
             return github_comments
 
-        if self.comment_summarizer is None:
+        if self.problem_extractor is None:
             return github_comments
 
         try:
-            pred = self.comment_summarizer(message=github_comments)
-            out = getattr(pred, "summary", "NOT FOUND")
-            return str(out).strip()
-        except Exception as e:
-            return f"[summarization failed: {e}]"
+            extracted, validation_report = self.problem_extractor.extract_comments(
+                comment_thread=github_comments
+            )
 
-    def _summarize_llm_issue(self, issue_history: str, issue_stat: str) -> str:
-        """Summarize issue using LLM structuring.
+            # Log validation metrics
+            if validation_report.get("validation_enabled"):
+                avg_lcs = validation_report.get("avg_lcs", 0)
+                avg_ngram = validation_report.get("avg_ngram", 0)
+                logger.info(
+                    f"Comment extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}"
+                )
+
+                # Warn if quality is low
+                if not validation_report.get("overall_pass"):
+                    logger.warning(
+                        f"Comment extraction has low extractiveness:\n"
+                        f"{validation_report.get('details', 'No details available')}"
+                    )
+
+            return extracted.strip()
+        except Exception as e:
+            logger.error(f"Comment extraction failed: {e}", exc_info=True)
+            return f"[extraction failed: {e}]"
+
+    def _extract_problem_statement(self, issue_history: str, issue_stat: str) -> str:
+        """Extract (not summarize) problem statement from issue.
+
+        Uses extractive approach to maintain 85%+ LCS ratio with source material.
+        Preserves original wording, code examples, and technical details verbatim.
 
         Args:
             issue_history: Main issue description
             issue_stat: Related issue statistics/content
 
         Returns:
-            Structured issue summary
+            Extracted problem statement
         """
-        if self.issue_structurer is None:
+        if self.problem_extractor is None:
             return issue_history
 
         try:
-            pred = self.issue_structurer(issue_history, issue_stat)
-            summ = getattr(pred, "structured_issue", "NOT FOUND")
-            return str(summ).strip()
+            extracted, validation_report = self.problem_extractor.extract_problem(
+                message=issue_history,
+                related_issues=issue_stat
+            )
+
+            # Log validation metrics
+            if validation_report.get("validation_enabled"):
+                avg_lcs = validation_report.get("avg_lcs", 0)
+                avg_ngram = validation_report.get("avg_ngram", 0)
+                logger.info(
+                    f"Problem statement extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}"
+                )
+
+                # Warn if quality is low
+                if not validation_report.get("overall_pass"):
+                    logger.warning(
+                        f"Problem statement has low extractiveness:\n"
+                        f"{validation_report.get('details', 'No details available')}"
+                    )
+
+            return extracted.strip()
         except Exception as e:
-            return f"[structure failed: {e}]"
+            logger.error(f"Problem statement extraction failed: {e}", exc_info=True)
+            return f"[extraction failed: {e}]"
 
     def _get_pr_change_summary(self, owner: str, repo: str, pr_number: int) -> str:
         """Get file change summary for a PR.
@@ -482,8 +527,8 @@ class ReportBuilder:
     def _compose_problem_statement(self, git_problem_str: str, git_issue_str: str) -> tuple[str, str]:
         """Return the problem section title and statement text."""
         if self.summarize_llm:
-            summary = self._summarize_llm_issue(git_problem_str, git_issue_str)
-            return "LLM Generated summary", summary
+            extracted = self._extract_problem_statement(git_problem_str, git_issue_str)
+            return "Problem Statement", extracted  # Changed from "LLM Generated summary"
 
         if git_issue_str:
             statement = f"{git_problem_str}\n\n## Referenced Issues\n\n{git_issue_str}"
@@ -554,10 +599,10 @@ class ReportBuilder:
         # Collect comments and links
         github_comments, comment_links = self._collect_pr_comments(owner, repo, pr_number)
 
-        # Summarize comments
+        # Extract discussion from comments
         visited_links: set[str] = {""}
-        comment_summary = self._summarize_comments("\n\n".join(github_comments))
-        logger.debug("got comment summary")
+        comment_summary = self._extract_discussion("\n\n".join(github_comments))
+        logger.debug("got comment extraction")
 
         # Process linked resources
         link_summaries = self._process_linked_resources(comment_links, visited_links)
@@ -568,6 +613,7 @@ class ReportBuilder:
         if not issue_data and not pr_body:
             return ReportResult(
                 report_md="NOT_A_VALID_PR",
+                report_data={},
                 problem_statement="",
                 hints="",
                 classification="",
@@ -583,6 +629,7 @@ class ReportBuilder:
             logger.debug("NOT A PERFORMANCE COMMIT (filtered out by filter_performance_only=True)")
             return ReportResult(
                 report_md="NOT_A_PERFORMANCE_COMMIT",
+                report_data={},
                 problem_statement="",
                 hints="",
                 classification="",
@@ -601,19 +648,21 @@ class ReportBuilder:
             logger.debug("got classification")
 
         # Build final report using template
+        report_data = {
+            "hints": comment_summary,
+            "links_section": "\n".join(link_summaries) if link_summaries else "",
+            "performance_section": perf_json if is_performance_commit else "",
+            "problem_section_title": problem_section_title,
+            "problem_statement": problem_stat,
+            "classification": cat if self.add_classification else "",
+            "difficulty": diff if self.add_classification else "",
+        }
         template = self.jinja_env.get_template("report.md.j2")
-        report_md = template.render(
-            hints=comment_summary,
-            links_section="\n".join(link_summaries) if link_summaries else "",
-            performance_section=perf_json if is_performance_commit else "",
-            problem_section_title=problem_section_title,
-            problem_statement=problem_stat,
-            classification=cat if self.add_classification else "",
-            difficulty=diff if self.add_classification else "",
-        )
+        report_md = template.render(**report_data)
 
         return ReportResult(
             report_md=report_md,
+            report_data=report_data,
             problem_statement=problem_stat,
             hints=comment_summary,
             classification=cat,
