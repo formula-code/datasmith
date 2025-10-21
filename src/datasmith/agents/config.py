@@ -11,7 +11,18 @@ logger = logging.getLogger(__name__)
 def configure_agent_backends(local: bool = False, PORTKEY_MODEL_NAME: str | None = None) -> None:
     model = os.getenv("DSPY_MODEL_NAME")
     backend_url = os.getenv("DSPY_URL")
-    kwargs: dict[str, str | dict[str, str]] = {"model_type": "chat"}
+    # Base LM kwargs; allow tweaking via env for long outputs.
+    kwargs: dict[str, str | int | float | dict[str, str]] = {"model_type": "chat"}
+    # Increase generation budget to reduce JSON truncation in extractors.
+    try:
+        kwargs["max_tokens"] = int(os.getenv("DSPY_MAX_TOKENS", "8000"))
+    except ValueError:
+        kwargs["max_tokens"] = 8000
+    # Keep deterministic unless overridden.
+    try:
+        kwargs["temperature"] = float(os.getenv("DSPY_TEMPERATURE", "0"))
+    except ValueError:
+        kwargs["temperature"] = 0.0
     if portkey_api_key := os.getenv("PORTKEY_API_KEY"):
         api_key = "unused-by-portkey"
         model = (

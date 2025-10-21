@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Final
 
@@ -158,13 +159,14 @@ def crude_perf_filter(df: pd.DataFrame, filter_repos: bool = True) -> pd.DataFra
     filtered_df["total_changes"] = filtered_df["total_additions"] + filtered_df["total_deletions"]
     filtered_df["n_files_changed"] = filtered_df["files_changed"].str.split("\n").apply(len)
     filtered_df["is_perf"] = filtered_df["message"].apply(basic_message_filter)
+    max_tokens = int(os.getenv("DSPY_MAX_TOKENS", "16000"))
 
     mask = (
         filtered_df["is_perf"]
         & (filtered_df["total_changes"] < 40000)
         & (filtered_df["n_files_changed"] < 500)
         & (filtered_df["n_patch_tokens"] >= 5)
-        & (filtered_df["n_patch_tokens"] < 80000)
+        & (filtered_df["n_patch_tokens"] < max_tokens)
     )
     if filter_repos:
         mask &= ~filtered_df["repo_name"].apply(is_delinquient_repo)

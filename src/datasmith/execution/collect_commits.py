@@ -11,7 +11,7 @@ from urllib.parse import quote
 from tqdm.auto import tqdm
 
 from datasmith import logger
-from datasmith.agents.perf_judge import PerfClassifier
+from datasmith.agents.summ_judge import PerfClassifier
 from datasmith.core.api.github_client import get_github_metadata
 from datasmith.execution.collect_commits_offline import batch_classify_commits
 

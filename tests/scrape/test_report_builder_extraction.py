@@ -5,11 +5,13 @@ These tests verify that the new extractive approach works correctly
 when integrated with ReportBuilder.
 """
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-from datasmith.scrape.report_builder import ReportBuilder
-from datasmith.scrape.verbatim_checker import compute_lcs_ratio, is_verbatim_subset
+from unittest.mock import Mock, patch
 
+import pytest
+
+from datasmith.agents.problem_extractor import ProblemExtraction
+from datasmith.scrape.report_builder import ReportBuilder
+from datasmith.scrape.verbatim_checker import is_verbatim_subset
 
 # Sample PR data for testing
 SAMPLE_PR_DICT = {
@@ -71,28 +73,31 @@ class TestReportBuilderWithProblemExtractor:
 
     def test_builder_initialization_with_llm(self):
         """Test that builder initializes ProblemExtractor when LLM enabled."""
-        with patch('datasmith.scrape.report_builder.configure_agent_backends'):
-            with patch('datasmith.scrape.report_builder.ProblemExtractor') as mock_extractor:
-                with patch('datasmith.scrape.report_builder.ClassifyJudge'):
-                    with patch('datasmith.scrape.report_builder.PerfClassifier'):
-                        builder = ReportBuilder(
-                            enable_llm_backends=True,
-                            summarize_llm=True,
-                        )
+        with (
+            patch("datasmith.scrape.report_builder.configure_agent_backends"),
+            patch("datasmith.scrape.report_builder.ProblemExtractor") as mock_extractor,
+            patch("datasmith.scrape.report_builder.ClassifyJudge"),
+            patch("datasmith.scrape.report_builder.PerfClassifier"),
+        ):
+            ReportBuilder(
+                enable_llm_backends=True,
+                summarize_llm=True,
+            )
 
-                        # Verify ProblemExtractor was initialized with correct params
-                        mock_extractor.assert_called_once_with(
-                            validate_lcs=True,
-                            min_lcs=0.85,
-                            log_validation=True,
-                        )
+            # Verify ProblemExtractor was initialized with correct params
+            mock_extractor.assert_called_once_with(
+                validate_lcs=True,
+                min_lcs=0.85,
+                log_validation=True,
+            )
 
-    @patch('datasmith.scrape.report_builder.issue_comments')
-    @patch('datasmith.scrape.report_builder.review_comments')
-    @patch('datasmith.scrape.report_builder.reviews')
-    @patch('datasmith.scrape.report_builder.extract_issues_from_description')
-    def test_build_without_llm(self, mock_extract, mock_reviews, mock_review_comments,
-                               mock_issue_comments, builder_no_llm):
+    @patch("datasmith.scrape.report_builder.issue_comments")
+    @patch("datasmith.scrape.report_builder.review_comments")
+    @patch("datasmith.scrape.report_builder.reviews")
+    @patch("datasmith.scrape.report_builder.extract_issues_from_description")
+    def test_build_without_llm(
+        self, mock_extract, mock_reviews, mock_review_comments, mock_issue_comments, builder_no_llm
+    ):
         """Test building report without LLM extraction."""
         # Mock the data fetching
         mock_issue_comments.return_value = []
@@ -114,7 +119,7 @@ class TestExtractDiscussionMethod:
     @pytest.fixture
     def builder_with_mock_extractor(self):
         """Create builder with mocked ProblemExtractor."""
-        with patch('datasmith.scrape.report_builder.configure_agent_backends'):
+        with patch("datasmith.scrape.report_builder.configure_agent_backends"):
             builder = ReportBuilder(
                 enable_llm_backends=False,  # Don't actually initialize backends
             )
@@ -148,9 +153,7 @@ class TestExtractDiscussionMethod:
     def test_extract_discussion_handles_failure(self, builder_with_mock_extractor):
         """Test that _extract_discussion handles extraction failures."""
         # Mock extractor to raise exception
-        builder_with_mock_extractor.problem_extractor.extract_comments.side_effect = Exception(
-            "Test error"
-        )
+        builder_with_mock_extractor.problem_extractor.extract_comments.side_effect = Exception("Test error")
 
         result = builder_with_mock_extractor._extract_discussion("test comments")
 
@@ -164,7 +167,7 @@ class TestExtractProblemStatementMethod:
     @pytest.fixture
     def builder_with_mock_extractor(self):
         """Create builder with mocked ProblemExtractor."""
-        with patch('datasmith.scrape.report_builder.configure_agent_backends'):
+        with patch("datasmith.scrape.report_builder.configure_agent_backends"):
             builder = ReportBuilder(enable_llm_backends=False)
             builder.problem_extractor = Mock()
             builder.summarize_llm = True
@@ -172,7 +175,7 @@ class TestExtractProblemStatementMethod:
 
     def test_extract_problem_statement_with_extractor(self, builder_with_mock_extractor):
         """Test that _extract_problem_statement uses ProblemExtractor."""
-        mock_extracted = "This is the extracted problem statement"
+        mock_extracted = ProblemExtraction(problem_statement="This is the extracted problem statement")
         mock_validation = {
             "validation_enabled": True,
             "overall_pass": True,
@@ -184,21 +187,18 @@ class TestExtractProblemStatementMethod:
             mock_validation,
         )
 
-        result = builder_with_mock_extractor._extract_problem_statement(
-            "issue text", "related issues"
-        )
+        result = builder_with_mock_extractor._extract_problem_statement("issue text", "related issues")
 
-        assert result == mock_extracted
+        assert isinstance(result, ProblemExtraction)
+        assert result.problem_statement == "This is the extracted problem statement"
+        assert result.problem_statement == "This is the extracted problem statement"
         builder_with_mock_extractor.problem_extractor.extract_problem.assert_called_once_with(
-            message="issue text",
-            related_issues="related issues"
+            message="issue text", related_issues="related issues"
         )
 
-    def test_extract_problem_statement_logs_warning_on_low_quality(
-        self, builder_with_mock_extractor, caplog
-    ):
+    def test_extract_problem_statement_logs_warning_on_low_quality(self, builder_with_mock_extractor, caplog):
         """Test that low extraction quality triggers warning."""
-        mock_extracted = "Extracted text"
+        mock_extracted = ProblemExtraction(problem_statement="Extracted text")
         mock_validation = {
             "validation_enabled": True,
             "overall_pass": False,  # Failed validation
@@ -212,12 +212,10 @@ class TestExtractProblemStatementMethod:
         )
 
         with caplog.at_level("WARNING"):
-            result = builder_with_mock_extractor._extract_problem_statement(
-                "issue text", "related issues"
-            )
+            result = builder_with_mock_extractor._extract_problem_statement("issue text", "related issues")
 
-        # Should still return the extracted text
-        assert result == mock_extracted
+        # Should still return the extracted data
+        assert isinstance(result, ProblemExtraction)
         # Should log warning
         assert "low extractiveness" in caplog.text.lower()
 
@@ -262,14 +260,13 @@ class TestExtractiveQualityMeasurement:
 class TestEndToEndWithMockedLLM:
     """End-to-end tests with mocked LLM responses."""
 
-    @patch('datasmith.scrape.report_builder.issue_comments')
-    @patch('datasmith.scrape.report_builder.review_comments')
-    @patch('datasmith.scrape.report_builder.reviews')
-    @patch('datasmith.scrape.report_builder.extract_issues_from_description')
-    @patch('datasmith.scrape.report_builder.configure_agent_backends')
+    @patch("datasmith.scrape.report_builder.issue_comments")
+    @patch("datasmith.scrape.report_builder.review_comments")
+    @patch("datasmith.scrape.report_builder.reviews")
+    @patch("datasmith.scrape.report_builder.extract_issues_from_description")
+    @patch("datasmith.scrape.report_builder.configure_agent_backends")
     def test_full_build_with_mocked_extraction(
-        self, mock_config, mock_extract, mock_reviews,
-        mock_review_comments, mock_issue_comments
+        self, mock_config, mock_extract, mock_reviews, mock_review_comments, mock_issue_comments
     ):
         """Test complete build workflow with mocked LLM extraction."""
         # Setup mocks
@@ -284,12 +281,12 @@ class TestEndToEndWithMockedLLM:
         # Mock the extractor
         mock_extractor = Mock()
         mock_extractor.extract_problem.return_value = (
-            "Points are hardly visible. Points are super big.",
-            {"validation_enabled": True, "overall_pass": True, "avg_lcs": 0.95}
+            ProblemExtraction(problem_statement="Points are hardly visible. Points are super big."),
+            {"validation_enabled": True, "overall_pass": True, "avg_lcs": 0.95},
         )
         mock_extractor.extract_comments.return_value = (
             "No comments",
-            {"validation_enabled": True, "overall_pass": True, "avg_lcs": 1.0}
+            {"validation_enabled": True, "overall_pass": True, "avg_lcs": 1.0},
         )
         builder.problem_extractor = mock_extractor
         builder.summarize_llm = True
@@ -303,6 +300,8 @@ class TestEndToEndWithMockedLLM:
         # Verify result structure
         assert result.report_md != "NOT_A_VALID_PR"
         assert "Points are hardly visible" in result.problem_statement
+        assert result.problem_sections is not None
+        assert result.problem_sections.problem_statement
         assert result.is_performance_commit is False  # No perf detection
 
 
@@ -324,19 +323,25 @@ class TestBackwardCompatibility:
 
     def test_output_structure_unchanged(self):
         """Test that output structure remains the same."""
-        with patch('datasmith.scrape.report_builder.issue_comments', return_value=[]):
-            with patch('datasmith.scrape.report_builder.review_comments', return_value=[]):
-                with patch('datasmith.scrape.report_builder.reviews', return_value=[]):
-                    with patch('datasmith.scrape.report_builder.extract_issues_from_description',
-                              return_value=([SAMPLE_PR_DICT["pr_body"]], [])):
+        with (
+            patch("datasmith.scrape.report_builder.issue_comments", return_value=[]),
+            patch("datasmith.scrape.report_builder.review_comments", return_value=[]),
+            patch("datasmith.scrape.report_builder.reviews", return_value=[]),
+            patch(
+                "datasmith.scrape.report_builder.extract_issues_from_description",
+                return_value=([SAMPLE_PR_DICT["pr_body"]], []),
+            ),
+        ):
+            builder = ReportBuilder(enable_llm_backends=False)
+            result = builder.build(SAMPLE_PR_DICT)
 
-                        builder = ReportBuilder(enable_llm_backends=False)
-                        result = builder.build(SAMPLE_PR_DICT)
-
-                        # Check that result has expected attributes
-                        assert hasattr(result, 'report_md')
-                        assert hasattr(result, 'problem_statement')
-                        assert hasattr(result, 'hints')
-                        assert hasattr(result, 'classification')
-                        assert hasattr(result, 'difficulty')
-                        assert hasattr(result, 'is_performance_commit')
+            # Check that result has expected attributes
+            assert hasattr(result, "report_md")
+            assert hasattr(result, "problem_statement")
+            assert hasattr(result, "hints")
+            assert hasattr(result, "classification")
+            assert hasattr(result, "difficulty")
+            assert hasattr(result, "is_performance_commit")
+            assert hasattr(result, "classification_reason")
+            assert hasattr(result, "classification_confidence")
+            assert hasattr(result, "problem_sections")

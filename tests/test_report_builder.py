@@ -129,6 +129,10 @@ class TestReportResult:
         assert result.classification == "Better algorithm"
         assert result.difficulty == "medium"
         assert result.is_performance_commit is True
+        assert result.report_data == {}
+        assert result.classification_reason == ""
+        assert result.classification_confidence is None
+        assert result.problem_sections is None
 
     def test_report_result_empty_values(self):
         """Test ReportResult with empty values."""
@@ -144,6 +148,8 @@ class TestReportResult:
         assert result.report_md == "NOT_A_VALID_PR"
         assert result.problem_statement == ""
         assert result.is_performance_commit is False
+        assert result.classification_reason == ""
+        assert result.classification_confidence is None
 
 
 class TestReportBuilder:

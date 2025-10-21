@@ -14,7 +14,7 @@ from git import Commit, GitCommandError, Repo
 from tqdm.auto import tqdm
 
 from datasmith import logger
-from datasmith.agents.perf_judge import PerfClassifier
+from datasmith.agents.summ_judge import PerfClassifier
 from datasmith.execution.utils import _get_commit_info_offline, clone_repo, get_change_summary, has_core_file
 
 _PR_MERGE_PATTERNS: tuple[re.Pattern[str], ...] = (

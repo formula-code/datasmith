@@ -1,13 +1,35 @@
+### {{ problem_section_title }}
+
+{# Problem statement (problem-only by default) #}
+{% if problem_extraction and problem_extraction.problem_statement %}
+{{ problem_extraction.problem_statement }}
+{% elif git_problem_str %}
+{{ git_problem_str }}
+{% else %}
+{{ problem_statement }}
+{% endif %}
+
+{# Always include expanded referenced issues when available #}
+{% if git_issue_str %}
 
 ### Hints
 
-{{ hints }}
-{% if links_section %}
+#### Referenced Issues
 
-### Links found inside comments:
-
-{{ links_section }}
+{{ git_issue_str }}
 {% endif %}
+
+{# Optional solution section, controlled by include_solution flag #}
+{% if include_solution and solution_overview %}
+
+#### Solution Overview
+
+{{ solution_overview }}
+{% endif %}
+
+#### Relevant Discussions
+
+{{ hints }}
 {% if performance_section %}
 
 ### Performance Issue
@@ -15,16 +37,16 @@
 {{ performance_section }}
 {% endif %}
 
-### {{ problem_section_title }}
+{% if classification or classification_reason or difficulty or classification_confidence %}
 
-{{ problem_statement }}
-{% if classification %}
+### Metadata
 
-### Classification
-
-{{ classification }}
-
-### Difficulty
-
-{{ difficulty }}
+{% if classification %}- **Category:** {{ classification }}
+{% endif %}
+{% if difficulty %}- **Difficulty:** {{ difficulty }}
+{% endif %}
+{% if classification_confidence %}- **Confidence:** {{ classification_confidence }} / 100
+{% endif %}
+{% if classification_reason %}- **Rationale:** {{ classification_reason }}
+{% endif %}
 {% endif %}

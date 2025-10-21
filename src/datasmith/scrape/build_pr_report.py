@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import re
 import textwrap
 from datetime import datetime, timezone
@@ -11,24 +10,20 @@ from urllib.parse import urlparse
 import requests
 
 # import tiktoken
-from datasmith.agents.config import configure_agent_backends
-from datasmith.agents.perf_judge import PerfClassifier
-from datasmith.agents.summ_judge import ClassifyJudge, LLMCommentSummarizer, LLMStructurer
+# from datasmith.agents.summ_judge import ClassifyJudge, LLMCommentSummarizer, LLMStructurer
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.utils import _parse_pr_url
 from datasmith.utils import _get_github_metadata
 
 logger = configure_logging()
 
 # configure_agent_backends()
-configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
+# configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
 
 
 MAX_LINKS_TO_FOLLOW = 60  # safety cap for level-2 traversal
-ISSUE_STRUCTURER = LLMStructurer()
-COMMENT_SUMMARIZER = LLMCommentSummarizer()
-CLASSIFY_JUDGE = ClassifyJudge()
-PERF_CLASSIFIER = PerfClassifier()
+# ISSUE_STRUCTURER = LLMStructurer()
+# COMMENT_SUMMARIZER = LLMCommentSummarizer()
+# CLASSIFY_JUDGE = ClassifyJudge()
 
 # Dataframe with git commits to generate reports for
 
@@ -218,8 +213,6 @@ def md_comment(item: dict, kind: str) -> str:
         **{item["user"]["login"]}** — {iso(ts_iso)}
 
         {excerpt}
-
-        Links mentioned: {", ".join(extract_links(body)) or "—"}
         """
     ).strip("\n")
 
@@ -228,32 +221,41 @@ def anonymize_github_issue(text: str) -> str:
     """
     Remove identifying information (URLs, emails, usernames, repo names, issue numbers)
     from a GitHub issue description so that it cannot be traced back.
-    INPUT:
-    text : str (Raw GitHub issue description text.)
-    OUTPUT:
-    str (Sanitized issue text safe for model input.)
+
+    - Fix: commit SHA rule now requires at least one hex letter [a-f] to avoid eating long numbers.
+    - Fix: emails are scrubbed *before* @mentions so emails don't get half-redacted.
+    - Extra: handles ssh-style GitHub remotes.
     """
 
-    # GitHub URLs (issues, pulls, commits, repos)
-    text = re.sub(r"https?://(?:www\.)?github\.com/[^\s)]+", "[GITHUB_URL]", text)
+    # 1) Emails FIRST (avoid @mention rule hitting '@example' inside an email)
+    text = re.sub(
+        r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        "[EMAIL]",
+        text,
+    )
 
-    #  user mentions --> @username
-    text = re.sub(r"@\w+", "[USER]", text)
+    # 2) GitHub URLs (https and ssh)
+    text = re.sub(r"https?://(?:www\.)?github\.com/[^\s)>\]]+", "[GITHUB_URL]", text)
+    text = re.sub(r"git@github\.com:[\w.-]+/[\w.-]+(?:\.git)?", "[GITHUB_SSH_URL]", text)
 
-    # email addresses
-    text = re.sub(r"[\w\.-]+@[\w\.-]+\.\w+", "[EMAIL]", text)
+    # 3) Issue/PR references
+    text = re.sub(r"(?<!\w)#\d+\b", "[ISSUE_NUM]", text)
+    text = re.sub(r"\bGH-\d+\b", "[ISSUE_NUM]", text, flags=re.IGNORECASE)
 
-    # issue/PR references
-    text = re.sub(r"(?<!\w)#\d+", "[ISSUE_NUM]", text)
-    text = re.sub(r"GH-\d+", "[ISSUE_NUM]", text)
+    # 4) User mentions (avoid decorators like @pytest.mark by not matching when a dot follows)
+    text = re.sub(r"(?<!\w)@[A-Za-z0-9-]{1,39}(?!\.[A-Za-z])", "[USER]", text)
 
-    # owner/repo patterns
-    # text = re.sub(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", "[REPO]", text)
+    # 5) Commit SHAs (7-40 hex chars) — MUST contain at least one letter to avoid numeric runs
+    def _sha_repl(m: re.Match) -> str:
+        s = m.group(0)
+        return "[COMMIT_SHA]" if re.search(r"[A-Fa-f]", s) else s
 
-    #  commit SHAs (7-40 hex characters)
-    text = re.sub(r"\b[0-9a-f]{7,40}\b", "[COMMIT_SHA]", text)
+    text = re.sub(r"\b[0-9A-Fa-f]{7,40}\b", _sha_repl, text)
 
-    # text = re.sub(r"\s{2,}", " ", text).strip() whitespace?
+    # If you decide you also want to redact bare owner/repo slugs in prose, uncomment below.
+    # Beware this can be noisy if your issues contain generic path-like strings.
+    # text = re.sub(r"\b[\w.-]+/[\w.-]+\b", "[REPO]", text)
+
     return text
 
 
@@ -366,26 +368,26 @@ def summarize(issue_url: str) -> tuple[str, str]:
     return git_problem_str, git_issue_str
 
 
-def summarize_llm(issue_history: str, issue_stat: str) -> str:
-    try:
-        pred = ISSUE_STRUCTURER(issue_history, issue_stat)
-        # pred is a dspy.Prediction with attribute .summary
-        summ = getattr(pred, "structured_issue", "NOT FOUND")
-        return str(summ).strip()
-    except Exception as e:
-        # Fallback behavior if the LLM call fails for any reason
-        return f"[structure failed: {e}]"
+# def summarize_llm(issue_history: str, issue_stat: str) -> str:
+#     try:
+#         pred = ISSUE_STRUCTURER(issue_history, issue_stat)
+#         # pred is a dspy.Prediction with attribute .summary
+#         summ = getattr(pred, "structured_issue", "NOT FOUND")
+#         return str(summ).strip()
+#     except Exception as e:
+#         # Fallback behavior if the LLM call fails for any reason
+#         return f"[structure failed: {e}]"
 
 
-def summarize_comments(github_comments: str) -> str:
-    try:
-        pred = COMMENT_SUMMARIZER(message=github_comments)
-        # pred is a dspy.Prediction with attribute .summary
-        out = getattr(pred, "summary", "NOT FOUND")
-        return str(out).strip()
-    except Exception as e:
-        # Fallback behavior if the LLM call fails for any reason
-        return f"[summarization failed: {e}]"
+# def summarize_comments(github_comments: str) -> str:
+#     try:
+#         pred = COMMENT_SUMMARIZER(message=github_comments)
+#         # pred is a dspy.Prediction with attribute .summary
+#         out = getattr(pred, "summary", "NOT FOUND")
+#         return str(out).strip()
+#     except Exception as e:
+#         # Fallback behavior if the LLM call fails for any reason
+#         return f"[summarization failed: {e}]"
 
 
 def _collect_pr_comments(owner: str, repo: str, num: int) -> tuple[list[str], set[str]]:
@@ -428,72 +430,72 @@ def _process_linked_resources(comment_links: set[str], visited_links: set[str]) 
     return link_summaries
 
 
-def build_report(
-    owner: str, repo: str, num: int, patch: str, llm: bool, add_classification: bool = False
-) -> tuple[str, str, str, str, str, bool]:
-    out_parts = []
-    visited_links: set[str] = {""}
-    logger.debug("got meta-data")
+# def build_report(
+#     owner: str, repo: str, num: int, patch: str, llm: bool, add_classification: bool = False
+# ) -> tuple[str, str, str, str, str, bool]:
+#     out_parts = []
+#     visited_links: set[str] = {""}
+#     logger.debug("got meta-data")
 
-    # Collect comments and links
-    github_comments, comment_links = _collect_pr_comments(owner, repo, num)
+#     # Collect comments and links
+#     github_comments, comment_links = _collect_pr_comments(owner, repo, num)
 
-    # Summarize comments if LLM is enabled
-    comment_summary = ""
-    out_parts.append("\n### Hints\n")
-    if llm:
-        comment_summary = summarize_comments("\n\n".join(github_comments))
-        out_parts.append(comment_summary)
-    else:
-        print(github_comments, "GITHUB_COMMENTS")
-        comment_summary = "\n\n".join(github_comments)
-    logger.debug("got comment summary")
+#     # Summarize comments if LLM is enabled
+#     comment_summary = ""
+#     out_parts.append("\n### Hints\n")
+#     if llm:
+#         comment_summary = summarize_comments("\n\n".join(github_comments))
+#         out_parts.append(comment_summary)
+#     else:
+#         print(github_comments, "GITHUB_COMMENTS")
+#         comment_summary = "\n\n".join(github_comments)
+#     logger.debug("got comment summary")
 
-    # Process linked resources
-    out_parts.extend(_process_linked_resources(comment_links, visited_links))
+#     # Process linked resources
+#     out_parts.extend(_process_linked_resources(comment_links, visited_links))
 
-    # Build problem statement
-    issue_history, issue_stat = problem_statement(owner, repo, num)
-    if issue_history == "NOT_A_VALID_PR":
-        return "NOT_A_VALID_PR", "", "", "", "", False
+#     # Build problem statement
+#     issue_history, issue_stat = problem_statement(owner, repo, num)
+#     if issue_history == "NOT_A_VALID_PR":
+#         return "NOT_A_VALID_PR", "", "", "", "", False
 
-    # Check if the issue is a performance issue
-    is_performance_commit = False
-    if llm:
-        file_change = get_pr_change_summary_from_url(owner, repo, num)
-        is_performance_commit, json_response = PERF_CLASSIFIER.get_response(
-            message=issue_history, file_change_summary=file_change, git_patch=patch
-        )
-        if is_performance_commit:
-            out_parts.append("\n### Performance Issue")
-            out_parts.append(json_response)
-        else:
-            logger.debug("NOT A PERFORMANCE COMMIT")
-            return "NOT_A_PERFORMANCE_COMMIT", "", "", "", "", False
+#     # Check if the issue is a performance issue
+#     is_performance_commit = False
+#     if llm:
+#         file_change = get_pr_change_summary_from_url(owner, repo, num)
+#         is_performance_commit, json_response = PERF_CLASSIFIER.get_response(
+#             message=issue_history, file_change_summary=file_change, git_patch=patch
+#         )
+#         if is_performance_commit:
+#             out_parts.append("\n### Performance Issue")
+#             out_parts.append(json_response)
+#         else:
+#             logger.debug("NOT A PERFORMANCE COMMIT")
+#             return "NOT_A_PERFORMANCE_COMMIT", "", "", "", "", False
 
-    problem_stat = ""
-    if llm:
-        out_parts.append("\n### LLM Generated summary")
-        problem_stat = summarize_llm(issue_history, issue_stat)
-        out_parts.append(problem_stat)
-    else:
-        out_parts.append("\n### Problem Statement\n")
-        out_parts.append(issue_history)
-        problem_stat = issue_history
-    logger.debug("got problem statement")
+#     problem_stat = ""
+#     if llm:
+#         out_parts.append("\n### LLM Generated summary")
+#         problem_stat = summarize_llm(issue_history, issue_stat)
+#         out_parts.append(problem_stat)
+#     else:
+#         out_parts.append("\n### Problem Statement\n")
+#         out_parts.append(issue_history)
+#         problem_stat = issue_history
+#     logger.debug("got problem statement")
 
-    # Add classification if requested
-    cat, diff = ("", "")
-    if add_classification:
-        out_parts.append("\n### Classification")
-        cat, diff = classification(issue_history, owner, repo, patch)
-        logger.debug("got classification")
-        out_parts.append(cat)
-        out_parts.append("\n### Difficulty")
-        out_parts.append(diff)
-        logger.debug("got difficulty")
+#     # Add classification if requested
+#     cat, diff = ("", "")
+#     if add_classification:
+#         out_parts.append("\n### Classification")
+#         cat, diff = classification(issue_history, owner, repo, patch)
+#         logger.debug("got classification")
+#         out_parts.append(cat)
+#         out_parts.append("\n### Difficulty")
+#         out_parts.append(diff)
+#         logger.debug("got difficulty")
 
-    return "\n\n".join(out_parts), problem_stat, comment_summary, cat, diff, is_performance_commit
+#     return "\n\n".join(out_parts), problem_stat, comment_summary, cat, diff, is_performance_commit
 
 
 def save_markdown(report: str, filepath: str) -> None:
@@ -546,28 +548,34 @@ def save_markdown(report: str, filepath: str) -> None:
 #     return merged_df, reports_df
 
 
-def classification(problem_desc: str, owner: str, repo: str, git_patch: str) -> tuple[str, str]:
-    """Classify the given git commit and associated solution to one of these categories:
-    - Better data structure
-    - Better algorithm
-    - Use a lower-level system
-    - Accept a less-precise solution
-    - Use parallelization
-    - Remove redundancy
-    - Cache and reuse
-    - Improve/introduce scaling
-    - Database and storage tuning
-    - Micro-optimizations
+# def classification(problem_desc: str, owner: str, repo: str, git_patch: str) -> ClassificationDecision:
+#     """Classify the given git commit and associated solution to one of these categories:
+#     - Better data structure
+#     - Better algorithm
+#     - Use a lower-level system
+#     - Accept a less-precise solution
+#     - Use parallelization
+#     - Remove redundancy
+#     - Cache and reuse
+#     - Improve/introduce scaling
+#     - Database and storage tuning
+#     - Micro-optimizations
 
-    Inputs: problem description, git patch (the proposed solution)
-    """
-    try:
-        out = CLASSIFY_JUDGE(message=problem_desc, patch=git_patch)
-        cat = getattr(out, "category", "NOT FOUND")
-        diff = getattr(out, "difficulty", "NOT FOUND")
-        return str(cat), str(diff)
-    except Exception as e:
-        return f"[classification failed: {e}]", ""
+#     Inputs: problem description, git patch (the proposed solution)
+
+#     Returns:
+#         A ``ClassificationDecision`` with rationale, category, difficulty, and confidence.
+#     """
+#     try:
+#         return CLASSIFY_JUDGE(message=problem_desc, patch=git_patch)
+#     except Exception as e:
+#         logger.error(f"Classification failed: {e}", exc_info=True)
+#         return ClassificationDecision(
+#             reason=f"classification failed: {e}",
+#             category="",
+#             difficulty="",
+#             confidence=None,
+#         )
 
 
 # def build(df: pd.DataFrame, args: argparse.Namespace) -> None:
@@ -598,105 +606,105 @@ def classification(problem_desc: str, owner: str, repo: str, git_patch: str) -> 
 #         json.dump(result_map, f, indent=4)
 
 
-def build_pr_report(
-    link: str, summarize_llm: bool, add_classification: bool, patch: str
-) -> tuple[str, str, str, str, str, bool]:
-    owner, repo, num = _parse_pr_url(link)
-    # logger.debug(problem_statement(owner=owner, repo=repo, num=num))
-    report, prob_stat, hints, classif, diffi, perf = build_report(
-        owner=owner,
-        repo=repo,
-        num=int(num),
-        patch=patch,
-        llm=summarize_llm,
-        add_classification=add_classification,
-    )
+# def build_pr_report(
+#     link: str, summarize_llm: bool, add_classification: bool, patch: str
+# ) -> tuple[str, str, str, str, str, bool]:
+#     owner, repo, num = _parse_pr_url(link)
+#     # logger.debug(problem_statement(owner=owner, repo=repo, num=num))
+#     report, prob_stat, hints, classif, diffi, perf = build_report(
+#         owner=owner,
+#         repo=repo,
+#         num=int(num),
+#         patch=patch,
+#         llm=summarize_llm,
+#         add_classification=add_classification,
+#     )
 
-    return report, prob_stat, hints, classif, diffi, perf
-    # if report == "NOT_A_VALID_PR":
-    #     logger.debug(f"{link}: NOT_A_VALID_PR")
-    #     return
+#     return report, prob_stat, hints, classif, diffi, perf
+#     # if report == "NOT_A_VALID_PR":
+#     #     logger.debug(f"{link}: NOT_A_VALID_PR")
+#     #     return
 
 
 # build(commits_df)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--df_location",
-        # default="/mnt/sdd1/atharvas/formulacode/datasmith/scratch/artifacts/processed/useful_commits.csv",
-        default="/mnt/sdd1/atharvas/formulacode/datasmith/scratch/artifacts/processed/downloads/useful_enriched.tbformat_2025-09-13T23:38:29.017709.parquet",
-        help="location of dataframe with the commits",
-    )
-    parser.add_argument(
-        "--save_location",
-        default="/mnt/sdd1/akanksha/formulacode/datasmith/src/datasmith/scrape/data",
-        help="location to save instruction markdown and json with problem statement and hints",
-    )
-    parser.add_argument(
-        "--markdown",
-        default=True,
-        help="boolean (marks whether to create markdown file or not)",
-    )
-    parser.add_argument(
-        "--summarize_llm",
-        default=True,
-        help="boolean (marks whether to use llm summarization or just heuristics)",
-    )
-    parser.add_argument(
-        "--link",
-        default="https://github.com/astropy/astropy/pull/16088",
-        help="to test individual links",
-    )
-    args = parser.parse_args()
+# if __name__ == "__main__":
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument(
+#         "--df_location",
+#         # default="/mnt/sdd1/atharvas/formulacode/datasmith/scratch/artifacts/processed/useful_commits.csv",
+#         default="/mnt/sdd1/atharvas/formulacode/datasmith/scratch/artifacts/processed/downloads/useful_enriched.tbformat_2025-09-13T23:38:29.017709.parquet",
+#         help="location of dataframe with the commits",
+#     )
+#     parser.add_argument(
+#         "--save_location",
+#         default="/mnt/sdd1/akanksha/formulacode/datasmith/src/datasmith/scrape/data",
+#         help="location to save instruction markdown and json with problem statement and hints",
+#     )
+#     parser.add_argument(
+#         "--markdown",
+#         default=True,
+#         help="boolean (marks whether to create markdown file or not)",
+#     )
+#     parser.add_argument(
+#         "--summarize_llm",
+#         default=True,
+#         help="boolean (marks whether to use llm summarization or just heuristics)",
+#     )
+#     parser.add_argument(
+#         "--link",
+#         default="https://github.com/astropy/astropy/pull/16088",
+#         help="to test individual links",
+#     )
+#     args = parser.parse_args()
 
-    # Get just the issue number
+#     # Get just the issue number
 
-    MAX_LINKS_TO_FOLLOW = 60
-    ISSUE_STRUCTURER = LLMStructurer()
-    COMMENT_SUMMARIZER = LLMCommentSummarizer()
-    CLASSIFY_JUDGE = ClassifyJudge()
+#     MAX_LINKS_TO_FOLLOW = 60
+#     ISSUE_STRUCTURER = LLMStructurer()
+#     COMMENT_SUMMARIZER = LLMCommentSummarizer()
+#     CLASSIFY_JUDGE = ClassifyJudge()
 
-    # _______________________________________________________________________________________
+#     # _______________________________________________________________________________________
 
-    # # Dataframe with git commits to generate reports for
+#     # # Dataframe with git commits to generate reports for
 
-    # # meta = pq.read_metadata(Path(args.df_location))     # if this fails, the file/ footer is broken
-    # # logger.debug(meta.num_row_groups, meta.schema)
-    # path = Path(args.df_location)
-    # from pathlib import Path
-    # p = Path(args.df_location)
-    # pf = pq.ParquetFile(p)
-    # logger.debug(pf)                # nice summary (row groups, columns, etc.)
-    # logger.debug(pf.schema)         # full Parquet schema
-    # logger.debug(pf.metadata)       # detailed file metadata
-    # logger.debug(pf.num_row_groups) # number of row groups
+#     # # meta = pq.read_metadata(Path(args.df_location))     # if this fails, the file/ footer is broken
+#     # # logger.debug(meta.num_row_groups, meta.schema)
+#     # path = Path(args.df_location)
+#     # from pathlib import Path
+#     # p = Path(args.df_location)
+#     # pf = pq.ParquetFile(p)
+#     # logger.debug(pf)                # nice summary (row groups, columns, etc.)
+#     # logger.debug(pf.schema)         # full Parquet schema
+#     # logger.debug(pf.metadata)       # detailed file metadata
+#     # logger.debug(pf.num_row_groups) # number of row groups
 
-    # # Try reading in chunks
-    # parquet_file = pq.ParquetFile(p)
-    # columns = parquet_file.schema.names
+#     # # Try reading in chunks
+#     # parquet_file = pq.ParquetFile(p)
+#     # columns = parquet_file.schema.names
 
-    # try:
-    #     pf = fastparquet.ParquetFile(p)
-    #     logger.debug("FastParquet can open file")
-    #     logger.debug("Columns:", pf.columns)
-    #     logger.debug("Schema:", pf.schema)
+#     # try:
+#     #     pf = fastparquet.ParquetFile(p)
+#     #     logger.debug("FastParquet can open file")
+#     #     logger.debug("Columns:", pf.columns)
+#     #     logger.debug("Schema:", pf.schema)
 
-    #     # Try to read with fastparquet directly
-    #     df = pf.to_pandas()
-    #     logger.debug("FastParquet read successful!")
-    # except Exception as e:
-    #     logger.debug(f"FastParquet also failed: {e}")
+#     #     # Try to read with fastparquet directly
+#     #     df = pf.to_pandas()
+#     #     logger.debug("FastParquet read successful!")
+#     # except Exception as e:
+#     #     logger.debug(f"FastParquet also failed: {e}")
 
-    # logger.debug(df.columns)
-    # logger.debug(len(df))
-    # small_df = df.head()
-    # logger.debug(small_df)
-    # build(df, args)
+#     # logger.debug(df.columns)
+#     # logger.debug(len(df))
+#     # small_df = df.head()
+#     # logger.debug(small_df)
+#     # build(df, args)
 
-    # _______________________________________________________________________________________
-    report, prob_stat, hints, classif, diffi, perf = build_pr_report(
-        args.link, args.summarize_llm, add_classification=False, patch=args.patch
-    )
-    if report and "NOT_A_VALID_PR" not in report and Path(args.save_location).exists():
-        save_markdown(report, f"{args.save_location}/pr_report_{args.link}.md")
+#     # _______________________________________________________________________________________
+#     report, prob_stat, hints, classif, diffi, perf = build_pr_report(
+#         args.link, args.summarize_llm, add_classification=False, patch=args.patch
+#     )
+#     if report and "NOT_A_VALID_PR" not in report and Path(args.save_location).exists():
+#         save_markdown(report, f"{args.save_location}/pr_report_{args.link}.md")

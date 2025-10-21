@@ -8,17 +8,18 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader
 
+# from datasmith.agents.perf_judge import PerfClassifier
 from datasmith.agents.config import configure_agent_backends
-from datasmith.agents.perf_judge import PerfClassifier
-from datasmith.agents.summ_judge import ClassifyJudge
-from datasmith.agents.problem_extractor import ProblemExtractor
+from datasmith.agents.problem_extractor import ProblemExtraction, ProblemExtractor
+from datasmith.agents.summ_judge import ClassificationDecision, ClassifyJudge, PerfClassifier
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.build_pr_report import (
     anonymize_github_issue,
     classify_gh_link,
     issue_comments,
+    issue_timeline,
     review_comments,
     reviews,
     summarize_gh_resource,
@@ -105,6 +106,10 @@ class ReportBuilder:
         model_name: LLM model name to use for agent backends
     """
 
+    problem_extractor: ProblemExtractor | None
+    classify_judge: ClassifyJudge | None
+    perf_classifier: PerfClassifier | None
+
     def __init__(
         self,
         enable_llm_backends: bool = False,
@@ -112,7 +117,7 @@ class ReportBuilder:
         add_classification: bool = False,
         filter_performance_only: bool = False,
         include_bot_comments: bool = False,
-        anonymize_output: bool = True,
+        anonymize_output: bool = False,
         max_links_to_follow: int = 60,
         model_name: str = "@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
     ):
@@ -160,14 +165,12 @@ class ReportBuilder:
         # Initialize LLM agents if enabled
         self.problem_extractor: ProblemExtractor | None
         self.classify_judge: ClassifyJudge | None
-        self.perf_classifier: PerfClassifier | None
 
         if self.enable_llm_backends:
             configure_agent_backends(PORTKEY_MODEL_NAME=model_name)
+            # Disable LCS/verbatim validation to simplify extraction and reduce noise
             self.problem_extractor = ProblemExtractor(
-                validate_lcs=True,  # Enable LCS validation
-                min_lcs=0.85,  # 85% verbatim threshold
-                log_validation=True,  # Log validation metrics
+                validate_lcs=False,
             )
             self.classify_judge = ClassifyJudge()
             self.perf_classifier = PerfClassifier()
@@ -180,7 +183,7 @@ class ReportBuilder:
         template_dir = Path(__file__).parent / "templates"
         self.jinja_env = Environment(
             loader=FileSystemLoader(template_dir),
-            autoescape=False,  #
+            autoescape=False,  # noqa: S701
             trim_blocks=True,
         )
 
@@ -307,12 +310,95 @@ class ReportBuilder:
             visited_links.add(link)
             cls = classify_gh_link(link)
             if cls:
-                link_summaries.append(summarize_gh_resource(cls))
+                # Prefer expanded details for issues; otherwise fall back to generic summary
+                if cls[0] == "issue":
+                    _, o, r, ident = cls
+                    try:
+                        expanded = self._summarize_issue_link(o, r, int(ident))
+                        link_summaries.append(expanded)
+                    except Exception:
+                        link_summaries.append(summarize_gh_resource(cls))
+                else:
+                    link_summaries.append(summarize_gh_resource(cls))
             else:
                 link_summaries.append(f"* <{link}>")
         logger.debug("got links found inside comments")
 
         return link_summaries
+
+    def _extract_xrefs_from_timeline(self, timeline_raw: list[dict]) -> list[str]:
+        """Extract cross-references from issue timeline events.
+
+        Args:
+            timeline_raw: Raw timeline events from GitHub API
+
+        Returns:
+            List of extracted cross-reference bodies
+        """
+        xrefs = []
+        for event in timeline_raw:
+            try:
+                src_issue = event.get("source", {}).get("issue")
+                if not src_issue:
+                    continue
+                b = (src_issue.get("body") or "").strip()
+                if b:
+                    xrefs.append(b)
+            except Exception:
+                logger.exception("Failed to extract cross-reference from event")
+                continue
+        return xrefs
+
+    def _summarize_issue_link(self, owner: str, repo: str, number: int) -> str:
+        """Return an expanded markdown summary for a linked issue (single level).
+
+        Includes title, short body excerpt, a few comments, and cross-references.
+        Large sections are truncated for readability.
+        """
+        from datasmith.utils import _get_github_metadata  # local import to avoid cycles
+
+        issue = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/issues/{number}")
+        if not isinstance(issue, dict):
+            return f"* Issue #{number} — details unavailable\n  <https://github.com/{owner}/{repo}/issues/{number}>"
+
+        title = issue.get("title", f"Issue #{number}")
+        body = issue.get("body") or ""
+        body_excerpt = body.strip().replace("\r\n", "\n")
+
+        comments_raw = issue_comments(owner, repo, number)
+        timeline_raw = issue_timeline(owner, repo, number)
+
+        comments = [c.get("body", "").strip() for c in comments_raw if c.get("body")]
+        xrefs = self._extract_xrefs_from_timeline(timeline_raw)
+
+        # Do not truncate: include full content as requested
+        comments_preview = comments
+        xrefs_preview = xrefs
+
+        if self.anonymize_output:
+            body_excerpt = anonymize_github_issue(body_excerpt)
+            comments_preview = [anonymize_github_issue(c) for c in comments_preview]
+            xrefs_preview = [anonymize_github_issue(x) for x in xrefs_preview]
+
+        lines = [
+            f"* Issue #{number}: {title}  ",
+            f"  <https://github.com/{owner}/{repo}/issues/{number}>",
+        ]
+        if body_excerpt:
+            lines.append("")
+            lines.append(f"  Description:\n  {body_excerpt}")
+        if comments_preview:
+            lines.append("")
+            lines.append("  Comments:")
+            for c in comments_preview:
+                lines.append(f"  - {c}")
+        if xrefs_preview:
+            lines.append("")
+            lines.append("  Cross-references:")
+            for x in xrefs_preview:
+                lines.append(f"  - {x}")
+
+        return "\n".join(lines)
 
     def _extract_discussion(self, github_comments: str) -> str:
         """Extract (not summarize) key discussion points from comments.
@@ -333,17 +419,13 @@ class ReportBuilder:
             return github_comments
 
         try:
-            extracted, validation_report = self.problem_extractor.extract_comments(
-                comment_thread=github_comments
-            )
+            extracted, validation_report = self.problem_extractor.extract_comments(comment_thread=github_comments)
 
             # Log validation metrics
             if validation_report.get("validation_enabled"):
                 avg_lcs = validation_report.get("avg_lcs", 0)
                 avg_ngram = validation_report.get("avg_ngram", 0)
-                logger.info(
-                    f"Comment extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}"
-                )
+                logger.info(f"Comment extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}")
 
                 # Warn if quality is low
                 if not validation_report.get("overall_pass"):
@@ -357,7 +439,7 @@ class ReportBuilder:
             logger.error(f"Comment extraction failed: {e}", exc_info=True)
             return f"[extraction failed: {e}]"
 
-    def _extract_problem_statement(self, issue_history: str, issue_stat: str) -> str:
+    def _extract_problem_statement(self, issue_history: str, issue_stat: str) -> ProblemExtraction:
         """Extract (not summarize) problem statement from issue.
 
         Uses extractive approach to maintain 85%+ LCS ratio with source material.
@@ -368,24 +450,21 @@ class ReportBuilder:
             issue_stat: Related issue statistics/content
 
         Returns:
-            Extracted problem statement
+            A structured ``ProblemExtraction`` instance.
         """
         if self.problem_extractor is None:
-            return issue_history
+            return ProblemExtraction(problem_statement=issue_history)
 
         try:
-            extracted, validation_report = self.problem_extractor.extract_problem(
-                message=issue_history,
-                related_issues=issue_stat
+            extraction, validation_report = self.problem_extractor.extract_problem(
+                message=issue_history, related_issues=issue_stat
             )
 
             # Log validation metrics
             if validation_report.get("validation_enabled"):
                 avg_lcs = validation_report.get("avg_lcs", 0)
                 avg_ngram = validation_report.get("avg_ngram", 0)
-                logger.info(
-                    f"Problem statement extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}"
-                )
+                logger.info(f"Problem statement extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}")
 
                 # Warn if quality is low
                 if not validation_report.get("overall_pass"):
@@ -393,11 +472,11 @@ class ReportBuilder:
                         f"Problem statement has low extractiveness:\n"
                         f"{validation_report.get('details', 'No details available')}"
                     )
-
-            return extracted.strip()
         except Exception as e:
             logger.error(f"Problem statement extraction failed: {e}", exc_info=True)
-            return f"[extraction failed: {e}]"
+            return ProblemExtraction(problem_statement=f"[extraction failed: {e}]")
+        else:
+            return extraction
 
     def _get_pr_change_summary(self, owner: str, repo: str, pr_number: int) -> str:
         """Get file change summary for a PR.
@@ -451,8 +530,8 @@ class ReportBuilder:
 
     def _classify_performance(
         self, issue_history: str, owner: str, repo: str, pr_number: int, patch: str
-    ) -> tuple[str, str]:
-        """Classify commit for performance optimization category and difficulty.
+    ) -> ClassificationDecision | None:
+        """Classify commit for performance optimization details.
 
         Args:
             issue_history: Issue description
@@ -462,18 +541,21 @@ class ReportBuilder:
             patch: Git patch content
 
         Returns:
-            Tuple of (category, difficulty)
+            ``ClassificationDecision`` with structured outputs, or ``None`` when unavailable.
         """
         if self.classify_judge is None:
-            return "[classification unavailable: judge not configured]", ""
+            return None
 
         try:
-            out = self.classify_judge(message=issue_history, patch=patch)
-            cat = getattr(out, "category", "NOT FOUND")
-            diff = getattr(out, "difficulty", "NOT FOUND")
-            return str(cat), str(diff)
+            return self.classify_judge(message=issue_history, patch=patch)  # type: ignore[no-any-return]  # pyright: ignore[reportReturnType]
         except Exception as e:
-            return f"[classification failed: {e}]", ""
+            logger.error(f"Classification failed: {e}", exc_info=True)
+            return ClassificationDecision(
+                reason=f"classification failed: {e}",
+                category="",
+                difficulty="",
+                confidence=None,
+            )
 
     def _resolve_pr_body(self, pr_dict: dict[str, Any], owner: str, repo: str, pr_number: int) -> str:
         """Resolve the PR body from the provided dict or GitHub metadata."""
@@ -484,6 +566,17 @@ class ReportBuilder:
         pr_meta = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{pr_number}")
         if isinstance(pr_meta, dict):
             return str(pr_meta.get("body") or "")
+        return ""
+
+    def _resolve_pr_title(self, pr_dict: dict[str, Any], owner: str, repo: str, pr_number: int) -> str:
+        """Resolve the PR title from the provided dict or GitHub metadata."""
+        pr_title = pr_dict.get("pr_title")
+        if pr_title is not None:
+            return str(pr_title)
+
+        pr_meta = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{pr_number}")
+        if isinstance(pr_meta, dict):
+            return str(pr_meta.get("title") or "")
         return ""
 
     def _expand_issue_details(self, issue_data: list[dict[str, Any]]) -> str:
@@ -524,20 +617,14 @@ class ReportBuilder:
         git_issue_str = self._expand_issue_details(issue_data)
         return git_problem_str, git_issue_str, issue_data
 
-    def _compose_problem_statement(self, git_problem_str: str, git_issue_str: str) -> tuple[str, str]:
-        """Return the problem section title and statement text."""
+    def _compose_problem_statement(self, git_problem_str: str, git_issue_str: str) -> ProblemExtraction | None:
+        """Return structured extraction when LLM summarization is enabled."""
         if self.summarize_llm:
-            extracted = self._extract_problem_statement(git_problem_str, git_issue_str)
-            return "Problem Statement", extracted  # Changed from "LLM Generated summary"
-
-        if git_issue_str:
-            statement = f"{git_problem_str}\n\n## Referenced Issues\n\n{git_issue_str}"
-            return "Problem Statement", statement
-
-        return "Problem Statement", git_problem_str
+            return self._extract_problem_statement(git_problem_str, git_issue_str)
+        return None
 
     def _evaluate_performance_detection(
-        self, git_problem_str: str, owner: str, repo: str, pr_number: int, patch: str
+        self, judge_problem_description: str, owner: str, repo: str, pr_number: int, patch: str
     ) -> tuple[bool, str]:
         """Return performance detection outputs when enabled."""
         if not (self.filter_performance_only or self.add_classification):
@@ -548,18 +635,40 @@ class ReportBuilder:
 
         file_change = self._get_pr_change_summary(owner, repo, pr_number)
         return self.perf_classifier.get_response(
-            message=git_problem_str,
+            message=judge_problem_description,
             file_change_summary=file_change,
             git_patch=patch,
         )
 
     def _maybe_classify(
-        self, git_problem_str: str, owner: str, repo: str, pr_number: int, patch: str
-    ) -> tuple[str, str]:
+        self, judge_problem_description: str, owner: str, repo: str, pr_number: int, patch: str
+    ) -> ClassificationDecision | None:
         """Return classification outputs when enabled."""
         if not self.add_classification:
-            return "", ""
-        return self._classify_performance(git_problem_str, owner, repo, pr_number, patch)
+            return None
+        return self._classify_performance(judge_problem_description, owner, repo, pr_number, patch)
+
+    def _compose_judge_problem_description(
+        self,
+        pr_title: str,
+        pr_body: str,
+        git_issue_str: str,
+        comments_text: str,
+    ) -> str:
+        """Compose a rich, self-contained problem description for the judge/classifier.
+
+        Includes PR title, PR body, expanded issue content, and discussion comments.
+        """
+        parts: list[str] = []
+        if pr_title:
+            parts.append(f"PR Title:\n{pr_title}\n")
+        if pr_body:
+            parts.append(f"PR Body:\n{pr_body}\n")
+        if git_issue_str:
+            parts.append(f"Referenced Issues (expanded):\n{git_issue_str}\n")
+        if comments_text:
+            parts.append(f"Discussion Comments:\n{comments_text}\n")
+        return "\n".join(parts).strip()
 
     def build(self, pr_dict: dict[str, Any]) -> ReportResult:
         """Build a report from a PR dictionary.
@@ -593,6 +702,7 @@ class ReportBuilder:
 
         # Get PR body from dict, or fetch from API
         pr_body = self._resolve_pr_body(pr_dict, owner, repo, pr_number)
+        pr_title = self._resolve_pr_title(pr_dict, owner, repo, pr_number)
 
         logger.debug("Building report for %s/%s PR #%d", owner, repo, pr_number)
 
@@ -601,7 +711,8 @@ class ReportBuilder:
 
         # Extract discussion from comments
         visited_links: set[str] = {""}
-        comment_summary = self._extract_discussion("\n\n".join(github_comments))
+        raw_comments_text = "\n\n".join(github_comments)
+        comment_summary = self._extract_discussion(raw_comments_text)
         logger.debug("got comment extraction")
 
         # Process linked resources
@@ -613,7 +724,7 @@ class ReportBuilder:
         if not issue_data and not pr_body:
             return ReportResult(
                 report_md="NOT_A_VALID_PR",
-                report_data={},
+                all_data={},
                 problem_statement="",
                 hints="",
                 classification="",
@@ -621,15 +732,23 @@ class ReportBuilder:
                 is_performance_commit=False,
             )
 
+        # Compose enriched context for the performance judge & classifier
+        judge_problem_description = self._compose_judge_problem_description(
+            pr_title=pr_title,
+            pr_body=pr_body,
+            git_issue_str=git_issue_str,
+            comments_text=raw_comments_text,
+        )
+
         # Check if performance commit (if filtering or classification enabled)
         is_performance_commit, perf_json = self._evaluate_performance_detection(
-            git_problem_str, owner, repo, pr_number, patch
+            judge_problem_description, owner, repo, pr_number, patch
         )
         if self.filter_performance_only and not is_performance_commit:
             logger.debug("NOT A PERFORMANCE COMMIT (filtered out by filter_performance_only=True)")
             return ReportResult(
                 report_md="NOT_A_PERFORMANCE_COMMIT",
-                report_data={},
+                all_data={},
                 problem_statement="",
                 hints="",
                 classification="",
@@ -637,35 +756,104 @@ class ReportBuilder:
                 is_performance_commit=False,
             )
 
-        # Generate problem statement
-        problem_section_title, problem_stat = self._compose_problem_statement(git_problem_str, git_issue_str)
+        # Generate problem statement (problem-only) and a with-solution variant
+        problem_extraction = self._compose_problem_statement(git_problem_str, git_issue_str)
+        problem_section_title = "Problem Statement"
+
+        solution_overview: str = ""
+        if problem_extraction:
+            has_problem = bool(getattr(problem_extraction, "problem_statement", None)) and bool(
+                (problem_extraction.problem_statement or "").strip()
+            )
+            if has_problem:
+                problem_stat = problem_extraction.to_problem_markdown()
+                sol = getattr(problem_extraction, "solution_overview", None) or ""
+                solution_overview = sol.strip()
+            else:
+                # Fallback: use raw PR body for a readable problem statement
+                problem_stat = git_problem_str
+                sol = getattr(problem_extraction, "solution_overview", None) or ""
+                solution_overview = sol.strip()
+        else:
+            # No extraction; use raw PR body
+            problem_stat = git_problem_str
+
+        # Compose the problem+solution string for convenience
+        problem_stat_with_sol = problem_stat
+        if solution_overview:
+            problem_stat_with_sol = f"{problem_stat_with_sol}\n\n**Solution Overview**\n\n{solution_overview}"
 
         logger.debug("got problem statement")
 
-        # Add classification if requested
-        cat, diff = self._maybe_classify(git_problem_str, owner, repo, pr_number, patch)
-        if self.add_classification:
-            logger.debug("got classification")
+        # Add classification only if this is a performance commit
+        classification_decision = None
+        if self.add_classification and is_performance_commit:
+            classification_decision = self._maybe_classify(judge_problem_description, owner, repo, pr_number, patch)
+            if classification_decision:
+                logger.debug("got classification")
 
-        # Build final report using template
+        classification = ""
+        difficulty = ""
+        classification_reason = ""
+        classification_confidence: int | None = None
+
+        if self.add_classification and classification_decision:
+            classification = classification_decision.category
+            difficulty = classification_decision.difficulty
+            classification_reason = classification_decision.reason
+            classification_confidence = classification_decision.confidence
+
+        # Build final report using template (problem-only variant)
         report_data = {
             "hints": comment_summary,
             "links_section": "\n".join(link_summaries) if link_summaries else "",
-            "performance_section": perf_json if is_performance_commit else "",
+            # "performance_section": perf_json if is_performance_commit else "",
             "problem_section_title": problem_section_title,
             "problem_statement": problem_stat,
-            "classification": cat if self.add_classification else "",
-            "difficulty": diff if self.add_classification else "",
+            "solution_overview": solution_overview,
+            "include_solution": False,
+            "problem_extraction": problem_extraction,
+            "problem_sections": problem_extraction.to_dict() if problem_extraction else None,
+            "git_problem_str": git_problem_str,
+            "git_issue_str": git_issue_str,
+            # "classification": classification,
+            # "difficulty": difficulty,
+            # "classification_reason": classification_reason,
+            # "classification_confidence": classification_confidence,
         }
         template = self.jinja_env.get_template("report.md.j2")
         report_md = template.render(**report_data)
 
+        # Render a second variant that includes the solution section
+        report_with_sol = template.render({**report_data, "include_solution": True})
+
         return ReportResult(
             report_md=report_md,
-            report_data=report_data,
+            report_with_sol=report_with_sol,
+            all_data={
+                "hints": comment_summary,
+                "links_section": "\n".join(link_summaries) if link_summaries else "",
+                "performance_section": perf_json if is_performance_commit else "",
+                "problem_section_title": problem_section_title,
+                "problem_statement": problem_stat,
+                "solution_overview": solution_overview,
+                "include_solution": False,
+                "problem_extraction": problem_extraction,
+                "problem_sections": problem_extraction.to_dict() if problem_extraction else None,
+                "git_problem_str": git_problem_str,
+                "git_issue_str": git_issue_str,
+                "classification": classification,
+                "difficulty": difficulty,
+                "classification_reason": classification_reason,
+                "classification_confidence": classification_confidence,
+            },
             problem_statement=problem_stat,
+            problem_statement_with_sol=problem_stat_with_sol,
             hints=comment_summary,
-            classification=cat,
-            difficulty=diff,
+            classification=classification,
+            difficulty=difficulty,
             is_performance_commit=is_performance_commit,
+            classification_reason=classification_reason,
+            classification_confidence=classification_confidence,
+            problem_sections=problem_extraction,
         )
