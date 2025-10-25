@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import pickle
 import re
 import time
@@ -29,9 +30,7 @@ from datasmith.docker.cleanup import fast_cleanup_run_artifacts, remove_containe
 from datasmith.docker.context import ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import gen_run_labels
 from datasmith.docker.validation import DockerValidator, ValidationConfig
-
-# from datasmith.docker.validation import build_and_validate as build_and_validate_impl
-from datasmith.execution.resolution import analyze_commit
+from datasmith.execution.resolution.task_utils import resolve_task  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 RE_PY_EXTRACT = re.compile(r"python[=<>!~]*([\d\.]+)")
@@ -423,10 +422,9 @@ def agent_build_and_validate(  # noqa: C901
     Returns:
         Dictionary with build results and attempt history
     """
-    run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
     assert task.sha is not None, "task.sha must be set"  # noqa: S101
-    sha: str = task.sha
-    task_analysis = analyze_commit(sha, f"{task.owner}/{task.repo}", bypass_cache=True) or {}
+    run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
+    task_analysis, task = resolve_task(task)
     if not task_analysis or not task_analysis.get("can_install", False):
         logger.warning("agent_build_and_validate: task cannot be installed")
         return {
@@ -439,35 +437,10 @@ def agent_build_and_validate(  # noqa: C901
             "image_name": task.with_tag("pkg").get_image_name(),
             "duration_s": 0.0,
             "stderr_tail": json.dumps(task_analysis) if task_analysis else "No analysis",
-            "stdout_tail": task_analysis.get("dry_run_log", ""),
+            "stdout_tail": task_analysis.get("dry_run_log", "") if task_analysis else "",
             "attempts": [],
             "context_pickle": None,
         }
-
-    python_version = ""
-    if task_analysis.get("resolution_strategy"):
-        m = RE_PY_EXTRACT.search(task_analysis["resolution_strategy"])
-        if m:
-            python_version = m.group(1)
-    if not python_version:
-        python_version = task_analysis.get("python_version", "")
-    if not python_version and task.python_version:
-        python_version = task.python_version
-
-    logger.info(
-        "agent_build_and_validate: task analysis: python_versions=%s, final_dependencies=%s",
-        task_analysis.get("python_version"),
-        task_analysis.get("final_dependencies"),
-    )
-
-    task = Task(
-        owner=task.owner,
-        repo=task.repo,
-        sha=task.sha,
-        commit_date=task.commit_date,
-        python_version=python_version,
-        env_payload=json.dumps({"dependencies": task_analysis.get("final_dependencies", "")}) or task.env_payload,
-    )
 
     # Gather defaults + similar contexts
     default_building_template = context_registry.get_default(tag="env")[1].building_data
@@ -517,7 +490,7 @@ def agent_build_and_validate(  # noqa: C901
             task=task.with_tag("env"),
             context=probe_context,
             repo_url=repo_url,
-            sha=sha,
+            sha=cast(str, task.sha),
             timeout_s=args.build_timeout,
             tail_chars=args.tail_chars,
             probe=True,
@@ -797,6 +770,14 @@ def agent_build_and_validate(  # noqa: C901
             if build_res.ok:
                 with context_registry.get_lock():
                     context_registry.register(task.with_tag("pkg"), ctx)
+
+                if args.push_to_ecr:
+                    logger.info("agent_build_and_validate: pushed %s to ECR", task.with_tag("run").get_image_name())
+                    ctx.build_and_publish_to_ecr(
+                        client=client,
+                        task=task.with_tag("run"),
+                        region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+                    )
 
                 final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
                 _save_pickle(ctx, final_pickle)

@@ -9,9 +9,8 @@ from urllib.parse import urlparse
 
 import requests
 
-# import tiktoken
-# from datasmith.agents.summ_judge import ClassifyJudge, LLMCommentSummarizer, LLMStructurer
 from datasmith.logging_config import configure_logging
+from datasmith.scrape.issue_extractor import extract_issues_from_description
 from datasmith.utils import _get_github_metadata
 
 logger = configure_logging()
@@ -26,6 +25,62 @@ MAX_LINKS_TO_FOLLOW = 60  # safety cap for level-2 traversal
 # CLASSIFY_JUDGE = ClassifyJudge()
 
 # Dataframe with git commits to generate reports for
+# Known bot usernames to filter out from comments
+BOT_USERNAMES = {
+    "coveralls",
+    "codecov",
+    "github-actions",
+    "dependabot",
+    "dependabot[bot]",
+    "renovate",
+    "renovate[bot]",
+    "netlify",
+    "vercel",
+    "circleci",
+    "travis-ci",
+    "appveyor",
+    "pre-commit-ci",
+    "pre-commit-ci[bot]",
+    "sonarcloud",
+    "codefactor-io",
+    "imgbot",
+    "imgbot[bot]",
+    "github-advanced-security",
+    "gitguardian",
+    "snyk-bot",
+    "pull",
+    "pull[bot]",
+    "allcontributors",
+    "allcontributors[bot]",
+    # GitHub / CI / merge helpers
+    "github-actions[bot]",  # official Actions actor
+    "k8s-ci-robot",  # Kubernetes Prow bot
+    "docker-library-bot",
+    "bors[bot]",
+    "Mergifyio",
+    "kodiakhq[bot]",
+    # Releases & automation
+    "semantic-release-bot",
+    "release-drafter",
+    # CLA / governance
+    "cla-assistant",
+    "cla-bot",
+    "google-cla",
+    # Translation / localization
+    "weblate",
+    "crowdin-bot",
+    # Dependency / security updaters
+    "greenkeeperio-bot",
+    "pyup-bot",
+    "fossabot",
+    "npm-cli-bot",
+    # Code quality / legacy services
+    "lgtm-com[bot]",
+    "codeclimate",
+    # Misc automations
+    "stale[bot]",
+    "autofix-ci",
+}
 
 
 def iso(ts: str) -> str:
@@ -37,36 +92,51 @@ def extract_links(text: str) -> list[str]:
     return re.findall(r"https?://[^\s)<>\]]+", text or "")
 
 
-def fetch_commit(owner: str, repo: str, sha: str) -> dict:
-    # endpoint = f"/repos/{owner}/{repo}/commits/{sha}"
-    # logger.debug(endpoint)
-    commit_metadata = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/commits/{sha}")
-    if commit_metadata and isinstance(commit_metadata, dict):
-        return {
-            "sha": sha,
-            "date_iso": commit_metadata["commit"]["author"]["date"],
-            "message": commit_metadata["commit"]["message"],
-        }
-    return {}
+# def fetch_commit(owner: str, repo: str, sha: str) -> dict:
+#     # endpoint = f"/repos/{owner}/{repo}/commits/{sha}"
+#     # logger.debug(endpoint)
+#     commit_metadata = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/commits/{sha}")
+#     if commit_metadata and isinstance(commit_metadata, dict):
+#         return {
+#             "sha": sha,
+#             "date_iso": commit_metadata["commit"]["author"]["date"],
+#             "message": commit_metadata["commit"]["message"],
+#         }
+#     return {}
 
 
-def prs_for_commit(owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
-    # pulls_metadata: Sequence[dict] = _get_github_metadata(
-    #     endpoint=f"/repos/{owner}/{repo}/commits/{sha}/pulls?per_page=100"
-    # )
-    pulls_metadata = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/commits/{sha}/pulls?per_page=100")
-    if pulls_metadata and isinstance(pulls_metadata, list):
-        return pulls_metadata
-    return []
-    # url = f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}/pulls"
-    # return gh_get(url, params={"per_page": 100})
+# def prs_for_commit(owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+#     # pulls_metadata: Sequence[dict] = _get_github_metadata(
+#     #     endpoint=f"/repos/{owner}/{repo}/commits/{sha}/pulls?per_page=100"
+#     # )
+#     pulls_metadata = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/commits/{sha}/pulls?per_page=100")
+#     if pulls_metadata and isinstance(pulls_metadata, list):
+#         return pulls_metadata
+#     return []
+#     # url = f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}/pulls"
+#     # return gh_get(url, params={"per_page": 100})
 
 
-def pr_meta(owner: str, repo: str, num: int) -> dict[str, Any]:
-    pr_metadata = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{num}")
-    if pr_metadata and isinstance(pr_metadata, dict):
-        return pr_metadata
-    return {}
+# def pr_meta(owner: str, repo: str, num: int) -> dict[str, Any]:
+#     pr_metadata = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{num}")
+#     if pr_metadata and isinstance(pr_metadata, dict):
+#         return pr_metadata
+#     return {}
+
+
+def _is_bot_comment(comment: dict) -> bool:
+    """Check if a comment is from a bot.
+
+    Args:
+        comment: Comment dict with user information
+
+    Returns:
+        True if comment is from a known bot
+    """
+    if not comment.get("user"):
+        return False
+    username = comment["user"].get("login", "").lower()
+    return "[bot]" in username or username in BOT_USERNAMES or username in {u.lower() for u in BOT_USERNAMES}
 
 
 def issue_timeline(owner: str, repo: str, num: int) -> list[dict[str, Any]]:
@@ -99,7 +169,6 @@ def issue_comments(owner: str, repo: str, num: int) -> list[dict[str, Any]]:
         else:
             break
 
-        # Stop when fewer than 100 results?
         if len(issue_metadata) < 100:
             break
         page += 1
@@ -167,6 +236,133 @@ def summarize_gh_resource(res: tuple[str, ...]) -> str:
     except (KeyError, ValueError, TypeError):
         return ""
     return ""
+
+
+# New shared helpers migrated from ReportBuilder
+
+
+def extract_xrefs_from_timeline(timeline_raw: list[dict]) -> list[str]:
+    """Extract cross-references from issue timeline events."""
+    xrefs: list[str] = []
+    for event in timeline_raw:
+        try:
+            src_issue = event.get("source", {}).get("issue")
+            if not src_issue:
+                continue
+            b = (src_issue.get("body") or "").strip()
+            if b:
+                xrefs.append(b)
+        except Exception:
+            logger.exception("Failed to extract cross-reference from event")
+            continue
+    return xrefs
+
+
+def expand_issue_details(issue_data: list[dict[str, Any]], anonymize: bool = False) -> str:
+    """Combine issue metadata into a markdown-friendly string.
+
+    Args:
+        issue_data: List of issue metadata dicts
+        anonymize: Whether to anonymize content
+    """
+    if not issue_data:
+        return ""
+
+    issue_texts: list[str] = []
+    for index, issue in enumerate(issue_data):
+        segments: list[str] = [f"Issue {index}: {issue.get('title', '')}\n"]
+
+        body = issue.get("body")
+        if body:
+            segments.append(f"Description:\n{body}\n")
+
+        comments = [comment for comment in issue.get("comments", []) if comment]
+        if comments:
+            comment_lines = "\n".join(f"- {comment}" for comment in comments)
+            segments.append(f"Comments ({len(comments)}):\n{comment_lines}\n")
+
+        cross_refs = [xref for xref in issue.get("cross_references", []) if xref]
+        if cross_refs:
+            cross_lines = "\n".join(f"- {xref}" for xref in cross_refs)
+            segments.append(f"Cross-references ({len(cross_refs)}):\n{cross_lines}\n")
+
+        issue_texts.append("".join(segments))
+
+    combined = " ".join(issue_texts)
+    return anonymize_github_issue(combined) if anonymize else combined
+
+
+def build_issue_context(
+    pr_body: str, owner: str, repo: str, *, anonymize: bool = False
+) -> tuple[str, str, list[dict[str, Any]], str, str]:
+    """Construct issue/problem strings plus raw variants and metadata.
+
+    Returns:
+        Tuple of (git_problem_str, git_issue_str, issue_data, git_problem_str_raw, git_issue_str_raw)
+    """
+    prob_stat_list, issue_data = extract_issues_from_description(pr_body, owner, repo)
+    git_problem_str_raw = " ".join(str(item) for item in prob_stat_list)
+    git_problem_str = anonymize_github_issue(git_problem_str_raw) if anonymize else git_problem_str_raw
+
+    git_issue_str_raw = expand_issue_details(issue_data, anonymize=False)
+    git_issue_str = expand_issue_details(issue_data, anonymize=anonymize)
+    return git_problem_str, git_issue_str, issue_data, git_problem_str_raw, git_issue_str_raw
+
+
+def get_pr_change_summary(owner: str, repo: str, pr_number: int) -> str:
+    """Get file change summary for a PR as a markdown table (paginated)."""
+    api = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
+    headers = {"Accept": "application/vnd.github+json"}
+    lines = [
+        "| File | Status | Lines Added | Lines Removed | Total Changes |",
+        "|------|--------|-------------|---------------|---------------|",
+    ]
+    total_add = total_del = total_changes = 0
+    page = 1
+
+    while True:
+        resp = requests.get(api, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
+        resp.raise_for_status()
+        files = resp.json()
+        if not files:
+            break
+
+        for f in files:
+            status = f.get("status", "")
+            filename = f.get("filename", "")
+            if status == "renamed" and f.get("previous_filename"):
+                filename = f"{f['previous_filename']} ➜ {f['filename']}"
+
+            added = f.get("additions", 0)
+            deleted = f.get("deletions", 0)
+            changes = f.get("changes", added + deleted)
+
+            lines.append(f"| {filename} | {status} | {added} | {deleted} | {changes} |")
+
+            total_add += added
+            total_del += deleted
+            total_changes += changes
+
+        if 'rel="next"' not in resp.headers.get("Link", ""):
+            break
+        page += 1
+
+    lines.append(f"| **TOTAL** |  | **{total_add}** | **{total_del}** | **{total_changes}** |")
+    return "\n".join(lines)
+
+
+def compose_judge_problem_description(*, pr_title: str, pr_body: str, git_issue_str: str, comments_text: str) -> str:
+    """Compose a rich, self-contained problem description for the judge/classifier."""
+    parts: list[str] = []
+    if pr_title:
+        parts.append(f"PR Title:\n{pr_title}\n")
+    if pr_body:
+        parts.append(f"PR Body:\n{pr_body}\n")
+    if git_issue_str:
+        parts.append(f"Referenced Issues (expanded):\n{git_issue_str}\n")
+    if comments_text:
+        parts.append(f"Discussion Comments:\n{comments_text}\n")
+    return "\n".join(parts).strip()
 
 
 def md_commit_block(c: dict, owner: str, repo: str) -> str:
@@ -259,113 +455,113 @@ def anonymize_github_issue(text: str) -> str:
     return text
 
 
-def get_pr_change_summary_from_url(owner: str, repo: str, pr_number: int) -> str:
-    api = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
+# def get_pr_change_summary_from_url(owner: str, repo: str, pr_number: int) -> str:
+#     api = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
 
-    headers = {"Accept": "application/vnd.github+json"}
-    lines = [
-        "| File | Status | Lines Added | Lines Removed | Total Changes |",
-        "|------|--------|-------------|---------------|---------------|",
-    ]
-    total_add = total_del = total_changes = 0
-    page = 1
+#     headers = {"Accept": "application/vnd.github+json"}
+#     lines = [
+#         "| File | Status | Lines Added | Lines Removed | Total Changes |",
+#         "|------|--------|-------------|---------------|---------------|",
+#     ]
+#     total_add = total_del = total_changes = 0
+#     page = 1
 
-    while True:
-        resp = requests.get(api, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
-        resp.raise_for_status()
-        files = resp.json()
-        if not files:
-            break
+#     while True:
+#         resp = requests.get(api, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
+#         resp.raise_for_status()
+#         files = resp.json()
+#         if not files:
+#             break
 
-        for f in files:
-            status = f.get("status", "")
-            filename = f.get("filename", "")
-            if status == "renamed" and f.get("previous_filename"):
-                filename = f"{f['previous_filename']} ➜ {f['filename']}"
+#         for f in files:
+#             status = f.get("status", "")
+#             filename = f.get("filename", "")
+#             if status == "renamed" and f.get("previous_filename"):
+#                 filename = f"{f['previous_filename']} ➜ {f['filename']}"
 
-            added = f.get("additions", 0)
-            deleted = f.get("deletions", 0)
-            changes = f.get("changes", added + deleted)
+#             added = f.get("additions", 0)
+#             deleted = f.get("deletions", 0)
+#             changes = f.get("changes", added + deleted)
 
-            lines.append(f"| {filename} | {status} | {added} | {deleted} | {changes} |")
+#             lines.append(f"| {filename} | {status} | {added} | {deleted} | {changes} |")
 
-            total_add += added
-            total_del += deleted
-            total_changes += changes
+#             total_add += added
+#             total_del += deleted
+#             total_changes += changes
 
-        # pagination: check if there's another page
-        if 'rel="next"' not in resp.headers.get("Link", ""):
-            break
-        page += 1
+#         # pagination: check if there's another page
+#         if 'rel="next"' not in resp.headers.get("Link", ""):
+#             break
+#         page += 1
 
-    lines.append(f"| **TOTAL** |  | **{total_add}** | **{total_del}** | **{total_changes}** |")
-    return "\n".join(lines)
-
-
-def problem_statement(owner: str, repo: str, num: int) -> tuple[str, str]:
-    """Returns a summary of the main issue of the pull request."""
-    pr = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{num}")
-    if not pr or not isinstance(pr, dict):
-        return "NOT_A_VALID_PR", ""
-    issue_url = pr["issue_url"]
-    git_problem_str, git_issue_str = summarize(issue_url)
-
-    return git_problem_str, git_issue_str
+#     lines.append(f"| **TOTAL** |  | **{total_add}** | **{total_del}** | **{total_changes}** |")
+#     return "\n".join(lines)
 
 
-def summarize(issue_url: str) -> tuple[str, str]:
-    """Takes in a URL and provides a summary of the comments in it.
-    Used as helpr function to generate problem_statement and hints.
-    Purely heuristc in nature (No LLM calls being made.)
-    """
-    parsed = urlparse(issue_url)
-    endpoint = parsed.path.lstrip("/")
-    issue = _get_github_metadata(endpoint)  # THIS IS THE PR ITSELF
-    description = ""
-    if issue and isinstance(issue, dict) and issue["body"]:
-        description += issue["body"]
-    marker = "<!-- Optional opt-out -->"
-    if marker in description:
-        description = description.split(marker, 1)[0].strip()
-    parts = parsed.path.strip("/").split("/")
-    owner, repo = parts[1], parts[2]
+# def problem_statement(owner: str, repo: str, num: int) -> tuple[str, str]:
+#     """Returns a summary of the main issue of the pull request."""
+#     pr = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{num}")
+#     if not pr or not isinstance(pr, dict):
+#         return "NOT_A_VALID_PR", ""
+#     issue_url = pr["issue_url"]
+#     git_problem_str, git_issue_str = summarize(issue_url)
 
-    prob_stat = [description + "\n"]
-    issue_stat = []
+#     return git_problem_str, git_issue_str
 
-    # Extracting all issue numbers
-    issues = re.findall(r"#(\d+)", description)
-    logger.debug(description)
-    if issues == []:
-        return "NOT_A_VALID_PR", ""
-    for i, iss in enumerate(issues):
-        endpoint = f"/repos/{owner}/{repo}/issues/{iss}"
-        issue_thread = _get_github_metadata(endpoint)
-        stat = ""
-        if issue_thread and isinstance(issue_thread, dict):
-            issue_comments_list = issue_comments(owner, repo, iss)
-            stat = f"Issue {i}:" + issue_thread["title"] + "\n"
-            stat = (
-                stat
-                + f"Issue {i} comments:"
-                + "\n".join(comment.get("body", "") for comment in issue_comments_list)
-                + "\n"
-            )
-            stat = (
-                stat
-                + f"Issue {i} cross-referenced comments:"
-                + "\n".join(comment["source"]["issue"]["body"] for comment in issue_timeline(owner, repo, iss))
-                + "\n"
-            )
-        issue_stat.append(stat)
 
-    git_problem_str = " ".join(str(x) for x in prob_stat)
-    git_problem_str = anonymize_github_issue(git_problem_str)
-    git_issue_str = " ".join(str(x) for x in issue_stat)
-    git_issue_str = anonymize_github_issue(git_issue_str)
-    # classify whether performance improving or not.
+# def summarize(issue_url: str) -> tuple[str, str]:
+#     """Takes in a URL and provides a summary of the comments in it.
+#     Used as helpr function to generate problem_statement and hints.
+#     Purely heuristc in nature (No LLM calls being made.)
+#     """
+#     parsed = urlparse(issue_url)
+#     endpoint = parsed.path.lstrip("/")
+#     issue = _get_github_metadata(endpoint)  # THIS IS THE PR ITSELF
+#     description = ""
+#     if issue and isinstance(issue, dict) and issue["body"]:
+#         description += issue["body"]
+#     marker = "<!-- Optional opt-out -->"
+#     if marker in description:
+#         description = description.split(marker, 1)[0].strip()
+#     parts = parsed.path.strip("/").split("/")
+#     owner, repo = parts[1], parts[2]
 
-    return git_problem_str, git_issue_str
+#     prob_stat = [description + "\n"]
+#     issue_stat = []
+
+#     # Extracting all issue numbers
+#     issues = re.findall(r"#(\d+)", description)
+#     logger.debug(description)
+#     if issues == []:
+#         return "NOT_A_VALID_PR", ""
+#     for i, iss in enumerate(issues):
+#         endpoint = f"/repos/{owner}/{repo}/issues/{iss}"
+#         issue_thread = _get_github_metadata(endpoint)
+#         stat = ""
+#         if issue_thread and isinstance(issue_thread, dict):
+#             issue_comments_list = issue_comments(owner, repo, iss)
+#             stat = f"Issue {i}:" + issue_thread["title"] + "\n"
+#             stat = (
+#                 stat
+#                 + f"Issue {i} comments:"
+#                 + "\n".join(comment.get("body", "") for comment in issue_comments_list)
+#                 + "\n"
+#             )
+#             stat = (
+#                 stat
+#                 + f"Issue {i} cross-referenced comments:"
+#                 + "\n".join(comment["source"]["issue"]["body"] for comment in issue_timeline(owner, repo, iss))
+#                 + "\n"
+#             )
+#         issue_stat.append(stat)
+
+#     git_problem_str = " ".join(str(x) for x in prob_stat)
+#     git_problem_str = anonymize_github_issue(git_problem_str)
+#     git_issue_str = " ".join(str(x) for x in issue_stat)
+#     git_issue_str = anonymize_github_issue(git_issue_str)
+#     # classify whether performance improving or not.
+
+#     return git_problem_str, git_issue_str
 
 
 # def summarize_llm(issue_history: str, issue_stat: str) -> str:

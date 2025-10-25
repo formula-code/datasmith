@@ -12,8 +12,9 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from datasmith.logging_config import get_logger
 from git import Commit, Repo
+
+from datasmith.logging_config import get_logger
 
 from .constants import ASV_REGEX, GIT_CACHE_DIR
 
@@ -222,7 +223,8 @@ def cleanup_worktree_cache(  # noqa: C901
             kept_entries.extend(entries)
             to_remove = []
 
-        for path, _mtime, _sha in to_remove:
+        for entry in to_remove:
+            path = entry[0]
             removed.append(path)
             _remove_worktree_dir(repo, path)
 
@@ -233,7 +235,8 @@ def cleanup_worktree_cache(  # noqa: C901
             free_space = _free_gb(GIT_CACHE_DIR)
             idx = 0
             while free_space < min_free and idx < len(removable):
-                path, _mtime, _sha = removable[idx]
+                entry = removable[idx]
+                path = entry[0]
                 idx += 1
                 removed.append(path)
                 _remove_worktree_dir(repo, path)
@@ -312,8 +315,8 @@ def prepare_repo_checkout(repo_name: str, sha: str, tmp_root: Path) -> tuple[Rep
                     current = wt_repo.head.commit.hexsha
                 except Exception:
                     current = None
-                with suppress(Exception):
-                    wt_repo.git.clean("-xfd")
+                # with suppress(Exception):
+                #     wt_repo.git.clean("-xfd")
                 if current != sha:
                     with suppress(Exception):
                         wt_repo.git.reset("--hard", sha)
@@ -393,7 +396,24 @@ def materialize_blobs(
         relpath = cast(str, getattr(item, "path", ""))
         if predicate(relpath):
             dst = base / relpath
-            dst.parent.mkdir(parents=True, exist_ok=True)
+            # Be defensive against file/dir conflicts from prior runs.
+            # If the intended parent exists as a file, remove it so we can create a directory.
+            parent = dst.parent
+            try:
+                if parent.exists() and parent.is_file():
+                    parent.unlink()
+            except Exception as e:
+                # Fall through; mkdir may still succeed if race resolved elsewhere.
+                logger.debug("Failed to remove parent file %s: %s", parent, e)
+            parent.mkdir(parents=True, exist_ok=True)
+            # If a directory exists at the exact dst path (e.g., from a previous
+            # materialization of a folder that later became a file), remove it.
+            try:
+                if dst.exists() and dst.is_dir():
+                    shutil.rmtree(dst)
+            except Exception as e:
+                # If removal fails, attempt to proceed with writing; open() will error if still a dir.
+                logger.debug("Failed to remove directory %s: %s", dst, e)
             data_stream = getattr(item, "data_stream", None)
             if data_stream is None:
                 continue

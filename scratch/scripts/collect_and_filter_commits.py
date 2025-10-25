@@ -42,7 +42,10 @@ def _commit_info_worker(arg_tuple: tuple[Repo, str]) -> dict[str, Any] | None:
     """Wrapper for ProcessPool: arg_tuple = (repo_name, sha)."""
     repo, sha = arg_tuple
     # return _get_commit_info(repo, sha)
-    return _get_commit_info_offline(repo, sha)
+    ret = _get_commit_info_offline(repo, sha)
+    if ret is None:
+        ret = _get_commit_info_offline(repo, sha, bypass_cache=True)
+    return ret
 
 
 def main() -> None:
@@ -107,13 +110,13 @@ def main() -> None:
 
     commits_meta = pd.json_normalize(commit_info)  # pyright: ignore[reportArgumentType]
     commits_meta = commits_meta[commits_meta["has_asv"]]  # Take out all commits that don't have asv installed.
-    commits_meta["kind"] = commits_meta["sha"].map(commit2kind)
+    commits_meta["kind"] = commits_meta["merge_commit_sha"].map(commit2kind)
 
     commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
-    commits_merged["repo_name"] = commits_merged["sha"].map(commit2repo)
+    commits_merged["repo_name"] = commits_merged["merge_commit_sha"].map(commit2repo)
     # commits_merged["pr"] = commits_merged["sha"].map(commit2pr)
     # commit2pr returns a dict that is json-serializable, so we can expand it into multiple columns
-    pr_expanded = commits_merged["sha"].map(commit2pr).apply(pd.Series)
+    pr_expanded = commits_merged["merge_commit_sha"].map(commit2pr).apply(pd.Series)
     commits_merged = pd.concat([commits_merged, pr_expanded.add_prefix("pr_")], axis=1)
 
     out_path = Path(args.output_pth)

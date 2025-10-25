@@ -266,9 +266,23 @@ $ python scratch/scripts/collect_and_filter_commits.py \
        --threads   32 \
        --procs     32
 
+$ python scratch/scripts/symbolic_context_synthesis.py \
+       --commits scratch/artifacts/pipeflush/merge_commits_filtered_2.parquet \
+       --output-dir scratch/artifacts/pipeflush/symbolic_synthesis/ \
+       --max-workers 200 \
+       --context-registry scratch/artifacts/pipeflush/symbolic_context_registry.json \
+       --limit-per-repo -1
+
+$ python scratch/scripts/prepare_commits_for_building_reports.py \
+       --input scratch/artifacts/pipeflush/merge_commits_filtered.parquet \
+       --output scratch/artifacts/pipeflush/merge_commits_filtered_with_patch.parquet \
+       --max-workers 200 \
+       --filter-repos \
+       --fetch-patches
+
 $ python scratch/scripts/collect_perf_commits.py \
-       --commits  scratch/artifacts/pipeflush/commits_filtered.parquet \
-       --outfile    scratch/artifacts/pipeflush/commits_perfonly.jsonl \
+       --commits  scratch/artifacts/pipeflush/merge_commits_filtered_with_patch.parquet \
+       --outfile    scratch/artifacts/pipeflush/perfonly_commits_with_patch.parquet \
        --max-workers -1
 ```
 

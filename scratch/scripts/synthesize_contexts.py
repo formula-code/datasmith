@@ -25,7 +25,7 @@ configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
 
 # logger = configure_logging(level=10)
-logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".tiny.log"), "w"))  # noqa: SIM115
+logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,6 +76,11 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the context registry JSON file.",
     )
+    parser.add_argument(
+        "--push-to-ecr",
+        action="store_true",
+        help="Whether to push built images to AWS ECR.",
+    )
     return parser.parse_args()
 
 
@@ -100,7 +105,8 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]
-            sha = row["sha"]
+            # sha = row["sha"]
+            sha = row["pr_base"]["sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
                 logger.debug("Skipping %s commit %s as it does not have ASV benchmarks.", repo_name, sha)
@@ -119,6 +125,11 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
     return all_states
 
 
+def within_3_months(unix_time: float) -> bool:
+    three_months_ago = datetime.datetime.now() - datetime.timedelta(days=90)
+    return datetime.datetime.fromtimestamp(unix_time) >= three_months_ago
+
+
 def prepare_tasks(
     all_states: dict[tuple[str, str], set[tuple[str, float, str]]],
     limit_per_repo: int,
@@ -130,6 +141,12 @@ def prepare_tasks(
             Task(owner, repo, sha, commit_date=date, env_payload=env_payload) for sha, date, env_payload in sorted(tup)
         })
         # tasks = list(filter(lambda t: t.with_tag("pkg") not in context_registry, tasks))
+        tasks = [
+            t
+            for t in tasks
+            if (t.with_tag("pkg") not in context_registry)
+            or (not within_3_months(context_registry.get(t.with_tag("pkg")).created_unix))
+        ]
         if limit_per_repo > 0:
             tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))
         all_tasks.extend(tasks)

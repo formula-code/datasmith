@@ -1,4 +1,11 @@
-"""HTTP helpers with rate limiting and retry logic."""
+"""HTTP helpers with rate limiting and retry logic.
+
+Enhancements:
+- Add long-wait handling for GitHub rate limits (403/429) using X-RateLimit-Reset
+  or a conservative 90-minute default with periodic log pings.
+- Do not consume retry attempts on rate-limit waits; only increment on real
+  transport or HTTP errors to avoid exiting early.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +23,7 @@ from datasmith import logger
 
 LIST_UA = sua.get_list(shuffle=True, force_cached=True)
 
-RPS: dict[str, int] = {"github": 20, "codecov": 20}
+RPS: dict[str, int] = {"github": 2, "codecov": 20}
 _last_call: dict[str, float] = {"github": 0.0, "codecov": 0.0}
 
 
@@ -29,13 +36,19 @@ def get_session() -> requests.Session:
     return session
 
 
+def parse_gh_tokens() -> list[str]:
+    tokens_str = os.environ.get("GH_TOKENS", "")
+    tokens = [token.strip() for token in tokens_str.split(",") if token.strip()]
+    return tokens
+
+
 def _build_github_headers(diff_api: bool = False) -> dict[str, str]:
-    if "GH_TOKEN" not in os.environ:
+    if "GH_TOKENS" not in os.environ:
         logger.warning("No GH_TOKEN environment variable found. Rate limits may apply.")
-    token = os.environ.get("GH_TOKEN")
-    if token2 := os.environ.get("GH_TOKEN2"):
-        # randomly use one of two tokens if available to double rate limit
-        token = random.choice([token, token2])  # noqa: S311
+    all_gh_tokens = parse_gh_tokens()
+    if not len(all_gh_tokens):
+        logger.warning("No GH_TOKENS environment variable found or it's empty. Rate limits may apply.")
+    token = random.choice(all_gh_tokens) if all_gh_tokens else None  # noqa: S311
     accept = "application/vnd.github.v3.diff" if diff_api else "application/vnd.github+json"
     return {
         "Accept": accept,
@@ -71,7 +84,7 @@ def build_headers(name: str, **kwargs: Any) -> dict[str, str]:
     return builder(**kwargs)
 
 
-def request_with_backoff(
+def request_with_backoff(  # noqa: C901
     url: str,
     *,
     site_name: str,
@@ -81,7 +94,14 @@ def request_with_backoff(
     max_backoff: float = 60.0,
     header_kwargs: dict[str, Any] | None = None,
 ) -> requests.Response:
-    """GET ``url`` with exponential back-off and basic rate limiting."""
+    """GET ``url`` with exponential back-off and basic rate limiting.
+
+    Special handling for GitHub rate limits: when we receive 403/429 with
+    evidence of rate limiting, we wait until the server-advertised reset time
+    (``X-RateLimit-Reset``) or for a conservative 90 minutes, emitting periodic
+    log pings so long-running jobs are observable. Rate-limited waits do not
+    consume a retry attempt.
+    """
     if session is None:
         session = get_session()
     if header_kwargs is None:
@@ -89,8 +109,37 @@ def request_with_backoff(
 
     delay = base_delay
     last_exception: RequestException | None = None
+    attempt = 0
 
-    for _ in range(1, max_retries + 1):
+    def _sleep_with_pings(total_seconds: float, *, ping_interval: float = 300.0, reason: str = "") -> None:
+        end = time.time() + max(0.0, total_seconds)
+        remaining = max(0, int(end - time.time()))
+        if reason:
+            logger.warning(
+                "Waiting %dm %ds (%s). Pinging every %d minutes.",
+                remaining // 60,
+                remaining % 60,
+                reason,
+                int(ping_interval // 60) or 1,
+            )
+        else:
+            logger.warning(
+                "Waiting %dm %ds. Pinging every %d minutes.",
+                remaining // 60,
+                remaining % 60,
+                int(ping_interval // 60) or 1,
+            )
+
+        while True:
+            now = time.time()
+            if now >= end:
+                break
+            to_sleep = min(ping_interval, end - now)
+            time.sleep(max(0.1, to_sleep))
+            remaining = max(0, int(end - time.time()))
+            logger.info("Still waiting… %dm %ds remaining", remaining // 60, remaining % 60)
+
+    while attempt < max_retries:
         now = time.time()
         min_interval = 1.0 / RPS.get(site_name, 2)
         since = now - _last_call.get(site_name, 0.0)
@@ -101,6 +150,32 @@ def request_with_backoff(
         try:
             resp = session.get(url, headers=build_headers(site_name, **header_kwargs), timeout=15)
             if resp.status_code in (403, 429):
+                # Detect rate limit response. Prefer explicit remaining header
+                # or look for a generic hint in the body text.
+                body_lower = (resp.text or "").lower()
+                is_rate_limited = resp.headers.get("X-RateLimit-Remaining") == "0" or "rate limit" in body_lower
+                if is_rate_limited and site_name == "github":
+                    # Compute a generous wait time: Retry-After, then X-RateLimit-Reset, else 90 minutes
+                    retry_after = resp.headers.get("Retry-After")
+                    reset_at = resp.headers.get("X-RateLimit-Reset")
+
+                    wait_seconds = float(30 * 60)  # default to 0.5h
+                    try:
+                        if retry_after:
+                            wait_seconds = max(wait_seconds, float(retry_after))
+                        elif reset_at:
+                            reset_ts = float(reset_at)
+                            delta = max(0.0, reset_ts - time.time())
+                            wait_seconds = max(wait_seconds, delta + 30.0)  # tiny buffer
+                    except Exception:
+                        wait_seconds = float(30 * 60)
+
+                    resp.close()
+                    _sleep_with_pings(wait_seconds, reason=f"{site_name} rate limit")
+                    # Do NOT increment attempts on rate limits
+                    continue
+
+                # Non-rate-limit 403/429: backoff counts as a retry
                 retry_after = resp.headers.get("Retry-After")
                 if retry_after:
                     sleep_for = float(retry_after)
@@ -109,12 +184,14 @@ def request_with_backoff(
                     delay *= 2
                 resp.close()
                 time.sleep(sleep_for)
+                attempt += 1
                 continue
             resp.raise_for_status()
         except (Timeout, requests.ConnectionError, HTTPError) as exc:
             last_exception = exc
             time.sleep(min(delay, max_backoff))
             delay *= 2
+            attempt += 1
         else:
             return resp
 

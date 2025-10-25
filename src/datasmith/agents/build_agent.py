@@ -40,7 +40,6 @@
 
 #     # NOTE: container.exec_run supports demux/stream; see docs.
 #     # We keep TTY disabled so demux works predictably.
-#     import IPython; IPython.embed()
 #     res = container.exec_run(
 #         final_cmd,
 #         stream=stream,

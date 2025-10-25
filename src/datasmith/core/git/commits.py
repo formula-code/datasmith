@@ -70,7 +70,7 @@ def get_commit_info(repo_name: str, commit_sha: str) -> dict[str, Any]:
 
 
 @cache_completion(CACHE_LOCATION, "get_commit_info_offline")
-def get_commit_info_offline(repo: Repo, commit_sha: str) -> dict[str, Any]:
+def get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache: bool = False) -> dict[str, Any]:
     """Gather commit info without hitting the GitHub REST API."""
     default = {
         "sha": commit_sha,

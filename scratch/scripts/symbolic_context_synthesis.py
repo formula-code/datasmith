@@ -88,7 +88,7 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], list[tuple
 
     for _, row in commits.iterrows():
         repo_name = row["repo_name"]
-        sha = row["sha"]
+        sha = row["pr_base"]["sha"]
         has_asv = row.get("has_asv", True)
 
         if not has_asv:

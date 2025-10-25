@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.build_pr_report import issue_comments, issue_timeline
+from datasmith.scrape.report_utils import issue_comments, issue_timeline
 from datasmith.utils import _get_github_metadata
 
 logger = configure_logging()

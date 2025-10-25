@@ -108,9 +108,9 @@ def collect_merge_shas(repo: str) -> list[dict]:
 
     params = {"state": "closed", "sort": "updated", "direction": "desc"}
     if default_base:
-        params["base"] = default_base  # reduces pages for repos with many non-default-base PRsd
+        params["base"] = default_base  # reduces pages for repos with many non-default-base PRs
 
-    prs = _paginate_github(f"repos/{repo}/pulls", params=params, per_page=100, max_pages=100)
+    prs = _paginate_github(f"repos/{repo}/pulls", params=params, per_page=100, max_pages=250)
 
     out: list[dict] = []
     seen: set[str] = set()

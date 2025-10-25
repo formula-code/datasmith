@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
 from jinja2 import Environment, FileSystemLoader
 
 # from datasmith.agents.perf_judge import PerfClassifier
@@ -15,78 +12,26 @@ from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.problem_extractor import ProblemExtraction, ProblemExtractor
 from datasmith.agents.summ_judge import ClassificationDecision, ClassifyJudge, PerfClassifier
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.build_pr_report import (
+from datasmith.scrape.models import ReportResult
+from datasmith.scrape.report_utils import (
+    _is_bot_comment,
     anonymize_github_issue,
+    build_issue_context,
     classify_gh_link,
+    compose_judge_problem_description,
+    extract_links,
+    extract_xrefs_from_timeline,
+    iso,
     issue_comments,
     issue_timeline,
     review_comments,
     reviews,
     summarize_gh_resource,
 )
-from datasmith.scrape.issue_extractor import extract_issues_from_description
-from datasmith.scrape.models import ReportResult
 from datasmith.scrape.utils import _parse_pr_url
 from datasmith.utils import _get_github_metadata
 
 logger = configure_logging()
-
-# Known bot usernames to filter out from comments
-BOT_USERNAMES = {
-    "coveralls",
-    "codecov",
-    "github-actions",
-    "dependabot",
-    "dependabot[bot]",
-    "renovate",
-    "renovate[bot]",
-    "netlify",
-    "vercel",
-    "circleci",
-    "travis-ci",
-    "appveyor",
-    "pre-commit-ci",
-    "pre-commit-ci[bot]",
-    "sonarcloud",
-    "codefactor-io",
-    "imgbot",
-    "imgbot[bot]",
-    "github-advanced-security",
-    "gitguardian",
-    "snyk-bot",
-    "pull",
-    "pull[bot]",
-    "allcontributors",
-    "allcontributors[bot]",
-    # GitHub / CI / merge helpers
-    "github-actions[bot]",  # official Actions actor
-    "k8s-ci-robot",  # Kubernetes Prow bot
-    "docker-library-bot",
-    "bors[bot]",
-    "Mergifyio",
-    "kodiakhq[bot]",
-    # Releases & automation
-    "semantic-release-bot",
-    "release-drafter",
-    # CLA / governance
-    "cla-assistant",
-    "cla-bot",
-    "google-cla",
-    # Translation / localization
-    "weblate",
-    "crowdin-bot",
-    # Dependency / security updaters
-    "greenkeeperio-bot",
-    "pyup-bot",
-    "fossabot",
-    "npm-cli-bot",
-    # Code quality / legacy services
-    "lgtm-com[bot]",
-    "codeclimate",
-    # Misc automations
-    "stale[bot]",
-    "autofix-ci",
-}
 
 
 class ReportBuilder:
@@ -167,7 +112,7 @@ class ReportBuilder:
         self.classify_judge: ClassifyJudge | None
 
         if self.enable_llm_backends:
-            configure_agent_backends(PORTKEY_MODEL_NAME=model_name)
+            configure_agent_backends(PORTKEY_MODEL_NAME=model_name.replace("local/", ""), local="local" in model_name)
             # Disable LCS/verbatim validation to simplify extraction and reduce noise
             self.problem_extractor = ProblemExtractor(
                 validate_lcs=False,
@@ -187,29 +132,6 @@ class ReportBuilder:
             trim_blocks=True,
         )
 
-    def _iso_format(self, ts: str) -> str:
-        """Convert ISO timestamp to readable format.
-
-        Args:
-            ts: ISO format timestamp string
-
-        Returns:
-            Formatted timestamp string (HH:MM DD/MM/YYYY)
-        """
-        dt = datetime.fromisoformat(ts.rstrip("Z")).replace(tzinfo=timezone.utc)
-        return dt.strftime("%H:%M %d/%m/%Y")
-
-    def _extract_links(self, text: str) -> list[str]:
-        """Extract HTTP(S) URLs from text.
-
-        Args:
-            text: Text to extract links from
-
-        Returns:
-            List of URLs found in text
-        """
-        return re.findall(r"https?://[^\s)<>\]]+", text or "")
-
     def _format_comment(self, item: dict, kind: str) -> str:
         """Format a comment using the Jinja2 template.
 
@@ -228,24 +150,10 @@ class ReportBuilder:
         template = self.jinja_env.get_template("comment.md.j2")
         return template.render(
             user_login=item["user"]["login"],
-            timestamp=self._iso_format(ts_iso),
+            timestamp=iso(ts_iso),
             body=excerpt,
-            links_str=", ".join(self._extract_links(body)) or "—",
+            links_str=", ".join(extract_links(body)) or "—",
         )
-
-    def _is_bot_comment(self, comment: dict) -> bool:
-        """Check if a comment is from a bot.
-
-        Args:
-            comment: Comment dict with user information
-
-        Returns:
-            True if comment is from a known bot
-        """
-        if not comment.get("user"):
-            return False
-        username = comment["user"].get("login", "").lower()
-        return username in BOT_USERNAMES or username in {u.lower() for u in BOT_USERNAMES}
 
     def _collect_pr_comments(self, owner: str, repo: str, num: int) -> tuple[list[str], set[str]]:
         """Collect all comments from a PR and extract links.
@@ -263,31 +171,31 @@ class ReportBuilder:
 
         for c in issue_comments(owner, repo, num):
             # Filter bots unless explicitly included
-            if not self.include_bot_comments and self._is_bot_comment(c):
+            if not self.include_bot_comments and _is_bot_comment(c):
                 logger.debug(f"Filtered out bot comment from {c['user']['login']}")
                 continue
 
-            comment_links.update(self._extract_links(c["body"]))
+            comment_links.update(extract_links(c["body"]))
             github_comments.append(self._format_comment(c, "issue"))
         logger.debug("got issue comments")
 
         for rc in review_comments(owner, repo, num):
             # Filter bots unless explicitly included
-            if not self.include_bot_comments and self._is_bot_comment(rc):
+            if not self.include_bot_comments and _is_bot_comment(rc):
                 logger.debug(f"Filtered out bot review comment from {rc['user']['login']}")
                 continue
 
-            comment_links.update(self._extract_links(rc["body"]))
+            comment_links.update(extract_links(rc["body"]))
             github_comments.append(self._format_comment(rc, "review_comment"))
         logger.debug("got review comments")
 
         for rv in reviews(owner, repo, num):
             # Filter bots unless explicitly included
-            if not self.include_bot_comments and self._is_bot_comment(rv):
+            if not self.include_bot_comments and _is_bot_comment(rv):
                 logger.debug(f"Filtered out bot review from {rv['user']['login']}")
                 continue
 
-            comment_links.update(self._extract_links(rv["body"]))
+            comment_links.update(extract_links(rv["body"]))
             github_comments.append(self._format_comment(rv, "review"))
         logger.debug("got reviews")
 
@@ -326,36 +234,12 @@ class ReportBuilder:
 
         return link_summaries
 
-    def _extract_xrefs_from_timeline(self, timeline_raw: list[dict]) -> list[str]:
-        """Extract cross-references from issue timeline events.
-
-        Args:
-            timeline_raw: Raw timeline events from GitHub API
-
-        Returns:
-            List of extracted cross-reference bodies
-        """
-        xrefs = []
-        for event in timeline_raw:
-            try:
-                src_issue = event.get("source", {}).get("issue")
-                if not src_issue:
-                    continue
-                b = (src_issue.get("body") or "").strip()
-                if b:
-                    xrefs.append(b)
-            except Exception:
-                logger.exception("Failed to extract cross-reference from event")
-                continue
-        return xrefs
-
     def _summarize_issue_link(self, owner: str, repo: str, number: int) -> str:
         """Return an expanded markdown summary for a linked issue (single level).
 
         Includes title, short body excerpt, a few comments, and cross-references.
         Large sections are truncated for readability.
         """
-        from datasmith.utils import _get_github_metadata  # local import to avoid cycles
 
         issue = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/issues/{number}")
         if not isinstance(issue, dict):
@@ -369,7 +253,7 @@ class ReportBuilder:
         timeline_raw = issue_timeline(owner, repo, number)
 
         comments = [c.get("body", "").strip() for c in comments_raw if c.get("body")]
-        xrefs = self._extract_xrefs_from_timeline(timeline_raw)
+        xrefs = extract_xrefs_from_timeline(timeline_raw)
 
         # Do not truncate: include full content as requested
         comments_preview = comments
@@ -478,56 +362,6 @@ class ReportBuilder:
         else:
             return extraction
 
-    def _get_pr_change_summary(self, owner: str, repo: str, pr_number: int) -> str:
-        """Get file change summary for a PR.
-
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            pr_number: PR number
-
-        Returns:
-            Markdown table of file changes
-        """
-        api = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
-        headers = {"Accept": "application/vnd.github+json"}
-        lines = [
-            "| File | Status | Lines Added | Lines Removed | Total Changes |",
-            "|------|--------|-------------|---------------|---------------|",
-        ]
-        total_add = total_del = total_changes = 0
-        page = 1
-
-        while True:
-            resp = requests.get(api, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
-            resp.raise_for_status()
-            files = resp.json()
-            if not files:
-                break
-
-            for f in files:
-                status = f.get("status", "")
-                filename = f.get("filename", "")
-                if status == "renamed" and f.get("previous_filename"):
-                    filename = f"{f['previous_filename']} ➜ {f['filename']}"
-
-                added = f.get("additions", 0)
-                deleted = f.get("deletions", 0)
-                changes = f.get("changes", added + deleted)
-
-                lines.append(f"| {filename} | {status} | {added} | {deleted} | {changes} |")
-
-                total_add += added
-                total_del += deleted
-                total_changes += changes
-
-            if 'rel="next"' not in resp.headers.get("Link", ""):
-                break
-            page += 1
-
-        lines.append(f"| **TOTAL** |  | **{total_add}** | **{total_del}** | **{total_changes}** |")
-        return "\n".join(lines)
-
     def _classify_performance(
         self, issue_history: str, owner: str, repo: str, pr_number: int, patch: str
     ) -> ClassificationDecision | None:
@@ -557,66 +391,6 @@ class ReportBuilder:
                 confidence=None,
             )
 
-    def _resolve_pr_body(self, pr_dict: dict[str, Any], owner: str, repo: str, pr_number: int) -> str:
-        """Resolve the PR body from the provided dict or GitHub metadata."""
-        pr_body = pr_dict.get("pr_body")
-        if pr_body is not None:
-            return str(pr_body)
-
-        pr_meta = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{pr_number}")
-        if isinstance(pr_meta, dict):
-            return str(pr_meta.get("body") or "")
-        return ""
-
-    def _resolve_pr_title(self, pr_dict: dict[str, Any], owner: str, repo: str, pr_number: int) -> str:
-        """Resolve the PR title from the provided dict or GitHub metadata."""
-        pr_title = pr_dict.get("pr_title")
-        if pr_title is not None:
-            return str(pr_title)
-
-        pr_meta = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/pulls/{pr_number}")
-        if isinstance(pr_meta, dict):
-            return str(pr_meta.get("title") or "")
-        return ""
-
-    def _expand_issue_details(self, issue_data: list[dict[str, Any]]) -> str:
-        """Combine issue metadata into a markdown-friendly string."""
-        if not issue_data:
-            return ""
-
-        issue_texts: list[str] = []
-        for index, issue in enumerate(issue_data):
-            segments: list[str] = [f"Issue {index}: {issue.get('title', '')}\n"]
-
-            body = issue.get("body")
-            if body:
-                segments.append(f"Description:\n{body}\n")
-
-            comments = [comment for comment in issue.get("comments", []) if comment]
-            if comments:
-                comment_lines = "\n".join(f"- {comment}" for comment in comments)
-                segments.append(f"Comments ({len(comments)}):\n{comment_lines}\n")
-
-            cross_refs = [xref for xref in issue.get("cross_references", []) if xref]
-            if cross_refs:
-                cross_lines = "\n".join(f"- {xref}" for xref in cross_refs)
-                segments.append(f"Cross-references ({len(cross_refs)}):\n{cross_lines}\n")
-
-            issue_texts.append("".join(segments))
-
-        combined = " ".join(issue_texts)
-        return anonymize_github_issue(combined) if self.anonymize_output else combined
-
-    def _build_issue_context(self, pr_body: str, owner: str, repo: str) -> tuple[str, str, list[dict[str, Any]]]:
-        """Construct the problem and issue strings alongside raw issue metadata."""
-        prob_stat_list, issue_data = extract_issues_from_description(pr_body, owner, repo)
-        git_problem_str = " ".join(str(item) for item in prob_stat_list)
-        if self.anonymize_output:
-            git_problem_str = anonymize_github_issue(git_problem_str)
-
-        git_issue_str = self._expand_issue_details(issue_data)
-        return git_problem_str, git_issue_str, issue_data
-
     def _compose_problem_statement(self, git_problem_str: str, git_issue_str: str) -> ProblemExtraction | None:
         """Return structured extraction when LLM summarization is enabled."""
         if self.summarize_llm:
@@ -624,7 +398,7 @@ class ReportBuilder:
         return None
 
     def _evaluate_performance_detection(
-        self, judge_problem_description: str, owner: str, repo: str, pr_number: int, patch: str
+        self, judge_problem_description: str, file_change_summary: str, patch: str
     ) -> tuple[bool, str]:
         """Return performance detection outputs when enabled."""
         if not (self.filter_performance_only or self.add_classification):
@@ -633,10 +407,9 @@ class ReportBuilder:
         if self.perf_classifier is None:
             return False, ""
 
-        file_change = self._get_pr_change_summary(owner, repo, pr_number)
         return self.perf_classifier.get_response(
             message=judge_problem_description,
-            file_change_summary=file_change,
+            file_change_summary=file_change_summary,
             git_patch=patch,
         )
 
@@ -647,28 +420,6 @@ class ReportBuilder:
         if not self.add_classification:
             return None
         return self._classify_performance(judge_problem_description, owner, repo, pr_number, patch)
-
-    def _compose_judge_problem_description(
-        self,
-        pr_title: str,
-        pr_body: str,
-        git_issue_str: str,
-        comments_text: str,
-    ) -> str:
-        """Compose a rich, self-contained problem description for the judge/classifier.
-
-        Includes PR title, PR body, expanded issue content, and discussion comments.
-        """
-        parts: list[str] = []
-        if pr_title:
-            parts.append(f"PR Title:\n{pr_title}\n")
-        if pr_body:
-            parts.append(f"PR Body:\n{pr_body}\n")
-        if git_issue_str:
-            parts.append(f"Referenced Issues (expanded):\n{git_issue_str}\n")
-        if comments_text:
-            parts.append(f"Discussion Comments:\n{comments_text}\n")
-        return "\n".join(parts).strip()
 
     def build(self, pr_dict: dict[str, Any]) -> ReportResult:
         """Build a report from a PR dictionary.
@@ -701,8 +452,8 @@ class ReportBuilder:
         patch = pr_dict.get("patch", "")
 
         # Get PR body from dict, or fetch from API
-        pr_body = self._resolve_pr_body(pr_dict, owner, repo, pr_number)
-        pr_title = self._resolve_pr_title(pr_dict, owner, repo, pr_number)
+        pr_body = pr_dict.get("pr_body", "")
+        pr_title = pr_dict.get("pr_title", "")
 
         logger.debug("Building report for %s/%s PR #%d", owner, repo, pr_number)
 
@@ -718,10 +469,16 @@ class ReportBuilder:
         # Process linked resources
         link_summaries = self._process_linked_resources(comment_links, visited_links)
 
-        # Extract and process referenced issues
-        git_problem_str, git_issue_str, issue_data = self._build_issue_context(pr_body, owner, repo)
+        # Extract and process referenced issues (plus raw variants)
+        (
+            git_problem_str,
+            git_issue_str,
+            issue_data,
+            git_problem_str_raw,
+            git_issue_str_raw,
+        ) = build_issue_context(pr_body, owner, repo, anonymize=self.anonymize_output)
 
-        if not issue_data and not pr_body:
+        if not issue_data or not pr_body:
             return ReportResult(
                 report_md="NOT_A_VALID_PR",
                 all_data={},
@@ -733,22 +490,24 @@ class ReportBuilder:
             )
 
         # Compose enriched context for the performance judge & classifier
-        judge_problem_description = self._compose_judge_problem_description(
+        judge_problem_description = compose_judge_problem_description(
             pr_title=pr_title,
             pr_body=pr_body,
             git_issue_str=git_issue_str,
             comments_text=raw_comments_text,
         )
 
-        # Check if performance commit (if filtering or classification enabled)
+        file_change_summary = pr_dict.get("file_change_summary", "")
         is_performance_commit, perf_json = self._evaluate_performance_detection(
-            judge_problem_description, owner, repo, pr_number, patch
+            judge_problem_description, file_change_summary, patch
         )
         if self.filter_performance_only and not is_performance_commit:
             logger.debug("NOT A PERFORMANCE COMMIT (filtered out by filter_performance_only=True)")
             return ReportResult(
                 report_md="NOT_A_PERFORMANCE_COMMIT",
-                all_data={},
+                all_data={
+                    "performance_section": perf_json,
+                },
                 problem_statement="",
                 hints="",
                 classification="",
@@ -816,6 +575,16 @@ class ReportBuilder:
             "problem_sections": problem_extraction.to_dict() if problem_extraction else None,
             "git_problem_str": git_problem_str,
             "git_issue_str": git_issue_str,
+            # Raw, non-LLM variants for downstream consumers
+            "raw_comments": raw_comments_text,
+            "raw_comment_links": sorted(comment_links),
+            "raw_git_problem_str": git_problem_str_raw,
+            "raw_git_issue_str": git_issue_str_raw,
+            "raw_issue_data": issue_data,
+            "raw_pr_title": pr_title,
+            "raw_pr_body": pr_body,
+            "raw_patch": patch,
+            "raw_file_change_summary": file_change_summary,
             # "classification": classification,
             # "difficulty": difficulty,
             # "classification_reason": classification_reason,
@@ -842,6 +611,17 @@ class ReportBuilder:
                 "problem_sections": problem_extraction.to_dict() if problem_extraction else None,
                 "git_problem_str": git_problem_str,
                 "git_issue_str": git_issue_str,
+                # Raw, non-LLM variants for downstream consumers
+                "raw_comments": raw_comments_text,
+                "raw_comment_links": sorted(comment_links),
+                "raw_git_problem_str": git_problem_str_raw,
+                "raw_git_issue_str": git_issue_str_raw,
+                "raw_issue_data": issue_data,
+                "raw_pr_title": pr_title,
+                "raw_pr_body": pr_body,
+                "raw_patch": patch,
+                "raw_file_change_summary": file_change_summary,
+                "judge_problem_description": judge_problem_description,
                 "classification": classification,
                 "difficulty": difficulty,
                 "classification_reason": classification_reason,

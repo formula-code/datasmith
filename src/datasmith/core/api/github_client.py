@@ -75,7 +75,16 @@ def get_github_metadata(endpoint: str, params: dict[str, str] | None = None) -> 
 
     api_url = prepare_url(f"https://api.github.com/{endpoint}", params=params)
     try:
-        response = request_with_backoff(api_url, site_name="github", header_kwargs=header_kwargs)
+        # Use long backoff defaults; rate-limited waits inside request_with_backoff
+        # do not consume retries and will wait until GitHub's reset time or ~90 minutes.
+        response = request_with_backoff(
+            api_url,
+            site_name="github",
+            header_kwargs=header_kwargs,
+            base_delay=1.0,
+            max_retries=5,
+            max_backoff=60.0,
+        )
     except HTTPError as exc:
         status = getattr(exc.response, "status_code", None)
         if status in (404, 451, 410):
