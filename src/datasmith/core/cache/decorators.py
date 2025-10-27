@@ -52,7 +52,7 @@ def get_db_connection(db_loc: str) -> sqlite3.Connection:
     return conn
 
 
-def cache_completion(db_loc: str, table_name: str = "cache") -> Callable[[Callable[_P, _T]], Callable[_P, _T]]:
+def cache_completion(db_loc: str, table_name: str = "cache") -> Callable[[Callable[_P, _T]], Callable[_P, _T]]:  # noqa: C901
     """Cache function results in a SQLite table keyed by args/kwargs.
 
     Passing ``bypass_cache=True`` to the wrapped function forces a refresh and
@@ -61,9 +61,9 @@ def cache_completion(db_loc: str, table_name: str = "cache") -> Callable[[Callab
     if not re.match(r"^\w+$", table_name):
         raise ValueError("table_name must be alphanumeric/underscore only")
 
-    def decorator(func: Callable[_P, _T]) -> Callable[_P, _T]:
+    def decorator(func: Callable[_P, _T]) -> Callable[_P, _T]:  # noqa: C901
         @functools.wraps(func)
-        def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _T:
+        def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _T:  # noqa: C901
             bypass = cast(bool, kwargs.pop("bypass_cache", False))
             key_kwargs = dict(sorted(kwargs.items()))
 
@@ -84,6 +84,43 @@ def cache_completion(db_loc: str, table_name: str = "cache") -> Callable[[Callab
                 )
                 with _file_lock(db_loc), _cache_lock:
                     conn.execute(create_sql)
+                    # Lightweight, idempotent migration: ensure expected columns exist
+                    try:
+                        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name});")}
+                        # Backfill created_at if an older table lacks it
+                        if "created_at" not in cols:
+                            try:
+                                conn.execute(
+                                    f"ALTER TABLE {table_name} ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                                )
+                            except sqlite3.OperationalError as e:  # Older SQLite disallows non-constant default
+                                if "non-constant default" in str(e).lower():
+                                    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN created_at TEXT")
+                                else:
+                                    raise
+                        # Backfill updated_at used by the UPSERT clause
+                        if "updated_at" not in cols:
+                            try:
+                                conn.execute(
+                                    f"ALTER TABLE {table_name} ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                                )
+                            except sqlite3.OperationalError as e:  # Older SQLite disallows non-constant default
+                                if "non-constant default" in str(e).lower():
+                                    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN updated_at TEXT")
+                                else:
+                                    raise
+                    except sqlite3.OperationalError:
+                        # Ignore race conditions or older SQLite quirks; next statements will surface issues if any remain
+                        pass
+
+                # Decide UPSERT clause depending on presence of updated_at
+                try:
+                    cols_after = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name});")}
+                except sqlite3.OperationalError:
+                    cols_after = set()
+                set_clause = "result_blob=excluded.result_blob"
+                if "updated_at" in cols_after:
+                    set_clause += ", updated_at=CURRENT_TIMESTAMP"
 
                 args_blob = pickle.dumps((function_name, args, key_kwargs))
 
@@ -112,9 +149,7 @@ def cache_completion(db_loc: str, table_name: str = "cache") -> Callable[[Callab
                         f"""
                         INSERT INTO {table_name}(function_name, argument_blob, result_blob)
                         VALUES(?, ?, ?)
-                        ON CONFLICT(function_name, argument_blob) DO UPDATE SET
-                            result_blob=excluded.result_blob,
-                            updated_at=CURRENT_TIMESTAMP
+                        ON CONFLICT(function_name, argument_blob) DO UPDATE SET {set_clause}
                         """,
                         (function_name, args_blob, result_blob),
                     )

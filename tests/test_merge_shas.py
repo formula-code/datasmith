@@ -1,13 +1,3 @@
-# from datasmith.execution.collect_commits import search_commits
-
-# merged_sha_commits = search_commits(
-#     repo_name="pandas-dev/pandas",
-#     query="state=closed",
-#     max_pages=4,
-#     per_page=100,
-# )
-# Make a pytest out of the above commands.
-
 from datasmith.execution.collect_commits import search_commits
 from datasmith.execution.collect_commits_offline import find_perf_commits
 

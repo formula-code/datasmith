@@ -7,29 +7,20 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader
 
-# from datasmith.agents.perf_judge import PerfClassifier
 from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.problem_extractor import ProblemExtraction, ProblemExtractor
 from datasmith.agents.summ_judge import ClassificationDecision, ClassifyJudge, PerfClassifier
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.models import ReportResult
+from datasmith.scrape.issue_extractor import extract_issues_from_description
+from datasmith.scrape.models import HintComment, HintsContext, IssueExpanded, ReportResult
 from datasmith.scrape.report_utils import (
-    _is_bot_comment,
     anonymize_github_issue,
-    build_issue_context,
-    classify_gh_link,
-    compose_judge_problem_description,
     extract_links,
-    extract_xrefs_from_timeline,
     iso,
-    issue_comments,
     issue_timeline,
-    review_comments,
-    reviews,
-    summarize_gh_resource,
+    to_datetime,
 )
 from datasmith.scrape.utils import _parse_pr_url
-from datasmith.utils import _get_github_metadata
 
 logger = configure_logging()
 
@@ -64,7 +55,7 @@ class ReportBuilder:
         include_bot_comments: bool = False,
         anonymize_output: bool = False,
         max_links_to_follow: int = 60,
-        model_name: str = "@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        model_name: str = "local/meta-llama/Llama-3.3-70B-Instruct",
     ):
         """Initialize the ReportBuilder with configuration.
 
@@ -115,7 +106,7 @@ class ReportBuilder:
             configure_agent_backends(PORTKEY_MODEL_NAME=model_name.replace("local/", ""), local="local" in model_name)
             # Disable LCS/verbatim validation to simplify extraction and reduce noise
             self.problem_extractor = ProblemExtractor(
-                validate_lcs=False,
+                validate_lcs=True,
             )
             self.classify_judge = ClassifyJudge()
             self.perf_classifier = PerfClassifier()
@@ -155,193 +146,67 @@ class ReportBuilder:
             links_str=", ".join(extract_links(body)) or "—",
         )
 
-    def _collect_pr_comments(self, owner: str, repo: str, num: int) -> tuple[list[str], set[str]]:
-        """Collect all comments from a PR and extract links.
+    def _collect_pr_discussions(
+        self, owner: str, repo: str, num: int, pr_dict: dict
+    ) -> tuple[list[HintComment], set[IssueExpanded]]:
+        """Collect structured discussion items for the Hints section.
 
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            num: PR number
-
-        Returns:
-            Tuple of (formatted_comments, comment_links)
+        Returns a tuple of (items, links) where items are `HintComment`s and
+        links is the set of URLs mentioned across comments.
         """
-        comment_links: set[str] = set()
-        github_comments = []
+        comment_links: set[IssueExpanded] = set()
+        items: list[HintComment] = []
 
-        for c in issue_comments(owner, repo, num):
-            # Filter bots unless explicitly included
-            if not self.include_bot_comments and _is_bot_comment(c):
-                logger.debug(f"Filtered out bot comment from {c['user']['login']}")
+        def _mk_item(obj: dict, kind: str) -> HintComment:
+            body = (obj.get("body") or "").strip().replace("\r\n", "\n")
+            ts_field = "submitted_at" if kind == "reviewed" else "created_at"
+            ts_iso = obj.get(ts_field, "") or ""
+            linked_issues = extract_issues_from_description(
+                body, owner, repo, pr_created_at=pr_dict.get("pr_created_at", "") or None
+            )
+            return HintComment(
+                user_login=obj["user"]["login"],
+                timestamp=iso(ts_iso) if ts_iso else "",
+                created_at=ts_iso,
+                body=body,
+                links=linked_issues,
+                kind=kind,
+            )
+
+        timeline = issue_timeline(owner, repo, num)
+        pr_merged_at = to_datetime(pr_dict["pr_merged_at"])
+
+        for event in timeline:
+            event_time = event.get("updated_at")
+            if (not event_time) or to_datetime(event_time) >= pr_merged_at:
                 continue
+            item = _mk_item(event, event.get("event", "pr_comment"))
+            comment_links.update(item.links)
+            items.append(item)
 
-            comment_links.update(extract_links(c["body"]))
-            github_comments.append(self._format_comment(c, "issue"))
-        logger.debug("got issue comments")
+        return items, comment_links
 
-        for rc in review_comments(owner, repo, num):
-            # Filter bots unless explicitly included
-            if not self.include_bot_comments and _is_bot_comment(rc):
-                logger.debug(f"Filtered out bot review comment from {rc['user']['login']}")
-                continue
-
-            comment_links.update(extract_links(rc["body"]))
-            github_comments.append(self._format_comment(rc, "review_comment"))
-        logger.debug("got review comments")
-
-        for rv in reviews(owner, repo, num):
-            # Filter bots unless explicitly included
-            if not self.include_bot_comments and _is_bot_comment(rv):
-                logger.debug(f"Filtered out bot review from {rv['user']['login']}")
-                continue
-
-            comment_links.update(extract_links(rv["body"]))
-            github_comments.append(self._format_comment(rv, "review"))
-        logger.debug("got reviews")
-
-        return github_comments, comment_links
-
-    def _process_linked_resources(self, comment_links: set[str], visited_links: set[str]) -> list[str]:
-        """Process and summarize linked resources from comments.
-
-        Args:
-            comment_links: Set of links found in comments
-            visited_links: Set of already visited links (updated in-place)
-
-        Returns:
-            List of formatted link summaries
-        """
-        link_summaries = []
-        sub_links = [label for label in comment_links if label not in visited_links][: self.max_links_to_follow]
-
-        for link in sub_links:
-            visited_links.add(link)
-            cls = classify_gh_link(link)
-            if cls:
-                # Prefer expanded details for issues; otherwise fall back to generic summary
-                if cls[0] == "issue":
-                    _, o, r, ident = cls
-                    try:
-                        expanded = self._summarize_issue_link(o, r, int(ident))
-                        link_summaries.append(expanded)
-                    except Exception:
-                        link_summaries.append(summarize_gh_resource(cls))
-                else:
-                    link_summaries.append(summarize_gh_resource(cls))
-            else:
-                link_summaries.append(f"* <{link}>")
-        logger.debug("got links found inside comments")
-
-        return link_summaries
-
-    def _summarize_issue_link(self, owner: str, repo: str, number: int) -> str:
-        """Return an expanded markdown summary for a linked issue (single level).
-
-        Includes title, short body excerpt, a few comments, and cross-references.
-        Large sections are truncated for readability.
-        """
-
-        issue = _get_github_metadata(endpoint=f"/repos/{owner}/{repo}/issues/{number}")
-        if not isinstance(issue, dict):
-            return f"* Issue #{number} — details unavailable\n  <https://github.com/{owner}/{repo}/issues/{number}>"
-
-        title = issue.get("title", f"Issue #{number}")
-        body = issue.get("body") or ""
-        body_excerpt = body.strip().replace("\r\n", "\n")
-
-        comments_raw = issue_comments(owner, repo, number)
-        timeline_raw = issue_timeline(owner, repo, number)
-
-        comments = [c.get("body", "").strip() for c in comments_raw if c.get("body")]
-        xrefs = extract_xrefs_from_timeline(timeline_raw)
-
-        # Do not truncate: include full content as requested
-        comments_preview = comments
-        xrefs_preview = xrefs
-
-        if self.anonymize_output:
-            body_excerpt = anonymize_github_issue(body_excerpt)
-            comments_preview = [anonymize_github_issue(c) for c in comments_preview]
-            xrefs_preview = [anonymize_github_issue(x) for x in xrefs_preview]
-
-        lines = [
-            f"* Issue #{number}: {title}  ",
-            f"  <https://github.com/{owner}/{repo}/issues/{number}>",
-        ]
-        if body_excerpt:
-            lines.append("")
-            lines.append(f"  Description:\n  {body_excerpt}")
-        if comments_preview:
-            lines.append("")
-            lines.append("  Comments:")
-            for c in comments_preview:
-                lines.append(f"  - {c}")
-        if xrefs_preview:
-            lines.append("")
-            lines.append("  Cross-references:")
-            for x in xrefs_preview:
-                lines.append(f"  - {x}")
-
-        return "\n".join(lines)
-
-    def _extract_discussion(self, github_comments: str) -> str:
-        """Extract (not summarize) key discussion points from comments.
-
-        Uses extractive approach to maintain 85%+ LCS ratio with source material.
-        Preserves technical details, code snippets, and disagreements verbatim.
-
-        Args:
-            github_comments: Concatenated comment text
-
-        Returns:
-            Extracted discussion or raw comments if extraction disabled
-        """
-        if not self.summarize_llm:  # Keep flag name for backward compatibility
-            return github_comments
-
-        if self.problem_extractor is None:
-            return github_comments
-
-        try:
-            extracted, validation_report = self.problem_extractor.extract_comments(comment_thread=github_comments)
-
-            # Log validation metrics
-            if validation_report.get("validation_enabled"):
-                avg_lcs = validation_report.get("avg_lcs", 0)
-                avg_ngram = validation_report.get("avg_ngram", 0)
-                logger.info(f"Comment extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}")
-
-                # Warn if quality is low
-                if not validation_report.get("overall_pass"):
-                    logger.warning(
-                        f"Comment extraction has low extractiveness:\n"
-                        f"{validation_report.get('details', 'No details available')}"
-                    )
-
-            return extracted.strip()
-        except Exception as e:
-            logger.error(f"Comment extraction failed: {e}", exc_info=True)
-            return f"[extraction failed: {e}]"
-
-    def _extract_problem_statement(self, issue_history: str, issue_stat: str) -> ProblemExtraction:
+    def _extract_problem_statement(self, pr_body: str, pr_comments: str) -> ProblemExtraction:
         """Extract (not summarize) problem statement from issue.
 
         Uses extractive approach to maintain 85%+ LCS ratio with source material.
         Preserves original wording, code examples, and technical details verbatim.
 
         Args:
-            issue_history: Main issue description
+            pr_body: Main issue description
+            pr_comments: Related issue statistics/content
             issue_stat: Related issue statistics/content
 
         Returns:
             A structured ``ProblemExtraction`` instance.
         """
-        if self.problem_extractor is None:
-            return ProblemExtraction(problem_statement=issue_history)
+        if self.problem_extractor is None or (not self.summarize_llm):
+            return ProblemExtraction(problem_statement="", solution_overview=pr_body + "\n\n" + pr_comments + "\n\n")
 
         try:
             extraction, validation_report = self.problem_extractor.extract_problem(
-                message=issue_history, related_issues=issue_stat
+                pr_body=pr_body,
+                pr_comments=pr_comments,
             )
 
             # Log validation metrics
@@ -350,28 +215,17 @@ class ReportBuilder:
                 avg_ngram = validation_report.get("avg_ngram", 0)
                 logger.info(f"Problem statement extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}")
 
-                # Warn if quality is low
-                if not validation_report.get("overall_pass"):
-                    logger.warning(
-                        f"Problem statement has low extractiveness:\n"
-                        f"{validation_report.get('details', 'No details available')}"
-                    )
         except Exception as e:
             logger.error(f"Problem statement extraction failed: {e}", exc_info=True)
-            return ProblemExtraction(problem_statement=f"[extraction failed: {e}]")
+            return ProblemExtraction(problem_statement="", solution_overview=pr_body + "\n\n" + pr_comments + "\n\n")
         else:
             return extraction
 
-    def _classify_performance(
-        self, issue_history: str, owner: str, repo: str, pr_number: int, patch: str
-    ) -> ClassificationDecision | None:
+    def _classify_performance(self, issue_history: str, patch: str) -> ClassificationDecision | None:
         """Classify commit for performance optimization details.
 
         Args:
             issue_history: Issue description
-            owner: Repository owner
-            repo: Repository name
-            pr_number: PR number
             patch: Git patch content
 
         Returns:
@@ -391,12 +245,6 @@ class ReportBuilder:
                 confidence=None,
             )
 
-    def _compose_problem_statement(self, git_problem_str: str, git_issue_str: str) -> ProblemExtraction | None:
-        """Return structured extraction when LLM summarization is enabled."""
-        if self.summarize_llm:
-            return self._extract_problem_statement(git_problem_str, git_issue_str)
-        return None
-
     def _evaluate_performance_detection(
         self, judge_problem_description: str, file_change_summary: str, patch: str
     ) -> tuple[bool, str]:
@@ -412,14 +260,6 @@ class ReportBuilder:
             file_change_summary=file_change_summary,
             git_patch=patch,
         )
-
-    def _maybe_classify(
-        self, judge_problem_description: str, owner: str, repo: str, pr_number: int, patch: str
-    ) -> ClassificationDecision | None:
-        """Return classification outputs when enabled."""
-        if not self.add_classification:
-            return None
-        return self._classify_performance(judge_problem_description, owner, repo, pr_number, patch)
 
     def build(self, pr_dict: dict[str, Any]) -> ReportResult:
         """Build a report from a PR dictionary.
@@ -439,7 +279,6 @@ class ReportBuilder:
         Raises:
             ValueError: If required fields are missing from pr_dict
         """
-        # Extract basic info from pr_dict, fallback to API if needed
         pr_url = pr_dict.get("pr_url")
         if not pr_url:
             raise ValueError("pr_dict must contain 'pr_url' field")
@@ -447,64 +286,46 @@ class ReportBuilder:
         # Parse owner/repo/number from URL
         owner, repo, pr_number_str = _parse_pr_url(pr_url)
         pr_number = int(pr_number_str)
-
-        # Get patch from dict or empty string
         patch = pr_dict.get("patch", "")
-
-        # Get PR body from dict, or fetch from API
         pr_body = pr_dict.get("pr_body", "")
         pr_title = pr_dict.get("pr_title", "")
+        pr_created_at: str = pr_dict.get("pr_created_at", "")
+        file_change_summary = pr_dict.get("file_change_summary", "")
+
+        repo_template = self.jinja_env.get_template("repo.md.j2")
+        repo_description_rendered = repo_template.render(
+            repo_name=pr_dict["pr_base"]["repo"]["name"],
+            repo_description=pr_dict["pr_base"]["repo"]["description"],
+            repo_topics=", ".join(pr_dict["pr_base"]["repo"]["topics"]),
+            repo_language=pr_dict["pr_base"]["repo"]["language"],
+        )
+
+        pr_template = self.jinja_env.get_template("pr_header.md.j2")
+        pr_body_text = pr_template.render(
+            title=pr_title,
+            number=pr_number,
+            repo_full_name=f"{owner}/{repo}",
+            labels=", ".join([label["name"] for label in pr_dict.get("pr_labels", [])]) or "—",
+            body=pr_body,
+        )
 
         logger.debug("Building report for %s/%s PR #%d", owner, repo, pr_number)
+        all_issues: set[IssueExpanded] = set()
+        if issue_data := extract_issues_from_description(
+            pr_body_text, owner, repo, pr_created_at=pr_created_at or None
+        ):
+            all_issues.update(issue_data)
+        hint_items, comment_links = self._collect_pr_discussions(owner, repo, pr_number, pr_dict)
+        all_issues.update(comment_links)
+        pr_raw_comments_text = "\n\n".join(item.body for item in hint_items)
+        hints_ctx = HintsContext(items=hint_items, summary=pr_raw_comments_text, prefer_summary=self.summarize_llm)
 
-        # Collect comments and links
-        github_comments, comment_links = self._collect_pr_comments(owner, repo, pr_number)
-
-        # Extract discussion from comments
-        visited_links: set[str] = {""}
-        raw_comments_text = "\n\n".join(github_comments)
-        comment_summary = self._extract_discussion(raw_comments_text)
-        logger.debug("got comment extraction")
-
-        # Process linked resources
-        link_summaries = self._process_linked_resources(comment_links, visited_links)
-
-        # Extract and process referenced issues (plus raw variants)
-        (
-            git_problem_str,
-            git_issue_str,
-            issue_data,
-            git_problem_str_raw,
-            git_issue_str_raw,
-        ) = build_issue_context(pr_body, owner, repo, anonymize=self.anonymize_output)
-
-        if not issue_data or not pr_body:
-            return ReportResult(
-                report_md="NOT_A_VALID_PR",
-                all_data={},
-                problem_statement="",
-                hints="",
-                classification="",
-                difficulty="",
-                is_performance_commit=False,
-            )
-
-        # Compose enriched context for the performance judge & classifier
-        judge_problem_description = compose_judge_problem_description(
-            pr_title=pr_title,
-            pr_body=pr_body,
-            git_issue_str=git_issue_str,
-            comments_text=raw_comments_text,
-        )
-
-        file_change_summary = pr_dict.get("file_change_summary", "")
-        is_performance_commit, perf_json = self._evaluate_performance_detection(
-            judge_problem_description, file_change_summary, patch
-        )
+        raw_pr_text = pr_body_text + "\n\nComments:\n" + pr_raw_comments_text
+        is_performance_commit, perf_json = self._evaluate_performance_detection(raw_pr_text, file_change_summary, patch)
         if self.filter_performance_only and not is_performance_commit:
             logger.debug("NOT A PERFORMANCE COMMIT (filtered out by filter_performance_only=True)")
             return ReportResult(
-                report_md="NOT_A_PERFORMANCE_COMMIT",
+                final_md="NOT_A_PERFORMANCE_COMMIT",
                 all_data={
                     "performance_section": perf_json,
                 },
@@ -514,42 +335,40 @@ class ReportBuilder:
                 difficulty="",
                 is_performance_commit=False,
             )
+        bisected_pr_information = self._extract_problem_statement(
+            pr_body=pr_body_text,
+            pr_comments=pr_raw_comments_text,
+        )
 
-        # Generate problem statement (problem-only) and a with-solution variant
-        problem_extraction = self._compose_problem_statement(git_problem_str, git_issue_str)
-        problem_section_title = "Problem Statement"
+        issues_template = self.jinja_env.get_template("issues.md.j2")
+        issues_rendered = issues_template.render(issues=all_issues)
+        if self.anonymize_output:
+            issues_rendered = anonymize_github_issue(issues_rendered)
 
-        solution_overview: str = ""
-        if problem_extraction:
-            has_problem = bool(getattr(problem_extraction, "problem_statement", None)) and bool(
-                (problem_extraction.problem_statement or "").strip()
-            )
-            if has_problem:
-                problem_stat = problem_extraction.to_problem_markdown()
-                sol = getattr(problem_extraction, "solution_overview", None) or ""
-                solution_overview = sol.strip()
-            else:
-                # Fallback: use raw PR body for a readable problem statement
-                problem_stat = git_problem_str
-                sol = getattr(problem_extraction, "solution_overview", None) or ""
-                solution_overview = sol.strip()
-        else:
-            # No extraction; use raw PR body
-            problem_stat = git_problem_str
+        hints_template = self.jinja_env.get_template("hints.md.j2")
+        hints_block = hints_template.render(problem_description=bisected_pr_information.problem_statement)
 
-        # Compose the problem+solution string for convenience
-        problem_stat_with_sol = problem_stat
-        if solution_overview:
-            problem_stat_with_sol = f"{problem_stat_with_sol}\n\n**Solution Overview**\n\n{solution_overview}"
-
-        logger.debug("got problem statement")
+        # now make a structured final.md.j2
+        final_template = self.jinja_env.get_template("final.md.j2")
+        final_template_rendered = final_template.render(
+            repo_description=repo_description_rendered,
+            problem_statement=issues_rendered,
+            hints=hints_block,
+        )
+        final_template_no_hints_rendered = final_template.render(
+            repo_description=repo_description_rendered,
+            problem_statement=issues_rendered,
+            hints="",
+        )
+        if self.anonymize_output:
+            final_template_rendered = anonymize_github_issue(final_template_rendered)
+            final_template_no_hints_rendered = anonymize_github_issue(final_template_no_hints_rendered)
 
         # Add classification only if this is a performance commit
         classification_decision = None
         if self.add_classification and is_performance_commit:
-            classification_decision = self._maybe_classify(judge_problem_description, owner, repo, pr_number, patch)
-            if classification_decision:
-                logger.debug("got classification")
+            # classification_decision = self._maybe_classify(raw_pr_text, owner, repo, pr_number, patch)
+            classification_decision = self._classify_performance(raw_pr_text, patch)
 
         classification = ""
         difficulty = ""
@@ -562,78 +381,48 @@ class ReportBuilder:
             classification_reason = classification_decision.reason
             classification_confidence = classification_decision.confidence
 
-        # Build final report using template (problem-only variant)
-        report_data = {
-            "hints": comment_summary,
-            "links_section": "\n".join(link_summaries) if link_summaries else "",
-            # "performance_section": perf_json if is_performance_commit else "",
-            "problem_section_title": problem_section_title,
-            "problem_statement": problem_stat,
-            "solution_overview": solution_overview,
-            "include_solution": False,
-            "problem_extraction": problem_extraction,
-            "problem_sections": problem_extraction.to_dict() if problem_extraction else None,
-            "git_problem_str": git_problem_str,
-            "git_issue_str": git_issue_str,
-            # Raw, non-LLM variants for downstream consumers
-            "raw_comments": raw_comments_text,
-            "raw_comment_links": sorted(comment_links),
-            "raw_git_problem_str": git_problem_str_raw,
-            "raw_git_issue_str": git_issue_str_raw,
-            "raw_issue_data": issue_data,
-            "raw_pr_title": pr_title,
-            "raw_pr_body": pr_body,
-            "raw_patch": patch,
-            "raw_file_change_summary": file_change_summary,
-            # "classification": classification,
-            # "difficulty": difficulty,
-            # "classification_reason": classification_reason,
-            # "classification_confidence": classification_confidence,
+        # Assemble final results map with both the composed report and section pieces
+        final_results: dict[str, str] = {
+            "final_report": final_template_rendered,
+            "repo_description": repo_description_rendered,
+            "pr_header": pr_body_text,
+            "issues": issues_rendered,
+            "hints": hints_block,
         }
-        template = self.jinja_env.get_template("report.md.j2")
-        report_md = template.render(**report_data)
 
-        # Render a second variant that includes the solution section
-        report_with_sol = template.render({**report_data, "include_solution": True})
-
+        # Construct ReportResult with both human-readable strings and structured fields
         return ReportResult(
-            report_md=report_md,
-            report_with_sol=report_with_sol,
+            final_md=final_template_rendered,
+            final_md_no_hints=final_template_no_hints_rendered,
+            pr_created_at=pr_created_at,
+            pr_merged_at=pr_dict.get("pr_merged_at"),
+            final_with_sol="",
             all_data={
-                "hints": comment_summary,
-                "links_section": "\n".join(link_summaries) if link_summaries else "",
+                # Structured + raw context for downstream consumers
+                "hints_context": hints_ctx,
+                "issues_expanded": list(all_issues),
                 "performance_section": perf_json if is_performance_commit else "",
-                "problem_section_title": problem_section_title,
-                "problem_statement": problem_stat,
-                "solution_overview": solution_overview,
-                "include_solution": False,
-                "problem_extraction": problem_extraction,
-                "problem_sections": problem_extraction.to_dict() if problem_extraction else None,
-                "git_problem_str": git_problem_str,
-                "git_issue_str": git_issue_str,
-                # Raw, non-LLM variants for downstream consumers
-                "raw_comments": raw_comments_text,
-                "raw_comment_links": sorted(comment_links),
-                "raw_git_problem_str": git_problem_str_raw,
-                "raw_git_issue_str": git_issue_str_raw,
-                "raw_issue_data": issue_data,
+                "raw_comments": pr_raw_comments_text,
                 "raw_pr_title": pr_title,
                 "raw_pr_body": pr_body,
                 "raw_patch": patch,
                 "raw_file_change_summary": file_change_summary,
-                "judge_problem_description": judge_problem_description,
                 "classification": classification,
                 "difficulty": difficulty,
                 "classification_reason": classification_reason,
                 "classification_confidence": classification_confidence,
             },
-            problem_statement=problem_stat,
-            problem_statement_with_sol=problem_stat_with_sol,
-            hints=comment_summary,
+            problem_statement=bisected_pr_information.problem_statement or "",
+            problem_statement_with_sol=bisected_pr_information.to_problem_with_solution_markdown()
+            if bisected_pr_information
+            else "",
+            raw_problem_statement=raw_pr_text,
+            hints=hints_block,
             classification=classification,
             difficulty=difficulty,
             is_performance_commit=is_performance_commit,
             classification_reason=classification_reason,
             classification_confidence=classification_confidence,
-            problem_sections=problem_extraction,
+            problem_sections=bisected_pr_information,
+            final_results=final_results,
         )

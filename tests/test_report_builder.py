@@ -102,10 +102,7 @@ class TestIssueExtractor:
         """Test extraction when description is None."""
         from datasmith.scrape.issue_extractor import extract_issues_from_description
 
-        prob_stat, issue_data = extract_issues_from_description(None, "owner", "repo")
-
-        assert len(prob_stat) == 1
-        assert prob_stat[0] == ""
+        issue_data = extract_issues_from_description(None, "owner", "repo")
         assert len(issue_data) == 0
 
 
@@ -115,7 +112,7 @@ class TestReportResult:
     def test_report_result_creation(self):
         """Test creating a ReportResult instance."""
         result = ReportResult(
-            report_md="# Test Report",
+            final_md="# Test Report",
             problem_statement="Test problem",
             hints="Test hints",
             classification="Better algorithm",
@@ -123,13 +120,13 @@ class TestReportResult:
             is_performance_commit=True,
         )
 
-        assert result.report_md == "# Test Report"
+        assert result.final_md == "# Test Report"
         assert result.problem_statement == "Test problem"
         assert result.hints == "Test hints"
         assert result.classification == "Better algorithm"
         assert result.difficulty == "medium"
         assert result.is_performance_commit is True
-        assert result.report_data == {}
+        assert result.all_data == {}
         assert result.classification_reason == ""
         assert result.classification_confidence is None
         assert result.problem_sections is None
@@ -137,7 +134,7 @@ class TestReportResult:
     def test_report_result_empty_values(self):
         """Test ReportResult with empty values."""
         result = ReportResult(
-            report_md="NOT_A_VALID_PR",
+            final_md="NOT_A_VALID_PR",
             problem_statement="",
             hints="",
             classification="",
@@ -145,7 +142,7 @@ class TestReportResult:
             is_performance_commit=False,
         )
 
-        assert result.report_md == "NOT_A_VALID_PR"
+        assert result.final_md == "NOT_A_VALID_PR"
         assert result.problem_statement == ""
         assert result.is_performance_commit is False
         assert result.classification_reason == ""

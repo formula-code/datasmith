@@ -19,10 +19,10 @@ def configure_agent_backends(local: bool = False, PORTKEY_MODEL_NAME: str | None
     except ValueError:
         kwargs["max_tokens"] = 8000
     # Keep deterministic unless overridden.
-    try:
-        kwargs["temperature"] = float(os.getenv("DSPY_TEMPERATURE", "0"))
-    except ValueError:
-        kwargs["temperature"] = 0.0
+    # try:
+    #     kwargs["temperature"] = float(os.getenv("DSPY_TEMPERATURE", "0"))
+    # except ValueError:
+    #     kwargs["temperature"] = 0.0
     if portkey_api_key := os.getenv("PORTKEY_API_KEY"):
         api_key = "unused-by-portkey"
         model = (

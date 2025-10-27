@@ -20,6 +20,9 @@ from typing import Any
 import dspy
 
 from datasmith.logging_config import configure_logging
+from datasmith.scrape.verbatim_checker import (
+    validate_section_extractiveness,
+)
 
 # Verbatim validation disabled: previously imported utilities for LCS checks
 # have been removed to simplify extraction and avoid noisy logs.
@@ -92,129 +95,87 @@ class ProblemExtraction:
 
 class ProblemExtractorSignature(dspy.Signature):
     """
-    Create a comprehensive problem statement from GitHub PR/issue discussions.
+    PURPOSE
+    --------
+    Given a GitHub PR and its comments, decide what verbatim content belongs in:
+      (A) Problem Description — original problem/need/motivation/context
+      (B) Solution Overview — proposed or implemented changes
+    Be STRICTLY EXTRACTIVE: select contiguous spans that already exist in the source.
+    Do NOT rewrite or add words. You may trim leading/trailing whitespace only.
+    Code blocks and error logs MUST be character-exact (including fences/whitespace).
 
-    Focus on four key aspects:
-    1. The original problem or need
-    2. Key discussions and decisions made
-    3. Important technical details and constraints
-    4. The implemented solution (in a separate section.)
+    INPUT
+    -----
+      - `pr_body`: concatenated raw text from the PR title/body
+      - `pr_comments`: concatenated raw text from all PR comments
 
-    ## Output Format
-    Output plain content for two fields (no headings in the content itself):
-    1. Problem Statement (required when any evidence exists)
-       - The core issue being addressed (1-3 sentences)
-       - Technical context: code snippets, error messages, repro steps (verbatim)
-       - Key viewpoints or constraints (optional)
-    2. Solution Overview (optional)
-       - A concise summary of the implemented changes (verbatim wording preferred)
+    WHAT TO RETURN
+    --------------
+    Two plain-text fields (no headings in the content):
+      1) Problem Description (may be empty)
+         - Verbatim spans describing problem/need, symptoms, error messages, repro steps,
+           constraints, affected components, etc.
+         - Ignore pleasantries, greetings, sign-offs, and non-technical commentary.
+      2) Solution Overview (may be empty)
+         - Verbatim spans describing implemented/proposed changes: diffs, function/file names,
+           config/flags, commands, metrics, validations, “Fixes #…”, related links.
 
+    SPAN RULES
+    ----------
+    - Copy whole sentences OR contiguous code/log blocks as they appear in the source.
+    - Do NOT splice non-contiguous text; do NOT insert ellipses unless present in source.
+    - If a sentence alone is incomplete, include the immediately adjacent sentence that
+      completes the thought—still verbatim.
+    - Lists are OK, but output ONE span per line with no bullets/numbers/labels/commentary.
 
-    ## General guidelines
-    - Preserve technical accuracy (exact error messages, code snippets, file paths)
-    - Maintain attribution for important viewpoints
-    - Create a coherent narrative that flows logically
-    - Focus on information essential for understanding the PR
-    - Extract, don't abstract - use original wording wherever possible
-    - Ignore boilerplate such as PR template checklists (`- [x] ...`) and
-      CI/automation headers unless they contain unique technical details
+    ORDER & DEDUP
+    -------------
+    - Preserve original chronological order (top → bottom).
+    - When de-duplicating near-identical spans, keep the FIRST occurrence and preserve order.
 
-    CRITICAL: Your output will be AUTOMATICALLY VALIDATED for extractiveness using LCS
-    (Longest Common Subsequence) ratio. Target: 75%+ of your output should be verbatim
-    from the source.
+    FORMAT & STYLE
+    --------------
+    - Preserve exact tokens: function/variable names, file paths, versions, hashes, issue/PR IDs.
+    - Code/logs must remain character-exact, including markdown fences if present.
+    - Ignore boilerplate (checklists, CI banners) unless they contain unique technical details.
+    - Maintain attribution only when the text itself names people/handles.
 
-    RULES:
-    1. Extract, don't abstract - use original wording wherever possible
-       - BAD: "There has been discussion about size issues"
-       - GOOD: "Points are sometimes invisible when using large coordinate values"
+    VALIDATION NOTES
+    ----------------
+    - Either field may be an empty string if no evidence exists.
+    - High extractiveness is expected (e.g., LCS/4-gram checks); code/log blocks must be exact.
+    - Do NOT add headings like “Problem Statement” or “Solution Overview” into the content.
 
-    2. ALL code snippets must be CHARACTER-EXACT verbatim
-       - Copy-paste code blocks with no modifications
-       - Preserve all whitespace, indentation, comments
-       - Any paraphrased code = automatic failure
-
-    3. Keep technical terms EXACTLY as written
-       - `experimental_canvas_size_limits` NOT "canvas size settings"
-       - `np.asarray(viewer.dims.range).max() * 0.01` NOT "computed from viewer dimensions"
-       - Preserve function names, variable names, file paths exactly
-
-    4. Include specific values, never generalize
-       - "(2, 100) or (2, 10000)" NOT "small range values"
-       - "1000x1000 image" NOT "large images"
-       - "haesleinhuepf" NOT "a user" (when attribution matters)
-       - Keep version numbers, commit hashes, issue numbers exact
-
-    VALIDATION CRITERIA (your output will be checked):
-    - Each sentence will be LCS-matched against source
-    - Required: 75% LCS ratio OR 70% exact 4-gram match
-    - Code blocks: 100% exact match required
-    - If validation fails, your output will be rejected
-
-
-    Additional requirements:
-    - Always provide a non-empty Problem Statement when the PR/issue contains any relevant
-      description (title/body/comments/issues). If the source only has a solution description,
-      infer the minimal problem description from it without adding new facts.
-    - Do NOT include section headings like "Problem Statement" or "Solution Overview" in your content.
-    - Do NOT return only links as the problem statement; summarise the problem in 1-3 sentences.
-
-    ANTI-PATTERNS TO AVOID:
-    ❌ "There has been some discussion" → ✓ State the actual issue
-    ❌ "Users report that..." → ✓ Give concrete example with code
-    ❌ "The proposed fix involves..." → ✓ Describe the actual change
-    ❌ Paraphrasing code → ✓ Copy-paste exactly
-    ❌ "Issue 0, Issue 1, Issue 2" → ✓ Only reference if actually numbered in source
+    NOTES
+    -----
+    - Favor specificity. When only solution text exists, leave Problem empty (and vice-versa).
     """
 
-    github_text: str = dspy.InputField(desc="Raw GitHub PR/issue text (titles, bodies, comments).")
-    related_issues: str = dspy.InputField(desc="Concatenated text from linked issues/PRs/discussions, if any.")
+    # Inputs
+    pr_body: str = dspy.InputField(desc="The GitHub PR/issue description")
 
-    # Structured outputs (fill only when supported by input)
-    # Some providers occasionally emit arrays/content chunks; accept list[str] and we will
-    # normalise to a string in post-processing to avoid adapter parse failures.
-    problem_statement: str | list[Any] | None = dspy.OutputField(
-        desc="A markdown document detailing the problem statement and relevant discussion."
+    pr_comments: str = dspy.InputField(desc="Comments on the PR thread.")
+
+    # Outputs (lists allowed; caller can normalize to string later)
+    reasoning: str | list[Any] | None = dspy.OutputField(
+        desc="(Optional) Empty OR a JSON list of source offsets only (no prose), e.g. "
+        '[{"field":"problem","start":123,"end":256},{"field":"solution","start":...}].'
     )
-    solution_overview: str | list[Any] | None = dspy.OutputField(
-        desc="What the PR implements or changes. Describe the actual change using precise terms from the source."
+    extracted_problem_description: str | list[Any] | None = dspy.OutputField(
+        desc="Verbatim spans evidencing the problem/symptoms/constraints, one span per line (may be empty)."
     )
-
-
-class CommentExtractorSignature(dspy.Signature):
-    """
-    Extract key technical discussions from GitHub comment threads.
-
-    Focus on:
-    - Technical decisions and their rationales
-    - Alternative approaches discussed
-    - Specific concerns or objections raised
-    - Debugging insights and workarounds
-
-    ## Guidelines
-    - Preserve exact technical details (code, error messages, values)
-    - Attribute viewpoints to specific users
-    - Organize by topic for readability
-    - Omit social pleasantries and redundant restatements
-    - Keep disagreements and different perspectives
-    - Extract, don't abstract - preserve original wording
-    - Omit greetings, thanks, off-topic tangents
-    - Compress verbose restatements of the same point
-    - Keep all distinct technical points
-    - Preserve links to related discussions (verbatim URLs)
-    """
-
-    comment_thread: str = dspy.InputField(desc="Concatenated GitHub comment thread")
-    extracted_discussion: str = dspy.OutputField(
-        desc="Extracted discussion summary with high fidelity to source (75%+ LCS ratio)"
+    extracted_solution_overview: str | list[Any] | None = dspy.OutputField(
+        desc="Verbatim spans describing the implemented/proposed solution, one span per line (may be empty)."
     )
 
 
 class ProblemExtractor(dspy.Module):
     """
-    Extractive problem statement and discussion extractor with LCS validation.
+    Extractive problem/solution bucketizer and discussion extractor with LCS validation.
 
-    This module extracts (not summarizes) problem statements and discussion points
-    from GitHub PR/issue content while maintaining high fidelity to source material.
+    This module uses the updated signatures:
+      - ProblemExtractorSignature(pr_body, pr_comments)
+      - CommentExtractorSignature(comment_thread)
 
     Validation:
         - LCS ratio: 75%+ for each section
@@ -225,15 +186,10 @@ class ProblemExtractor(dspy.Module):
     Usage:
         extractor = ProblemExtractor(validate_lcs=True, min_lcs=0.75)
 
-        # Extract problem statement
-        problem, validation = extractor.extract_problem(
-            message="GitHub issue text...",
-            related_issues="Related issue details..."
-        )
-
-        # Extract discussion
-        discussion, validation = extractor.extract_comments(
-            comment_thread="Comment thread..."
+        # Extract Problem/Solution buckets from a PR
+        extraction, validation = extractor.extract_problem(
+            pr_body=pr_body_text,
+            pr_comments=all_pr_comments_text,
         )
     """
 
@@ -243,77 +199,92 @@ class ProblemExtractor(dspy.Module):
         min_lcs: float = 0.75,
         log_validation: bool = True,
     ):
-        """
-        Initialize ProblemExtractor.
-
-        Args:
-            validate_lcs: Whether to validate extractiveness using LCS ratio
-            min_lcs: Minimum LCS ratio required (0.0-1.0, default 0.75)
-            log_validation: Whether to log validation reports
-        """
         super().__init__()
         self.validate_lcs = validate_lcs
         self.min_lcs = min_lcs
         self.log_validation = log_validation
 
-        # Initialize DSPy predictors
+        # Updated predictors (signatures themselves already updated by you)
         self.problem_predictor = dspy.Predict(ProblemExtractorSignature)
-        self.comment_predictor = dspy.Predict(CommentExtractorSignature)
+        # self.comment_predictor = dspy.Predict(CommentExtractorSignature)
 
-    def extract_problem(self, message: str, related_issues: str) -> tuple[ProblemExtraction, dict[str, Any]]:
+    # ---------- PUBLIC API ----------
+
+    def extract_problem(
+        self,
+        *,
+        pr_body: str,
+        pr_comments: str,
+    ) -> tuple[ProblemExtraction, dict[str, Any]]:
         """
-        Extract problem statement from GitHub issue/PR with validation.
+        Extract Problem/Solution buckets from a GitHub PR + comments.
 
         Args:
-            message: Main GitHub issue or PR description
-            related_issues: Text from related issues and references
+            pr_body: The GitHub PR/issue description
+            pr_comments: Comments on the PR thread
 
         Returns:
-            Tuple of (ProblemExtraction, validation_report)
-
-            validation_report contains:
-                - overall_pass: bool
-                - avg_lcs: float
-                - avg_ngram: float
-                - details: str (human-readable report)
-                - raw_scores: list of VerbatimScore objects
+            (ProblemExtraction, validation_report)
         """
-        # Run extraction
+        # Run extraction with UPDATED input arg names
         try:
             result = self.problem_predictor(
-                github_text=message,
-                related_issues=related_issues,
+                pr_body=pr_body,
+                pr_comments=pr_comments,
             )
             extraction = self._build_extraction(result)
         except Exception as e:
             logger.error(f"Problem extraction failed: {e}", exc_info=True)
-            fallback = ProblemExtraction(problem_statement=f"[extraction failed: {e}]")
+            fallback = ProblemExtraction(problem_statement=f"[extraction failed: {e}]", solution_overview=None)
             return fallback, {"overall_pass": False, "error": str(e)}
 
         markdown_output = extraction.to_markdown()
 
-        # Validate if enabled
+        # Validate against the FULL source (body + both comment sets)
+        full_source = "\n\n".join(s for s in (pr_body, pr_comments) if s)
         validation_report = self._validate_extraction(
             extracted=markdown_output,
-            source=message + "\n\n" + related_issues,
-            extraction_type="problem_statement",
+            source=full_source,
+            extraction_type="problem_description",
         )
 
         return extraction, validation_report
+
+    # def extract_comments(self, *, comment_thread: str) -> tuple[str, dict[str, Any]]:
+    #     """
+    #     Extract discussion points from a GitHub comment thread with validation.
+
+    #     Args:
+    #         comment_thread: Concatenated GitHub comment text
+
+    #     Returns:
+    #         (extracted_discussion, validation_report)
+    #     """
+    #     try:
+    #         result = self.comment_predictor(comment_thread=comment_thread)
+    #         extracted = str(getattr(result, "extracted_discussion", "")).strip()
+    #     except Exception as e:
+    #         logger.error(f"Comment extraction failed: {e}", exc_info=True)
+    #         return f"[extraction failed: {e}]", {"overall_pass": False, "error": str(e)}
+
+    #     validation_report = self._validate_extraction(
+    #         extracted=extracted,
+    #         source=comment_thread,
+    #         extraction_type="discussion",
+    #     )
+    #     return extracted, validation_report
 
     def _clean_text(self, value: Any | None) -> str | None:
         """Clean and normalize text values from predictions."""
         if value is None:
             return None
-        # Accept list[str] or other providers' chunked content and coerce to text
         if isinstance(value, list):
             try:
                 # Flatten nested lists and join with newlines
                 flat: list[str] = []
                 for v in value:
                     if isinstance(v, list):
-                        for x in v:
-                            flat.append(str(x))
+                        flat.extend(str(x) for x in v)
                     else:
                         flat.append(str(v))
                 value = "\n".join(flat)
@@ -327,9 +298,14 @@ class ProblemExtractor(dspy.Module):
         return stripped or None
 
     def _build_extraction(self, prediction: Any) -> ProblemExtraction:
-        """Normalise the raw DSPy prediction into a structured extraction object."""
-        problem = self._clean_text(getattr(prediction, "problem_statement", None))
-        solution = self._clean_text(getattr(prediction, "solution_overview", None))
+        """
+        Normalize the raw DSPy prediction (using UPDATED output names)
+        into your ProblemExtraction object (which still expects
+        problem_statement / solution_overview).
+        """
+        # Primary: new field names
+        problem = self._clean_text(getattr(prediction, "extracted_problem_description", None))
+        solution = self._clean_text(getattr(prediction, "extracted_solution_overview", None))
 
         def plausible(s: str | None, *, min_len: int = 20) -> bool:
             if s is None:
@@ -337,57 +313,68 @@ class ProblemExtractor(dspy.Module):
             stripped = s.strip()
             if len(stripped) < min_len:
                 return False
-            # Require at least one alphabetic character (avoids bare numbers / tokens)
             return bool(re.search(r"[A-Za-z]", stripped))
 
-        # Sanity checks: discard implausible outputs to enable robust fallback in ReportBuilder
         if not plausible(problem, min_len=20):
             problem = None
         if not plausible(solution, min_len=10):
             solution = None
 
         extraction = ProblemExtraction(
-            problem_statement=problem,
-            solution_overview=solution,
+            problem_statement=problem or "",
+            solution_overview=solution or "",
         )
 
-        # Ensure there's at least some content to present
-        if not extraction.problem_statement and not extraction.to_markdown():
+        # Ensure there's at least some content string (empty strings are allowed)
+        if extraction.problem_statement is None:
             extraction.problem_statement = ""
+        if extraction.solution_overview is None:
+            extraction.solution_overview = ""
 
         return extraction
 
-    def extract_comments(self, comment_thread: str) -> tuple[str, dict[str, Any]]:
-        """
-        Extract discussion points from GitHub comment thread with validation.
-
-        Args:
-            comment_thread: Concatenated GitHub comment text
-
-        Returns:
-            Tuple of (extracted_discussion, validation_report)
-        """
-        # Run extraction
-        try:
-            result = self.comment_predictor(comment_thread=comment_thread)
-            extracted = str(result.extracted_discussion).strip()
-        except Exception as e:
-            logger.error(f"Comment extraction failed: {e}", exc_info=True)
-            return f"[extraction failed: {e}]", {"overall_pass": False, "error": str(e)}
-
-        # Validate if enabled
-        validation_report = self._validate_extraction(
-            extracted=extracted,
-            source=comment_thread,
-            extraction_type="discussion",
-        )
-
-        return extracted, validation_report
-
     def _validate_extraction(self, extracted: str, source: str, extraction_type: str) -> dict[str, Any]:
-        """Validation disabled: return a stubbed pass report without side effects."""
+        """Validate extractiveness using LCS and exact n-gram metrics.
+
+        - When ``validate_lcs`` is False, returns a passing stub with validation disabled.
+        - When enabled, enforces code-block exactness and computes per-sentence scores.
+        """
+        if not self.validate_lcs:
+            return {
+                "overall_pass": True,
+                "validation_enabled": False,
+            }
+
+        try:
+            overall_pass, scores = validate_section_extractiveness(
+                extracted,
+                source,
+                min_lcs=self.min_lcs,
+                code_blocks_must_be_exact=True,
+            )
+        except Exception as e:  # never fail the caller due to validator issues
+            return {
+                "overall_pass": False,
+                "validation_enabled": True,
+                "details": f"FAIL: validator error: {e}",
+            }
+
+        avg_lcs = 0.0
+        avg_ngram = 0.0
+        if scores:
+            avg_lcs = sum(s.lcs_ratio for s in scores) / len(scores)
+            avg_ngram = sum(s.exact_match_ratio for s in scores) / len(scores)
+
+        total = len(scores)
+        passed = sum(1 for s in scores if s.is_verbatim)
+        status = "PASS" if overall_pass else "FAIL"
+        details = f"{status}: {passed}/{total} sentences ≥ LCS {self.min_lcs:.2f}; avg LCS={avg_lcs:.3f}, avg 4-gram={avg_ngram:.3f}"
+
         return {
-            "overall_pass": True,
-            "validation_enabled": False,
-            "message": "Validation disabled",
+            "overall_pass": overall_pass,
+            "validation_enabled": True,
+            "avg_lcs": avg_lcs,
+            "avg_ngram": avg_ngram,
+            "details": details,
+            "type": extraction_type,
         }

@@ -154,7 +154,9 @@ def prepare_tasks(
 
 
 def main(args: argparse.Namespace) -> None:
-    client = get_docker_client()
+    # Size the Docker HTTP connection pool to our concurrency to avoid
+    # adapter/pool starvation when many threads issue Docker API calls.
+    client = get_docker_client(max_concurrency=args.max_workers)
     all_states = process_inputs(args)
     if not args.context_registry.exists():
         logger.warning("main: context registry file %s does not exist; starting fresh", args.context_registry)

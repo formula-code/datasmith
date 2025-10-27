@@ -30,7 +30,7 @@ from datasmith.docker.cleanup import fast_cleanup_run_artifacts, remove_containe
 from datasmith.docker.context import ContextRegistry, DockerContext
 from datasmith.docker.orchestrator import gen_run_labels
 from datasmith.docker.validation import DockerValidator, ValidationConfig
-from datasmith.execution.resolution.task_utils import resolve_task  # type: ignore[import-not-found]
+from datasmith.execution.resolution.task_utils import resolve_task
 
 logger = logging.getLogger(__name__)
 RE_PY_EXTRACT = re.compile(r"python[=<>!~]*([\d\.]+)")

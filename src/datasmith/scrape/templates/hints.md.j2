@@ -1,0 +1,27 @@
+{#
+ Renders the "Relevant Discussions" section.
+
+ Expects a variable `h` that is an instance of HintsContext.
+ Uses `comment.md.j2` for per-comment rendering when not using summary.
+#}
+The following information may help in addressing the problem.
+{% if problem_description %}
+{{ problem_description }}
+{% endif %}
+{% if h %}
+{% if h.prefer_summary and h.summary %}
+Some relevant discussion comments:
+{{ h.summary }}
+{% else %}
+{% for item in h.items %}
+{% set user_login = item.user_login %}
+{% set timestamp = item.timestamp %}
+{% set body = item.body %}
+{% set links_str = (item.links | join(', ')) if item.links else '—' %}
+{% include 'comment.md.j2' %}
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endif %}

@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.report_utils import issue_comments, issue_timeline
+from datasmith.scrape.models import IssueExpanded
 from datasmith.utils import _get_github_metadata
 
 logger = configure_logging()
@@ -74,8 +74,9 @@ def _extract_issue_refs(text: str, default_owner: str, default_repo: str) -> lis
 
 def _extract_cross_reference_bodies(timeline: list[dict[str, Any]]) -> list[str]:
     """Return a list of cross-reference bodies from the GitHub issue timeline."""
+    cross_ref_timeline = [e for e in timeline if e.get("event") == "cross-referenced"]
     bodies: list[str] = []
-    for event in timeline:
+    for event in cross_ref_timeline:
         try:
             src_issue = event.get("source", {}).get("issue")
             if not src_issue:
@@ -96,8 +97,22 @@ def _format_issue_stat(index: int, title: str, comments: list[str], cross_refere
     return stat
 
 
-def _build_issue_payload(owner: str, repo: str, number: str, index: int) -> dict[str, Any] | None:
-    """Fetch issue metadata and assemble the payload used by the report builder."""
+def _build_issue_payload(
+    owner: str,
+    repo: str,
+    number: str,
+    index: int,
+    *,
+    pr_created_at: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch issue metadata and assemble the payload used by the report builder.
+
+    Comments are derived from the issue timeline and optionally filtered to only
+    include those created before the given PR's creation time.
+    """
+    # Local import to avoid circular dependency with report_utils
+    from datasmith.scrape.report_utils import issue_timeline, to_datetime
+
     endpoint = f"/repos/{owner}/{repo}/issues/{number}"
     issue_thread = _get_github_metadata(endpoint)
     if not issue_thread or not isinstance(issue_thread, dict):
@@ -109,12 +124,28 @@ def _build_issue_payload(owner: str, repo: str, number: str, index: int) -> dict
             return None
         logger.debug("Keeping unmerged PR %s/%s#%s for discussion", owner, repo, number)
 
-    issue_comments_list = issue_comments(owner, repo, int(number))
     timeline = issue_timeline(owner, repo, int(number))
     xref_bodies = _extract_cross_reference_bodies(timeline)
 
-    # Normalise comment content
-    comments = [comment.get("body") or "" for comment in issue_comments_list]
+    # Extract comments from timeline and filter out any made after the PR was created
+    comments: list[str] = []
+    cutoff = to_datetime(pr_created_at) if pr_created_at else None
+    for evt in timeline:
+        # Only consider actual user comments in the timeline
+        if evt.get("event") != "commented":
+            continue
+        body = (evt.get("body") or "").strip()
+        if not body:
+            continue
+        created_at = evt.get("created_at") or evt.get("updated_at")
+        if cutoff and created_at:
+            try:
+                if to_datetime(created_at) >= cutoff:
+                    continue
+            except Exception as exc:
+                # If parsing fails, include conservatively but record it for diagnostics
+                logger.debug("Failed to parse timeline timestamp %s: %s", created_at, exc, exc_info=True)
+        comments.append(body)
     formatted_text = _format_issue_stat(index, issue_thread.get("title", ""), comments, xref_bodies)
 
     return {
@@ -123,6 +154,8 @@ def _build_issue_payload(owner: str, repo: str, number: str, index: int) -> dict
         "number": number,
         "title": issue_thread.get("title", ""),
         "body": issue_thread.get("body", ""),
+        "created_at": issue_thread.get("created_at"),
+        "closed_at": issue_thread.get("closed_at"),
         "comments": comments,
         "cross_references": xref_bodies,
         "is_pr": "pull_request" in issue_thread,
@@ -132,8 +165,12 @@ def _build_issue_payload(owner: str, repo: str, number: str, index: int) -> dict
 
 
 def extract_issues_from_description(
-    description: str | None, owner: str, repo: str
-) -> tuple[list[str], list[dict[str, Any]]]:
+    description: str | None,
+    owner: str,
+    repo: str,
+    *,
+    pr_created_at: str | None = None,
+) -> list[IssueExpanded]:
     """Extract and fetch issue details from a PR/issue description.
 
     Args:
@@ -142,30 +179,38 @@ def extract_issues_from_description(
         repo: Repository name
 
     Returns:
-        Tuple of (problem_statements, issue_data) where:
-        - problem_statements: List of formatted issue summaries
-        - issue_data: List of dicts containing issue metadata
+        List of IssueExpanded models for referenced issues/PRs.
     """
-    # Handle None descriptions (some PRs have no body)
     if description is None:
         description = ""
 
-    prob_stat = [description + "\n"] if description else [""]
-    issue_data_list: list[dict[str, Any]] = []
-
-    # Extract all referenced issues
+    issue_data_list: list[IssueExpanded] = []
     refs = _extract_issue_refs(description, owner, repo)
-
-    logger.debug("Extracted refs: %s", refs)
-
     if not refs:
-        return prob_stat, issue_data_list
-
-    # Iterate unique (owner, repo, number) refs
+        return issue_data_list
+    base = f"https://github.com/{owner}/{repo}"
     for i, (o, r, num) in enumerate(sorted(refs)):
-        payload = _build_issue_payload(o, r, num, i)
-        if not payload:
+        issue = _build_issue_payload(o, r, num, i, pr_created_at=pr_created_at)
+        if not issue:
             continue
-        issue_data_list.append(payload)
+        try:
+            number_s = str(issue.get("number", "0"))
+            number = int(number_s) if number_s.isdigit() else 0
+            url = f"{base}/issues/{number}" if number else base
+            issue_data_list.append(
+                IssueExpanded(
+                    number=number,
+                    title=issue.get("title", ""),
+                    url=url,
+                    description=issue.get("body", "") or "",
+                    comments=tuple(c for c in issue.get("comments", []) if c),
+                    cross_references=tuple(x for x in issue.get("cross_references", []) if x),
+                    created_at=issue.get("created_at"),
+                    closed_at=issue.get("closed_at"),
+                )
+            )
+        except Exception:
+            logger.exception("Failed to build IssueExpanded model")
+            continue
 
-    return prob_stat, issue_data_list
+    return issue_data_list

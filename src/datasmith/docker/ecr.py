@@ -11,6 +11,10 @@ import docker
 from botocore.exceptions import ClientError
 from docker.errors import APIError
 
+from datasmith.logging_config import configure_logging
+
+logger = configure_logging()
+
 
 def publish_images_to_ecr(  # noqa: C901
     local_refs: list[str],
@@ -160,7 +164,9 @@ def publish_images_to_ecr(  # noqa: C901
     failures: dict[str, str] = {}
 
     if verbose:
-        print(f"Publishing {len(plan)} image(s) to {registry} using mode={repository_mode}, parallelism={parallelism}")
+        logger.debug(
+            f"Publishing {len(plan)} image(s) to {registry} using mode={repository_mode}, parallelism={parallelism}"
+        )
 
     def _looks_like_auth_error(msg: Optional[str]) -> bool:
         if not msg:
@@ -200,7 +206,7 @@ def publish_images_to_ecr(  # noqa: C901
             st = line.get("status")
             if st and verbose and any(tok in st for tok in ("Pushed", "Digest", "already exists", "mounted")):
                 with lock:
-                    print(st)
+                    logger.debug(st)
         return ok, digest, last_error
 
     def _push_one(local_ref: str, repo_name: str, tag: str) -> None:  # noqa: C901
@@ -212,7 +218,7 @@ def publish_images_to_ecr(  # noqa: C901
             if tags is not None and tag in tags:
                 if verbose:
                     with lock:
-                        print(f"✔ {ecr_ref} already exists — skipping")
+                        logger.debug(f"✔ {ecr_ref} already exists — skipping")
                 with lock:
                     results[local_ref] = ecr_ref
                 return
@@ -223,7 +229,7 @@ def publish_images_to_ecr(  # noqa: C901
         except Exception as e:
             with lock:
                 failures[local_ref] = f"local image not found: {e}"
-                print(f"✖ {local_ref}: not found locally ({e})")
+                logger.debug(f"✖ {local_ref}: not found locally ({e})")
             return
 
         # Tag (idempotent)
@@ -232,12 +238,12 @@ def publish_images_to_ecr(  # noqa: C901
         except Exception as e:
             with lock:
                 failures[local_ref] = f"failed to tag: {e}"
-                print(f"✖ failed to tag {local_ref} -> {ecr_ref}: {e}")
+                logger.debug(f"✖ failed to tag {local_ref} -> {ecr_ref}: {e}")
             return
 
         if verbose:
             with lock:
-                print(f"Pushing {ecr_ref} ...")
+                logger.debug(f"Pushing {ecr_ref} ...")
 
         # Per-thread low-level client for stable streaming pushes
         def _make_api_client() -> Any:
@@ -269,14 +275,14 @@ def publish_images_to_ecr(  # noqa: C901
                             existing_tags_cache.setdefault(repo_name, set()).add(tag)
                         results[local_ref] = ecr_ref
                         if verbose and digest:
-                            print(f"✔ pushed {ecr_ref} ({digest})")
+                            logger.debug(f"✔ pushed {ecr_ref} ({digest})")
                     return
 
                 # Stream completed without success — if it looks like auth, refresh and retry
                 if _looks_like_auth_error(err) and attempt < max_retries - 1:
                     with lock:
                         if verbose:
-                            print(f"⚠ auth issue pushing {ecr_ref}; refreshing ECR token and retrying...")
+                            logger.debug(f"⚠ auth issue pushing {ecr_ref}; refreshing ECR token and retrying...")
                     _login_to_ecr()
                 else:
                     _raise_push_failed(err)
@@ -287,19 +293,19 @@ def publish_images_to_ecr(  # noqa: C901
                 if code == 401 and attempt < max_retries - 1:
                     with lock:
                         if verbose:
-                            print(f"⚠ 401 unauthorized pushing {ecr_ref}; refreshing ECR token and retrying...")
+                            logger.debug(f"⚠ 401 unauthorized pushing {ecr_ref}; refreshing ECR token and retrying...")
                     _login_to_ecr()
                 else:
                     if attempt >= max_retries - 1:
                         with lock:
                             failures[local_ref] = f"Docker APIError: {e}"
-                            print(f"✖ failed to push {ecr_ref}: {e}")
+                            logger.debug(f"✖ failed to push {ecr_ref}: {e}")
                         return
             except Exception as e:
                 if attempt >= max_retries - 1:
                     with lock:
                         failures[local_ref] = str(e)
-                        print(f"✖ failed to push {ecr_ref}: {e}")
+                        logger.debug(f"✖ failed to push {ecr_ref}: {e}")
                     return
             finally:
                 if attempt < max_retries - 1:
@@ -318,8 +324,8 @@ def publish_images_to_ecr(  # noqa: C901
 
     if verbose and failures:
         with lock:
-            print(f"Completed with {len(results)} success(es) and {len(failures)} failure(s).")
+            logger.debug(f"Completed with {len(results)} success(es) and {len(failures)} failure(s).")
             for k, v in failures.items():
-                print(f"  • {k}: {v}")
+                logger.debug(f"  • {k}: {v}")
 
     return results

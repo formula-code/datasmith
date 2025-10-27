@@ -23,8 +23,9 @@ from typing import Any
 import pandas as pd
 from tqdm.auto import tqdm
 
+from datasmith.agents.problem_extractor import ProblemExtraction
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.report_builder import ProblemExtraction, ReportBuilder
+from datasmith.scrape.report_builder import ReportBuilder
 
 logger = configure_logging(stream=open(Path(__file__).with_suffix(".log"), "w"), level=20)  # noqa: SIM115
 
@@ -203,7 +204,7 @@ def main(args: argparse.Namespace) -> None:
     enrich["problem_sections"] = enrich["problem_sections"].apply(
         lambda pe: pe.__dict__ if isinstance(pe, ProblemExtraction) else pe
     )
-    df_enriched = pd.concat([df.reset_index(drop=True).head(15866), enrich], axis=1)
+    df_enriched = pd.concat([df.reset_index(drop=True), enrich], axis=1)
 
     # Save performance-related commits
     raw_out = args.outfile.with_suffix(".raw.parquet")

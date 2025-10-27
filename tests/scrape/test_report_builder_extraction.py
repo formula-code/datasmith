@@ -298,7 +298,7 @@ class TestEndToEndWithMockedLLM:
         assert mock_extractor.extract_problem.called
 
         # Verify result structure
-        assert result.report_md != "NOT_A_VALID_PR"
+        assert result.final_md != "NOT_A_VALID_PR"
         assert "Points are hardly visible" in result.problem_statement
         assert result.problem_sections is not None
         assert result.problem_sections.problem_statement
