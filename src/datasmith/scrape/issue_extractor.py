@@ -170,6 +170,7 @@ def extract_issues_from_description(
     repo: str,
     *,
     pr_created_at: str | None = None,
+    pr_number_to_ignore: int | None = None,
 ) -> list[IssueExpanded]:
     """Extract and fetch issue details from a PR/issue description.
 
@@ -186,6 +187,11 @@ def extract_issues_from_description(
 
     issue_data_list: list[IssueExpanded] = []
     refs = _extract_issue_refs(description, owner, repo)
+    # Filter out references to the current PR (self-reference via "#<num>")
+    if pr_number_to_ignore is not None:
+        refs = [
+            (o, r, n) for (o, r, n) in refs if not (o == owner and r == repo and str(n) == str(pr_number_to_ignore))
+        ]
     if not refs:
         return issue_data_list
     base = f"https://github.com/{owner}/{repo}"

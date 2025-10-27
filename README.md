@@ -38,6 +38,23 @@ scratch/artifacts
 └── backup/                     # Optional BACKUP_DIR for long‑term storage
 ```
 
+## Architecture Overview
+
+```text
+Datasmith (src/datasmith)
+├─ agents/       # Build planning, judges, tools
+├─ docker/       # Build contexts, orchestration, validation
+├─ scrape/       # Dashboard scrapers and loaders
+├─ benchmark/    # ASV collection/parsing utilities
+├─ detection/    # Change-point detection (performance shifts)
+├─ execution/    # Runners and helpers
+├─ collation/    # Reporting and artifact collation
+└─ core/         # Shared utilities, types, logging
+
+Flow: scrape → benchmark → detection → agents/docker execution → collation
+Artifacts: scratch/artifacts, wheel: dist/
+```
+
 ## Docker Builder
 
 Datasmith uses a **Templated Docker Builder** to create reproducible build environments for benchmarking tasks. The builder replaces flat shell scripts with a structured, template-driven system that provides:
@@ -96,6 +113,7 @@ python -m datasmith.docker.builder diff \
 - **[CLI Reference](src/datasmith/docker/builder/CLI.md)**: Command-line interface documentation
 - **[Migration Guide](docs/MIGRATION_GUIDE.md)**: Migrating from legacy system
 - **[Architecture Spec](TEMPLATED_BUILDER.md)**: Detailed design document
+- **[Repository Guidelines](AGENTS.md)**: Contributor workflow, style, tests, and PRs
 
 ### Key Features
 

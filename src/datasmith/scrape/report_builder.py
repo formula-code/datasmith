@@ -162,7 +162,11 @@ class ReportBuilder:
             ts_field = "submitted_at" if kind == "reviewed" else "created_at"
             ts_iso = obj.get(ts_field, "") or ""
             linked_issues = extract_issues_from_description(
-                body, owner, repo, pr_created_at=pr_dict.get("pr_created_at", "") or None
+                body,
+                owner,
+                repo,
+                pr_created_at=pr_dict.get("pr_created_at", "") or None,
+                pr_number_to_ignore=num,
             )
             return HintComment(
                 user_login=obj["user"]["login"],
@@ -177,8 +181,12 @@ class ReportBuilder:
         pr_merged_at = to_datetime(pr_dict["pr_merged_at"])
 
         for event in timeline:
-            event_time = event.get("updated_at")
+            # Prefer created_at for cutoff; fall back to updated_at conservatively
+            event_time = event.get("created_at") or event.get("updated_at")
             if (not event_time) or to_datetime(event_time) >= pr_merged_at:
+                continue
+            # Keep only events that look like user-authored comments with bodies
+            if not (event.get("body") and isinstance(event.get("user"), dict) and event["user"].get("login")):
                 continue
             item = _mk_item(event, event.get("event", "pr_comment"))
             comment_links.update(item.links)
@@ -189,7 +197,9 @@ class ReportBuilder:
     def _extract_problem_statement(self, pr_body: str, pr_comments: str) -> ProblemExtraction:
         """Extract (not summarize) problem statement from issue.
 
-        Uses extractive approach to maintain 85%+ LCS ratio with source material.
+        Uses an extractive approach to keep high overlap (typically 60%+ LCS)
+        with source material. Preserves original wording, code examples, and
+        technical details verbatim where possible.
         Preserves original wording, code examples, and technical details verbatim.
 
         Args:
@@ -293,11 +303,12 @@ class ReportBuilder:
         file_change_summary = pr_dict.get("file_change_summary", "")
 
         repo_template = self.jinja_env.get_template("repo.md.j2")
+        _repo = (pr_dict.get("pr_base", {}) or {}).get("repo", {}) or {}
         repo_description_rendered = repo_template.render(
-            repo_name=pr_dict["pr_base"]["repo"]["name"],
-            repo_description=pr_dict["pr_base"]["repo"]["description"],
-            repo_topics=", ".join(pr_dict["pr_base"]["repo"]["topics"]),
-            repo_language=pr_dict["pr_base"]["repo"]["language"],
+            repo_name=_repo.get("name", f"{owner}/{repo}"),
+            repo_description=_repo.get("description", ""),
+            repo_topics=", ".join(_repo.get("topics", []) or []),
+            repo_language=_repo.get("language", ""),
         )
 
         pr_template = self.jinja_env.get_template("pr_header.md.j2")
@@ -312,7 +323,7 @@ class ReportBuilder:
         logger.debug("Building report for %s/%s PR #%d", owner, repo, pr_number)
         all_issues: set[IssueExpanded] = set()
         if issue_data := extract_issues_from_description(
-            pr_body_text, owner, repo, pr_created_at=pr_created_at or None
+            pr_body_text, owner, repo, pr_created_at=pr_created_at or None, pr_number_to_ignore=pr_number
         ):
             all_issues.update(issue_data)
         hint_items, comment_links = self._collect_pr_discussions(owner, repo, pr_number, pr_dict)
@@ -322,12 +333,51 @@ class ReportBuilder:
 
         raw_pr_text = pr_body_text + "\n\nComments:\n" + pr_raw_comments_text
         is_performance_commit, perf_json = self._evaluate_performance_detection(raw_pr_text, file_change_summary, patch)
+        # Build a stable, sorted list of referenced issues
+        issues_sorted: list[IssueExpanded] = sorted(all_issues, key=lambda it: it.number)
+        issues_template = self.jinja_env.get_template("issues.md.j2")
+        issues_rendered = issues_template.render(issues=issues_sorted)
+        if self.anonymize_output:
+            issues_rendered = anonymize_github_issue(issues_rendered)
+
+        # Reject PRs with no referenced issues and no body content
+        if not issues_sorted and not (pr_body or "").strip():
+            return ReportResult(
+                final_md="NOT_A_VALID_PR",
+                all_data={
+                    "issues_expanded": issues_sorted,
+                    "raw_issue_data": [],
+                    "git_issue_str": "",
+                },
+                problem_statement="",
+                hints="",
+                classification="",
+                difficulty="",
+                is_performance_commit=is_performance_commit,
+            )
+
+        # If filtering to performance-only, optionally short-circuit but preserve metadata
         if self.filter_performance_only and not is_performance_commit:
             logger.debug("NOT A PERFORMANCE COMMIT (filtered out by filter_performance_only=True)")
             return ReportResult(
                 final_md="NOT_A_PERFORMANCE_COMMIT",
                 all_data={
                     "performance_section": perf_json,
+                    "issues_expanded": issues_sorted,
+                    "raw_issue_data": [
+                        {
+                            "number": it.number,
+                            "title": it.title,
+                            "url": it.url,
+                            "description": it.description,
+                            "comments": list(it.comments),
+                            "cross_references": list(it.cross_references),
+                            "created_at": it.created_at,
+                            "closed_at": it.closed_at,
+                        }
+                        for it in issues_sorted
+                    ],
+                    "git_issue_str": issues_rendered,
                 },
                 problem_statement="",
                 hints="",
@@ -340,13 +390,15 @@ class ReportBuilder:
             pr_comments=pr_raw_comments_text,
         )
 
-        issues_template = self.jinja_env.get_template("issues.md.j2")
-        issues_rendered = issues_template.render(issues=all_issues)
-        if self.anonymize_output:
-            issues_rendered = anonymize_github_issue(issues_rendered)
-
         hints_template = self.jinja_env.get_template("hints.md.j2")
         hints_block = hints_template.render(problem_description=bisected_pr_information.problem_statement)
+
+        # if there are no linked issues, but we have a problem statement,
+        # we should set problem statement to the hints block,
+        # and not give any other hints.
+        if not issues_sorted and (bisected_pr_information.problem_statement or "").strip():
+            issues_rendered = hints_block
+            hints_block = ""
 
         # now make a structured final.md.j2
         final_template = self.jinja_env.get_template("final.md.j2")
@@ -400,7 +452,7 @@ class ReportBuilder:
             all_data={
                 # Structured + raw context for downstream consumers
                 "hints_context": hints_ctx,
-                "issues_expanded": list(all_issues),
+                "issues_expanded": issues_sorted,
                 "performance_section": perf_json if is_performance_commit else "",
                 "raw_comments": pr_raw_comments_text,
                 "raw_pr_title": pr_title,
@@ -411,6 +463,21 @@ class ReportBuilder:
                 "difficulty": difficulty,
                 "classification_reason": classification_reason,
                 "classification_confidence": classification_confidence,
+                # Back-compat fields expected by tests
+                "raw_issue_data": [
+                    {
+                        "number": it.number,
+                        "title": it.title,
+                        "url": it.url,
+                        "description": it.description,
+                        "comments": list(it.comments),
+                        "cross_references": list(it.cross_references),
+                        "created_at": it.created_at,
+                        "closed_at": it.closed_at,
+                    }
+                    for it in issues_sorted
+                ],
+                "git_issue_str": issues_rendered,
             },
             problem_statement=bisected_pr_information.problem_statement or "",
             problem_statement_with_sol=bisected_pr_information.to_problem_with_solution_markdown()

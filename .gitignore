@@ -206,3 +206,4 @@ output
 *.db
 scratch/artifacts/git/
 scratch/notebooks/git/
+scratch/artifacts/**/*.parquet
