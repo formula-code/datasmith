@@ -583,6 +583,18 @@ def agent_build_and_validate(  # noqa: C901
                     context_registry.register(task.with_tag("pkg"), ctx)
                 context_registry.save_to_file(path=args.context_registry)
 
+                # If requested, publish the successfully built image to ECR
+                if getattr(args, "push_to_ecr", False):
+                    logger.info(
+                        "agent_build_and_validate: pushed %s to ECR",
+                        task.with_tag("run").get_image_name(),
+                    )
+                    ctx.build_and_publish_to_ecr(
+                        client=client,
+                        task=task.with_tag("run"),
+                        region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+                    )
+
                 final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
                 _save_pickle(ctx, final_pickle)
 

@@ -310,7 +310,7 @@ class ReportBuilder:
         pr_base = pr_dict.get("pr_base")
         if not isinstance(pr_base, dict):
             pr_base = {}
-        _repo = pr_base.get("repo") if isinstance(pr_base.get("repo"), dict) else {}
+        _repo = pr_base.get("repo", {}) if isinstance(pr_base.get("repo"), dict) else {}
         # Normalize repo topics to a comma-separated string safely
         _topics_val = _repo.get("topics", [])
         _topics_list = [] if not isinstance(_topics_val, (list, tuple, set)) else list(_topics_val)
