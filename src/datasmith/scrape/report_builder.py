@@ -53,6 +53,7 @@ class ReportBuilder:
         add_classification: bool = False,
         filter_performance_only: bool = False,
         include_bot_comments: bool = False,
+        summarize_prs: bool = False,
         anonymize_output: bool = False,
         max_links_to_follow: int = 60,
         model_name: str = "local/meta-llama/Llama-3.3-70B-Instruct",
@@ -76,6 +77,7 @@ class ReportBuilder:
         self.summarize_llm = summarize_llm
         self.add_classification = add_classification
         self.filter_performance_only = filter_performance_only
+        self.summarize_prs = summarize_prs
         self.include_bot_comments = include_bot_comments
         self.anonymize_output = anonymize_output
         self.max_links_to_follow = max_links_to_follow
@@ -271,7 +273,7 @@ class ReportBuilder:
             git_patch=patch,
         )
 
-    def build(self, pr_dict: dict[str, Any]) -> ReportResult:
+    def build(self, pr_dict: dict[str, Any]) -> ReportResult:  # noqa: C901
         """Build a report from a PR dictionary.
 
         Args:
@@ -289,8 +291,10 @@ class ReportBuilder:
         Raises:
             ValueError: If required fields are missing from pr_dict
         """
-        pr_url = pr_dict.get("pr_url")
-        if not pr_url:
+        # pr_url may occasionally arrive as a non-string (e.g., numpy/object), avoid truthiness on arrays
+        pr_url_obj = pr_dict.get("pr_url")
+        pr_url = pr_url_obj if isinstance(pr_url_obj, str) else ("" if pr_url_obj is None else str(pr_url_obj))
+        if pr_url.strip() == "":
             raise ValueError("pr_dict must contain 'pr_url' field")
 
         # Parse owner/repo/number from URL
@@ -303,20 +307,36 @@ class ReportBuilder:
         file_change_summary = pr_dict.get("file_change_summary", "")
 
         repo_template = self.jinja_env.get_template("repo.md.j2")
-        _repo = (pr_dict.get("pr_base", {}) or {}).get("repo", {}) or {}
+        pr_base = pr_dict.get("pr_base")
+        if not isinstance(pr_base, dict):
+            pr_base = {}
+        _repo = pr_base.get("repo") if isinstance(pr_base.get("repo"), dict) else {}
+        # Normalize repo topics to a comma-separated string safely
+        _topics_val = _repo.get("topics", [])
+        _topics_list = [] if not isinstance(_topics_val, (list, tuple, set)) else list(_topics_val)
+        _topics_str = ", ".join([str(t) for t in _topics_list]) if _topics_list else ""
         repo_description_rendered = repo_template.render(
             repo_name=_repo.get("name", f"{owner}/{repo}"),
             repo_description=_repo.get("description", ""),
-            repo_topics=", ".join(_repo.get("topics", []) or []),
+            repo_topics=_topics_str,
             repo_language=_repo.get("language", ""),
         )
 
         pr_template = self.jinja_env.get_template("pr_header.md.j2")
+        labels_raw = pr_dict.get("pr_labels", [])
+        if isinstance(labels_raw, dict):
+            labels_seq = [labels_raw]
+        elif isinstance(labels_raw, (list, tuple, set)):
+            labels_seq = list(labels_raw)
+        else:
+            labels_seq = []
+        labels_joined = ", ".join([str(label.get("name", "")) for label in labels_seq if isinstance(label, dict)])
+        labels_joined = labels_joined if labels_joined else "—"
         pr_body_text = pr_template.render(
             title=pr_title,
             number=pr_number,
             repo_full_name=f"{owner}/{repo}",
-            labels=", ".join([label["name"] for label in pr_dict.get("pr_labels", [])]) or "—",
+            labels=labels_joined,
             body=pr_body,
         )
 
@@ -332,7 +352,6 @@ class ReportBuilder:
         hints_ctx = HintsContext(items=hint_items, summary=pr_raw_comments_text, prefer_summary=self.summarize_llm)
 
         raw_pr_text = pr_body_text + "\n\nComments:\n" + pr_raw_comments_text
-        is_performance_commit, perf_json = self._evaluate_performance_detection(raw_pr_text, file_change_summary, patch)
         # Build a stable, sorted list of referenced issues
         issues_sorted: list[IssueExpanded] = sorted(all_issues, key=lambda it: it.number)
         issues_template = self.jinja_env.get_template("issues.md.j2")
@@ -353,9 +372,10 @@ class ReportBuilder:
                 hints="",
                 classification="",
                 difficulty="",
-                is_performance_commit=is_performance_commit,
+                is_performance_commit=False,
             )
 
+        is_performance_commit, perf_json = self._evaluate_performance_detection(raw_pr_text, file_change_summary, patch)
         # If filtering to performance-only, optionally short-circuit but preserve metadata
         if self.filter_performance_only and not is_performance_commit:
             logger.debug("NOT A PERFORMANCE COMMIT (filtered out by filter_performance_only=True)")

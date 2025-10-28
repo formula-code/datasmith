@@ -16,14 +16,16 @@ Example:
 from __future__ import annotations
 
 import argparse
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from datasmith.agents.problem_extractor import ProblemExtraction
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.report_builder import ReportBuilder
 
@@ -70,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         help="Add performance classification for detected performance commits.",
     )
     p.add_argument(
+        "--summarize-prs",
+        action="store_true",
+        default=True,
+        help="Add LLM-based PR summarization (slower).",
+    )
+    p.add_argument(
         "--filter-performance-only",
         action="store_true",
         default=True,
@@ -105,13 +113,52 @@ def _load_input(path: Path) -> pd.DataFrame:
     return pd.read_json(path, lines=True)
 
 
-def _build_single(rb: ReportBuilder, row: pd.Series) -> dict[str, Any]:
+def _build_single(rb: ReportBuilder, row: pd.Series) -> dict[str, Any]:  # noqa: C901
     """
     Run ReportBuilder on a single row; return a small dict with classification fields.
     Any exceptions are caught and produce a default negative classification.
     """
     try:
         pr_dict = row.to_dict()
+
+        # Sanitize numpy/pandas objects to plain Python types expected by ReportBuilder
+        def _sanitize(v: Any) -> Any:
+            # Convert NaN to None
+            try:
+                if pd.isna(v):  # type: ignore[arg-type]
+                    return None
+            except Exception:
+                logger.exception("Error checking isnan for value: %s", v)
+                pass
+            # Convert numpy arrays to lists (avoid ambiguous truthiness)
+            if isinstance(v, np.ndarray):
+                return v.tolist()
+            # Convert pandas-like Timestamp to ISO string
+            if hasattr(v, "isoformat") and callable(v.isoformat):
+                try:
+                    return v.isoformat()
+                except Exception:
+                    return str(v)
+            return v
+
+        pr_dict = {k: _sanitize(v) for k, v in pr_dict.items()}
+
+        # Ensure nested structures have the expected shapes
+        if not isinstance(pr_dict.get("pr_base"), dict):
+            pr_dict["pr_base"] = {}
+        lbl = pr_dict.get("pr_labels")
+        if lbl is None:
+            pr_dict["pr_labels"] = []
+        elif isinstance(lbl, dict):
+            pr_dict["pr_labels"] = [lbl]
+        elif isinstance(lbl, (tuple, set)):
+            pr_dict["pr_labels"] = list(lbl)
+
+        # Coerce common text fields to strings when present
+        for key in ("pr_url", "pr_body", "pr_title", "patch", "file_change_summary"):
+            if key in pr_dict and pr_dict[key] is not None and not isinstance(pr_dict[key], str):
+                pr_dict[key] = str(pr_dict[key])
+
         result = rb.build(pr_dict=pr_dict)
     except Exception as e:  # Defensive: keep the batch running
         logger.warning(f"Report build failed for row sha={row.get('sha')}: {e}")
@@ -126,7 +173,7 @@ def _build_single(rb: ReportBuilder, row: pd.Series) -> dict[str, Any]:
         return result.__dict__
 
 
-def main(args: argparse.Namespace) -> None:
+def main(args: argparse.Namespace) -> None:  # noqa: C901
     df = _load_input(args.commits)
     if args.sample_size and args.sample_size > 0:
         # df = df.sample(n=args.sample_size, random_state=42).reset_index(drop=True)
@@ -182,6 +229,7 @@ def main(args: argparse.Namespace) -> None:
             try:
                 ordered[idx] = fut.result()
             except Exception:
+                logger.warning(f"Report build failed for row index={idx}")
                 ordered[idx] = {
                     "is_performance_commit": False,
                     "classification": "",
@@ -196,15 +244,47 @@ def main(args: argparse.Namespace) -> None:
             records.append(_build_single(rb, row))
 
     enrich = pd.DataFrame(records)
-    enrich["all_data"] = enrich["all_data"].apply(
-        lambda d: {k: v.__dict__ if isinstance(v, ProblemExtraction) else v for k, v in d.items()}
-        if isinstance(d, dict)
-        else d
-    )
-    enrich["problem_sections"] = enrich["problem_sections"].apply(
-        lambda pe: pe.__dict__ if isinstance(pe, ProblemExtraction) else pe
-    )
+
+    # Normalize nested dataclasses and complex objects so we can serialize reliably.
+    def _normalize(obj):
+        if is_dataclass(obj):
+            return asdict(obj)
+        if isinstance(obj, dict):
+            return {k: _normalize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_normalize(v) for v in obj]
+        return obj
+
+    if "all_data" in enrich.columns:
+        enrich["all_data"] = enrich["all_data"].apply(_normalize)
+    if "problem_sections" in enrich.columns:
+        enrich["problem_sections"] = enrich["problem_sections"].apply(_normalize)
+    if "final_results" in enrich.columns:
+        enrich["final_results"] = enrich["final_results"].apply(_normalize)
+
+    # Convert complex columns to JSON strings to keep the parquet schema simple and stable.
+    def _to_json(val: Any) -> str:
+        try:
+            return json.dumps(val, ensure_ascii=False, default=lambda o: asdict(o) if is_dataclass(o) else str(o))
+        except Exception:
+            return json.dumps(str(val))
+
+    for _col in ("all_data", "problem_sections", "final_results"):
+        if _col in enrich.columns:
+            enrich[_col] = enrich[_col].apply(_to_json)
+    # drop duplicate columns.
+    enrich = enrich.drop(columns=[col for col in df.columns if col in enrich.columns])
     df_enriched = pd.concat([df.reset_index(drop=True), enrich], axis=1)
+
+    # Drop duplicate column names, keeping the original input columns by preference.
+    dupes = pd.Series(df_enriched.columns)
+    if dupes.duplicated().any():
+        # Log which duplicates we drop (we keep the first occurrence)
+        logger.warning(
+            "Duplicate columns detected; dropping later duplicates: %s",
+            sorted(dupes[dupes.duplicated()].unique().tolist()),
+        )
+        df_enriched = df_enriched.loc[:, ~df_enriched.columns.duplicated(keep="first")]
 
     # Save performance-related commits
     raw_out = args.outfile.with_suffix(".raw.parquet")
