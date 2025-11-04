@@ -94,7 +94,6 @@ def prepare_tasks(
         tasks = list({
             Task(owner, repo, sha, commit_date=date, env_payload=env_payload) for sha, date, env_payload in sorted(tup)
         })
-        # tasks = list(filter(lambda t: t.with_tag("pkg") not in context_registry, tasks))
         tasks = [
             t
             for t in tasks
@@ -135,7 +134,7 @@ def _list_ecr_tags_single_repo(*, region: str, repo_name: str) -> set[str]:
     """
     tags: set[str] = set()
     try:
-        session = boto3.session.Session(region_name=region)
+        session = boto3.session.Session(region_name=region) # pyright: ignore[reportAttributeAccessIssue]
         ecr = session.client("ecr")
         token: str | None = None
         while True:

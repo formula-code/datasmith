@@ -32,6 +32,9 @@ def _new_api_client(client: docker.DockerClient, timeout: int = 600) -> docker.A
     """
     Create a fresh low-level APIClient for each build to avoid connection
     contention across threads and to align API versions with the daemon.
+
+    Critically, this preserves max_pool_size from the parent client to enable
+    true parallelism across multiple threads.
     """
     try:
         base_url = client.api.base_url  # e.g., 'unix://var/run/docker.sock'
@@ -43,10 +46,16 @@ def _new_api_client(client: docker.DockerClient, timeout: int = 600) -> docker.A
     except Exception:
         api_version = "auto"
 
+    # Extract max_pool_size from the original client to enable concurrent connections
     try:
-        return docker.APIClient(base_url=base_url, version=api_version, timeout=timeout)
+        max_pool_size = client.api.max_pool_size
     except Exception:
-        return docker.APIClient(version="auto", timeout=timeout)
+        max_pool_size = 10  # fallback to requests default
+
+    try:
+        return docker.APIClient(base_url=base_url, version=api_version, timeout=timeout, max_pool_size=max_pool_size)
+    except Exception:
+        return docker.APIClient(version="auto", timeout=timeout, max_pool_size=max_pool_size)
 
 
 def build_base_image(client: docker.DockerClient, ctx: DockerContext) -> str:

@@ -92,3 +92,21 @@ from pkg AS run
 COPY docker_build_run.sh /docker_build_run.sh
 RUN chmod +x /docker_build_run.sh \
     && /docker_build_run.sh
+
+# ---------- FINAL STAGE ----------
+FROM run AS final
+ARG BENCHMARKS=""
+
+COPY docker_build_final.sh /docker_build_final.sh
+RUN chmod +x /docker_build_final.sh \
+    && if [ -n "${BENCHMARKS}" ]; then \
+         if [ -f "${BENCHMARKS}" ]; then \
+           ARG_PATH="${BENCHMARKS}"; \
+         else \
+           printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks.csv; \
+           ARG_PATH=/tmp/asv_benchmarks.csv; \
+         fi; \
+         /docker_build_final.sh "${ARG_PATH}"; \
+       else \
+         echo "BENCHMARKS not provided; skipping finalization step."; \
+       fi

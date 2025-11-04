@@ -553,9 +553,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
 
                     # Check if we succeeded; confirm with a real install preflight
                     if can_install:
-                        ok_real, real_log = uv_install_real(
-                            candidate_resolved, python_executable=python_exe.as_posix()
-                        )
+                        ok_real, real_log = uv_install_real(candidate_resolved, python_executable=python_exe.as_posix())
                         if ok_real:
                             found_flag = True
                             logger.debug(f"Success with Python {candidate_version} (preflight install ok)!")

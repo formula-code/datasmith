@@ -241,6 +241,7 @@ done
 
 
 export UV_NO_PROGRESS=1
+
 uv_install() {
   local python_bin=$1; shift
   # Try with build isolation first; on failure, retry without it.

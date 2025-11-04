@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
-
 from datasmith.core.models import Task
 from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client

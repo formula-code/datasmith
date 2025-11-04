@@ -150,9 +150,7 @@ def uv_dry_run_install(
     return ok, log
 
 
-def uv_install_real(
-    pinned: Iterable[str], *, python_executable: str | None = None
-) -> tuple[bool, str]:
+def uv_install_real(pinned: Iterable[str], *, python_executable: str | None = None) -> tuple[bool, str]:
     """
     Perform a real install of pinned requirements to surface sdist build failures.
 

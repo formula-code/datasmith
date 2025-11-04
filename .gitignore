@@ -205,6 +205,7 @@ output
 # Database files
 *.db
 scratch/artifacts/git/
+scratch/artifacts/.git/
 scratch/notebooks/git/
 scratch/artifacts/**/*.parquet
 scratch/**/*.json

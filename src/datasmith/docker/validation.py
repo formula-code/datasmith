@@ -114,7 +114,8 @@ class ValidationConfig:
     write_logs: bool = True
     # Preview budgets
     success_preview_chars: int = 240
-    failure_preview_chars: int = 4000
+    # Increased to provide sufficient context for agent synthesis (agent expects ~8k per log)
+    failure_preview_chars: int = 16000
 
 
 @dataclass
@@ -701,7 +702,6 @@ class DockerValidator:
 def _preview(s: str, n: int = 160) -> str:
     """Return the last n characters of a string, replacing newlines with \\n."""
     bottom_s = n
-    s = s or ""
     s = s or ""
     if n <= 0:
         return ""

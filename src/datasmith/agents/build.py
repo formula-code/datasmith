@@ -745,7 +745,7 @@ def agent_build_and_validate(
         Dictionary with build results and attempt history
     """
     assert task.sha is not None, "task.sha must be set"  # noqa: S101
-    task_analysis, task = resolve_task(task, bypass_cache=True)
+    task_analysis, task = resolve_task(task, bypass_cache=False)
     if not task_analysis or not task_analysis.get("can_install", False):
         logger.warning("agent_build_and_validate: task cannot be installed")
         return {
