@@ -182,8 +182,8 @@ def filter_tasks_not_on_ecr(
     filtered: list[Task] = []
     skipped = 0
     for t in tasks:
-        local_ref = t.with_tag("run").get_image_name()  # e.g., owner-repo-sha:run
-        enc_tag = _encode_ecr_tag_from_local(local_ref)  # e.g., owner-repo-sha--run
+        local_ref = t.with_tag("final").get_image_name()  # e.g., owner-repo-sha:final
+        enc_tag = _encode_ecr_tag_from_local(local_ref)  # e.g., owner-repo-sha--final
         if enc_tag in existing_tags:
             skipped += 1
             logger.info("Skipping %s (already on ECR as %s:%s)", local_ref, single_repo, enc_tag)
@@ -228,9 +228,9 @@ def main(args: argparse.Namespace) -> None:
     # Prepare tasks
     tasks = prepare_tasks(all_states, context_registry)
     # Filter out tasks already present on ECR before building
-    # aws_region = os.environ.get("AWS_REGION", "us-east-1")
-    # tasks = filter_tasks_not_on_ecr(tasks, region=aws_region)
-    # logger.info("main: Starting work on %d tasks[%d workers]", len(tasks), args.max_workers)
+    aws_region = os.environ.get("AWS_REGION", "us-east-1")
+    tasks = filter_tasks_not_on_ecr(tasks, region=aws_region)
+    logger.info("main: Starting work on %d tasks[%d workers]", len(tasks), args.max_workers)
 
     def build_and_publish_task(task: Task, client: DockerClient) -> tuple[dict, dict]:
         task_analysis, task = resolve_task(task)

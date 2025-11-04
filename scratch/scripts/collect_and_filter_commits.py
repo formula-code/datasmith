@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from git import Repo
+from tqdm.auto import tqdm
+
 from datasmith.execution.collect_commits import collect_merge_shas
 from datasmith.execution.utils import _get_commit_info_offline, clone_repo, find_file_in_tree, has_core_file
 from datasmith.logging_config import configure_logging
-from git import Repo
-from tqdm.auto import tqdm
 
 # Configure logging for the script
 logger = configure_logging()

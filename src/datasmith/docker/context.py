@@ -790,6 +790,8 @@ class DockerContext:
                     pass
                 except DockerException:
                     logger.exception("Failed to delete image '%s' after build.", image_name)
+                except Exception:
+                    logger.exception("Unexpected error deleting image '%s' after build.", image_name)
 
     def build_and_publish_to_ecr(
         self,

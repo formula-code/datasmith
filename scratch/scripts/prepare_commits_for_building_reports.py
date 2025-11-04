@@ -18,12 +18,13 @@ from typing import Any
 
 import pandas as pd
 import tiktoken
+from tqdm.auto import tqdm
+
 from datasmith import setup_environment
 from datasmith.execution.filter_commits import crude_perf_filter
 from datasmith.execution.resolution import analyze_commit
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import get_patch_from_diff_url, make_task
-from tqdm.auto import tqdm
 
 logger = configure_logging()
 
@@ -222,7 +223,6 @@ def main():
         return
 
     # Analyze whether dependencies can be installed, resolution strategy, etc.
-    # (replaces Dask delayed/analyze_commit with ThreadPool + tqdm)
     pairs: list[tuple[str, str]] = []
     for _, row in filtered_df.iterrows():
         pairs.append((row["pr_base"]["sha"], row["repo_name"]))
