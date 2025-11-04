@@ -82,6 +82,7 @@ class DockerContext:
     default_docker_build_base_loc = Path(__file__).parent / "docker_build_base.sh"
     default_docker_build_run_loc = Path(__file__).parent / "docker_build_run.sh"
     default_docker_build_env_loc = Path(__file__).parent / "docker_build_env.sh"
+    default_docker_build_final_loc = Path(__file__).parent / "docker_build_final.sh"
     default_docker_build_pkg_loc = Path(__file__).parent / "docker_build_pkg.sh"
     default_profile_loc = Path(__file__).parent / "profile.sh"
     default_run_tests_loc = Path(__file__).parent / "run_tests.sh"
@@ -93,6 +94,7 @@ class DockerContext:
     building_data: str
     profile_data: str
     run_tests_data: str
+    final_building_data: str
     # Unix timestamp (float) when this context was registered. Defaults to 0.0
     created_unix: float
 
@@ -109,6 +111,7 @@ class DockerContext:
         run_building_data: str | None = None,
         profile_data: str | None = None,
         run_tests_data: str | None = None,
+        final_building_data: str | None = None,
         *,
         created_unix: float | None = None,
     ) -> None:
@@ -128,6 +131,8 @@ class DockerContext:
             profile_data = self.default_profile_loc.read_text()
         if run_tests_data is None:
             run_tests_data = self.default_run_tests_loc.read_text()
+        if final_building_data is None:
+            final_building_data = self.default_docker_build_final_loc.read_text()
 
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
@@ -142,6 +147,7 @@ class DockerContext:
         self.created_unix = 0.0 if created_unix is None else float(created_unix)
 
         self._context_tar_bytes = {}
+        self.final_building_data = final_building_data
 
     @staticmethod
     def add_bytes(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644) -> None:
@@ -168,6 +174,7 @@ class DockerContext:
             DockerContext.add_bytes(tar, "docker_build_base.sh", self.base_building_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "profile.sh", self.profile_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "run_tests.sh", self.run_tests_data.encode("utf-8"), mode=0o755)
+            DockerContext.add_bytes(tar, "docker_build_final.sh", self.final_building_data.encode("utf-8"), mode=0o755)
             if not probe:
                 DockerContext.add_bytes(tar, "docker_build_pkg.sh", self.building_data.encode("utf-8"), mode=0o755)
         buf.seek(0)
@@ -228,9 +235,25 @@ class DockerContext:
             if len(build_args) == 0 and not probe:
                 raise RuntimeError(f"Docker image '{image_name}' not found and no REPO_URL provided for build.")
 
+            # Ensure all build-arg values are strings (Docker expects strings)
+            safe_build_args: dict[str, str] = {}
+            for k, v in (build_args or {}).items():
+                if isinstance(v, str):
+                    safe_build_args[k] = v
+                elif isinstance(v, (bytes, bytearray)):
+                    try:
+                        safe_build_args[k] = v.decode("utf-8", errors="replace")
+                    except Exception:
+                        safe_build_args[k] = str(v)
+                else:
+                    try:
+                        safe_build_args[k] = json.dumps(v)
+                    except Exception:
+                        safe_build_args[k] = str(v)
+
             # Pretty log
-            if len(build_args):
-                build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in build_args.items())
+            if len(safe_build_args):
+                build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in safe_build_args.items())
                 logger.info("$ docker build -t %s . --build-arg %s", image_name, build_args_str)
             else:
                 logger.info("$ docker build -t %s .", image_name)
@@ -241,7 +264,7 @@ class DockerContext:
                     fileobj=io.BytesIO(self._get_context_bytes(probe=probe)),
                     custom_context=True,
                     tag=image_name,
-                    buildargs={**build_args, "BUILDKIT_INLINE_CACHE": "1"},
+                    buildargs={**safe_build_args, "BUILDKIT_INLINE_CACHE": "1"},
                     target=target,
                     rm=True,
                     labels=run_labels,
@@ -596,9 +619,26 @@ class DockerContext:
                 build_args = {**build_args, "BASE_IMAGE": base_image}
                 cache_from = [base_image]
 
+            # Ensure all build-arg values are strings (Docker expects strings)
+            safe_build_args: dict[str, str] = {}
+            for k, v in (build_args or {}).items():
+                if isinstance(v, str):
+                    safe_build_args[k] = v
+                elif isinstance(v, (bytes, bytearray)):
+                    try:
+                        safe_build_args[k] = v.decode("utf-8", errors="replace")
+                    except Exception:
+                        safe_build_args[k] = str(v)
+                else:
+                    # JSON-encode non-string args (e.g., lists/dicts)
+                    try:
+                        safe_build_args[k] = json.dumps(v)
+                    except Exception:
+                        safe_build_args[k] = str(v)
+
             # Pretty log line for transparency
-            if build_args:
-                build_args_str = " --build-arg ".join(f"{k}='{v}'" for k, v in build_args.items())
+            if safe_build_args:
+                build_args_str = " --build-arg ".join(f"{k}='{v}'" for k, v in safe_build_args.items())
                 logger.info("$ docker build -t %s . --build-arg %s", image_name, build_args_str)
             else:
                 logger.info("$ docker build -t %s .", image_name)
@@ -616,80 +656,105 @@ class DockerContext:
                 cache_from_list.append(s3_cache_mount)
                 logger.info("Using S3 cache: %s", s3_cache_mount)
 
-            try:
-                stream = api.build(
-                    fileobj=io.BytesIO(tar_bytes),
-                    custom_context=True,
-                    tag=image_name,
-                    buildargs={**build_args, "BUILDKIT_INLINE_CACHE": "1"},
-                    decode=True,
-                    rm=True,
-                    pull=pull,
-                    target=target,
-                    labels=run_labels,
-                    network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
-                    cache_from=cache_from_list,
-                )
-            except DockerException:
-                logger.exception("Failed to initiate build for '%s'", image_name)
-                success = False
-                return BuildResult(
-                    ok=False,
-                    image_name=image_name,
-                    image_id=None,
-                    rc=1,
-                    duration_s=time.time() - t0,
-                    stderr_tail="",
-                    stdout_tail="",
-                )
-
+            # Try build with cache first, then retry without cache if we hit a broken cache error
             error_seen = None
-            try:
-                for chunk in stream:
-                    # Time check first
-                    if time.time() - t0 > timeout_s:
-                        error_seen = "[TIMEOUT]"
-                        break
-
-                    # Typical keys: 'stream', 'status', 'error', 'errorDetail'
-                    if chunk.get("stream"):
-                        s = str(chunk["stream"])
-                        if s:
-                            stdout_buf.append(s)
-                    if "status" in chunk and chunk.get("progressDetail"):
-                        s = str(chunk.get("status", ""))
-                        if s:
-                            stdout_buf.append(s + "\n")
-                    if "error" in chunk or "errorDetail" in chunk:
-                        error_seen = (chunk.get("error") or str(chunk.get("errorDetail", ""))).strip()
-                        if error_seen:
-                            stderr_buf.append(error_seen + "\n")
-                        break
-            except APIError:
-                logger.exception("Build stream APIError for '%s'", image_name)
-                error_seen = "APIError during build"
-
-            duration = time.time() - t0
-
-            # Success path: ensure image exists
-            if not error_seen:
-                try:
-                    img = client.images.get(image_name)
-                    logger.info("Build completed successfully for '%s' in %.1f sec.", image_name, duration)
-                    success = True
-                    return BuildResult(
-                        ok=True,
-                        image_name=image_name,
-                        image_id=img.id,
-                        rc=0,
-                        duration_s=duration,
-                        stderr_tail="".join(stderr_buf)[-tail_chars:],
-                        stdout_tail="".join(stdout_buf)[-tail_chars:],
+            duration = 0.0
+            for attempt in range(2):
+                nocache_param = attempt == 1  # Second attempt uses nocache=True
+                if nocache_param:
+                    logger.warning(
+                        "Retrying build for '%s' with nocache=True due to broken cache error", image_name
                     )
-                except ImageNotFound:
-                    error_seen = "Build completed but image not found"
 
-            # Failure
+                try:
+                    stream = api.build(
+                        fileobj=io.BytesIO(tar_bytes),
+                        custom_context=True,
+                        tag=image_name,
+                        buildargs={**safe_build_args, "BUILDKIT_INLINE_CACHE": "1"},
+                        decode=True,
+                        rm=True,
+                        pull=pull,
+                        target=target,
+                        labels=run_labels,
+                        network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
+                        cache_from=cache_from_list if not nocache_param else None,
+                        nocache=nocache_param,
+                    )
+                except DockerException:
+                    logger.exception("Failed to initiate build for '%s'", image_name)
+                    success = False
+                    return BuildResult(
+                        ok=False,
+                        image_name=image_name,
+                        image_id=None,
+                        rc=1,
+                        duration_s=time.time() - t0,
+                        stderr_tail="",
+                        stdout_tail="",
+                    )
+
+                try:
+                    for chunk in stream:
+                        # Time check first
+                        if time.time() - t0 > timeout_s:
+                            error_seen = "[TIMEOUT]"
+                            break
+
+                        # Typical keys: 'stream', 'status', 'error', 'errorDetail'
+                        if chunk.get("stream"):
+                            s = str(chunk["stream"])
+                            if s:
+                                stdout_buf.append(s)
+                        if "status" in chunk and chunk.get("progressDetail"):
+                            s = str(chunk.get("status", ""))
+                            if s:
+                                stdout_buf.append(s + "\n")
+                        if "error" in chunk or "errorDetail" in chunk:
+                            error_seen = (chunk.get("error") or str(chunk.get("errorDetail", ""))).strip()
+                            if error_seen:
+                                stderr_buf.append(error_seen + "\n")
+                            break
+                except APIError:
+                    logger.exception("Build stream APIError for '%s'", image_name)
+                    error_seen = "APIError during build"
+
+                duration = time.time() - t0
+
+                # Success path: ensure image exists
+                if not error_seen:
+                    try:
+                        img = client.images.get(image_name)
+                        logger.info("Build completed successfully for '%s' in %.1f sec.", image_name, duration)
+                        success = True
+                        return BuildResult(
+                            ok=True,
+                            image_name=image_name,
+                            image_id=img.id,
+                            rc=0,
+                            duration_s=duration,
+                            stderr_tail="".join(stderr_buf)[-tail_chars:],
+                            stdout_tail="".join(stdout_buf)[-tail_chars:],
+                        )
+                    except ImageNotFound:
+                        error_seen = "Build completed but image not found"
+
+                # Check if this is a broken cache error that we should retry
+                if attempt == 0 and error_seen and "unable to find image" in error_seen.lower():
+                    logger.warning(
+                        "Detected broken cache error for '%s': %s. Will retry with nocache=True.",
+                        image_name,
+                        error_seen,
+                    )
+                    # Clear buffers for retry
+                    stdout_buf.clear()
+                    stderr_buf.clear()
+                    continue  # Retry with nocache=True
+
+                # Either successful (returned above) or failed with non-retryable error
+                break
+
+            # Failure (exhausted retries or non-retryable error)
             rc = 124 if error_seen == "[TIMEOUT]" else 1
             logger.error(
                 "Build failed for '%s' in %.1f sec: [%s][%s]",
@@ -756,6 +821,8 @@ class DockerContext:
             build_args["ENV_PAYLOAD"] = task.env_payload
         if getattr(task, "python_version", ""):
             build_args["PY_VERSION"] = task.python_version
+        if getattr(task, "benchmarks", ""):
+            build_args["BENCHMARKS"] = task.benchmarks
 
         if run_labels is None:
             run_labels = {
@@ -820,6 +887,7 @@ class DockerContext:
             "run_building_data": self.run_building_data,
             "profile_data": self.profile_data,
             "run_tests_data": self.run_tests_data,
+            "final_building_data": self.final_building_data,
             "created_unix": self.created_unix,
         }
 
@@ -838,6 +906,7 @@ class DockerContext:
             run_building_data=data.get("run_building_data", None),
             profile_data=data.get("profile_data", None),
             run_tests_data=data.get("run_tests_data", None),
+            final_building_data=data.get("final_building_data", None),
             created_unix=float(data.get("created_unix", 0.0) or 0.0),
         )
 
@@ -851,6 +920,7 @@ class DockerContext:
             self.run_building_data,
             self.profile_data,
             self.run_tests_data,
+            self.final_building_data,
         ))
 
 
@@ -862,7 +932,7 @@ class ContextRegistry:
     all contexts are stored under a canonical key with tag='pkg'.
     """
 
-    VALID_TAGS: ClassVar[set[str]] = {"env", "pkg", "run", "base"}
+    VALID_TAGS: ClassVar[set[str]] = {"env", "pkg", "run", "base", "final"}
 
     def __init__(self, registry: dict[Task, DockerContext] | None = None, default_context: DockerContext | None = None):
         if registry is None:

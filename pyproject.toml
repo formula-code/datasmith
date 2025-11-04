@@ -20,12 +20,10 @@ dependencies = [
     "asv",
     "boto3>=1.7.84",
     "botocore>=1.10.84",
-    "copychat>=0.6.3",
     "docker",
     "dspy>=2.6.27",
     "gitpython",
     "jinja2>=3.1.6",
-    "json5",
     "numpy",
     "packaging>=25.0",
     "pandas",
@@ -35,7 +33,6 @@ dependencies = [
     "ruptures",
     "simple-useragent",
     "tiktoken",
-    "tomli>=2.2.1",
     "tqdm",
 ]
 
@@ -85,7 +82,6 @@ show_error_codes = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-anyio_backends = ["asyncio"]
 
 [tool.ruff]
 target-version = "py39"
@@ -146,10 +142,6 @@ skip_empty = true
 [tool.coverage.run]
 branch = true
 source = ["src"]
-
-[tool.deptry.per_rule_ignores]
-# Allow keeping 'copychat' pinned even if unused by code (optional tooling)
-DEP002 = ["copychat"]
 
 [[tool.mypy.overrides]]
 module = "dspy.*"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -27,6 +28,12 @@ def parse_args() -> argparse.Namespace:
         "--max-repos", type=int, default=150, help="Maximum number of repositories (sorted by stars) to consider."
     )
     p.add_argument("--procs", type=int, default=1, help="Number of processes for fetching commit metadata (CPU-bound).")
+    p.add_argument(
+        "--repo2mergepr",
+        type=Path,
+        default=None,
+        help="Path to JSON file mapping repo names to their merge PRs (to avoid redundant GitHub calls).",
+    )
 
     # Optional knobs. keep defaults sensible
     p.add_argument("--threads", type=int, default=16, help="Worker threads for finding asv.conf.json (I/O-bound).")
@@ -50,6 +57,9 @@ def _commit_info_worker(arg_tuple: tuple[Repo, str]) -> dict[str, Any] | None:
 
 def main() -> None:
     args = parse_args()
+    repo2mergepr = None
+    if args.repo2mergepr and args.repo2mergepr.exists():
+        repo2mergepr = json.loads(args.repo2mergepr.read_text(encoding="utf-8"))
 
     benchmarks = pd.read_csv(args.filtered_benchmarks_pth)
 
@@ -75,8 +85,7 @@ def main() -> None:
             for f in tqdm(as_completed(futures), total=len(futures), desc="Cloning repos"):
                 repo_name, repo = f.result()
                 all_repos[repo_name] = repo
-                # kind_commit_shas = collect_commits(repo)
-                merge_prs = collect_merge_shas(repo_name)
+                merge_prs = repo2mergepr.get(repo_name, []) if repo2mergepr else collect_merge_shas(repo_name)
                 commit2pr.update({pr.get("merge_commit_sha"): pr for pr in merge_prs})
                 merge_shas = [pr.get("merge_commit_sha") for pr in merge_prs if pr.get("merge_commit_sha")]
 
@@ -110,13 +119,13 @@ def main() -> None:
 
     commits_meta = pd.json_normalize(commit_info)  # pyright: ignore[reportArgumentType]
     commits_meta = commits_meta[commits_meta["has_asv"]]  # Take out all commits that don't have asv installed.
-    commits_meta["kind"] = commits_meta["merge_commit_sha"].map(commit2kind)
+    commits_meta["kind"] = commits_meta["sha"].map(commit2kind)
 
     commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
-    commits_merged["repo_name"] = commits_merged["merge_commit_sha"].map(commit2repo)
+    commits_merged["repo_name"] = commits_merged["sha"].map(commit2repo)
     # commits_merged["pr"] = commits_merged["sha"].map(commit2pr)
     # commit2pr returns a dict that is json-serializable, so we can expand it into multiple columns
-    pr_expanded = commits_merged["merge_commit_sha"].map(commit2pr).apply(pd.Series)
+    pr_expanded = commits_merged["sha"].map(commit2pr).apply(pd.Series)
     commits_merged = pd.concat([commits_merged, pr_expanded.add_prefix("pr_")], axis=1)
 
     out_path = Path(args.output_pth)

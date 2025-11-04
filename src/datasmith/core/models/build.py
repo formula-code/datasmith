@@ -17,6 +17,7 @@ class BuildResult:
     stderr_tail: str
     stdout_tail: str
     failure_stage: str | None = None  # None (success), "build", "profile", "tests"
+    benchmarks: str = ""  # List of benchmark results as strings
 
 
 __all__ = ["BuildResult"]

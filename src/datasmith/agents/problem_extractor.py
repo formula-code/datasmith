@@ -103,6 +103,7 @@ class ProblemExtractorSignature(dspy.Signature):
     Be STRICTLY EXTRACTIVE: select contiguous spans that already exist in the source.
     Do NOT rewrite or add words. You may trim leading/trailing whitespace only.
     Code blocks and error logs MUST be character-exact (including fences/whitespace).
+    ASV benchmarking efforts should ALWAYS be included in the Problem Description if present.
 
     INPUT
     -----

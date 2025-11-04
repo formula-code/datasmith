@@ -23,9 +23,13 @@ from datasmith.notebooks.utils import update_cr
 configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
+# configure_agent_backends(PORTKEY_MODEL_NAME="meta-llama/Llama-3.3-70B-Instruct-Turbo", local=True)
+
 
 # logger = configure_logging(level=10)
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
+
+# REPOS_TO_SKIP = {"astropy/astropy"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,6 +85,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Whether to push built images to AWS ECR.",
     )
+    parser.add_argument(
+        "--ignore-exhausted",
+        action="store_true",
+        help="Ignore tasks where all candidates have been exhausted in the context registry.",
+    )
+    parser.add_argument(
+        "--only-exhausted",
+        action="store_true",
+        help="Only tasks where all candidates have been exhausted in the context registry.",
+    )
+    parser.add_argument(
+        "--only-final",
+        action="store_true",
+        help="Only run the final validation step (no intermediate builds).",
+    )
     return parser.parse_args()
 
 
@@ -105,7 +124,9 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]
-            # sha = row["sha"]
+            # if repo_name not in REPOS_TO_SKIP:
+            #     logger.debug("Skipping %s as it is in the skip list.", repo_name)
+            #     continue
             sha = row["pr_base"]["sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
@@ -190,6 +211,7 @@ def main(args: argparse.Namespace) -> None:
     }
     logger.debug("main: machine_defaults keys=%d", len(machine_defaults))
     logger.info("main: Starting work on %d tasks[%d workers]", len(tasks), args.max_workers)
+    random.shuffle(tasks)
 
     results: list[dict] = []
     if args.max_workers < 1:
@@ -258,7 +280,7 @@ def main(args: argparse.Namespace) -> None:
         print("\n=== FAILURES ===")
         for r in failed:
             print(f"{r['image_name']}: rc={r['rc']} stage={r['stage']}")
-        print(f"\nDetails: {args.output_dir / 'errors.txt'}")
+        print(f"\nDetails: {args.output_dir / 'all_files_by_image.json'}")
     else:
         print("All containers validated successfully.")
 

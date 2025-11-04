@@ -29,6 +29,22 @@ if [ -z "${1:-}" ]; then
   exit 1
 fi
 
+# Best-effort system tuning for benchmarks
+best_effort_pyperf_tune() {
+  # Try several Python entrypoints; ignore failures
+  for py in python3 python; do
+    if command -v "$py" >/dev/null 2>&1; then
+      # Run without set -e to avoid aborting on tuning failures
+      set +e
+      "$py" -m pyperf system tune >/tmp/pyperf_tune.log 2>&1 || true
+      set -e
+      return 0
+    fi
+  done
+}
+
+best_effort_pyperf_tune || true
+
 LOG_DIR=$(realpath "$1")
 ADDITIONAL_ASV_ARGS="${2:-}"
 RESULTS_DIR="${LOG_DIR}/results"
@@ -105,7 +121,7 @@ micromamba run -n "$ENV_NAME" asv machine --yes --config "$REAL_TEST_CONF" \
   --num_cpu "1" \
   --ram "4GB" | tee "${LOG_DIR}.machine.log"
 
-ASV_ARGS=(--config "$REAL_TEST_CONF" -a "repeat=4" --python=same --machine="$MACHINE" --append-samples --show-stderr --set-commit-hash="$COMMIT_SHA")
+ASV_ARGS=(--config "$REAL_TEST_CONF" --python=same --machine="$MACHINE" --append-samples --show-stderr --set-commit-hash="$COMMIT_SHA")
 # Add additional ASV args if provided (string, might be blank)
 if [ -n "$ADDITIONAL_ASV_ARGS" ]; then
   # shellcheck disable=SC2206

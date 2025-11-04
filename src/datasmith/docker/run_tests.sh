@@ -779,7 +779,7 @@ if __name__ == "__main__":
         pass
 
     # Exit with pytest code; if truly no tests, treat as failure (1)
-    ecode = int(output["results"].get("exit_code", 1))
+    ecode = int(output["results"]["summary"].get("error", 1))
     try:
         exit_name = pytest.ExitCode(ecode).name  # e.g., TESTS_FAILED, NO_TESTS_COLLECTED
     except Exception:

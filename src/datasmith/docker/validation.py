@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import glob
+import json
 import logging
+import re
 import shutil
 import tarfile
 import tempfile
@@ -108,6 +110,11 @@ class ValidationConfig:
     profile_timeout: int = 600
     test_timeout: int = 900
     quick_timeout: int = 30
+    # Optional: persist raw logs to output_dir/logs
+    write_logs: bool = True
+    # Preview budgets
+    success_preview_chars: int = 240
+    failure_preview_chars: int = 4000
 
 
 @dataclass
@@ -172,6 +179,75 @@ class DockerValidator:
         self.config = config
         self.error_lock = threading.Lock()
 
+    # --------------------------- helpers ---------------------------
+    def _save_logs(self, stem: str, stdout: str, stderr: str) -> None:
+        """Persist raw logs under output_dir/logs if enabled."""
+        if not self.config.write_logs:
+            return
+        try:
+            logs_dir = (self.config.output_dir / "logs").resolve()
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (logs_dir / f"{stem}.stdout.log").write_text(stdout or "")
+            (logs_dir / f"{stem}.stderr.log").write_text(stderr or "")
+        except Exception:
+            # Best-effort only; never block validation on logging failures
+            pass
+
+    @staticmethod
+    def _extract_between(text: str, start: str, end: str) -> str | None:
+        s = text.find(start)
+        if s == -1:
+            return None
+        e = text.find(end, s + len(start))
+        if e == -1:
+            return None
+        return text[s + len(start) : e]
+
+    def _summarize_pytest(self, stdout: str, stderr: str) -> str:
+        """Condense pytest output to the most informative bits.
+
+        Strategy:
+        - Include structured JSON summary if present between FORMULACODE_TESTS_{START,END}
+        - Include PYTEST_EXIT line if present
+        - Include up to 25 lines starting with 'ERROR ' (file-level error headers)
+        - Include the final 40 lines (pytest summary banner)
+        """
+        parts: list[str] = []
+
+        # 1) Structured summary
+        blob = self._extract_between(stdout, "FORMULACODE_TESTS_START\n", "\nFORMULACODE_TESTS_END")
+        if blob:
+            try:
+                data = json.loads(blob)
+                parts.append("Summary: " + json.dumps(data, sort_keys=True))
+            except Exception:
+                parts.append("Summary: " + blob.strip())
+
+        # 2) PYTEST_EXIT marker
+        m = re.search(r"^PYTEST_EXIT: .*", stdout, re.MULTILINE)
+        if m:
+            parts.append(m.group(0))
+
+        # 3) File-level ERROR lines
+        error_lines = []
+        for ln in stdout.splitlines():
+            if ln.startswith("ERROR "):
+                error_lines.append(ln)
+                if len(error_lines) >= 25:
+                    break
+        if error_lines:
+            parts.append("First errors:")
+            parts.extend(error_lines)
+
+        # 4) Tail of stdout (pytest's own summary)
+        tail_lines = stdout.splitlines()[-40:]
+        if tail_lines:
+            parts.append("Last lines:")
+            parts.extend(tail_lines)
+
+        condensed = "\n".join(parts)
+        return _preview(condensed, self.config.failure_preview_chars)
+
     def validate_profile(
         self, image_name: str, run_labels: dict[str, str] | None = None, timeout: int | None = None
     ) -> ProfileValidationResult:
@@ -213,8 +289,8 @@ class DockerValidator:
 
             rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
             # Collect stdout and stderr separately
-            stdout = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
-            stderr = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
+            stdout_full = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
+            stderr_full = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
             duration = time.time() - start_time
 
             # Extract benchmark results from tarballs
@@ -222,30 +298,33 @@ class DockerValidator:
             if benchmark_content:
                 logger.debug("Successfully extracted asv_benchmarks.txt (%d chars)", len(benchmark_content))
 
+            # Persist raw logs
+            self._save_logs(f"{image_name.replace(':', '_')}-profile", stdout_full, stderr_full)
+
             if rc == 124:
                 logger.debug("profile:timeout rc=124 treated as success")
                 return ProfileValidationResult(
                     ok=True,
-                    stdout=_preview(stdout, 4000),
-                    stderr=_preview(stderr, 4000),
+                    stdout=f"(timeout after {quick_s}s; treated as success)",
+                    stderr=_preview(stderr_full, self.config.success_preview_chars),
                     duration_s=duration,
                     benchmarks=benchmark_content or "",
                 )
 
             if rc != 0:
-                logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(stderr, 240))
+                logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(stderr_full, 240))
                 return ProfileValidationResult(
                     ok=False,
-                    stdout=_preview(stdout, 4000),
-                    stderr=_preview(stderr, 4000),
+                    stdout=_preview(stdout_full, self.config.failure_preview_chars),
+                    stderr=_preview(stderr_full, self.config.failure_preview_chars),
                     duration_s=duration,
                     benchmarks=benchmark_content or "",
                 )
 
             return ProfileValidationResult(
                 ok=True,
-                stdout=_preview(stdout, 4000),
-                stderr=_preview(stderr, 4000),
+                stdout=f"ok: True rc: 0\nduration_s: {duration:.2f}",
+                stderr=_preview(stderr_full, self.config.success_preview_chars),
                 duration_s=duration,
                 benchmarks=benchmark_content or "",
             )
@@ -292,6 +371,7 @@ class DockerValidator:
         container = None
         quick_s = self.config.quick_timeout
         start_time = time.time()
+        tmp_logs_path = Path(tempfile.mkdtemp())
 
         try:
             cmdline = f"timeout -k 5 {quick_s}s /run_tests.sh"
@@ -303,38 +383,84 @@ class DockerValidator:
                 entrypoint=["/bin/bash", "-lc"],
                 detach=True,
                 labels=run_labels,
+                volumes={str(tmp_logs_path): {"bind": "/logs", "mode": "rw"}},
             )
 
             rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
             # Collect stdout and stderr separately
-            stdout = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
-            stderr = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
+            stdout_full = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
+            stderr_full = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
             duration = time.time() - start_time
+
+            # Persist raw logs
+            self._save_logs(f"{image_name.replace(':', '_')}-tests", stdout_full, stderr_full)
+
+            # Try to read structured results generated by formulacode_testrunner.py
+            structured_summary = None
+            structured_errors_text = None
+            try:
+                res_path = tmp_logs_path / "test_results.json"
+                if res_path.exists():
+                    data = json.loads(res_path.read_text(encoding="utf-8"))
+                    res = data.get("results", {})
+                    parts: list[str] = []
+                    if res.get("summary"):
+                        parts.append("Summary: " + json.dumps(res["summary"], sort_keys=True))
+                    errs = res.get("errors", []) or []
+                    if errs:
+                        parts.append("Collection errors (first 3):")
+                        total_lines_budget = 300
+                        used = 0
+                        for e in errs[:3]:
+                            nodeid = e.get("nodeid") or "<unknown>"
+                            lr = e.get("longrepr") or ""
+                            parts.append(f"ERROR {nodeid}")
+                            for ln in lr.splitlines()[:100]:
+                                if used >= total_lines_budget:
+                                    break
+                                parts.append(ln)
+                                used += 1
+                            if used >= total_lines_budget:
+                                break
+                    # Include up to two failing test longreprs
+                    tests = res.get("tests", []) or []
+                    failing = [t for t in tests if (t.get("outcome") in ("failed", "error"))]
+                    if failing:
+                        parts.append("Test failures (first 2):")
+                        for t in failing[:2]:
+                            nid = t.get("nodeid") or "<unknown>"
+                            parts.append(f"FAIL {nid}")
+                            lr = t.get("longrepr") or ""
+                            parts.extend(lr.splitlines()[:80])
+                    structured_summary = "\n".join(parts)
+                    structured_errors_text = "\n".join([f"ERROR {e.get('nodeid', '<unknown>')}" for e in errs[:10]])
+            except Exception:
+                pass
 
             if rc == 124:
                 logger.debug("tests:timeout rc=124 treated as success")
                 return TestValidationResult(
                     ok=True,
-                    stdout=_preview(stdout, 4000),
-                    stderr=_preview(stderr, 4000),
+                    stdout=f"(timeout after {quick_s}s; treated as success)",
+                    stderr=_preview(stderr_full, self.config.success_preview_chars),
                     duration_s=duration,
                     suite_name=suite,
                 )
 
             if rc != 0:
-                logger.debug("tests:failed rc=%s stderr_tail: %s", rc, _preview(stderr, 240))
+                logger.debug("tests:failed rc=%s stderr_tail: %s", rc, _preview(stderr_full, 240))
                 return TestValidationResult(
                     ok=False,
-                    stdout=_preview(stdout, 4000),
-                    stderr=_preview(stderr, 4000),
+                    stdout=structured_summary or self._summarize_pytest(stdout_full, stderr_full),
+                    stderr=(structured_errors_text or _preview(stderr_full, self.config.failure_preview_chars)),
                     duration_s=duration,
                     suite_name=suite,
                 )
 
             return TestValidationResult(
                 ok=True,
-                stdout=_preview(stdout, 4000),
-                stderr=_preview(stderr, 4000),
+                stdout=(structured_summary or f"ok: True rc: 0\nduration_s: {duration:.2f}"),
+                stderr=_preview(stderr_full, self.config.success_preview_chars),
                 duration_s=duration,
                 suite_name=suite,
             )
@@ -343,7 +469,7 @@ class DockerValidator:
             duration = time.time() - start_time
             return TestValidationResult(
                 ok=False,
-                stdout="",
+                stdout=f"exception: {e}",
                 stderr=f"exception: {e}",
                 duration_s=duration,
                 suite_name=suite,
@@ -352,6 +478,7 @@ class DockerValidator:
             with contextlib.suppress(Exception):
                 if container is not None:
                     container.remove(force=True)
+            _safe_rmtree(tmp_logs_path, self.client)
 
     def validate_acceptance(
         self,
@@ -431,7 +558,7 @@ class DockerValidator:
         Returns:
             BuildResult with build and validation outcome
         """
-        logger.info("build_and_validate: building image '%s'", task.get_image_name())
+        logger.info("build_and_validate[%s]: building image", task.get_image_name())
         logger.debug("build:start image=%s", task.get_image_name())
         _t_build_start = time.time()
 
@@ -459,7 +586,9 @@ class DockerValidator:
             return build_res
 
         # Build succeeded, now validate with profiling and testing
-        logger.info("build_and_validate: build ok; verifying profile+tests before recording attempt")
+        logger.info(
+            "build_and_validate[%s]: build ok; verifying profile+tests before recording attempt", task.get_image_name()
+        )
 
         # Validate profile
         logger.debug("profile:start")
@@ -469,7 +598,12 @@ class DockerValidator:
             run_labels=run_labels,
             timeout=min(self.config.build_timeout, self.config.profile_timeout),
         )
-        logger.debug("profile:done ok=%s duration=%.1fs", profile_result.ok, time.time() - _t_profile_start)
+        logger.info(
+            "build_and_validate[%s]: profile:done ok=%s duration=%.1fs",
+            task.get_image_name(),
+            profile_result.ok,
+            time.time() - _t_profile_start,
+        )
 
         # Validate tests (only if profile succeeded)
         if not profile_result.ok:
@@ -487,34 +621,46 @@ class DockerValidator:
 
         # Check if validation passed - only profile failures cause build failure
         if not profile_result.ok:
-            logger.warning("build_and_validate: profile validation failed")
+            logger.warning("build_and_validate[%s]: profile validation failed", task.get_image_name())
             # Return only profile logs (the failing step)
+            prof_err = (profile_result.stderr or "").rstrip("\n") + "\n[profile_ok=0]"
             return BuildResult(
                 ok=False,
                 image_id=build_res.image_id,
                 image_name=build_res.image_name,
                 rc=1,
                 duration_s=build_res.duration_s,
-                stderr_tail=profile_result.stderr,
+                stderr_tail=prof_err,
                 stdout_tail=profile_result.stdout,
                 failure_stage="profile",
+                benchmarks=""
             )
         else:
             # Profile passed - test failures are ignored but logged
             if tests_result is not None and not tests_result.ok:
-                logger.warning("build_and_validate: test validation failed, but ignoring test errors")
+                logger.warning(
+                    "build_and_validate[%s]: test validation failed, but ignoring test errors", task.get_image_name()
+                )
             else:
-                logger.info("build_and_validate: verification passed (profile and tests)")
+                logger.info("build_and_validate[%s]: verification passed (profile and tests)", task.get_image_name())
 
-            # Concatenate all three pairs of logs regardless of test outcome
+            # Concatenate all three pairs of logs, keeping successful sections compact
             combined_stdout = []
             combined_stderr = []
 
             # Build logs
             combined_stdout.append("=== BUILD ===")
-            combined_stdout.append(build_res.stdout_tail if build_res.stdout_tail else "(no stdout)")
+            if build_res.ok:
+                combined_stdout.append(
+                    f"ok: True rc: 0\nduration_s: {build_res.duration_s:.2f}\n(no additional stdout)"
+                )
+            else:
+                combined_stdout.append(build_res.stdout_tail if build_res.stdout_tail else "(no stdout)")
             combined_stderr.append("=== BUILD ===")
-            combined_stderr.append(build_res.stderr_tail if build_res.stderr_tail else "(no stderr)")
+            if build_res.ok:
+                combined_stderr.append("(no stderr)")
+            else:
+                combined_stderr.append(build_res.stderr_tail if build_res.stderr_tail else "(no stderr)")
 
             # Profile logs
             combined_stdout.append("\n=== PROFILE VALIDATION ===")
@@ -524,13 +670,21 @@ class DockerValidator:
                 combined_stdout.append(profile_result.benchmarks)
             combined_stderr.append("\n=== PROFILE VALIDATION ===")
             combined_stderr.append(profile_result.stderr)
+            combined_stderr.append(f"[profile_ok={'1' if profile_result.ok else '0'}]")
 
             # Test logs
             if tests_result is not None:
                 combined_stdout.append("\n=== TEST VALIDATION ===")
-                combined_stdout.append(tests_result.stdout)
+                if (tests_result.stdout or "").strip():
+                    combined_stdout.append(tests_result.stdout)
+                else:
+                    fallback = tests_result.stderr or "(no test output captured)"
+                    combined_stdout.append("(no test stdout; showing condensed errors)")
+                    combined_stdout.append(_preview(fallback, self.config.failure_preview_chars))
+
                 combined_stderr.append("\n=== TEST VALIDATION ===")
                 combined_stderr.append(tests_result.stderr)
+                combined_stderr.append(f"[tests_ok={'1' if tests_result.ok else '0'}]")
 
             return BuildResult(
                 ok=True,
@@ -540,6 +694,7 @@ class DockerValidator:
                 duration_s=build_res.duration_s,
                 stderr_tail="\n".join(combined_stderr),
                 stdout_tail="\n".join(combined_stdout),
+                benchmarks=profile_result.benchmarks,
             )
 
 
@@ -547,5 +702,11 @@ def _preview(s: str, n: int = 160) -> str:
     """Return the last n characters of a string, replacing newlines with \\n."""
     bottom_s = n
     s = s or ""
-    # s = s.replace("\n", "\\n")
-    return s[-bottom_s:]
+    s = s or ""
+    if n <= 0:
+        return ""
+    if len(s) <= n:
+        return s
+    head = s[: int(n * 0.25)]
+    tail = s[-int(n * 0.70) :]
+    return f"{head}\n... [truncated] ...\n{tail}"

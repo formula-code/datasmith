@@ -141,7 +141,8 @@ def _build_single(rb: ReportBuilder, row: pd.Series) -> dict[str, Any]:  # noqa:
                     return str(v)
             return v
 
-        pr_dict = {k: _sanitize(v) for k, v in pr_dict.items()}
+        # pr_dict = {k: _sanitize(v) for k, v in pr_dict.items()}
+
 
         # Ensure nested structures have the expected shapes
         if not isinstance(pr_dict.get("pr_base"), dict):

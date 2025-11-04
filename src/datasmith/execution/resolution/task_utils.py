@@ -12,14 +12,14 @@ logger = configure_logging()
 RE_PY_EXTRACT = re.compile(r"python[=<>!~]*([\d\.]+)")
 
 
-def resolve_task(task: Task) -> tuple[dict, Task]:
+def resolve_task(task: Task, bypass_cache: bool = False) -> tuple[dict, Task]:
     if task.sha is None:
         return {
             "dry_run_log": "No SHA provided",
             "can_install": False,
         }, task
     sha: str = task.sha
-    task_analysis = analyze_commit(sha, f"{task.owner}/{task.repo}", bypass_cache=True) or {}
+    task_analysis = analyze_commit(sha, f"{task.owner}/{task.repo}", bypass_cache=bypass_cache) or {}
     if not task_analysis or not task_analysis.get("can_install", False):
         logger.warning("agent_build_and_validate: task cannot be installed")
         return {

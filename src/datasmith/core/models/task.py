@@ -16,7 +16,8 @@ class Task:
     commit_date: float = 0.0
     env_payload: str = ""
     python_version: str = ""
-    tag: str = "pkg"  # 'pkg', 'env', 'run', or 'base'
+    tag: str = "pkg"  # 'pkg', 'env', 'run', or 'base', or 'final'
+    benchmarks: str = ""
 
     @classmethod
     def default_task(cls) -> Task:
@@ -33,8 +34,8 @@ class Task:
 
     def with_tag(self, tag: str) -> Task:
         """Return a copy of the task with ``tag`` substituted."""
-        if tag not in {"env", "pkg", "run", "base"}:
-            raise ValueError(f"Tag must be either 'env', 'pkg', 'run', or 'base', got '{tag}'.")
+        if tag not in {"env", "pkg", "run", "base", "final"}:
+            raise ValueError(f"Tag must be either 'env', 'pkg', 'run', 'base', or 'final', got '{tag}'.")
         return Task(
             owner=self.owner,
             repo=self.repo,
@@ -43,12 +44,26 @@ class Task:
             tag=tag,
             env_payload=self.env_payload,
             python_version=self.python_version,
+            benchmarks=self.benchmarks,
+        )
+
+    def with_benchmarks(self, benchmarks: str) -> Task:
+        """Return a copy of the task with ``benchmarks`` substituted."""
+        return Task(
+            owner=self.owner,
+            repo=self.repo,
+            sha=self.sha,
+            commit_date=self.commit_date,
+            tag=self.tag,
+            env_payload=self.env_payload,
+            python_version=self.python_version,
+            benchmarks=benchmarks,
         )
 
     def get_image_name(self) -> str:
         """Return the Docker image name for this task (repo:tag)."""
-        if self.tag not in {"env", "pkg", "run", "base"}:
-            raise ValueError("Tag must be either 'env', 'pkg', 'run', or 'base'.")
+        if self.tag not in {"env", "pkg", "run", "base", "final"}:
+            raise ValueError(f"Tag must be either 'env', 'pkg', 'run', 'base', or 'final', got '{self.tag}'.")
 
         owner = self._sanitize_component(self.owner)
         repo = self._sanitize_component(self.repo)
@@ -59,8 +74,8 @@ class Task:
 
     def get_container_name(self) -> str:
         """Return a deterministic container name for this task."""
-        if self.tag not in {"env", "pkg", "run", "base"}:
-            raise ValueError("Tag must be either 'env', 'pkg', 'run', or 'base'.")
+        if self.tag not in {"env", "pkg", "run", "base", "final"}:
+            raise ValueError("Tag must be either 'env', 'pkg', 'run', 'base', or 'final', got '{self.tag}'.")
 
         owner = self._sanitize_component(self.owner)
         repo = self._sanitize_component(self.repo)

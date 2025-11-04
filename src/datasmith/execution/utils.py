@@ -89,7 +89,7 @@ def get_change_summary(commit: Commit) -> str:
 
 
 def _get_commit_info_offline(repo: Repo, commit_sha: str, bypass_cache: bool = False) -> dict[str, Any]:
-    return core_get_commit_info_offline(repo, commit_sha, bypass_cache)
+    return core_get_commit_info_offline(repo, commit_sha, bypass_cache=bypass_cache)
 
 
 def find_file_in_tree(repo: str, filename: str, branch: str | None = None) -> list[str] | None:

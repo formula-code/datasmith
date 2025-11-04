@@ -463,7 +463,7 @@ for version in $PY_VERSIONS; do
     echo "Installing dependencies in $ENV_NAME from $DEPENDENCIES_PATH"
     if [ -s "$DEPENDENCIES_PATH" ]; then
         uv pip install --python "$PYTHON_BIN" wheel &&\
-         uv pip install  --no-build-isolation --python "$PYTHON_BIN" "${UV_OPTS[@]}" -r "$DEPENDENCIES_PATH"
+         uv pip install --python "$PYTHON_BIN" "${UV_OPTS[@]}" -r "$DEPENDENCIES_PATH"
 #     if [ -n "$install_command" ]; then
 #       echo "Running install commands from $CONF_NAME in $ENV_NAME:"
 #       echo "$install_command"

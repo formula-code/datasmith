@@ -207,3 +207,4 @@ output
 scratch/artifacts/git/
 scratch/notebooks/git/
 scratch/artifacts/**/*.parquet
+scratch/**/*.json

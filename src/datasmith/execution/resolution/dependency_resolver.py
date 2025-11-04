@@ -23,10 +23,7 @@ def rfc3339(ts: dt.datetime) -> str:
         ts = ts.replace(tzinfo=dt.timezone.utc)
     return ts.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
-
-def uv_compile_from_pyproject(
-    pyproject_path: Path, python_version: str | None, cutoff_rfc3339: str | None
-) -> list[str]:
+def uv_compile_from_pyproject(pyproject_path: Path, python_version: str | None, cutoff_rfc3339: str | None) -> list[str]:
     """
     Use `uv pip compile` to resolve to pinned requirements.
     Reads from pyproject.toml and prints the compiled file to stdout.
@@ -63,6 +60,7 @@ def uv_compile_from_pyproject(
         if s and not s.startswith("#"):
             out.append(s)
     return out
+
 
 
 def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutoff_rfc3339: str | None) -> list[str]:

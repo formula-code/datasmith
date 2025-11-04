@@ -84,6 +84,280 @@ def _image_exists(client: docker.DockerClient, name: str, retries: int = 3, dela
     return False
 
 
+# ----------------------------
+# Small utility helpers
+# ----------------------------
+
+
+def _summarize_attempts(attempts: list[AttemptRecord]) -> list[dict[str, Any]]:
+    """Summarize attempts into serializable dicts."""
+    return [
+        {
+            "attempt": a.attempt_idx,
+            "ok": (a.build_result.ok if a.build_result else False),
+            "rc": (a.build_result.rc if a.build_result else None),
+            "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
+            "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
+            "building_data": a.building_data,
+        }
+        for a in attempts
+    ]
+
+
+def _make_result(
+    *,
+    task: Task,
+    result: BuildResult | None,
+    stage: str,
+    attempts: list[AttemptRecord],
+    context_pickle: Path | None = None,
+) -> dict[str, Any]:
+    """Create a standardized result dictionary for callers."""
+    ok = result.ok if result else False
+    rc = result.rc if result else 1
+    duration_s = result.duration_s if result else 0.0
+    stderr_tail = result.stderr_tail if result else ""
+    stdout_tail = result.stdout_tail if result else ""
+
+    out: dict[str, Any] = {
+        "owner": task.owner,
+        "repo": task.repo,
+        "sha": task.sha,
+        "image_name": task.with_tag("pkg").get_image_name(),
+        "ok": ok,
+        "rc": rc,
+        "duration_s": duration_s,
+        "stderr_tail": stderr_tail,
+        "stdout_tail": stdout_tail,
+        "stage": stage,
+        "attempts": _summarize_attempts(attempts),
+    }
+    if context_pickle is not None:
+        out["context_pickle"] = str(context_pickle)
+    else:
+        out["context_pickle"] = None
+    return out
+
+
+def _maybe_save_attempt_pickle(attempt_idx: int, ctx: DockerContext, out_dir: Path, task: Task) -> None:
+    """Persist an attempt context pickle for visibility (skip index 0)."""
+    if attempt_idx >= 1:
+        attempt_pickle = out_dir / f"{task.owner}-{task.repo}-{task.sha}-attempt-{attempt_idx}.pkl"
+        _save_pickle(ctx, attempt_pickle)
+
+
+def _handle_success(
+    *,
+    ctx: DockerContext,
+    task: Task,
+    args: argparse.Namespace,
+    context_registry: ContextRegistry,
+    client: docker.DockerClient,
+    build_result: BuildResult,
+) -> Path:
+    """Register context, optionally publish to ECR, and write final pickle.
+
+    Returns the path to the final pickle.
+    """
+    with context_registry.get_lock():
+        context_registry.register(task.with_tag("pkg"), ctx)
+    # Persist registry if configured
+    with contextlib.suppress(Exception):
+        if getattr(args, "context_registry", None):
+            context_registry.save_to_file(path=args.context_registry)
+
+    # Optionally publish to ECR
+    if getattr(args, "push_to_ecr", False):
+        logger.info("agent_build_and_validate: pushed %s to ECR", task.with_tag("final").get_image_name())
+        ctx.build_and_publish_to_ecr(
+            client=client,
+            task=task.with_tag("final").with_benchmarks(build_result.benchmarks),
+            region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        )
+
+    out_dir = cast(Path, args.output_dir)
+    final_pickle = out_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
+    _save_pickle(ctx, final_pickle)
+    return final_pickle
+
+
+def _should_abort_iteration(res: BuildResult) -> bool:
+    """Return True if failure is unrelated to docker_build_pkg.sh or verification."""
+    is_verification_failure = res.failure_stage in ("profile", "tests")
+    return (
+        (not res.ok)
+        and bool(res.stderr_tail)
+        and ("docker_build_pkg.sh" not in res.stderr_tail)
+        and (not is_verification_failure)
+    )
+
+
+def _log_if_script_malformed(res: BuildResult, where: str) -> None:
+    """Log a helpful error when the docker_build_pkg.sh script is likely malformed."""
+    if res.ok or not res.stderr_tail:
+        return
+    stderr_lower = res.stderr_tail.lower()
+    if "docker_build_pkg.sh" in res.stderr_tail and any(
+        indicator in stderr_lower for indicator in ["syntax error", ": not found", "unexpected token", "line 1:"]
+    ):
+        logger.error(
+            "agent_build_and_validate: detected malformed docker_build_pkg.sh script (%s); script likely has invalid bash syntax",
+            where,
+        )
+
+
+def _do_build(validator: DockerValidator, task: Task, ctx: DockerContext, run_labels: dict[str, str]) -> BuildResult:
+    """Invoke validator.build_and_validate with injected build_once_with_context."""
+    return validator.build_and_validate(
+        task=task.with_tag("run"),
+        context=ctx,
+        run_labels=run_labels,
+        build_once_fn=build_once_with_context,
+    )
+
+
+def _execute_build_plan(
+    *,
+    program: BuildScriptProgram,
+    task: Task,
+    args: argparse.Namespace,
+    script_candidates: list[str],
+    default_building_template: str,
+    tool_exec: ContainerToolExecutor,
+    validator: DockerValidator,
+    run_labels: dict[str, str],
+    context_registry: ContextRegistry,
+    client: docker.DockerClient,
+    max_attempts: int,
+) -> dict[str, Any]:
+    """Unified attempt loop over similar and agent-synthesized scripts."""
+    attempts: list[AttemptRecord] = []
+    attempt_idx = 0
+
+    plan: list[tuple[str, str | None]] = [("similar", s) for s in script_candidates] + [
+        ("agent", None) for _ in range(max_attempts)
+    ] # pyright: ignore[reportAssignmentType]
+
+    for attempt_idx, (source, script_candidate) in enumerate(plan, start=0):
+        i = attempt_idx + 1  # 1-based for human-oriented logs
+        if source == "similar":
+            script = cast(str, script_candidate)
+            logger.info(
+                "agent_build_and_validate: trying similar-context candidate %d/%d",
+                i,
+                len(script_candidates),
+            )
+        else:
+            last = attempts[-1].build_result if attempts else None
+            stderr_tail = (last.stderr_tail if last else "") or ""
+            stdout_tail = (last.stdout_tail if last else "") or ""
+
+            if "[profile_ok=" in stderr_tail:
+                location = "profiler"
+            elif "[tests_ok=" in stderr_tail:
+                location = "pytest"
+            else:
+                location = "build"
+
+            if last and last.rc == 124:
+                failure_more = f"{location} timeout"
+            else:
+                failure_more = f"{location} failed rc={last.rc}" if last else f"{location} failed"
+
+            agent_idx = i - len(script_candidates)
+            logger.info("agent_build_and_validate: agent attempt %d/%d", agent_idx, max_attempts)
+            logger.debug(
+                "agent_build_and_validate: re-synthesis with last tails (stderr_len=%d, stdout_len=%d, failure=%s, location=%s)",
+                len(stderr_tail),
+                len(stdout_tail),
+                failure_more,
+                location,
+            )
+            try:
+                script = synthesize_script(
+                    program,
+                    task,
+                    attempts[-1].building_data if attempts else default_building_template,
+                    stderr_tail=stderr_tail,
+                    stdout_tail=stdout_tail,
+                    failure_more=failure_more,
+                    tool_exec=tool_exec,
+                    max_steps=args.max_steps,
+                )
+            except Exception as e:
+                logger.error("agent_build_and_validate: synthesis error: %s", e, exc_info=True)
+                build_res = BuildResult(
+                    ok=False,
+                    image_id=None,
+                    image_name=task.with_tag("pkg").get_image_name(),
+                    rc=1,
+                    duration_s=0.0,
+                    stderr_tail=str(e),
+                    stdout_tail="",
+                )
+                attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data="", build_result=build_res))
+                break
+
+        ctx = DockerContext(building_data=script)
+
+        _maybe_save_attempt_pickle(attempt_idx, ctx, args.output_dir, task)
+
+        build_res = _do_build(validator, task, ctx, run_labels)
+
+        attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
+
+        _log_if_script_malformed(build_res, where=source)
+
+        if build_res.ok:
+            final_pickle = _handle_success(
+                ctx=ctx,
+                task=task,
+                args=args,
+                context_registry=context_registry,
+                client=client,
+                build_result=build_res,
+            )
+            result_dict = _make_result(
+                task=task,
+                result=build_res,
+                stage="build",
+                attempts=attempts,
+                context_pickle=final_pickle,
+            )
+            logger.info(
+                "agent_build_and_validate: validation stage=%s ok=%s rc=%s",
+                result_dict.get("stage"),
+                result_dict.get("ok"),
+                result_dict.get("rc"),
+            )
+            return result_dict
+
+        if _should_abort_iteration(build_res):
+            logger.error(
+                "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh or validation; not worth iterating"
+            )
+            return _make_result(
+                task=task,
+                result=build_res,
+                stage="build",
+                attempts=attempts,
+                context_pickle=None,
+            )
+
+        logger.warning(
+            "agent_build_and_validate: %s attempt %d failed (rc=%s). Iterating if attempts remain.",
+            source,
+            attempt_idx - 1,
+            (build_res.rc if build_res else "unknown"),
+        )
+
+    last = attempts[-1].build_result if attempts else None
+    logger.error("agent_build_and_validate: all attempts failed for %s", task.with_tag("pkg").get_image_name())
+    failed = _make_result(task=task, result=last, stage="build", attempts=attempts, context_pickle=None)
+    failed["files"] = []
+    return failed
+
+
 class BuildScriptAgentStep(dspy.Signature):
     """
     An interactive planner for producing a bash script (docker_build.sh) to build and install a Python repo inside micromamba envs. It can either:
@@ -255,7 +529,7 @@ def synthesize_script(
         max_steps: Maximum agent steps
 
     Returns:
-        Tuple of (script)
+        Script string
     """
     logger.info(
         "synthesize_script: task=%s/%s@%s, last_script=%s",
@@ -264,8 +538,10 @@ def synthesize_script(
         task.sha,
         "present" if last_script else "none",
     )
-    merged_log = _merge_tail(stderr_tail, stdout_tail)
-    logger.debug("synthesize_script: merged_log_len=%d", len(merged_log))
+    logger.debug(
+        "synthesize_script: merged_log_len=%d",
+        len(_merge_tail(stderr_tail, stdout_tail)),
+    )
 
     try:
         result = program(
@@ -280,8 +556,8 @@ def synthesize_script(
             tool_executor=tool_exec,
             max_steps=max_steps,
         )
-        script = cast(str, result)
-        script = str(script)
+        # BuildScriptProgram.forward returns (script, messages_log)
+        script = cast(str, result[0]) if isinstance(result, tuple) and len(result) >= 1 else cast(str, result)
         logger.info("synthesize_script: raw script length=%d", len(script))
 
     except Exception:
@@ -332,6 +608,9 @@ def build_once_with_context(
         pull,
     )
 
+    # Always override BASE_IMAGE to a stable tag to avoid stale digest references
+    base_image = os.environ.get("DATASMITH_BASE_IMAGE", "buildpack-deps:jammy")
+
     res = context.build_container_streaming(
         client=client,
         image_name=task.get_image_name(),
@@ -340,6 +619,7 @@ def build_once_with_context(
             "COMMIT_SHA": sha,
             "ENV_PAYLOAD": task.env_payload if len(task.env_payload) else "{}",
             "PY_VERSION": task.python_version or "",
+            "BASE_IMAGE": base_image,
         },
         probe=probe,
         force=force,
@@ -360,45 +640,7 @@ def build_once_with_context(
     return res
 
 
-# def build_and_validate(
-#     client: docker.DockerClient,
-#     task: Task,
-#     context: DockerContext,
-#     repo_url: str,
-#     sha: str,
-#     run_labels: dict[str, str],
-#     args: argparse.Namespace,
-# ) -> BuildResult:
-#     """Build and validate a container (wrapper that injects build_once_with_context).
-
-#     This is a thin wrapper around the validation module's build_and_validate
-#     that injects the build_once_with_context function to avoid circular imports.
-
-#     Args:
-#         client: Docker client
-#         task: Task to build and validate
-#         context: DockerContext with build configuration
-#         repo_url: Repository URL
-#         sha: Commit SHA
-#         run_labels: Labels for the container run
-#         args: Command-line arguments
-
-#     Returns:
-#         BuildResult with validation outcome
-#     """
-#     return build_and_validate_impl(
-#         client=client,
-#         task=task,
-#         context=context,
-#         repo_url=repo_url,
-#         sha=sha,
-#         run_labels=run_labels,
-#         args=args,
-#         build_once_fn=build_once_with_context,
-#     )
-
-
-def agent_build_and_validate(  # noqa: C901
+def agent_build_and_validate(
     task: Task,
     args: argparse.Namespace,
     client: docker.DockerClient,
@@ -423,8 +665,7 @@ def agent_build_and_validate(  # noqa: C901
         Dictionary with build results and attempt history
     """
     assert task.sha is not None, "task.sha must be set"  # noqa: S101
-    run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
-    task_analysis, task = resolve_task(task)
+    task_analysis, task = resolve_task(task, bypass_cache=True)
     if not task_analysis or not task_analysis.get("can_install", False):
         logger.warning("agent_build_and_validate: task cannot be installed")
         return {
@@ -441,469 +682,222 @@ def agent_build_and_validate(  # noqa: C901
             "attempts": [],
             "context_pickle": None,
         }
-
-    # Gather defaults + similar contexts
-    default_building_template = context_registry.get_default(tag="env")[1].building_data
-    similar_contexts = context_registry.get_similar(task.with_tag("env"))
-
-    # Choose an ENV context for the probe build (most similar if possible)
-    if similar_contexts:
-        t, probe_context = similar_contexts[0]
+    # if final.pkl exists, try to load it and see if it works.
+    final_pickle = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
+    if final_pickle.exists():
         logger.info(
-            "build_once_with_context: found %d similar contexts; using most similar for probe with key=%s",
-            len(similar_contexts),
-            str(t),
+            "agent_build_and_validate: detected existing final pickle %s; attempting to load and validate",
+            str(final_pickle),
         )
-    else:
-        _, probe_context = context_registry.get_default(tag="env")
-        logger.info(
-            "build_once_with_context: no similar context found; using default for probe with key=%s", str(probe_context)
-        )
-
-    # Build-package script candidates: try every similar context's building_data first.
-    script_candidates = [ctx.building_data for _, ctx in (similar_contexts or [])]
-    if not script_candidates:
-        script_candidates = [default_building_template]
-
-    # keep the first max_similar_candidates entries
-    if hasattr(args, "max_similar_candidates") and args.max_similar_candidates > 0:
-        script_candidates = script_candidates[: args.max_similar_candidates]
-
-    logger.info(
-        "agent_build_and_validate: start for %s/%s@%s (max_attempts=%d, candidates=%d)",
-        task.owner,
-        task.repo,
-        task.sha,
-        max_attempts,
-        len(script_candidates),
-    )
-
-    program = BuildScriptProgram()
-    repo_url = f"https://www.github.com/{task.owner}/{task.repo}"
-    logger.debug("agent_build_and_validate: task=%s repo_url=%s", task, repo_url)
-
-    # Ensure probe ENV image exists
-    if not _image_exists(client, task.with_tag("env").get_image_name()):
-        logger.info("agent_build_and_validate: probe image not found, building probe image")
-        env_res = build_once_with_context(
+        with open(final_pickle, "rb") as f:
+            old_ctx = pickle.load(f)
+            ctx = DockerContext(building_data=old_ctx.building_data)
+        
+        validator = DockerValidator(
             client=client,
-            task=task.with_tag("env"),
-            context=probe_context,
-            repo_url=repo_url,
-            sha=cast(str, task.sha),
-            timeout_s=args.build_timeout,
-            tail_chars=args.tail_chars,
-            probe=True,
-            pull=False,
-            force=False,  # don't rebuild if already present
-            run_labels=run_labels,
+            context_registry=context_registry,
+            machine_defaults=machine_defaults,
+            config=ValidationConfig(
+                output_dir=args.output_dir,
+                build_timeout=args.build_timeout,
+                run_timeout=args.run_timeout,
+                tail_chars=args.tail_chars,
+            ),
         )
-        if not env_res.ok:
-            logger.warning("agent_build_and_validate: probe build failed; something is wrong with Dockerfile")
-            return {
-                "ok": False,
-                "rc": env_res.rc,
-                "stage": "probe",
-                "owner": task.owner,
-                "repo": task.repo,
-                "sha": task.sha,
-                "image_name": task.with_tag("pkg").get_image_name(),
-                "duration_s": env_res.duration_s,
-                "stderr_tail": env_res.stderr_tail,
-                "stdout_tail": env_res.stdout_tail,
-                "attempts": [],
-                "context_pickle": None,
-            }
-
-    tool_exec = ContainerToolExecutor(
-        docker_client=client,
-        image_name=task.with_tag("env").get_image_name(),
-        container_name=task.with_tag("env").get_container_name() + f"-{run_labels.get('datasmith.run', 'run')[:8]}",
-        workdir="/workspace/repo/",
-        run_labels=run_labels,
-    )
-
-    validation_config = ValidationConfig(
-        output_dir=args.output_dir,
-        build_timeout=args.build_timeout,
-        run_timeout=args.run_timeout,
-        tail_chars=args.tail_chars,
-    )
-
-    validator = DockerValidator(
-        client=client,
-        context_registry=context_registry,
-        machine_defaults=machine_defaults,
-        config=validation_config,
-    )
-
-    try:
-        attempts: list[AttemptRecord] = []
-        attempt_idx = 0
-
-        # Phase 1: try all similar-context scripts (no agent yet)
-        for cand_idx, script in enumerate(script_candidates, start=1):
+        build_res = validator.build_and_validate(
+            task=task.with_tag("run"),
+            context=ctx,
+            run_labels=gen_run_labels(task, runid=uuid.uuid4().hex),
+            build_once_fn=build_once_with_context,
+        )
+        if build_res.ok:
             logger.info(
-                "agent_build_and_validate: trying similar-context candidate %d/%d",
-                cand_idx,
-                len(script_candidates),
+                "agent_build_and_validate: loaded final pickle is valid for %s/%s@%s",
+                task.owner,
+                task.repo,
+                task.sha,
             )
-
-            ctx = DockerContext(building_data=script)
-
-            # Save attempt pickle (skip index 0 for parity with old behavior)
-            if attempt_idx >= 1:
-                attempt_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-attempt-{attempt_idx}.pkl"
-                _save_pickle(ctx, attempt_pickle)
-
-            # Build and validate package image
-            # build_res = build_and_validate(
-            #     client=client,
-            #     task=task,
-            #     context=ctx,
-            #     repo_url=repo_url,
-            #     sha=sha,
-            #     run_labels=run_labels,
-            #     args=args,
-            # )
-            build_res = validator.build_and_validate(
-                task=task.with_tag("run"),
-                context=ctx,
-                # repo_url=repo_url,
-                # sha=sha,
-                run_labels=run_labels,
-                build_once_fn=build_once_with_context,
+            return _make_result(
+                task=task,
+                result=build_res,
+                stage="build",
+                attempts=[],
+                context_pickle=final_pickle,
             )
-
-            attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
-            attempt_idx += 1
-
-            if build_res.ok:
-                with context_registry.get_lock():
-                    context_registry.register(task.with_tag("pkg"), ctx)
-                context_registry.save_to_file(path=args.context_registry)
-
-                # If requested, publish the successfully built image to ECR
-                if getattr(args, "push_to_ecr", False):
-                    logger.info(
-                        "agent_build_and_validate: pushed %s to ECR",
-                        task.with_tag("run").get_image_name(),
-                    )
-                    ctx.build_and_publish_to_ecr(
-                        client=client,
-                        task=task.with_tag("run"),
-                        region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-                    )
-
-                final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
-                _save_pickle(ctx, final_pickle)
-
-                result = attempts[-1].build_result
-                if result is None:
-                    raise RuntimeError("Unexpected: result is None after successful build")
-
-                result_dict: dict[str, Any] = {
-                    "owner": task.owner,
-                    "repo": task.repo,
-                    "sha": task.sha,
-                    "image_name": task.with_tag("pkg").get_image_name(),
-                    "ok": result.ok,
-                    "rc": result.rc,
-                    "duration_s": result.duration_s,
-                    "stderr_tail": result.stderr_tail,
-                    "stdout_tail": result.stdout_tail,
-                    "stage": "build",
-                }
-                logger.info(
-                    "agent_build_and_validate: validation stage=%s ok=%s rc=%s",
-                    result_dict.get("stage"),
-                    result_dict.get("ok"),
-                    result_dict.get("rc"),
-                )
-
-                result_dict["attempts"] = [
-                    {
-                        "attempt": a.attempt_idx,
-                        "ok": (a.build_result.ok if a.build_result else False),
-                        "rc": (a.build_result.rc if a.build_result else None),
-                        "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
-                        "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
-                        "building_data": a.building_data,
-                    }
-                    for a in attempts
-                ]
-                result_dict["context_pickle"] = str(final_pickle)
-                return result_dict
-
-            # Detect malformed scripts early (syntax errors, escaped newlines)
-            if not build_res.ok and build_res.stderr_tail:
-                stderr_lower = build_res.stderr_tail.lower()
-                # Check for common script syntax errors
-                if "docker_build_pkg.sh" in build_res.stderr_tail and any(
-                    indicator in stderr_lower
-                    for indicator in [
-                        "syntax error",
-                        ": not found",
-                        "unexpected token",
-                        "line 1:",  # Often indicates malformed script
-                    ]
-                ):
-                    logger.error(
-                        "agent_build_and_validate: detected malformed docker_build_pkg.sh script (syntax error) in candidate %d; "
-                        "script likely has invalid bash syntax",
-                        cand_idx,
-                    )
-
-            # Early exit if failure is unrelated to docker_build_pkg.sh or validation
-            # Check failure_stage to determine if this was a validation failure (profile/tests)
-            # or a build infrastructure failure
-            is_verification_failure = build_res.failure_stage in ("profile", "tests")
-            if (
-                (not build_res.ok)
-                and (build_res.stderr_tail)
-                and ("docker_build_pkg.sh" not in build_res.stderr_tail)
-                and (not is_verification_failure)
-            ):
-                logger.error(
-                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh or validation; not worth iterating"
-                )
-                return {
-                    "ok": False,
-                    "rc": build_res.rc,
-                    "stage": "build",
-                    "owner": task.owner,
-                    "repo": task.repo,
-                    "sha": task.sha,
-                    "image_name": task.with_tag("pkg").get_image_name(),
-                    "duration_s": build_res.duration_s,
-                    "stderr_tail": build_res.stderr_tail,
-                    "stdout_tail": build_res.stdout_tail,
-                    "attempts": [
-                        {
-                            "attempt": a.attempt_idx,
-                            "ok": (a.build_result.ok if a.build_result else False),
-                            "rc": (a.build_result.rc if a.build_result else None),
-                            "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
-                            "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
-                            "building_data": a.building_data,
-                        }
-                        for a in attempts
-                    ],
-                    "context_pickle": None,
-                }
-
+        else:
             logger.warning(
-                "agent_build_and_validate: candidate %d failed (rc=%s); trying next similar context if any.",
-                cand_idx,
-                (build_res.rc if build_res else "unknown"),
+                "agent_build_and_validate: loaded final pickle is invalid for %s/%s@%s; proceeding to rebuild",
+                task.owner,
+                task.repo,
+                task.sha,
             )
 
-        # Phase 2: all similar-context candidates failed  synthesize and iterate
-        for j in range(max_attempts):
-            logger.info("agent_build_and_validate: agent attempt %d/%d", j + 1, max_attempts)
-
-            last = attempts[-1].build_result if attempts else None
-            stderr_tail = (last.stderr_tail if last else "") or ""
-            stdout_tail = (last.stdout_tail if last else "") or ""
-
-            if "[profile_ok=" in stderr_tail:
-                location = "profiler"
-            elif "[tests_ok=" in stderr_tail:
-                location = "pytest"
-            else:
-                location = "build"
-
-            if last and last.rc == 124:
-                failure_more = f"{location} timeout"
-            else:
-                failure_more = f"{location} failed rc={last.rc}" if last else f"{location} failed"
-
-            logger.debug(
-                "agent_build_and_validate: re-synthesis with last tails (stderr_len=%d, stdout_len=%d, failure=%s, location=%s)",
-                len(stderr_tail),
-                len(stdout_tail),
-                failure_more,
-                location,
-            )
-
-            try:
-                script = synthesize_script(
-                    program,
-                    task,
-                    attempts[-1].building_data if attempts else default_building_template,
-                    stderr_tail=stderr_tail,
-                    stdout_tail=stdout_tail,
-                    failure_more=failure_more,
-                    tool_exec=tool_exec,
-                    max_steps=args.max_steps,
-                )
-            except Exception as e:
-                logger.error("agent_build_and_validate: synthesis error: %s", e, exc_info=True)
-                build_res = BuildResult(
-                    ok=False,
-                    image_id=None,
-                    image_name=task.with_tag("pkg").get_image_name(),
-                    rc=1,
-                    duration_s=0.0,
-                    stderr_tail=str(e),
-                    stdout_tail="",
-                )
-                attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data="", build_result=build_res))
-                break  # exit agent loop
-
-            ctx = DockerContext(building_data=script)
-
-            if attempt_idx >= 1:
-                attempt_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-attempt-{attempt_idx}.pkl"
-                _save_pickle(ctx, attempt_pickle)
-
-            # Build and validate package image
-            # build_res = build_and_validate(
-            #     client=client,
-            #     task=task,
-            #     context=ctx,
-            #     repo_url=repo_url,
-            #     sha=sha,
-            #     run_labels=run_labels,
-            #     args=args,
-            # )
-            build_res = validator.build_and_validate(
-                task=task.with_tag("run"),
-                context=ctx,
-                # repo_url=repo_url,
-                # sha=sha,
-                run_labels=run_labels,
-                build_once_fn=build_once_with_context,
-            )
-
-            attempts.append(AttemptRecord(attempt_idx=attempt_idx, building_data=script, build_result=build_res))
-            attempt_idx += 1
-
-            if build_res.ok:
-                with context_registry.get_lock():
-                    context_registry.register(task.with_tag("pkg"), ctx)
-
-                if args.push_to_ecr:
-                    logger.info("agent_build_and_validate: pushed %s to ECR", task.with_tag("run").get_image_name())
-                    ctx.build_and_publish_to_ecr(
-                        client=client,
-                        task=task.with_tag("run"),
-                        region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-                    )
-
-                final_pickle = args.output_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
-                _save_pickle(ctx, final_pickle)
-
-                result = attempts[-1].build_result
-                if result is None:
-                    raise RuntimeError("Unexpected: result is None after successful build")
-
-                result_dict = {
-                    "owner": task.owner,
-                    "repo": task.repo,
-                    "sha": task.sha,
-                    "image_name": task.with_tag("pkg").get_image_name(),
-                    "ok": result.ok,
-                    "rc": result.rc,
-                    "duration_s": result.duration_s,
-                    "stderr_tail": result.stderr_tail,
-                    "stdout_tail": result.stdout_tail,
-                    "stage": "build",
-                }
-                logger.info(
-                    "agent_build_and_validate: validation stage=%s ok=%s rc=%s",
-                    result_dict.get("stage"),
-                    result_dict.get("ok"),
-                    result_dict.get("rc"),
-                )
-                result_dict["attempts"] = [
-                    {
-                        "attempt": a.attempt_idx,
-                        "ok": (a.build_result.ok if a.build_result else False),
-                        "rc": (a.build_result.rc if a.build_result else None),
-                        "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
-                        "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
-                        "building_data": a.building_data,
-                    }
-                    for a in attempts
-                ]
-                result_dict["context_pickle"] = str(final_pickle)
-                return result_dict
-
-            # Early exit if failure is unrelated to docker_build_pkg.sh or validation
-            # Check failure_stage to determine if this was a validation failure (profile/tests)
-            # or a build infrastructure failure
-            is_verification_failure = build_res.failure_stage in ("profile", "tests")
-            if (
-                (not build_res.ok)
-                and (build_res.stderr_tail)
-                and ("docker_build_pkg.sh" not in build_res.stderr_tail)
-                and (not is_verification_failure)
-            ):
-                logger.error(
-                    "agent_build_and_validate: build failed without mentioning docker_build_pkg.sh or validation; not worth iterating"
-                )
-                return {
-                    "ok": False,
-                    "rc": build_res.rc,
-                    "stage": "build",
-                    "owner": task.owner,
-                    "repo": task.repo,
-                    "sha": task.sha,
-                    "image_name": task.with_tag("pkg").get_image_name(),
-                    "duration_s": build_res.duration_s,
-                    "stderr_tail": build_res.stderr_tail,
-                    "stdout_tail": build_res.stdout_tail,
-                    "attempts": [
-                        {
-                            "attempt": a.attempt_idx,
-                            "ok": (a.build_result.ok if a.build_result else False),
-                            "rc": (a.build_result.rc if a.build_result else None),
-                            "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
-                            "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
-                            "building_data": a.building_data,
-                        }
-                        for a in attempts
-                    ],
-                    "context_pickle": None,
-                }
-
-            logger.warning(
-                "agent_build_and_validate: agent attempt %d failed (rc=%s). Iterating if attempts remain.",
-                attempt_idx - 1,
-                (build_res.rc if build_res else "unknown"),
-            )
-
-        # All attempts failed (similar-context candidates + agent tries)
-        last = attempts[-1].build_result if attempts else None
-        logger.error("agent_build_and_validate: all attempts failed for %s", task.with_tag("pkg").get_image_name())
+    if args.only_final:
+        logger.error(
+            "agent_build_and_validate: only_final specified but no valid final pickle found for %s/%s@%s",
+            task.owner,
+            task.repo,
+            task.sha,
+        )
         return {
+            "ok": False,
+            "rc": 1,
+            "stage": "build",
             "owner": task.owner,
             "repo": task.repo,
             "sha": task.sha,
             "image_name": task.with_tag("pkg").get_image_name(),
-            "stage": "build",
-            "ok": False,
-            "rc": (last.rc if last else 1),
-            "duration_s": (last.duration_s if last else None),
-            "stderr_tail": (last.stderr_tail if last else ""),
-            "stdout_tail": (last.stdout_tail if last else ""),
-            "attempts": [
-                {
-                    "attempt": a.attempt_idx,
-                    "ok": (a.build_result.ok if a.build_result else False),
-                    "rc": (a.build_result.rc if a.build_result else None),
-                    "stderr_tail": (a.build_result.stderr_tail if a.build_result else ""),
-                    "stdout_tail": (a.build_result.stdout_tail if a.build_result else ""),
-                    "building_data": a.building_data,
-                }
-                for a in attempts
-            ],
-            "files": [],
+            "duration_s": 0.0,
+            "stderr_tail": "only_final specified but no valid final pickle found.",
+            "stdout_tail": "",
+            "attempts": [],
+            "context_pickle": None,
         }
+    total_attempts = args.max_similar_candidates + max_attempts - 1
+    last_attempt = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-attempt-{total_attempts}.pkl"
+    failure = (args.ignore_exhausted and (last_attempt.exists()))
+    if args.only_exhausted:
+        failure = not last_attempt.exists()
+    if failure:
+        # return early if we've already exhausted attempts
+        logger.info(
+            "agent_build_and_validate: detected existing final attempt pickle %s; skipping build",
+            str(last_attempt),
+        )
+        with open(last_attempt, "rb") as f:
+            ctx = pickle.load(f)
+        return {
+            "ok": False,
+            "rc": 1,
+            "stage": "build",
+            "owner": task.owner,
+            "repo": task.repo,
+            "sha": task.sha,
+            "image_name": task.with_tag("pkg").get_image_name(),
+            "duration_s": 0.0,
+            "stderr_tail": "Previous attempts exhausted; see final attempt pickle.",
+            "stdout_tail": "",
+            "attempts": [],
+            "context_pickle": str(last_attempt),
+        }
+
+    run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
+    tool_exec = None
+
+    try:
+        # Gather defaults + similar contexts
+        default_building_template = context_registry.get_default(tag="env")[1].building_data
+        similar_contexts = context_registry.get_similar(task.with_tag("env"))
+
+        # Choose an ENV context for the probe build (most similar if possible)
+        if similar_contexts:
+            t, probe_context = similar_contexts[0]
+            logger.info(
+                "build_once_with_context: found %d similar contexts; using most similar for probe with key=%s",
+                len(similar_contexts),
+                str(t),
+            )
+        else:
+            _, probe_context = context_registry.get_default(tag="env")
+            logger.info(
+                "build_once_with_context: no similar context found; using default for probe with key=%s", str(probe_context)
+            )
+
+        # Build-package script candidates: try every similar context's building_data first.
+        script_candidates = [ctx.building_data for _, ctx in (similar_contexts or [])]
+        if not script_candidates:
+            script_candidates = [default_building_template]
+
+        # keep the first max_similar_candidates entries
+        if hasattr(args, "max_similar_candidates") and args.max_similar_candidates > 0:
+            script_candidates = script_candidates[: args.max_similar_candidates]
+
+        logger.info(
+            "agent_build_and_validate: start for %s/%s@%s (max_attempts=%d, candidates=%d)",
+            task.owner,
+            task.repo,
+            task.sha,
+            max_attempts,
+            len(script_candidates),
+        )
+
+        program = BuildScriptProgram()
+        repo_url = f"https://www.github.com/{task.owner}/{task.repo}"
+        logger.debug("agent_build_and_validate: task=%s repo_url=%s", task, repo_url)
+
+        # Ensure probe ENV image exists
+        if not _image_exists(client, task.with_tag("env").get_image_name()):
+            logger.info("agent_build_and_validate: probe image not found, building probe image")
+            env_res = build_once_with_context(
+                client=client,
+                task=task.with_tag("env"),
+                context=probe_context,
+                repo_url=repo_url,
+                sha=cast(str, task.sha),
+                timeout_s=args.build_timeout,
+                tail_chars=args.tail_chars,
+                probe=True,
+                pull=False,
+                force=False,  # don't rebuild if already present
+                run_labels=run_labels,
+            )
+            if not env_res.ok:
+                logger.warning("agent_build_and_validate: probe build failed; something is wrong with Dockerfile")
+                return {
+                    "ok": False,
+                    "rc": env_res.rc,
+                    "stage": "probe",
+                    "owner": task.owner,
+                    "repo": task.repo,
+                    "sha": task.sha,
+                    "image_name": task.with_tag("pkg").get_image_name(),
+                    "duration_s": env_res.duration_s,
+                    "stderr_tail": env_res.stderr_tail,
+                    "stdout_tail": env_res.stdout_tail,
+                    "attempts": [],
+                    "context_pickle": None,
+                }
+
+        tool_exec = ContainerToolExecutor(
+            docker_client=client,
+            image_name=task.with_tag("env").get_image_name(),
+            container_name=task.with_tag("env").get_container_name() + f"-{run_labels.get('datasmith.run', 'run')[:8]}",
+            workdir="/workspace/repo/",
+            run_labels=run_labels,
+        )
+
+        validation_config = ValidationConfig(
+            output_dir=args.output_dir,
+            build_timeout=args.build_timeout,
+            run_timeout=args.run_timeout,
+            tail_chars=args.tail_chars,
+        )
+
+        validator = DockerValidator(
+            client=client,
+            context_registry=context_registry,
+            machine_defaults=machine_defaults,
+            config=validation_config,
+        )
+
+        return _execute_build_plan(
+            program=program,
+            task=task,
+            args=args,
+            script_candidates=script_candidates,
+            default_building_template=default_building_template,
+            tool_exec=tool_exec,
+            validator=validator,
+            run_labels=run_labels,
+            context_registry=context_registry,
+            client=client,
+            max_attempts=max_attempts,
+        )
     finally:
-        with contextlib.suppress(Exception):
-            tool_exec.shutdown()
+        # Shutdown tool executor if it was created
+        if tool_exec is not None:
+            with contextlib.suppress(Exception):
+                tool_exec.shutdown()
 
         try:
             run_id = run_labels.get("datasmith.run", "unknown")
