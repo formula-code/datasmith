@@ -65,7 +65,7 @@ def gen_run_labels(t: Task, runid: str) -> dict[str, str]:
 def get_docker_client(max_concurrency: int = 10) -> docker.DockerClient:
     """Return an authenticated Docker client or exit with an error."""
     try:
-        return docker.from_env(timeout=1800)
+        return docker.from_env(timeout=1800, max_pool_size=max_concurrency)
     except DockerException as exc:
         sys.exit(f"Could not connect to Docker daemon: {exc}")
 

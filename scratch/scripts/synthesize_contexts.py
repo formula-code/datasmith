@@ -19,16 +19,22 @@ from datasmith.docker.validation import _err_lock
 from datasmith.logging_config import configure_logging
 from datasmith.notebooks.utils import update_cr
 
-configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
+# configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
-# configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
+configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
 # configure_agent_backends(PORTKEY_MODEL_NAME="meta-llama/Llama-3.3-70B-Instruct-Turbo", local=True)
 
 
 # logger = configure_logging(level=10)
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 
-# REPOS_TO_SKIP = {"astropy/astropy"}
+# REPOS_TO_SKIP = {
+#     "astropy/astropy",
+#     "pandas-dev/pandas",
+#     "xdslproject/xdsl",
+#     "pydata/xarray",
+#     "sgkit-dev/sgkit",
+# }
 
 
 def parse_args() -> argparse.Namespace:

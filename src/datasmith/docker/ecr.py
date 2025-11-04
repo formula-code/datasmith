@@ -247,7 +247,7 @@ def publish_images_to_ecr(  # noqa: C901
 
         # Per-thread low-level client for stable streaming pushes
         def _make_api_client() -> Any:
-            return docker.from_env().api
+            return docker.from_env(timeout=1800).api
 
         def _raise_push_failed(err: Optional[str]) -> None:
             raise RuntimeError(f"push did not complete successfully: {err or 'no digest observed'}")
