@@ -640,48 +640,13 @@ def build_once_with_context(
     return res
 
 
-def agent_build_and_validate(
+def final_check(
     task: Task,
     args: argparse.Namespace,
     client: docker.DockerClient,
     machine_defaults: dict,
     context_registry: ContextRegistry,
-    max_attempts: int = 3,
 ) -> dict:
-    """
-    Main entry: iteratively try similar-context build scripts; if all fail,
-    synthesize a script with the agent and iterate. Saves attempt pickles and
-    final pickle on success.
-
-    Args:
-        task: Task to build
-        args: Command-line arguments
-        client: Docker client
-        machine_defaults: Default machine configuration
-        context_registry: Registry of build contexts
-        max_attempts: Maximum number of synthesis attempts
-
-    Returns:
-        Dictionary with build results and attempt history
-    """
-    assert task.sha is not None, "task.sha must be set"  # noqa: S101
-    task_analysis, task = resolve_task(task, bypass_cache=True)
-    if not task_analysis or not task_analysis.get("can_install", False):
-        logger.warning("agent_build_and_validate: task cannot be installed")
-        return {
-            "ok": False,
-            "rc": 1,
-            "stage": "analysis",
-            "owner": task.owner,
-            "repo": task.repo,
-            "sha": task.sha,
-            "image_name": task.with_tag("pkg").get_image_name(),
-            "duration_s": 0.0,
-            "stderr_tail": json.dumps(task_analysis) if task_analysis else "No analysis",
-            "stdout_tail": task_analysis.get("dry_run_log", "") if task_analysis else "",
-            "attempts": [],
-            "context_pickle": None,
-        }
     # if final.pkl exists, try to load it and see if it works.
     final_pickle = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
     if final_pickle.exists():
@@ -753,6 +718,50 @@ def agent_build_and_validate(
             "attempts": [],
             "context_pickle": None,
         }
+
+
+def agent_build_and_validate(
+    task: Task,
+    args: argparse.Namespace,
+    client: docker.DockerClient,
+    machine_defaults: dict,
+    context_registry: ContextRegistry,
+    max_attempts: int = 3,
+) -> dict:
+    """
+    Main entry: iteratively try similar-context build scripts; if all fail,
+    synthesize a script with the agent and iterate. Saves attempt pickles and
+    final pickle on success.
+
+    Args:
+        task: Task to build
+        args: Command-line arguments
+        client: Docker client
+        machine_defaults: Default machine configuration
+        context_registry: Registry of build contexts
+        max_attempts: Maximum number of synthesis attempts
+
+    Returns:
+        Dictionary with build results and attempt history
+    """
+    assert task.sha is not None, "task.sha must be set"  # noqa: S101
+    task_analysis, task = resolve_task(task, bypass_cache=True)
+    if not task_analysis or not task_analysis.get("can_install", False):
+        logger.warning("agent_build_and_validate: task cannot be installed")
+        return {
+            "ok": False,
+            "rc": 1,
+            "stage": "analysis",
+            "owner": task.owner,
+            "repo": task.repo,
+            "sha": task.sha,
+            "image_name": task.with_tag("pkg").get_image_name(),
+            "duration_s": 0.0,
+            "stderr_tail": json.dumps(task_analysis) if task_analysis else "No analysis",
+            "stdout_tail": task_analysis.get("dry_run_log", "") if task_analysis else "",
+            "attempts": [],
+            "context_pickle": None,
+        }
     total_attempts = args.max_similar_candidates + max_attempts - 1
     last_attempt = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-attempt-{total_attempts}.pkl"
     failure = args.ignore_exhausted and (last_attempt.exists())
@@ -764,8 +773,6 @@ def agent_build_and_validate(
             "agent_build_and_validate: detected existing final attempt pickle %s; skipping build",
             str(last_attempt),
         )
-        with open(last_attempt, "rb") as f:
-            ctx = pickle.load(f)
         return {
             "ok": False,
             "rc": 1,

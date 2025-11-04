@@ -22,6 +22,7 @@ from .dependency_resolver import (
     uv_compile,
     uv_compile_from_pyproject,
     uv_dry_run_install,
+    uv_install_real,
 )
 from .git_utils import asv_finder, prepare_repo_checkout
 from .import_analyzer import infer_runtime_from_imports
@@ -219,36 +220,47 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                                 )
 
                                 if candidate_can_install:
-                                    shutil.rmtree(candidate_venv_path, ignore_errors=True)
-                                    pkg_name_out = primary_meta.name
-                                    pkg_version_out = primary_meta.version
-                                    python_version = py_ver
-                                    resolved_dependencies = resolved
-                                    resolution_strategy = strat
-                                    can_install = candidate_can_install
-                                    dry_run_log = candidate_dry_run_log
-                                    excluded_missing_on_pypi = {}
-                                    excluded_exists_incompatible = {}
-                                    excluded_other = {}
-                                    commit_info = {
-                                        "sha": sha,
-                                        "repo_name": repo_name,
-                                        "package_name": pkg_name_out,
-                                        "package_version": pkg_version_out,
-                                        "python_version": python_version,
-                                        "build_command": list(cfg_items.build_commands),
-                                        "install_command": list(cfg_items.install_commands),
-                                        "final_dependencies": list(dict.fromkeys(resolved_dependencies)),
-                                        "can_install": can_install,
-                                        "dry_run_log": dry_run_log,
-                                        "primary_root": primary_root,
-                                        "resolution_strategy": resolution_strategy,
-                                        "excluded_missing_on_pypi": excluded_missing_on_pypi,
-                                        "excluded_exists_incompatible": excluded_exists_incompatible,
-                                        "excluded_other": excluded_other,
-                                    }
+                                    # Preflight a real install to surface sdist build failures
+                                    ok_real, real_log = uv_install_real(
+                                        resolved, python_executable=python_exe.as_posix()
+                                    )
+                                    if ok_real:
+                                        shutil.rmtree(candidate_venv_path, ignore_errors=True)
+                                        pkg_name_out = primary_meta.name
+                                        pkg_version_out = primary_meta.version
+                                        python_version = py_ver
+                                        resolved_dependencies = resolved
+                                        resolution_strategy = strat
+                                        can_install = candidate_can_install
+                                        dry_run_log = candidate_dry_run_log
+                                        excluded_missing_on_pypi = {}
+                                        excluded_exists_incompatible = {}
+                                        excluded_other = {}
+                                        commit_info = {
+                                            "sha": sha,
+                                            "repo_name": repo_name,
+                                            "package_name": pkg_name_out,
+                                            "package_version": pkg_version_out,
+                                            "python_version": python_version,
+                                            "build_command": list(cfg_items.build_commands),
+                                            "install_command": list(cfg_items.install_commands),
+                                            "final_dependencies": list(dict.fromkeys(resolved_dependencies)),
+                                            "can_install": can_install,
+                                            "dry_run_log": dry_run_log,
+                                            "primary_root": primary_root,
+                                            "resolution_strategy": resolution_strategy,
+                                            "excluded_missing_on_pypi": excluded_missing_on_pypi,
+                                            "excluded_exists_incompatible": excluded_exists_incompatible,
+                                            "excluded_other": excluded_other,
+                                        }
 
-                                    return commit_info
+                                        return commit_info
+                                    else:
+                                        # Real install failed; keep searching with next Python/cutoff
+                                        logger.debug(
+                                            f"Preflight install failed for Python {py_ver} (source={source.name}); trying next candidate.\n{real_log[-800:]}"
+                                        )
+                                        shutil.rmtree(candidate_venv_path, ignore_errors=True)
                                 else:
                                     # Clean up venv when dry-run fails to avoid resource accumulation
                                     shutil.rmtree(candidate_venv_path, ignore_errors=True)
@@ -539,11 +551,23 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                     can_install = candidate_can_install
                     dry_run_log = candidate_dry_run_log
 
-                    # Check if we succeeded
+                    # Check if we succeeded; confirm with a real install preflight
                     if can_install:
-                        found_flag = True
-                        logger.debug(f"Success with Python {candidate_version}!")
-                        break
+                        ok_real, real_log = uv_install_real(
+                            candidate_resolved, python_executable=python_exe.as_posix()
+                        )
+                        if ok_real:
+                            found_flag = True
+                            logger.debug(f"Success with Python {candidate_version} (preflight install ok)!")
+                            break
+                        else:
+                            # Treat as failure and try older versions
+                            logger.debug(
+                                f"Dry-run ok but real install failed on Python {candidate_version}; trying older version.\n{real_log[-800:]}"
+                            )
+                            can_install = False
+                            dry_run_log = real_log
+                            # continue loop to try another version
 
                     # Check if this is an ABI/Python version error (should try older Python)
                     log_lower = dry_run_log.lower()

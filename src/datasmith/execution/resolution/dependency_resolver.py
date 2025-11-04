@@ -150,6 +150,32 @@ def uv_dry_run_install(
     return ok, log
 
 
+def uv_install_real(
+    pinned: Iterable[str], *, python_executable: str | None = None
+) -> tuple[bool, str]:
+    """
+    Perform a real install of pinned requirements to surface sdist build failures.
+
+    Args:
+        pinned: Iterable of pinned requirement strings
+        python_executable: Full path to the Python interpreter (e.g., a temp venv)
+
+    Returns:
+        (ok, log) where ok indicates success and log contains combined output
+    """
+    lines = [fix_marker_spacing(x) for x in pinned if x.strip()]
+    if not lines:
+        return True, "No dependencies to install."
+    text = "\n".join(lines) + "\n"
+    args = ["pip", "install", "-r", "-"]
+    if python_executable:
+        args.extend(["--python", python_executable])
+    cp = run_uv(args, input_text=text)
+    ok = cp.returncode == 0
+    log = strip_ansi(cp.stdout.decode() + "\n" + cp.stderr.decode())
+    return ok, log
+
+
 def uv_build_and_read_metadata(project_dir: Path) -> tuple[str | None, str | None, list[str], str | None]:
     """
     Run `uv build` in the project directory, then read Name/Version/Requires-Dist/Requires-Python
