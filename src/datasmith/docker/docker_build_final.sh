@@ -50,4 +50,3 @@ micromamba run -n "$ENV_NAME" uv pip install -q --upgrade coverage || true
 # add asv-benchmarks.txt.
 echo "$ASV_BENCHMARKS" > /workspace/repo/asv-benchmarks.txt
 echo "Docker ASV benchmark finalization complete."
-

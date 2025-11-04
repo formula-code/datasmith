@@ -11,8 +11,6 @@ import asv
 import boto3
 import pandas as pd
 from botocore.exceptions import ClientError
-from docker.client import DockerClient
-
 from datasmith.agents.build import _do_build
 from datasmith.core.models import Task
 from datasmith.docker.context import ContextRegistry, DockerContext, build_base_image
@@ -21,6 +19,7 @@ from datasmith.docker.validation import DockerValidator, ValidationConfig
 from datasmith.execution.resolution.task_utils import resolve_task
 from datasmith.logging_config import configure_logging
 from datasmith.notebooks.utils import update_cr
+from docker.client import DockerClient
 
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 
@@ -165,8 +164,9 @@ def _list_ecr_tags_single_repo(*, region: str, repo_name: str) -> set[str]:
     return tags
 
 
-def filter_tasks_not_on_ecr(tasks: list[Task], *, region: str, repository_mode: str = "single",
-                            single_repo: str = "formulacode/all") -> list[Task]:
+def filter_tasks_not_on_ecr(
+    tasks: list[Task], *, region: str, repository_mode: str = "single", single_repo: str = "formulacode/all"
+) -> list[Task]:
     """Filter out tasks whose target image already exists on ECR.
 
     Currently supports repository_mode="single" (default used by Context.build_and_publish_to_ecr).
@@ -217,11 +217,8 @@ def main(args: argparse.Namespace) -> None:
         context_registry=context_registry,
         machine_defaults=machine_defaults,
         config=ValidationConfig(
-            output_dir=Path("scratch/docker_validation"),
-            build_timeout=3600,
-            run_timeout=3600,
-            tail_chars=4000
-        )
+            output_dir=Path("scratch/docker_validation"), build_timeout=3600, run_timeout=3600, tail_chars=4000
+        ),
     )
 
     logger.info("Building base image...")

@@ -662,9 +662,7 @@ class DockerContext:
             for attempt in range(2):
                 nocache_param = attempt == 1  # Second attempt uses nocache=True
                 if nocache_param:
-                    logger.warning(
-                        "Retrying build for '%s' with nocache=True due to broken cache error", image_name
-                    )
+                    logger.warning("Retrying build for '%s' with nocache=True due to broken cache error", image_name)
 
                 try:
                     stream = api.build(

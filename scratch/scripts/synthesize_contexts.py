@@ -9,7 +9,6 @@ from pathlib import Path
 
 import asv
 import pandas as pd
-
 from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.context_synthesis import agent_build_and_validate
 from datasmith.benchmark.collection import BenchmarkCollection

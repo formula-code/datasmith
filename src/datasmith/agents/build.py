@@ -236,7 +236,7 @@ def _execute_build_plan(
 
     plan: list[tuple[str, str | None]] = [("similar", s) for s in script_candidates] + [
         ("agent", None) for _ in range(max_attempts)
-    ] # pyright: ignore[reportAssignmentType]
+    ]  # pyright: ignore[reportAssignmentType]
 
     for attempt_idx, (source, script_candidate) in enumerate(plan, start=0):
         i = attempt_idx + 1  # 1-based for human-oriented logs
@@ -692,7 +692,7 @@ def agent_build_and_validate(
         with open(final_pickle, "rb") as f:
             old_ctx = pickle.load(f)
             ctx = DockerContext(building_data=old_ctx.building_data)
-        
+
         validator = DockerValidator(
             client=client,
             context_registry=context_registry,
@@ -755,7 +755,7 @@ def agent_build_and_validate(
         }
     total_attempts = args.max_similar_candidates + max_attempts - 1
     last_attempt = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-attempt-{total_attempts}.pkl"
-    failure = (args.ignore_exhausted and (last_attempt.exists()))
+    failure = args.ignore_exhausted and (last_attempt.exists())
     if args.only_exhausted:
         failure = not last_attempt.exists()
     if failure:
@@ -800,7 +800,8 @@ def agent_build_and_validate(
         else:
             _, probe_context = context_registry.get_default(tag="env")
             logger.info(
-                "build_once_with_context: no similar context found; using default for probe with key=%s", str(probe_context)
+                "build_once_with_context: no similar context found; using default for probe with key=%s",
+                str(probe_context),
             )
 
         # Build-package script candidates: try every similar context's building_data first.

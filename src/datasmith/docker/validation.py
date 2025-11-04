@@ -633,7 +633,7 @@ class DockerValidator:
                 stderr_tail=prof_err,
                 stdout_tail=profile_result.stdout,
                 failure_stage="profile",
-                benchmarks=""
+                benchmarks="",
             )
         else:
             # Profile passed - test failures are ignored but logged

@@ -24,10 +24,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm
-
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.report_builder import ReportBuilder
+from tqdm.auto import tqdm
 
 logger = configure_logging(stream=open(Path(__file__).with_suffix(".log"), "w"), level=20)  # noqa: SIM115
 
@@ -142,7 +141,6 @@ def _build_single(rb: ReportBuilder, row: pd.Series) -> dict[str, Any]:  # noqa:
             return v
 
         # pr_dict = {k: _sanitize(v) for k, v in pr_dict.items()}
-
 
         # Ensure nested structures have the expected shapes
         if not isinstance(pr_dict.get("pr_base"), dict):

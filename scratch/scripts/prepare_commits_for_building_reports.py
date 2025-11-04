@@ -18,13 +18,12 @@ from typing import Any
 
 import pandas as pd
 import tiktoken
-from tqdm.auto import tqdm
-
 from datasmith import setup_environment
 from datasmith.execution.filter_commits import crude_perf_filter
 from datasmith.execution.resolution import analyze_commit
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.utils import get_patch_from_diff_url, make_task
+from tqdm.auto import tqdm
 
 logger = configure_logging()
 
