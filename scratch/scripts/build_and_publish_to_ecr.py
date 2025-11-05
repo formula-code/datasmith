@@ -229,8 +229,9 @@ def main(args: argparse.Namespace) -> None:
     # Prepare tasks
     tasks = prepare_tasks(all_states, context_registry)
     # Filter out tasks already present on ECR before building
-    aws_region = os.environ.get("AWS_REGION", "us-east-1")
-    tasks = filter_tasks_not_on_ecr(tasks, region=aws_region)
+    if args.skip_existing:
+        aws_region = os.environ.get("AWS_REGION", "us-east-1")
+        tasks = filter_tasks_not_on_ecr(tasks, region=aws_region)
     logger.info("main: Starting work on %d tasks[%d workers]", len(tasks), args.max_workers)
 
     def build_and_publish_task(task: Task, client: DockerClient) -> tuple[dict, dict]:
@@ -246,6 +247,12 @@ def main(args: argparse.Namespace) -> None:
             timeout_s=3600,
             skip_existing=args.skip_existing,
         )
+        try:
+            container = client.containers.get(task.with_tag("final").get_container_name())
+            container.remove(force=True)
+        except Exception:
+            logger.exception("Error removing container: %s", task.with_tag("final").get_container_name())
+
         # remove the containers.
         try:
             container = client.containers.get(task.with_tag("run").get_container_name())
@@ -253,11 +260,6 @@ def main(args: argparse.Namespace) -> None:
         except Exception:
             logger.exception("Error removing container: %s", task.with_tag("run").get_container_name())
 
-        try:
-            container = client.containers.get(task.with_tag("final").get_container_name())
-            container.remove(force=True)
-        except Exception:
-            logger.exception("Error removing container: %s", task.with_tag("final").get_container_name())
 
         return build_res.__dict__, push_results
 

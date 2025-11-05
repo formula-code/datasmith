@@ -661,7 +661,7 @@ def final_check(
             str(final_pickle),
         )
         with open(final_pickle, "rb") as f:
-            old_ctx = pickle.load(f)
+            old_ctx = pickle.load(f)  # noqa: S301
             ctx = DockerContext(building_data=old_ctx.building_data)
 
         validator = DockerValidator(
@@ -726,7 +726,7 @@ def final_check(
         }
 
 
-def agent_build_and_validate(
+def agent_build_and_validate(  # noqa: C901
     task: Task,
     args: argparse.Namespace,
     client: docker.DockerClient,
@@ -793,6 +793,15 @@ def agent_build_and_validate(
             "attempts": [],
             "context_pickle": str(last_attempt),
         }
+
+    if args.only_final:
+        return final_check(
+            task=task,
+            args=args,
+            client=client,
+            machine_defaults=machine_defaults,
+            context_registry=context_registry,
+        )
 
     run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
     tool_exec = None
