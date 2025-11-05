@@ -611,16 +611,22 @@ def build_once_with_context(
     # Always override BASE_IMAGE to a stable tag to avoid stale digest references
     base_image = os.environ.get("DATASMITH_BASE_IMAGE", "buildpack-deps:jammy")
 
+    build_args = {
+        "REPO_URL": repo_url,
+        "COMMIT_SHA": sha,
+        "ENV_PAYLOAD": task.env_payload if len(task.env_payload) else "{}",
+        "PY_VERSION": task.python_version or "",
+        "BASE_IMAGE": base_image,
+    }
+
+    if len(task.benchmarks):
+        logger.info("build_once_with_context: injecting benchmarks into build args")
+        build_args["BENCHMARKS"] = task.benchmarks
+
     res = context.build_container_streaming(
         client=client,
         image_name=task.get_image_name(),
-        build_args={
-            "REPO_URL": repo_url,
-            "COMMIT_SHA": sha,
-            "ENV_PAYLOAD": task.env_payload if len(task.env_payload) else "{}",
-            "PY_VERSION": task.python_version or "",
-            "BASE_IMAGE": base_image,
-        },
+        build_args=build_args,
         probe=probe,
         force=force,
         timeout_s=timeout_s,

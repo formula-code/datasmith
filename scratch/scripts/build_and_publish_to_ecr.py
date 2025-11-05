@@ -11,6 +11,8 @@ import asv
 import boto3
 import pandas as pd
 from botocore.exceptions import ClientError
+from docker.client import DockerClient
+
 from datasmith.agents.build import _do_build
 from datasmith.core.models import Task
 from datasmith.docker.context import ContextRegistry, DockerContext, build_base_image
@@ -19,7 +21,6 @@ from datasmith.docker.validation import DockerValidator, ValidationConfig
 from datasmith.execution.resolution.task_utils import resolve_task
 from datasmith.logging_config import configure_logging
 from datasmith.notebooks.utils import update_cr
-from docker.client import DockerClient
 
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 
@@ -134,7 +135,7 @@ def _list_ecr_tags_single_repo(*, region: str, repo_name: str) -> set[str]:
     """
     tags: set[str] = set()
     try:
-        session = boto3.session.Session(region_name=region) # pyright: ignore[reportAttributeAccessIssue]
+        session = boto3.session.Session(region_name=region)  # pyright: ignore[reportAttributeAccessIssue]
         ecr = session.client("ecr")
         token: str | None = None
         while True:

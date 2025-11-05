@@ -174,12 +174,11 @@ The `scratch/artifacts/processed/repos_valid.csv` file contains a subset of the 
 Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch (the top 5000 PRs, sorted by popularity). We use the `collect_commits.py` script to do this. The `filter_commits.py` script then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes). The script also limits the number of repositories to a maximum of 350 to ensure we don't burden the GitHub API with too many requests. The scripts can be run as follows:
 
 ```bash
-# $ python scratch/scripts/collect_commits.py \
-#        --dashboards scratch/artifacts/raw/repos_valid.csv \
-#        --outfile    scratch/artifacts/raw/commits_all.jsonl \
-#        --max-pages  50
+$ python scratch/scripts/collect_commits.py \
+       --dashboards scratch/artifacts/raw/repos_valid.csv \
+       --outfile    scratch/artifacts/raw/commits_all.jsonl \
+       --max-pages  50
 
-# Needs to be a parquet file because the filtered commits are often very large.
 $ python scratch/scripts/collect_and_filter_commits.py \
        --filtered-benchmarks-pth scratch/artifacts/pipeflush/repos_valid.csv \
        --output-pth scratch/artifacts/pipeflush/merge_commits_filtered.parquet \
@@ -202,8 +201,8 @@ $ python scratch/scripts/prepare_commits_for_building_reports.py \
        --fetch-patches
 
 $ python scratch/scripts/collect_perf_commits.py \
-       --commits  scratch/artifacts/pipeflush/merge_commits_filtered_with_patch.parquet \
-       --outfile    scratch/artifacts/pipeflush/perfonly_commits_with_patch.parquet \
+       --commits  scratch/artifacts/processed/merge_commits_filtered_numpy_with_patch.parquet \
+       --outfile    scratch/artifacts/processed/perfonly_commits_numpy_with_patch.parquet \
        --max-workers -1
 ```
 

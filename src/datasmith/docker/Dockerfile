@@ -103,8 +103,8 @@ RUN chmod +x /docker_build_final.sh \
          if [ -f "${BENCHMARKS}" ]; then \
            ARG_PATH="${BENCHMARKS}"; \
          else \
-           printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks.csv; \
-           ARG_PATH=/tmp/asv_benchmarks.csv; \
+           printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks.txt; \
+           ARG_PATH=/tmp/asv_benchmarks.txt; \
          fi; \
          /docker_build_final.sh "${ARG_PATH}"; \
        else \
