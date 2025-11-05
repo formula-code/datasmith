@@ -477,7 +477,7 @@ def filter_requirements_for_pypi(  # noqa: C901
         Filtered list of PyPI-installable requirements
     """
     # Import here to avoid circular dependency
-    from .blocklist import get_blocklist
+    from .blocklist import get_blocklist, normalize_package_name
 
     local_names = project_local_names(project_dir)
     own_names = set()
@@ -522,7 +522,9 @@ def filter_requirements_for_pypi(  # noqa: C901
             continue
 
         # Dynamic blocklist (learned from failures)
-        if low in dynamic_blocklist or name in dynamic_blocklist:
+        # Normalize package name according to PEP 503 for proper comparison
+        normalized_name = normalize_package_name(name)
+        if normalized_name in dynamic_blocklist:
             continue
 
         # conda/system/tooling

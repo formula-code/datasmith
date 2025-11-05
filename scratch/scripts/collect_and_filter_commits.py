@@ -121,8 +121,8 @@ def main() -> None:
     commits_meta = commits_meta[commits_meta["has_asv"]]  # Take out all commits that don't have asv installed.
     commits_meta["kind"] = commits_meta["sha"].map(commit2kind)
 
+    commits_meta["repo_name"] = commits_meta["sha"].map(commit2repo)
     commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
-    commits_merged["repo_name"] = commits_merged["sha"].map(commit2repo)
     # commits_merged["pr"] = commits_merged["sha"].map(commit2pr)
     # commit2pr returns a dict that is json-serializable, so we can expand it into multiple columns
     pr_expanded = commits_merged["sha"].map(commit2pr).apply(pd.Series)

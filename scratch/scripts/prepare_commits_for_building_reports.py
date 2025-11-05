@@ -132,6 +132,8 @@ def main():
 
     # Tokenize patches after the early filter to avoid wasted work
     enc = tiktoken.get_encoding(args.token_encoding)
+    # remove special filtered words from patches.
+    commit_df = commit_df[~commit_df["patch"].str.contains("endoftext")]
     patch_tokens = enc.encode_batch(commit_df["patch"].fillna("").tolist(), num_threads=args.max_workers)
     commit_df["n_patch_tokens"] = [len(toks) for toks in patch_tokens]
 

@@ -573,6 +573,8 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                         "python abi tag" in log_lower
                         or "cp3" in dry_run_log
                         or ("no wheels" in log_lower and "python" in log_lower)
+                        or "cannot install on python version" in log_lower
+                        or "only versions" in log_lower
                     )
 
                     if is_abi_error:

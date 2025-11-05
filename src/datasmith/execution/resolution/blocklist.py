@@ -17,6 +17,23 @@ from .constants import GIT_CACHE_DIR
 
 logger = get_logger(__name__)
 
+
+def normalize_package_name(name: str) -> str:
+    """
+    Normalize a package name according to PEP 503.
+
+    Converts to lowercase and replaces runs of [-_.] with a single dash.
+    This ensures that 'numpy_distutils', 'numpy-distutils', and 'numpy.distutils'
+    all normalize to 'numpy-distutils'.
+
+    Args:
+        name: Package name to normalize
+
+    Returns:
+        Normalized package name
+    """
+    return re.sub(r"[-_.]+", "-", name).lower()
+
 # Path to persistent blocklist file
 BLOCKLIST_PATH = GIT_CACHE_DIR / "package_blocklist.json"
 
@@ -85,7 +102,8 @@ def add_to_blocklist(package_name: str) -> bool:
     if not package_name or not package_name.strip():
         return False
 
-    package_name = package_name.strip().lower()
+    # Normalize the package name according to PEP 503
+    package_name = normalize_package_name(package_name.strip())
 
     with _blocklist_lock:
         blocklist = _load_blocklist()
@@ -184,7 +202,7 @@ def remove_package_from_requirements(requirements: list[str], package_name: str)
 
     Args:
         requirements: List of requirement strings
-        package_name: Name of package to remove (case-insensitive)
+        package_name: Name of package to remove (case-insensitive, normalized)
 
     Returns:
         Tuple of (filtered_requirements, was_removed)
@@ -192,7 +210,8 @@ def remove_package_from_requirements(requirements: list[str], package_name: str)
     if not package_name:
         return requirements, False
 
-    package_name_lower = package_name.lower()
+    # Normalize the package name we're looking for
+    package_name_normalized = normalize_package_name(package_name)
     filtered: list[str] = []
     was_removed = False
 
@@ -201,8 +220,9 @@ def remove_package_from_requirements(requirements: list[str], package_name: str)
         # Handle formats: "package>=1.0", "package[extra]", "package ; marker"
         pkg_match = re.match(r"^([a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?)", req)
         if pkg_match:
-            req_pkg_name = pkg_match.group(1).lower()
-            if req_pkg_name == package_name_lower:
+            req_pkg_name = pkg_match.group(1)
+            # Normalize for comparison
+            if normalize_package_name(req_pkg_name) == package_name_normalized:
                 was_removed = True
                 continue
 
