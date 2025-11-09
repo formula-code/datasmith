@@ -9,7 +9,7 @@ ARG PY_VERSION=""
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        jq cmake ninja-build libopenmpi-dev libgeos-dev && \
+        jq cmake ninja-build libopenmpi-dev libgeos-dev pkg-config graphviz libgraphviz-dev && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
@@ -99,14 +99,6 @@ ARG BENCHMARKS=""
 
 COPY docker_build_final.sh /docker_build_final.sh
 RUN chmod +x /docker_build_final.sh \
-    && if [ -n "${BENCHMARKS}" ]; then \
-         if [ -f "${BENCHMARKS}" ]; then \
-           ARG_PATH="${BENCHMARKS}"; \
-         else \
-           printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks.txt; \
-           ARG_PATH=/tmp/asv_benchmarks.txt; \
-         fi; \
-         /docker_build_final.sh "${ARG_PATH}"; \
-       else \
-         echo "BENCHMARKS not provided; skipping finalization step."; \
-       fi
+    && printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks.txt; \
+    ARG_PATH=/tmp/asv_benchmarks.txt; \
+    /docker_build_final.sh "${ARG_PATH}";

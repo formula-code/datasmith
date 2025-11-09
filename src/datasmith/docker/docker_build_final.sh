@@ -44,9 +44,15 @@ eval "$(micromamba shell hook --shell=bash)"
 micromamba activate "$ENV_NAME" || true
 set -u
 
-micromamba run -n "$ENV_NAME" uv pip install git+https://github.com/formulacode/snapshot-tester.git || true
+micromamba run -n "$ENV_NAME" uv pip install git+https://github.com/formula-code/snapshot-tester.git || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade coverage || true
 
 # add asv-benchmarks.txt.
 cat "$ASV_BENCHMARKS" > /workspace/repo/asv-benchmarks.txt
 echo "Docker ASV benchmark finalization complete."
+# Add the location of the benchmarks folder to the asv_build_vars.sh file.
+# We should have the asv.conf.json location as $CONF_NAME
+ABS_BENCHMARK_DIR=$(micromamba run -n "$ENV_NAME" python -c 'import os; from pathlib import Path; import asv; cfg = asv.config.Config.load(Path(os.environ["CONF_NAME"])); print(Path(cfg.benchmark_dir).resolve())')
+
+
+echo "export BENCHMARK_DIR=$ABS_BENCHMARK_DIR" >> /etc/profile.d/asv_build_vars.sh

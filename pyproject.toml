@@ -24,6 +24,7 @@ dependencies = [
     "dspy>=2.6.27",
     "gitpython",
     "jinja2>=3.1.6",
+    "json5",
     "numpy",
     "packaging>=25.0",
     "pandas",
@@ -33,6 +34,7 @@ dependencies = [
     "ruptures",
     "simple-useragent",
     "tiktoken",
+    "tomli",
     "tqdm",
 ]
 

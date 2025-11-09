@@ -24,9 +24,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
+
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.report_builder import ReportBuilder
-from tqdm.auto import tqdm
 
 logger = configure_logging(stream=open(Path(__file__).with_suffix(".log"), "w"), level=20)  # noqa: SIM115
 

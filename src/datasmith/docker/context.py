@@ -48,7 +48,7 @@ def _new_api_client(client: docker.DockerClient, timeout: int = 600) -> docker.A
 
     # Extract max_pool_size from the original client to enable concurrent connections
     try:
-        max_pool_size = client.api.max_pool_size
+        max_pool_size = client.api.max_pool_size  # type: ignore[attr-defined]
     except Exception:
         max_pool_size = 10  # fallback to requests default
 
@@ -209,7 +209,7 @@ class DockerContext:
         repo, target = image_name.rsplit(":", 1)
         return repo, target
 
-    def build_container(
+    def build_container(  # noqa: C901
         self,
         client: docker.DockerClient,
         image_name: str,
@@ -1076,6 +1076,20 @@ class ContextRegistry:
 
             logger.info(f"No context found for key '{user_task}'. Using default context.")
             return self.registry[Task(owner="default", repo="default", sha=None, tag="pkg")]
+
+    def pop(self, key: str | Task) -> DockerContext | None:
+        """Remove a context by key (canonicalized to tag='pkg')."""
+        with self._lock:
+            user_task = self.parse_key(key) if isinstance(key, str) else key
+            canonical = self._canonicalize(user_task)
+            if canonical in self.registry:
+                logger.debug(f"Popping context for key '{user_task}' via '{canonical}'.")
+                return self.registry.pop(canonical)
+            if user_task in self.registry:
+                logger.debug(f"Popping context for key '{user_task}' directly.")
+                return self.registry.pop(user_task)
+            logger.debug(f"No context found to pop for key '{user_task}'.")
+            return None
 
     def get_similar(self, key: str | Task) -> list[tuple[Task, DockerContext]]:  # noqa: C901
         """

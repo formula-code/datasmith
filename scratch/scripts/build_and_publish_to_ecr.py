@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import os
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -11,7 +13,6 @@ import asv
 import boto3
 import pandas as pd
 from botocore.exceptions import ClientError
-from docker.client import DockerClient
 
 from datasmith.agents.build import _do_build
 from datasmith.core.models import Task
@@ -21,6 +22,12 @@ from datasmith.docker.validation import DockerValidator, ValidationConfig
 from datasmith.execution.resolution.task_utils import resolve_task
 from datasmith.logging_config import configure_logging
 from datasmith.notebooks.utils import update_cr
+
+_BUILD_CONCURRENCY = int(os.getenv("BUILD_CONCURRENCY", "24"))
+_PUSH_CONCURRENCY = int(os.getenv("PUSH_CONCURRENCY", "12"))
+_build_sem = threading.Semaphore(_BUILD_CONCURRENCY)
+_push_sem = threading.Semaphore(_PUSH_CONCURRENCY)
+_cr_lock = threading.Lock()  # protect ContextRegistry mutations
 
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 
@@ -82,8 +89,8 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
 
 
 def within_3_months(unix_time: float) -> bool:
-    one_month_ago = datetime.datetime.now() - datetime.timedelta(days=30)
-    return datetime.datetime.fromtimestamp(unix_time) >= one_month_ago
+    three_months_ago = datetime.datetime.now() - datetime.timedelta(days=90)
+    return datetime.datetime.fromtimestamp(unix_time) >= three_months_ago
 
 
 def prepare_tasks(
@@ -198,7 +205,7 @@ def filter_tasks_not_on_ecr(
 def main(args: argparse.Namespace) -> None:
     # Size the Docker HTTP connection pool to our concurrency to avoid
     # adapter/pool starvation when many threads issue Docker API calls.
-    client = get_docker_client(max_concurrency=args.max_workers)
+    client = get_docker_client(max_concurrency=8)
     all_states = process_inputs(args)
     context_registry_pth = args.context_registry
     context_registry = (
@@ -234,39 +241,53 @@ def main(args: argparse.Namespace) -> None:
         tasks = filter_tasks_not_on_ecr(tasks, region=aws_region)
     logger.info("main: Starting work on %d tasks[%d workers]", len(tasks), args.max_workers)
 
-    def build_and_publish_task(task: Task, client: DockerClient) -> tuple[dict, dict]:
-        task_analysis, task = resolve_task(task)
-        logger.debug("Resolved task: %s", task_analysis)
-        run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
-        ctx = context_registry.get(task.with_tag("pkg"))
-        partial_build_res = _do_build(validator, task.with_tag("run"), ctx, run_labels)
-        build_res, push_results = ctx.build_and_publish_to_ecr(
-            client=client,
-            region=os.environ.get("AWS_REGION", "us-east-1"),
-            task=task.with_tag("final").with_benchmarks(partial_build_res.benchmarks),
-            timeout_s=3600,
-            skip_existing=args.skip_existing,
-        )
+    def build_and_publish_task(task: Task) -> tuple[dict, dict]:
+        # Create a fresh client per thread. Small pool is fine; build is mostly daemon-side work.
+        client = get_docker_client(max_concurrency=8)
         try:
-            container = client.containers.get(task.with_tag("final").get_container_name())
-            container.remove(force=True)
-        except Exception:
-            logger.exception("Error removing container: %s", task.with_tag("final").get_container_name())
+            _task_analysis, task = resolve_task(task)
+            run_labels = gen_run_labels(task, runid=uuid.uuid4().hex)
+            ctx = context_registry.get(task.with_tag("pkg"))
 
-        # remove the containers.
-        try:
-            container = client.containers.get(task.with_tag("run").get_container_name())
-            container.remove(force=True)
-        except Exception:
-            logger.exception("Error removing container: %s", task.with_tag("run").get_container_name())
+            with _build_sem:
+                partial_build_res = _do_build(validator, task.with_tag("run"), ctx, run_labels)
 
+            if not partial_build_res.ok:
+                # Only one thread should edit/save the registry at a time
+                if (
+                    "docker_build_pkg" in partial_build_res.stderr_tail
+                    or "docker_build_env" in partial_build_res.stderr_tail
+                ):
+                    with _cr_lock:
+                        context_registry.pop(task.with_tag("pkg"))
+                        context_registry.save_to_file(context_registry_pth)
+                return partial_build_res.__dict__, {}
 
-        return build_res.__dict__, push_results
+            with _push_sem:
+                build_res, push_results = ctx.build_and_publish_to_ecr(
+                    client=client,
+                    region=os.environ.get("AWS_REGION", "us-east-1"),
+                    task=task.with_tag("final").with_benchmarks(partial_build_res.benchmarks),
+                    timeout_s=3600,
+                    skip_existing=args.skip_existing,
+                    force=True,
+                )
+
+            # for tag in ("final", "run"):
+            #     try:
+            #         client.containers.get(task.with_tag(tag).get_container_name()).remove(force=True)
+            #     except Exception:
+            #         logger.exception("Error removing container: %s", task.with_tag(tag).get_container_name())
+
+            return build_res.__dict__, push_results
+        finally:
+            with contextlib.suppress(Exception):
+                client.api.close()
 
     results: list[dict] = []
     if args.max_workers < 1:
         for t in tasks:
-            build_res, push_res = build_and_publish_task(t, client)
+            build_res, push_res = build_and_publish_task(t)
             all_res = {**build_res, **push_res}
             results.append(all_res)
             logger.info("Completed: %s", all_res)
@@ -276,7 +297,6 @@ def main(args: argparse.Namespace) -> None:
                 ex.submit(
                     build_and_publish_task,
                     task=t,
-                    client=client,
                 )
                 for t in tasks
             ]

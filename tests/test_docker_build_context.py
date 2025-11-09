@@ -48,7 +48,7 @@ class TestReadDockerignore:
         dockerignore = tmp_path / ".dockerignore"
         dockerignore.write_text("# This is a comment\n\n*.tmp\n  # Another comment  \n\nbuild/")
 
-        ignores, negates = read_dockerignore(tmp_path)
+        ignores, _negates = read_dockerignore(tmp_path)
 
         assert "*.tmp" in ignores
         assert "build/" in ignores

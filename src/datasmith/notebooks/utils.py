@@ -72,7 +72,7 @@ def update_cr(cr: ContextRegistry) -> ContextRegistry:
         new_v = deepcopy(v)
         new_v.entrypoint_data = DockerContext().entrypoint_data
         new_v.dockerfile_data = DockerContext().dockerfile_data
-        new_v.building_data = patch_dockerfile_data(v.building_data)
+        new_v.building_data = patch_dockerfile_data(v.building_data) or v.building_data
         new_v.env_building_data = DockerContext().env_building_data
         new_v.base_building_data = DockerContext().base_building_data
         new_v.run_building_data = DockerContext().run_building_data

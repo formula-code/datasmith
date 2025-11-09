@@ -379,7 +379,7 @@ async def run_container(  # noqa: C901
 
 
 def log_container_output(container: Container, archive: str = "/output") -> dict[str, str]:
-    stream, stat = container.get_archive(archive)
+    stream, _stat = container.get_archive(archive)
     # 3) Load tar stream into memory and walk files
     buf = io.BytesIO()
     for chunk in stream:

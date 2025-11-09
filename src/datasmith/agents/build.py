@@ -163,8 +163,7 @@ def _handle_success(
         context_registry.register(task.with_tag("pkg"), ctx)
     # Persist registry if configured
     with contextlib.suppress(Exception):
-        if getattr(args, "context_registry", None):
-            context_registry.save_to_file(path=args.context_registry)
+        context_registry.save_to_file(path=args.context_registry)
 
     # Optionally publish to ECR
     if getattr(args, "push_to_ecr", False):
@@ -173,6 +172,9 @@ def _handle_success(
             client=client,
             task=task.with_tag("final").with_benchmarks(build_result.benchmarks),
             region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+            force=True,
+            skip_existing=False,
+            timeout_s=args.build_timeout,
         )
 
     out_dir = cast(Path, args.output_dir)
@@ -724,6 +726,8 @@ def final_check(
             "attempts": [],
             "context_pickle": None,
         }
+    # This should never be reached since the function is only called when args.only_final is True
+    raise RuntimeError("Unreachable code in final_check")
 
 
 def agent_build_and_validate(  # noqa: C901

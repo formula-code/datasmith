@@ -71,8 +71,14 @@ def extract_asv_benchmarks_from_tarballs(output_dir: Path) -> str | None:
     tarballs = glob.glob(tarball_pattern)
 
     if not tarballs:
-        logger.debug("No tar.gz files found in %s", output_dir)
-        return None
+        # if there is a folder available in the tempdir with asv_benchmarks.txt, read from there
+        benchmark_paths = list(Path(output_dir).rglob("asv_benchmarks.txt"))
+        if not benchmark_paths:
+            logger.debug("No benchmark.txt found in tarball or tmpdir %s", output_dir)
+            return None
+        benchmark_path = benchmark_paths[0]
+        logger.debug("Found asv_benchmarks.txt in tmpdir: %s", benchmark_path)
+        return benchmark_path.read_text()
 
     # Extract each tarball and look for asv_benchmarks.txt
     for tarball_path in tarballs:
@@ -190,7 +196,7 @@ class DockerValidator:
             logs_dir.mkdir(parents=True, exist_ok=True)
             (logs_dir / f"{stem}.stdout.log").write_text(stdout or "")
             (logs_dir / f"{stem}.stderr.log").write_text(stderr or "")
-        except Exception:
+        except Exception:  # noqa: S110
             # Best-effort only; never block validation on logging failures
             pass
 
@@ -268,6 +274,7 @@ class DockerValidator:
             timeout = self.config.profile_timeout
 
         container = None
+        container2 = None
         quick_s = self.config.quick_timeout
         start_time = time.time()
 
@@ -275,7 +282,7 @@ class DockerValidator:
         tmpdir_path = Path(tempfile.mkdtemp())
 
         try:
-            cmd = [f'timeout -k 5 {quick_s}s /profile.sh /output/profile ""']
+            cmd = [f"timeout -k 5 {quick_s}s /profile.sh /output/profile"]
             logger.debug("profile:spawn cmd=%s", " ".join(cmd))
 
             # Mount the temporary directory to /output in the container
@@ -288,19 +295,42 @@ class DockerValidator:
                 volumes={str(tmpdir_path): {"bind": "/output", "mode": "rw"}},
             )
 
-            rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
+            # Use a generous Docker client wait timeout so we don't raise a
+            # client-side ReadTimeout before the in-container GNU timeout
+            # (quick_s) fires. Default profile_timeout is 600s.
+            rc = container.wait(timeout=timeout).get("StatusCode", 1)
             # Collect stdout and stderr separately
             stdout_full = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
             stderr_full = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
             duration = time.time() - start_time
+            # Persist raw logs
+            self._save_logs(f"{image_name.replace(':', '_')}-profile", stdout_full, stderr_full)
+
+            if rc != 0 and (rc != 124):
+                logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(stderr_full, 240))
+                return ProfileValidationResult(
+                    ok=False,
+                    stdout=_preview(stdout_full, self.config.failure_preview_chars),
+                    stderr=_preview(stderr_full, self.config.failure_preview_chars),
+                    duration_s=duration,
+                    benchmarks="",
+                )
+
+            cmd2 = [f'timeout -k 5 {quick_s * 4}s /profile.sh /output/profile "--bench just-discover"']
+            container2 = self.client.containers.run(
+                image=image_name,
+                command=cmd2,
+                entrypoint=["/bin/bash", "-lc"],
+                detach=True,
+                labels=run_labels,
+                volumes={str(tmpdir_path): {"bind": "/output", "mode": "rw"}},
+            )
+            container2.wait(timeout=timeout).get("StatusCode", 1)
 
             # Extract benchmark results from tarballs
             benchmark_content = extract_asv_benchmarks_from_tarballs(tmpdir_path)
             if benchmark_content:
                 logger.debug("Successfully extracted asv_benchmarks.txt (%d chars)", len(benchmark_content))
-
-            # Persist raw logs
-            self._save_logs(f"{image_name.replace(':', '_')}-profile", stdout_full, stderr_full)
 
             if rc == 124:
                 logger.debug("profile:timeout rc=124 treated as success")
@@ -308,16 +338,6 @@ class DockerValidator:
                     ok=True,
                     stdout=f"(timeout after {quick_s}s; treated as success)",
                     stderr=_preview(stderr_full, self.config.success_preview_chars),
-                    duration_s=duration,
-                    benchmarks=benchmark_content or "",
-                )
-
-            if rc != 0:
-                logger.debug("profile:failed rc=%s stderr_tail: %s", rc, _preview(stderr_full, 240))
-                return ProfileValidationResult(
-                    ok=False,
-                    stdout=_preview(stdout_full, self.config.failure_preview_chars),
-                    stderr=_preview(stderr_full, self.config.failure_preview_chars),
                     duration_s=duration,
                     benchmarks=benchmark_content or "",
                 )
@@ -344,10 +364,13 @@ class DockerValidator:
                 if container is not None:
                     container.remove(force=True)
 
+                if container2 is not None:
+                    container2.remove(force=True)
+
             # Clean up temp directory using our safe removal function
             _safe_rmtree(tmpdir_path, self.client)
 
-    def validate_tests(
+    def validate_tests(  # noqa: C901
         self,
         image_name: str,
         repo_name: str,
@@ -387,7 +410,11 @@ class DockerValidator:
                 volumes={str(tmp_logs_path): {"bind": "/logs", "mode": "rw"}},
             )
 
-            rc = container.wait(timeout=quick_s + 10).get("StatusCode", 1)
+            # Use the provided (or default) test timeout for the client wait,
+            # rather than a short quick_s-based window, to avoid premature
+            # client-side ReadTimeouts while the in-container timeout governs
+            # the actual execution duration.
+            rc = container.wait(timeout=timeout).get("StatusCode", 1)
             # Collect stdout and stderr separately
             stdout_full = (container.logs(stdout=True, stderr=False) or b"").decode("utf-8", errors="replace")
             stderr_full = (container.logs(stdout=False, stderr=True) or b"").decode("utf-8", errors="replace")
@@ -435,7 +462,7 @@ class DockerValidator:
                             parts.extend(lr.splitlines()[:80])
                     structured_summary = "\n".join(parts)
                     structured_errors_text = "\n".join([f"ERROR {e.get('nodeid', '<unknown>')}" for e in errs[:10]])
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
             if rc == 124:
@@ -701,7 +728,6 @@ class DockerValidator:
 
 def _preview(s: str, n: int = 160) -> str:
     """Return the last n characters of a string, replacing newlines with \\n."""
-    bottom_s = n
     s = s or ""
     if n <= 0:
         return ""

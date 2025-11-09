@@ -34,6 +34,7 @@ def normalize_package_name(name: str) -> str:
     """
     return re.sub(r"[-_.]+", "-", name).lower()
 
+
 # Path to persistent blocklist file
 BLOCKLIST_PATH = GIT_CACHE_DIR / "package_blocklist.json"
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import asv
 import pandas as pd
+
 from datasmith.agents.config import configure_agent_backends
 from datasmith.agents.context_synthesis import agent_build_and_validate
 from datasmith.benchmark.collection import BenchmarkCollection
@@ -29,6 +30,9 @@ configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3
 logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 
 # REPOS_TO_SKIP = {
+#     "dwavesystems/dimod",
+#     "napari/napari",
+#     "django-components/django-components",
 #     "astropy/astropy",
 #     "pandas-dev/pandas",
 #     "xdslproject/xdsl",
@@ -156,6 +160,17 @@ def within_3_months(unix_time: float) -> bool:
     return datetime.datetime.fromtimestamp(unix_time) >= three_months_ago
 
 
+def last_attempt_exists(args: argparse.Namespace, task: Task) -> bool:
+    total_attempts = args.max_similar_candidates + args.max_attempts - 1
+    last_attempt = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-attempt-{total_attempts}.pkl"
+    return last_attempt.exists()
+
+
+def final_exists(args: argparse.Namespace, task: Task) -> bool:
+    last_attempt = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
+    return last_attempt.exists()
+
+
 def prepare_tasks(
     all_states: dict[tuple[str, str], set[tuple[str, float, str]]],
     limit_per_repo: int,
@@ -179,7 +194,7 @@ def prepare_tasks(
     return all_tasks
 
 
-def main(args: argparse.Namespace) -> None:
+def main(args: argparse.Namespace) -> None:  # noqa: C901
     # Size the Docker HTTP connection pool to our concurrency to avoid
     # adapter/pool starvation when many threads issue Docker API calls.
     client = get_docker_client(max_concurrency=args.max_workers)
@@ -204,6 +219,10 @@ def main(args: argparse.Namespace) -> None:
 
     # Prepare tasks
     tasks = prepare_tasks(all_states, args.limit_per_repo, context_registry)
+    if args.ignore_exhausted:
+        tasks = [t for t in tasks if not last_attempt_exists(args, t)]
+    if args.only_final:
+        tasks = [t for t in tasks if final_exists(args, t)]
 
     (args.output_dir / "results").mkdir(parents=True, exist_ok=True)
     # reset outputs
