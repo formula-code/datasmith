@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import asv
+import tiktoken
 
 from datasmith.core.models import Task
 from datasmith.docker.context import ContextRegistry, DockerContext
@@ -30,6 +31,9 @@ This module separates loading from verification:
       * context registry update
       * ECR publish of the final image
 """
+
+encoder = tiktoken.get_encoding("cl100k_base")
+logger = configure_logging(stream=open(Path(__file__).with_suffix(".log"), "a", encoding="utf-8"))  # noqa: SIM115
 
 
 def load(task_dir: Path) -> tuple[Task, DockerContext]:
@@ -67,19 +71,29 @@ def _load_config() -> dict:
     raise FileNotFoundError("Expected dataset/config.json or dataset/config.py to exist.")
 
 
+def preview(logs: str, max_tokens: int = 30_000) -> str:
+    n_tokens = encoder.encode(logs)
+    if len(n_tokens) <= max_tokens:
+        return logs
+    first_part = encoder.decode(n_tokens[: max_tokens // 10])
+    last_part = encoder.decode(n_tokens[-(max_tokens - max_tokens // 10) :])
+    return f"{first_part}\n\n...[truncated]...\n\n{last_part}"
+
+
 def _format_failure(stage: str, stdout: str | None, stderr: str | None, rc: int | None = None) -> str:
     """Format a human-readable failure message with full traces."""
     parts: list[str] = [f"Verification failed during '{stage}' stage."]
     if rc is not None:
         parts.append(f"Return code: {rc}")
     parts.append("\n--- STDOUT ---")
-    parts.append(stdout or "(no stdout)")
+    parts.append(preview(stdout or "(no stdout)"))
     parts.append("\n--- STDERR ---")
-    parts.append(stderr or "(no stderr)")
+    parts.append(preview(stderr or "(no stderr)"))
     return "\n".join(parts)
 
 
 def verify_task_with_context(
+    task_dir: Path,
     task: Task,
     context: DockerContext,
     *,
@@ -159,6 +173,7 @@ def verify_task_with_context(
     if not tests_res.ok:
         msg = _format_failure("tests", tests_res.stdout, tests_res.stderr)
         log.error("%s", msg)
+        (Path(task_dir) / "test_failure.log").write_text(msg)
         raise RuntimeError(msg)
 
     log.info("Profile and tests both passed for %s", run_task.get_image_name())
@@ -230,6 +245,7 @@ def main() -> None:
 
     try:
         ecr_ref = verify_task_with_context(
+            task_dir=args.task,
             task=task,
             context=context,
             config=config,
@@ -239,12 +255,20 @@ def main() -> None:
             logger=logger,
         )
     except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+        logger.info(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
 
     final_task = task.with_tag("final")
     local_ref = final_task.get_image_name()
-    print(f"SUCCESS: {local_ref} -> {ecr_ref}")
+    logger.info(f"SUCCESS: {local_ref} -> {ecr_ref}")
+
+    # write success info to a file in the task dir
+    success_info = {
+        "local_image": local_ref,
+        "ecr_image": ecr_ref,
+    }
+    success_path = args.task / "verification_success.json"
+    success_path.write_text(json.dumps(success_info, indent=2))
 
 
 if __name__ == "__main__":

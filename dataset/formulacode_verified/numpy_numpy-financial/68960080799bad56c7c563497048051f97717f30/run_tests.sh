@@ -792,6 +792,7 @@ if __name__ == "__main__":
 EOF
 
 if [ ! -f jinja_patch_plugin_pandas.py ]; then
+    pip install -U jinja2
     cat > jinja_patch_plugin_pandas.py << 'PY'
 import importlib, pathlib, jinja2
 
