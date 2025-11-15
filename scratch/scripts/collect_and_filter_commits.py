@@ -123,7 +123,6 @@ def main() -> None:
 
     commits_meta["repo_name"] = commits_meta["sha"].map(commit2repo)
     commits_merged = commits_meta[commits_meta["files_changed"].apply(has_core_file)].reset_index(drop=True)
-    # commits_merged["pr"] = commits_merged["sha"].map(commit2pr)
     # commit2pr returns a dict that is json-serializable, so we can expand it into multiple columns
     pr_expanded = commits_merged["sha"].map(commit2pr).apply(pd.Series)
     commits_merged = pd.concat([commits_merged, pr_expanded.add_prefix("pr_")], axis=1)
@@ -134,7 +133,7 @@ def main() -> None:
     # save as a parquet file
     commits_merged.to_parquet(out_path, index=False)
 
-    logger.info("✔ Wrote %s rows → %s", len(commits_merged), out_path)
+    logger.info("[DONE] Wrote %s rows -> %s", len(commits_merged), out_path)
 
 
 if __name__ == "__main__":

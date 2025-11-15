@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-"""
-Collect performance-related commits using the new ReportBuilder workflow.
-
-This updates the older classifier-only script to:
-  - read the prepared parquet with PR + patch data (see prepare_commits_for_building_reports.py)
-  - run ReportBuilder to detect performance PRs (optionally with classification)
-  - emit a parquet filtered to performance commits and a companion .txt of SHAs
-
-Example:
-  uv run python scratch/scripts/collect_perf_commits.py \
-    --commits scratch/artifacts/pipeflush/merge_commits_filtered_with_patch.parquet \
-    --outfile scratch/artifacts/pipeflush/perf_commits
-"""
-
 from __future__ import annotations
 
 import argparse

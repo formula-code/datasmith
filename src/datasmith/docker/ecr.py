@@ -11,6 +11,7 @@ import docker
 from botocore.exceptions import ClientError
 from docker.errors import APIError
 
+from datasmith.core.models import Task
 from datasmith.logging_config import configure_logging
 
 logger = configure_logging()
@@ -218,7 +219,7 @@ def publish_images_to_ecr(  # noqa: C901
             if tags is not None and tag in tags:
                 if verbose:
                     with lock:
-                        logger.debug(f"✔ {ecr_ref} already exists — skipping")
+                        logger.debug(f"[DONE] {ecr_ref} already exists — skipping")
                 with lock:
                     results[local_ref] = ecr_ref
                 return
@@ -275,7 +276,7 @@ def publish_images_to_ecr(  # noqa: C901
                             existing_tags_cache.setdefault(repo_name, set()).add(tag)
                         results[local_ref] = ecr_ref
                         if verbose and digest:
-                            logger.debug(f"✔ pushed {ecr_ref} ({digest})")
+                            logger.debug(f"[DONE] pushed {ecr_ref} ({digest})")
                     return
 
                 # Stream completed without success — if it looks like auth, refresh and retry
@@ -329,3 +330,93 @@ def publish_images_to_ecr(  # noqa: C901
                 logger.debug(f"  • {k}: {v}")
 
     return results
+
+
+def _encode_ecr_tag_from_local(local_ref: str) -> str:
+    """Encode a local image reference into the tag used for single-repo ECR publishing.
+
+    Mirrors datasmith.docker.ecr._encode_tag_from_local used when repository_mode="single":
+      - local_ref like "repo[:tag]" becomes "repo--tag" (slashes in either side become "__").
+      - If the result exceeds 128 chars, add an 8-char hash suffix (not expected here).
+    """
+    import hashlib
+
+    if ":" in local_ref and "/" not in local_ref.split(":", 1)[1]:
+        repo, tag = local_ref.rsplit(":", 1)
+    else:
+        repo, tag = local_ref, "latest"
+    base = repo.replace("/", "__")
+    tag_enc = tag.replace("/", "__").replace(":", "--")
+    composed = f"{base}--{tag_enc}"
+    if len(composed) <= 128:
+        return composed
+    h = hashlib.sha256(composed.encode()).hexdigest()[:8]
+    trimmed = composed[-(128 - 10) :]
+    return f"{trimmed}--{h}"
+
+
+def _list_ecr_tags_single_repo(*, region: str, repo_name: str) -> set[str]:
+    """Return the set of existing image tags for an ECR repository.
+
+    Safe: returns empty set on missing repo or auth issues. Logs warnings instead of raising.
+    """
+    tags: set[str] = set()
+    try:
+        session = boto3.session.Session(region_name=region)  # pyright: ignore[reportAttributeAccessIssue]
+        ecr = session.client("ecr")
+        token: str | None = None
+        while True:
+            kwargs = {"repositoryName": repo_name, "maxResults": 1000}
+            if token:
+                kwargs["nextToken"] = token
+            try:
+                resp = ecr.list_images(**kwargs)
+            except ClientError as ce:  # pragma: no cover - network dependent
+                code = ce.response.get("Error", {}).get("Code")
+                if code == "RepositoryNotFoundException":
+                    logger.info("ECR repository %s not found; assuming no existing images.", repo_name)
+                    return set()
+                logger.warning("Failed to list ECR images for %s: %s", repo_name, ce)
+                return set()
+            for img in resp.get("imageIds", []):
+                t = img.get("imageTag")
+                if t:
+                    tags.add(str(t))
+            token = resp.get("nextToken")
+            if not token:
+                break
+    except Exception as exc:  # pragma: no cover - network dependent
+        logger.warning("Could not query ECR for existing tags (region=%s, repo=%s): %s", region, repo_name, exc)
+        return set()
+    return tags
+
+
+def filter_tasks_not_on_ecr(
+    tasks: list[Task], *, region: str, repository_mode: str = "single", single_repo: str = "formulacode/all"
+) -> list[Task]:
+    """Filter out tasks whose target image already exists on ECR.
+
+    Currently supports repository_mode="single" (default used by Context.build_and_publish_to_ecr).
+    """
+    if repository_mode != "single":
+        # Fallback: if we don't know how tags are computed, don't filter
+        logger.warning("ECR pre-filter only supports repository_mode='single'; skipping filter.")
+        return tasks
+
+    existing_tags = _list_ecr_tags_single_repo(region=region, repo_name=single_repo)
+    if not existing_tags:
+        return tasks
+
+    filtered: list[Task] = []
+    skipped = 0
+    for t in tasks:
+        local_ref = t.with_tag("final").get_image_name()  # e.g., owner-repo-sha:final
+        enc_tag = _encode_ecr_tag_from_local(local_ref)  # e.g., owner-repo-sha--final
+        if enc_tag in existing_tags:
+            skipped += 1
+            logger.info("Skipping %s (already on ECR as %s:%s)", local_ref, single_repo, enc_tag)
+            continue
+        filtered.append(t)
+    if skipped:
+        logger.info("Filtered out %d/%d tasks already on ECR", skipped, len(tasks))
+    return filtered

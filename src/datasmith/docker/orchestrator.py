@@ -472,7 +472,7 @@ async def orchestrate(
             status = "OK" if rc == 0 else f"FAIL({rc})"
             files = files if rc == 0 else {}
             print(status, files)
-            logger.info("■ cores=%s → %s", cpuset_str, status)
+            logger.info("■ cores=%s -> %s", cpuset_str, status)
             if len(files):
                 interim_path = Path(os.environ["CACHE_LOCATION"]).parent / "interim"
                 os.makedirs(interim_path, exist_ok=True)

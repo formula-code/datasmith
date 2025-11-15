@@ -28,7 +28,7 @@ KNOWN_COMMIT_URLS = {
     "joblib": "https://github.com/joblib/joblib/",
     "sklearn": "https://github.com/scikit-learn/scikit-learn/",
     "astropy": "https://github.com/astropy/astropy/",
-    # --- dist→GitHub owner/repo ---
+    # --- dist->GitHub owner/repo ---
     "opencv-python": "https://github.com/opencv/opencv-python/",
     "pyyaml": "https://github.com/yaml/pyyaml/",
     "beautifulsoup4": None,  # No official GitHub; canonical home is crummy.com / Launchpad
@@ -177,14 +177,14 @@ def _make_joiner(base_url: str) -> Callable[..., str]:
     """
     parsed = urllib.parse.urlparse(base_url)
 
-    # Remote dashboard → keep using urljoin
+    # Remote dashboard -> keep using urljoin
     if parsed.scheme:  # 'http', 'https', 'file', etc.
         # urljoin needs a trailing slash on the base or it will strip the
         # last path component on the first call.
         base_url_with_slash = base_url + "/" if not base_url.endswith("/") else base_url
         return lambda *parts: urllib.parse.urljoin(base_url_with_slash, "/".join(parts))
 
-    # Local dashboard folder → fall back to os.path.join / pathlib
+    # Local dashboard folder -> fall back to os.path.join / pathlib
     base_path = Path(base_url).expanduser().resolve()
     return lambda *parts: str(base_path.joinpath(*parts))
 

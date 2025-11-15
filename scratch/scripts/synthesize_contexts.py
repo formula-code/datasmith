@@ -142,9 +142,12 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
                 logger.debug("Skipping %s commit %s as it does not have ASV benchmarks.", repo_name, sha)
                 continue
             owner, repo = repo_name.split("/")
-            commit_date_unix: float = (
-                0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
-            )
+            if isinstance(row["date"], pd.Timestamp):
+                commit_date_unix = row["date"].to_pydatetime().timestamp()
+            else:
+                commit_date_unix: float = (
+                    0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
+                )
             env_payload = row.get("env_payload", "")
             if (owner, repo) not in all_states:
                 all_states[(owner, repo)] = [(sha, commit_date_unix, env_payload)]

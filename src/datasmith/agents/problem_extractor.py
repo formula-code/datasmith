@@ -131,7 +131,7 @@ class ProblemExtractorSignature(dspy.Signature):
 
     ORDER & DEDUP
     -------------
-    - Preserve original chronological order (top → bottom).
+    - Preserve original chronological order (top -> bottom).
     - When de-duplicating near-identical spans, keep the FIRST occurrence and preserve order.
 
     FORMAT & STYLE

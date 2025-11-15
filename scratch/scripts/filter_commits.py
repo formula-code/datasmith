@@ -172,7 +172,7 @@ def main() -> None:
     # commits.to_csv(out_path, index=False)
     commits_merged.to_json(out_path, orient="records", lines=True, index=False)
 
-    logger.info("✔ Wrote %s rows → %s", len(commits), out_path)
+    logger.info("[DONE] Wrote %s rows -> %s", len(commits), out_path)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""
-Process and filter commit data, analyze installability, enrich with PR/base info,
-optionally fetch patches from the GitHub diff API, and save a cleaned parquet.
-
-This is a conversion of an IPython notebook to a CLI script. Notable changes:
-- Replaced Dask Delayed with concurrent.futures.ThreadPoolExecutor + tqdm.
-- Added argparse for inputs/outputs and tuning.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -141,80 +131,6 @@ def main():
     logger.info(f"[filter] pre-filter shape: {commit_df.shape}")
     filtered_df = crude_perf_filter(commit_df, filter_repos=args.filter_repos)
     logger.info(f"[filter] post-filter shape: {filtered_df.shape}")
-    # Filter out commits with missing issues in the timeline.
-    # Early filter: keep only PRs that mention at least one issue in their timeline.
-    # Uses GitHub issues timeline API via issue_timeline(owner, repo, pr_number).
-    # Run in parallel to reduce wall-clock latency.
-    # if {"repo_name", "pr_number"}.issubset(filtered_df.columns):
-    #     # Build unique (repo_name, pr_number) keys
-    #     # key_series = filtered_df[["repo_name", "pr_number"]].dropna()
-    #     # Ensure pr_number are ints
-    #     # try:
-    #     #     key_series = key_series.assign(pr_number=key_series["pr_number"].astype(int))
-    #     # except Exception:
-    #     #     key_series = key_series[pd.to_numeric(key_series["pr_number"], errors="coerce").notna()]
-    #     #     key_series = key_series.assign(pr_number=key_series["pr_number"].astype(int))
-
-    #     # unique_keys: list[tuple[str, int]] = list({(r, int(n)) for r, n in key_series.itertuples(index=False)})
-
-    #     def _mentions_any_issue(row: pd.Series) -> tuple[tuple[str, int], bool]:
-    #         repo_full, pr_num = row["repo_name"], row["pr_number"]
-    #         try:
-    #             owner, repo = repo_full.split("/", 1)
-    #         except ValueError:
-    #             return (repo_full, pr_num), False
-    #         try:
-    #             timeline_events = issue_timeline(owner, repo, int(pr_num))
-    #             comments_events = list(filter(lambda x: not _is_bot_comment(x), issue_comments(owner, repo, int(pr_num))))
-    #             events = timeline_events + comments_events
-    #         except Exception:
-    #             return (repo_full, pr_num), False
-    #         if not events:
-    #             return (repo_full, pr_num), False
-    #         for ev in events:
-    #             src = (ev or {}).get("source") or {}
-    #             src_issue = src.get("issue") or {}
-    #             src_type = src.get("type")
-    #             # Prefer explicit type tag; fallback to absence of pull_request marker
-    #             if src_type == "issue":
-    #                 return (repo_full, pr_num), True
-    #             if isinstance(src_issue, dict) and "pull_request" not in src_issue:
-    #                 return (repo_full, pr_num), True
-    #         return (repo_full, pr_num), False
-
-    #     logger.info("[filter] Checking PR timelines for issue mentions across %d unique PRs", len(unique_keys))
-    #     results: list[Any] = _thread_map(
-    #         _mentions_any_issue,
-    #         filtered_df.iterrows(),
-    #         max_workers=args.max_workers,
-    #         desc="Checking PR timelines",
-    #         show_progress=True,
-    #     )
-    #     valid_results: list[tuple[tuple[str, int], bool]] = [
-    #         r for r in results if isinstance(r, tuple) and len(r) == 2 and isinstance(r[0], tuple)
-    #     ]
-    #     mention_map: dict[tuple[str, int], bool] = dict(valid_results)
-    #     # Map back to rows; rows without a mapping are treated as False
-    #     def _row_keep(row: pd.Series) -> bool:
-    #         try:
-    #             key = (row["repo_name"], int(row["pr_number"]))
-    #         except Exception:
-    #             return False
-    #         return mention_map.get(key, False)
-
-    #     pre_shape = filtered_df.shape
-    #     filtered_df = filtered_df[filtered_df.apply(_row_keep, axis=1)].reset_index(drop=True)
-    #     logger.info(
-    #         "[filter] PRs mentioning at least one issue in timeline: %d → %d",
-    #         pre_shape[0],
-    #         filtered_df.shape[0],
-    #     )
-    # else:
-    #     logger.warning(
-    #         "[filter] Missing 'repo_name' or 'pr_number' columns; skipping issue timeline filter. Columns: %s",
-    #         list(filtered_df.columns),
-    #     )
-
     filtered_df_path = args.input.parent / f"{args.input.stem}_2.parquet"
     filtered_df_path.parent.mkdir(parents=True, exist_ok=True)
     filtered_df.to_parquet(filtered_df_path, index=False)

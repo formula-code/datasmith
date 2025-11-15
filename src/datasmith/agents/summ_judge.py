@@ -83,7 +83,7 @@ class ClassifySignature(dspy.Signature):
        - Set category = "Uncategorized".
        - Set reason = "Not a performance commit" (briefly explain why, e.g., CI/lints/docs/refactor).
        - Set difficulty = "n/a".
-       - Set confidence high (≥80) if clearly non-perf; else lower.
+       - Set confidence level.
 
     3) If performance-related:
        - Identify the primary technique and choose the most specific category from below.
@@ -95,16 +95,16 @@ class ClassifySignature(dspy.Signature):
     - Renames, terminology cleanups, comment changes, reorganizing modules only.
 
     Category mapping (when performance-related):
-    - Algorithm improvements: complexity reduction; switching to faster algorithms → Category 1
-    - Data structures/layout: sets/maps/indices; memory layout tuning → Category 2
-    - System-level: C/Rust/NumPy/Vectorized/Native extensions → Category 3
-    - Approximation/heuristics: trade accuracy for speed → Category 4
-    - Parallelization: threads/processes/parallel algorithms (not just async I/O) → Category 5
-    - Cache & reuse: memoization, LRU, materialized results → Category 7
-    - Scheduling: batching, lazy, throttling → Category 8
-    - Database/storage: indices, query tuning, partitioning → Category 10
-    - Micro-optimizations: hot path tweaks, guards, inlining → Category 11
-    - I/O/latency hiding: async/non-blocking, overlap I/O/compute → Category 12
+    - Algorithm improvements: complexity reduction; switching to faster algorithms -> Category 1
+    - Data structures/layout: sets/maps/indices; memory layout tuning -> Category 2
+    - System-level: C/Rust/NumPy/Vectorized/Native extensions -> Category 3
+    - Approximation/heuristics: trade accuracy for speed -> Category 4
+    - Parallelization: threads/processes/parallel algorithms (not just async I/O) -> Category 5
+    - Cache & reuse: memoization, LRU, materialized results -> Category 7
+    - Scheduling: batching, lazy, throttling -> Category 8
+    - Database/storage: indices, query tuning, partitioning -> Category 10
+    - Micro-optimizations: hot path tweaks, guards, inlining -> Category 11
+    - I/O/latency hiding: async/non-blocking, overlap I/O/compute -> Category 12
 
     Difficulty (when performance-related):
     - easy: localized change (<50 lines), minimal risk
