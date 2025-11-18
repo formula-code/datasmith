@@ -76,11 +76,40 @@ def make_docker_file_tool(container: PersistentContainer) -> Callable:
 
     docker_file_tool = DockerFileTool(container)
 
-    def file_operations(operation: str, path: str, content: str | None = None, max_bytes: int | None = 256000) -> str:
+    def file_operations(
+        operation: str,
+        path: str,
+        old_content: str | None = None,
+        new_content: str | None = None,
+        max_bytes: int | None = 256000,
+    ) -> str:
+        """
+        Perform file operations inside the Docker container.
+
+        IMPORTANT: You can only EDIT existing files, NOT create new ones.
+
+        Operations:
+        - read: Read a file's contents
+        - edit: Replace old_content with new_content in an existing file
+        - list: List files in a directory
+        """
         kwargs: dict[str, Any] = {}
         if max_bytes is not None:
             kwargs["max_bytes"] = max_bytes
-        return docker_file_tool(operation, path, content, **kwargs)
+        return docker_file_tool(operation, path, old_content=old_content, new_content=new_content, **kwargs)
+
+    # Some tooling stacks (e.g., agent frameworks) inspect __annotations__
+    # and assume simple types with a __name__ attribute. Override the
+    # runtime annotations to avoid PEP 604 unions causing issues,
+    # while keeping source-level hints for static analysis.
+    file_operations.__annotations__ = {
+        "operation": str,
+        "path": str,
+        "old_content": str,
+        "new_content": str,
+        "max_bytes": int,
+        "return": str,
+    }
 
     file_operations.__name__ = "file_operations"
     return file_operations
@@ -180,25 +209,39 @@ class DockerFileTool:
                 return f"File at {path} is empty or could not be read"
             return f"--- Contents of {path} ---\n{content}"
 
-    def write_file(self, path: str, content: str) -> str:
+    def edit_file(self, path: str, old_content: str, new_content: str) -> str:
         """
-        Write content to a file inside the container.
+        Edit an EXISTING file inside the container by replacing old_content with new_content.
 
-        If the path is in a bind-mounted directory, changes persist to the host.
+        IMPORTANT: You can only EDIT existing files, NOT create new ones.
+        Use heredocs in shell scripts if you need temporary files.
 
         Args:
-            path: Absolute path to the file inside the container
-            content: Content to write
+            path: Absolute path to the EXISTING file inside the container
+            old_content: The exact content to replace (must exist in the file)
+            new_content: The new content to replace with
 
         Returns:
             Success or error message
         """
         try:
-            self.container.write_file(path, content)
-            return f"✓ Successfully wrote {len(content)} bytes to {path}"
+            # First check if file exists by trying to read it
+            try:
+                current_content = self.container.read_file(path, max_bytes=10_000_000)  # Read up to 10MB
+            except Exception:
+                return f"✗ Error: File {path} does not exist. You can only EDIT existing files, not create new ones. Use heredocs in shell scripts for temporary files."
+
+            # Check if old_content exists in the file
+            if old_content not in current_content:
+                return f"✗ Error: old_content not found in {path}. The content you want to replace doesn't exist. Read the file first to see its current contents."
+
+            # Replace the content (only first occurrence)
+            updated_content = current_content.replace(old_content, new_content, 1)
+            self.container.write_file(path, updated_content)
+            return f"✓ Successfully edited {path} - replaced {len(old_content)} bytes with {len(new_content)} bytes"
         except Exception as e:
-            logger.error(f"Error writing to {path}: {e}", exc_info=True)
-            return f"✗ Error writing to {path}: {e}"
+            logger.error(f"Error editing {path}: {e}", exc_info=True)
+            return f"✗ Error editing {path}: {e}"
 
     def list_files(self, directory: str, max_depth: int = 3, max_items: int = 500) -> str:
         """
@@ -224,14 +267,24 @@ class DockerFileTool:
             total_msg = f" (showing {max_items} of {len(files)})" if len(files) > max_items else ""
             return f"--- Files in {directory}{total_msg} ---\n{file_list}"
 
-    def __call__(self, operation: str, path: str, content: str | None = None, **kwargs: Any) -> str:
+    def __call__(
+        self,
+        operation: str,
+        path: str,
+        content: str | None = None,
+        old_content: str | None = None,
+        new_content: str | None = None,
+        **kwargs: Any,
+    ) -> str:
         """
         Allow the tool to be called with operation dispatch.
 
         Args:
-            operation: One of 'read', 'write', 'list'
+            operation: One of 'read', 'edit', 'list'
             path: File or directory path
-            content: Content for write operations
+            content: Deprecated - use old_content/new_content instead
+            old_content: For 'edit' - content to replace
+            new_content: For 'edit' - content to replace with
             **kwargs: Additional arguments
 
         Returns:
@@ -239,11 +292,13 @@ class DockerFileTool:
         """
         if operation == "read":
             return self.read_file(path, **kwargs)
-        elif operation == "write":
-            if content is None:
-                return "Error: 'content' required for write operation"
-            return self.write_file(path, content)
+        elif operation == "edit":
+            if old_content is None or new_content is None:
+                return "Error: Both 'old_content' and 'new_content' required for edit operation"
+            return self.edit_file(path, old_content, new_content)
         elif operation == "list":
             return self.list_files(path, **kwargs)
+        elif operation == "write":
+            return "Error: 'write' operation is deprecated. Use 'edit' to modify existing files. You cannot create new files - only edit existing ones."
         else:
-            return f"Error: Unknown operation '{operation}'. Use 'read', 'write', or 'list'."
+            return f"Error: Unknown operation '{operation}'. Use 'read', 'edit', or 'list'."

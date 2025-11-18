@@ -122,7 +122,7 @@ def verify_task_with_context(
         client=docker_client,
         docker_ctx=context,
         task=run_task,
-        force=False,
+        force=True,
         run_id=run_id,
     )
 
@@ -264,12 +264,9 @@ def main() -> None:
             for future in futures:
                 try:
                     ecr_ref = future.result()
-                    final_task = task.with_tag("final")
-                    local_ref = final_task.get_image_name()
-                    logger.info(f"SUCCESS: {local_ref} -> {ecr_ref}")
+                    logger.info(f"SUCCESS: {ecr_ref}")
                     # write success info to a file in the task dir
                     success_info = {
-                        "local_image": local_ref,
                         "ecr_image": ecr_ref,
                     }
                     all_successes.append(success_info)

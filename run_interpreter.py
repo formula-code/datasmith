@@ -81,10 +81,27 @@ def create_build_agent(task_dir: pathlib.Path) -> tuple[Agent, PersistentContain
         show_tool_calls=True,
         instructions=[
             "You are debugging pytest test failures inside a Docker container.",
-            "Files in /agent_workspace are bind-mounted from the host and changes persist.",
-            "The main script to modify is /agent_workspace/run_tests.sh",
-            "Use run_shell to execute commands and file_operations to read/write files.",
-            "After modifying run_tests.sh, copy it to /run_tests.sh before testing.",
+            "",
+            "CRITICAL RULES:",
+            "1. You can ONLY edit existing files in /agent_workspace - you CANNOT create new files",
+            "2. Do NOT create random test files like 'simple_test.py' or 'test.sh' - they will be ignored",
+            "3. You MUST run verify.py to test your changes: uv run python dataset/verify.py --task <task_path>",
+            "4. If you need temporary files, use heredocs inside the shell scripts",
+            "",
+            "FILES YOU CAN EDIT (in /agent_workspace):",
+            "- run_tests.sh: The main pytest execution script",
+            "- docker_build_run.sh: Docker build script for the 'run' stage",
+            "- Other existing files in /agent_workspace",
+            "",
+            "WORKFLOW:",
+            "1. Read /agent_workspace/run_tests.sh to understand current setup",
+            "2. Edit the file using file_operations(operation='edit', path=..., old_content=..., new_content=...)",
+            "3. Copy your changes: cp /agent_workspace/run_tests.sh /run_tests.sh",
+            "4. TEST with verify.py: run_shell('cd /workspace/repo && uv run python dataset/verify.py --task <path>')",
+            "5. Read the verify.py output to see if tests pass",
+            "6. If tests fail, repeat from step 2",
+            "",
+            "Remember: The ONLY way to know if your changes work is to run verify.py!",
         ],
     )
 
@@ -106,6 +123,7 @@ def safe_print_response(agent: Agent, prompt: str, max_retries: int = 3):
 
 def run_directory(task_dir: pathlib.Path):
     """Run agent on a single task directory with Docker container tools."""
+    print(f"[INFO] Running directory: {task_dir}")
     container = None
     try:
         agent, container = create_build_agent(task_dir)
@@ -116,28 +134,39 @@ def run_directory(task_dir: pathlib.Path):
             error_log = (task_dir / "test_failure.log").read_text()
 
         msg = f"""
-You are debugging pytest failures for task: {task_dir.name}
+TASK: Fix pytest failures for {task_dir.name}
 
-The test script is located at /agent_workspace/run_tests.sh (bind-mounted from host).
-Changes you make to files in /agent_workspace will persist to the host machine.
+Task directory: {task_dir.resolve()}
+Test script: /agent_workspace/run_tests.sh (bind-mounted from host)
 
-Here is the last error message:
+Previous failure (if any):
 ```
 {error_log or "No error log found - this is the first run."}
 ```
 
-Your task:
-1. Read /agent_workspace/run_tests.sh to understand the current test setup
-2. Run the tests to see what fails: bash /agent_workspace/run_tests.sh
-3. Analyze the errors and modify /agent_workspace/run_tests.sh to fix them. Do not destroy existing logic. Always run the full test suite.
-4. Copy your fixed version to /run_tests.sh so verify.py can use it: cp /agent_workspace/run_tests.sh /run_tests.sh
-5. Re-run tests until they pass
+CRITICAL: You MUST run verify.py to test your changes!
+verify.py command: uv run python dataset/verify.py --task {task_dir.resolve()}
 
-You have access to:
-- docker_shell: Execute commands inside the container
-- docker_file: Read, write, and list files inside the container
+WORKFLOW (you MUST follow this):
+1. Read /agent_workspace/run_tests.sh to understand the test setup
+2. Make SMALL edits to fix issues (use file_operations with operation='edit')
+3. Copy to container: run_shell('cp /agent_workspace/run_tests.sh /run_tests.sh')
+4. RUN VERIFY.PY: run_shell('cd /workspace/repo && timeout 600 uv run python dataset/verify.py --task {task_dir.resolve()}')
+5. Read verify.py output - if tests fail, repeat from step 2
 
-Remember: Files in /agent_workspace are bind-mounted and changes persist to the host!
+RULES:
+- You can ONLY edit existing files in /agent_workspace (run_tests.sh, docker_build_run.sh, etc.)
+- Do NOT create new files like simple_test.py or test.sh
+- Use heredocs inside scripts if you need temporary files
+- NEVER skip tests or reduce test coverage
+- The ONLY way to verify success is running verify.py
+
+Files you can edit:
+- /agent_workspace/run_tests.sh: pytest execution
+- /agent_workspace/docker_build_run.sh: system packages, python deps
+- /agent_workspace/docker_build_env.sh: environment setup
+
+Changes persist to host automatically via bind mount.
 """.strip()
 
         print("=" * 80)
