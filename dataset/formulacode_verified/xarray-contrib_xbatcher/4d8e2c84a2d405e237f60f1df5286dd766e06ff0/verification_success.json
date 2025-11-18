@@ -1,0 +1,7 @@
+{
+  "ok": true,
+  "stdout": "Summary: {\"error\": 0, \"failed\": 0, \"passed\": 41, \"rerun\": 0, \"skipped\": 0, \"total\": 41, \"warnings\": 504, \"xfailed\": 0, \"xpassed\": 0}",
+  "stderr": "+ cd /workspace/repo\n+ set +ux\n+ '[' 0 -gt 0 ']'\n+ '[' -n 4d\n... [truncated] ...\nt==8.4.2\n + pytest==9.0.1\n+ python formulacode_testrunner.py --all --base 4d8e2c84a2d405e237f60f1df5286dd766e06ff0 --extra-args '-p jinja_patch_plugin_pandas'\n+ exit 0\n",
+  "duration_s": 22.36775279045105,
+  "suite_name": "NOT USED"
+}

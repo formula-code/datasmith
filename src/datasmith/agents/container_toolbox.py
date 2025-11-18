@@ -49,6 +49,7 @@ class PersistentContainer:
         env: dict | None = None,
         keepalive_cmd: str | None = None,
         run_labels: dict[str, str] | None = None,
+        volumes: dict | None = None,
     ) -> None:
         self.client = client
         self.image = image
@@ -58,6 +59,7 @@ class PersistentContainer:
         self.keepalive_cmd = keepalive_cmd or _DEFAULT_KEEPALIVE_CMD
         self.container: Container | None = None
         self.run_labels = run_labels or {}
+        self.volumes = volumes or {}
 
     def is_running(self) -> bool:
         if not self.container:
@@ -85,6 +87,7 @@ class PersistentContainer:
                 labels=self.run_labels,
                 auto_remove=True,  # auto-remove on stop
                 network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
+                volumes=self.volumes if self.volumes else None,
             )
         except APIError as e:
             if "Conflict" in str(e) and self.name:
@@ -118,6 +121,7 @@ class PersistentContainer:
                     labels=self.run_labels,
                     auto_remove=True,  # auto-remove on stop
                     network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
+                    volumes=self.volumes if self.volumes else None,
                 )
             else:
                 raise
@@ -227,6 +231,38 @@ class PersistentContainer:
         """).strip()
         res = self.exec(f'python - << "PY"\n{py}\nPY', timeout_s=20)
         return res.stdout
+
+    def write_file(self, path: str, content: str) -> None:
+        """Write content to a file inside the container using put_archive."""
+        import io
+        import tarfile
+
+        if not self.is_running():
+            self.start()
+        if not self.container:
+            raise RuntimeError("container not started")
+
+        if self.container.id is None:
+            raise RuntimeError("Container ID should be set for a running container")
+
+        # Normalize path and get directory/filename
+        path = path.lstrip("/")
+        dirname = "/" + os.path.dirname(path) if os.path.dirname(path) else "/"
+        basename = os.path.basename(path)
+
+        # Create in-memory tar archive with the file
+        tar_stream = io.BytesIO()
+        content_bytes = content.encode("utf-8")
+
+        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+            tarinfo = tarfile.TarInfo(name=basename)
+            tarinfo.size = len(content_bytes)
+            tarinfo.mode = 0o644
+            tar.addfile(tarinfo, io.BytesIO(content_bytes))
+
+        # Upload to container
+        tar_stream.seek(0)
+        self.client.api.put_archive(self.container.id, dirname, tar_stream.getvalue())
 
     def infer_repo_facts(self, repo_root: str) -> dict:  # noqa: C901
         """

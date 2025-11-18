@@ -7,6 +7,12 @@ FROM ${BASE_IMAGE} AS base
 # Re-declare any ARGs you need in this stage
 ARG PY_VERSION=""
 
+# Install Rust using rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Configure the PATH for Rust tools
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         jq cmake ninja-build libopenmpi-dev libgeos-dev pkg-config graphviz libgraphviz-dev && \

@@ -6,7 +6,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import asv
 import tiktoken
@@ -71,7 +70,7 @@ def _load_config() -> dict:
     raise FileNotFoundError("Expected dataset/config.json or dataset/config.py to exist.")
 
 
-def preview(logs: str, max_tokens: int = 30_000) -> str:
+def preview(logs: str, max_tokens: int = 16_000) -> str:
     n_tokens = encoder.encode(logs)
     if len(n_tokens) <= max_tokens:
         return logs
@@ -99,7 +98,6 @@ def verify_task_with_context(
     *,
     config: dict,
     context_registry: ContextRegistry,
-    docker_client: Any,
     registry_path: Path,
     logger: logging.Logger | None = None,
 ) -> str:
@@ -108,6 +106,7 @@ def verify_task_with_context(
     Returns the ECR image reference on success.
     Raises RuntimeError with a detailed message on failure.
     """
+    docker_client = get_docker_client()
     log = logger or configure_logging()
 
     if task.sha is None:
@@ -123,7 +122,7 @@ def verify_task_with_context(
         client=docker_client,
         docker_ctx=context,
         task=run_task,
-        force=True,
+        force=False,
         run_id=run_id,
     )
 
@@ -181,7 +180,7 @@ def verify_task_with_context(
     # Register the now-verified context under the pkg tag and persist registry.
     with context_registry.get_lock():
         context_registry.register(task.with_tag("pkg"), context)
-        context_registry.save_to_file(registry_path)
+    context_registry.save_to_file(registry_path)
     log.info("Registered verified context for %s and saved registry to %s", task, registry_path)
 
     # Build and publish the final image to ECR (force push).
@@ -238,7 +237,49 @@ def main() -> None:
     context_registry = update_cr(context_registry)
 
     logger = configure_logging()
-    docker_client = get_docker_client()
+
+    if args.task.name == "formulacode_verified" or (args.task.parent.name == "formulacode_verified"):
+        globbed = args.task.rglob("*/*") if args.task.name == "formulacode_verified" else args.task.glob("*")
+        tasks = [d for d in globbed if d.is_dir() and ((d / "verification_success.json").exists())]
+        all_successes = []
+        success_pth = args.task / "all_verification_successes.jsonl"
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = []
+            for task_dir in tasks:
+                task, context = load(task_dir)
+                futures.append(
+                    executor.submit(
+                        verify_task_with_context,
+                        task_dir=task_dir,
+                        task=task,
+                        context=context,
+                        config=config,
+                        context_registry=context_registry,
+                        registry_path=registry_path,
+                        logger=logger,
+                    )
+                )
+            for future in futures:
+                try:
+                    ecr_ref = future.result()
+                    final_task = task.with_tag("final")
+                    local_ref = final_task.get_image_name()
+                    logger.info(f"SUCCESS: {local_ref} -> {ecr_ref}")
+                    # write success info to a file in the task dir
+                    success_info = {
+                        "local_image": local_ref,
+                        "ecr_image": ecr_ref,
+                    }
+                    all_successes.append(success_info)
+                    with success_pth.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(success_info) + "\n")
+
+                except Exception:
+                    logger.exception(f"Verification failed for task in {args.task}")
+
+        return
 
     task, context = load(args.task)
     logger.info("Loaded task %s from %s", task, args.task)
@@ -250,7 +291,6 @@ def main() -> None:
             context=context,
             config=config,
             context_registry=context_registry,
-            docker_client=docker_client,
             registry_path=registry_path,
             logger=logger,
         )

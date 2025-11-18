@@ -1,14 +1,24 @@
 import concurrent.futures
+import logging
 import pathlib
 import re
+import sys
+from pathlib import Path
 
 from openai import InternalServerError  # or openai.APIError in older clients
 from phi.agent import Agent
 from phi.model.openai.like import OpenAILike
-from phi.tools.file import FileTools
-from phi.tools.shell import ShellTools
+
+# Add datasmith to path if needed
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from dataset.verify import load
+from datasmith.agents.container_toolbox import PersistentContainer
+from datasmith.agents.tools.interpreter_tools import make_docker_file_tool, make_docker_shell_tool
+from datasmith.docker.orchestrator import build_repo_sha_image, get_docker_client
 
 MSG_HEADER_RE = re.compile("unexpected tokens remaining in message header")
+logger = logging.getLogger(__name__)
 
 # 1) Model: OpenAI-compatible server (safe to share across threads)
 model = OpenAILike(
@@ -17,29 +27,68 @@ model = OpenAILike(
     base_url="http://0.0.0.0:30001/v1",
 )
 
+# 2) Docker client (shared across threads)
+docker_client = get_docker_client()
 
-def create_build_agent() -> Agent:
-    """Create a fresh Agent + tools for a single directory run."""
-    shell_tools = ShellTools()
-    file_tools = FileTools(
-        base_dir=".",  # repo root
-        read_files=True,
-        save_files=True,
-        list_files=True,
+
+def create_build_agent(task_dir: pathlib.Path) -> tuple[Agent, PersistentContainer]:
+    """
+    Create a fresh Agent + Docker container tools for a single directory run.
+
+    Returns:
+        Tuple of (Agent, PersistentContainer) - container must be stopped when done
+    """
+    # Load task and context from directory
+    task, context = load(task_dir)
+
+    # Build Docker image for this task
+    run_task = task.with_tag("run")
+    run_id = f"interpreter-{task.sha}"
+
+    logger.info(f"Building image for {task_dir.name}...")
+    build_res = build_repo_sha_image(
+        client=docker_client,
+        docker_ctx=context,
+        task=run_task,
+        force=False,  # Use cached if available
+        run_id=run_id,
     )
 
-    return Agent(
+    if not build_res.ok:
+        raise RuntimeError(f"Docker build failed: {build_res.stderr_tail}")
+
+    # Create persistent container with bind mount
+    container = PersistentContainer(
+        client=docker_client,
+        image=run_task.get_image_name(),
+        name=f"interpreter-{task.repo.replace('/', '-')}-{task.sha[:8]}",
+        workdir="/workspace/repo",
+        run_labels={"datasmith.run": run_id, "datasmith.type": "interpreter"},
+        volumes={str(task_dir.absolute()): {"bind": "/agent_workspace", "mode": "rw"}},
+    )
+
+    # Start container (will handle name conflicts automatically)
+    container.start()
+
+    # Create Docker-aware tools (function-based for phi Agent compatibility)
+    shell_tool = make_docker_shell_tool(container)
+    file_tool = make_docker_file_tool(container)
+
+    agent = Agent(
         name="build-fixing-bot",
         model=model,
-        tools=[shell_tools, file_tools],
+        tools=[shell_tool, file_tool],
         show_tool_calls=True,
         instructions=[
-            "You are an assistant that debugs Docker build scripts.",
-            "verify.py will only pass when both asv and pytest work properly.",
-            "I can guarantee that asv already runs and the package compiles.",
-            "your job is to figure out what pytest needs; install it; and rerun.",
+            "You are debugging pytest test failures inside a Docker container.",
+            "Files in /agent_workspace are bind-mounted from the host and changes persist.",
+            "The main script to modify is /agent_workspace/run_tests.sh",
+            "Use run_shell to execute commands and file_operations to read/write files.",
+            "After modifying run_tests.sh, copy it to /run_tests.sh before testing.",
         ],
     )
+
+    return agent, container
 
 
 def safe_print_response(agent: Agent, prompt: str, max_retries: int = 3):
@@ -56,53 +105,71 @@ def safe_print_response(agent: Agent, prompt: str, max_retries: int = 3):
 
 
 def run_directory(task_dir: pathlib.Path):
-    agent = create_build_agent()
+    """Run agent on a single task directory with Docker container tools."""
+    container = None
+    try:
+        agent, container = create_build_agent(task_dir)
 
-    msg = f"""
-Task directory: {task_dir.resolve()}
-You may only edit these files in the directory:
- - docker_build_run.sh (if you need to install dependencies)
- - run_tests.sh (if you need to modify how/where pytest is called)
+        # Read error log if it exists
+        error_log = ""
+        if (task_dir / "test_failure.log").exists():
+            error_log = (task_dir / "test_failure.log").read_text()
 
-Steps you MUST follow:
+        msg = f"""
+You are debugging pytest failures for task: {task_dir.name}
 
-1. Use ShellTools to run the verification command from repo root (Give it 36000 seconds max):
-    The verification command runs the full build process in Docker and then runs profile and tests:
+The test script is located at /agent_workspace/run_tests.sh (bind-mounted from host).
+Changes you make to files in /agent_workspace will persist to the host machine.
 
-   uv run python dataset/verify.py --task "{task_dir.resolve()}"
+Here is the last error message:
+```
+{error_log or "No error log found - this is the first run."}
+```
 
-2. Use FileTools (list_files/read_file/save_file) scoped to this path
-   to inspect and edit ONLY files under: {task_dir.resolve()}. Always read a file before editing it.
+Your task:
+1. Read /agent_workspace/run_tests.sh to understand the current test setup
+2. Run the tests to see what fails: bash /agent_workspace/run_tests.sh
+3. Analyze the errors and modify /agent_workspace/run_tests.sh to fix them. Do not destroy existing logic. Always run the full test suite.
+4. Copy your fixed version to /run_tests.sh so verify.py can use it: cp /agent_workspace/run_tests.sh /run_tests.sh
+5. Re-run tests until they pass
 
-3. If tests fail:
-   - Read the error output.
-   - Decide which files in {task_dir.resolve()} to edit.
-   - Read the files you want to edit.
-   - Decide what changes to make.
-   - Edit them with FileTools.
-   - Re-run the verify command.
+You have access to:
+- docker_shell: Execute commands inside the container
+- docker_file: Read, write, and list files inside the container
 
-4. Give up after 10 failed verification attempts for this directory.
+Remember: Files in /agent_workspace are bind-mounted and changes persist to the host!
+""".strip()
 
-5. At the end, print:
-   - The commands you executed.
-   - A bullet list of files you changed and a short summary of each change.
-"""
-    print("=" * 80)
-    print(f"[START] Running task dir: {task_dir}")
-    for _ in range(5):
-        try:
-            safe_print_response(agent, msg)
-            print(f"[DONE ] Task dir: {task_dir}")
-            break
-        except Exception as e:
-            print(f"[ERROR] Task dir: {task_dir} -> {e}")
+        print("=" * 80)
+        print(f"[START] Running task dir: {task_dir}")
+
+        for attempt in range(5):
+            try:
+                safe_print_response(agent, msg)
+                print(f"[DONE ] Task dir: {task_dir}")
+                break
+            except Exception as e:
+                print(f"[ERROR] Attempt {attempt + 1}/5 for {task_dir}: {e}")
+                if attempt == 4:
+                    raise
+
+    finally:
+        # Always cleanup container
+        if container:
+            try:
+                container.stop()
+                logger.info(f"Stopped container for {task_dir}")
+            except Exception:
+                logger.exception(f"Error stopping container for {task_dir}")
 
 
 if __name__ == "__main__":
     root = pathlib.Path("dataset/formulacode_verified")
-    task_dirs = [d for d in root.rglob("*pandas*/*") if d.is_dir()]
-
+    task_dirs = [
+        d
+        for d in root.rglob("*/*")
+        if d.is_dir() and (d / "test_failure.log").exists() and (not (d / "validation_success.json").exists())
+    ]
     max_workers = 16
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_dir = {pool.submit(run_directory, d): d for d in task_dirs}
