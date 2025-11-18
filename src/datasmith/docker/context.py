@@ -20,6 +20,7 @@ from docker.errors import APIError, DockerException, ImageNotFound
 
 from datasmith.core.models.build import BuildResult
 from datasmith.core.models.task import Task
+from datasmith.docker.ecr import publish_images_to_ecr
 from datasmith.docker.s3_cache_manager import S3DockerCacheManager
 from datasmith.execution.utils import _get_commit_info
 from datasmith.logging_config import get_logger
@@ -31,6 +32,9 @@ def _new_api_client(client: docker.DockerClient, timeout: int = 600) -> docker.A
     """
     Create a fresh low-level APIClient for each build to avoid connection
     contention across threads and to align API versions with the daemon.
+
+    Critically, this preserves max_pool_size from the parent client to enable
+    true parallelism across multiple threads.
     """
     try:
         base_url = client.api.base_url  # e.g., 'unix://var/run/docker.sock'
@@ -42,10 +46,16 @@ def _new_api_client(client: docker.DockerClient, timeout: int = 600) -> docker.A
     except Exception:
         api_version = "auto"
 
+    # Extract max_pool_size from the original client to enable concurrent connections
     try:
-        return docker.APIClient(base_url=base_url, version=api_version, timeout=timeout)
+        max_pool_size = client.api.max_pool_size  # type: ignore[attr-defined]
     except Exception:
-        return docker.APIClient(version="auto", timeout=timeout)
+        max_pool_size = 10  # fallback to requests default
+
+    try:
+        return docker.APIClient(base_url=base_url, version=api_version, timeout=timeout, max_pool_size=max_pool_size)
+    except Exception:
+        return docker.APIClient(version="auto", timeout=timeout, max_pool_size=max_pool_size)
 
 
 def build_base_image(client: docker.DockerClient, ctx: DockerContext) -> str:
@@ -81,6 +91,7 @@ class DockerContext:
     default_docker_build_base_loc = Path(__file__).parent / "docker_build_base.sh"
     default_docker_build_run_loc = Path(__file__).parent / "docker_build_run.sh"
     default_docker_build_env_loc = Path(__file__).parent / "docker_build_env.sh"
+    default_docker_build_final_loc = Path(__file__).parent / "docker_build_final.sh"
     default_docker_build_pkg_loc = Path(__file__).parent / "docker_build_pkg.sh"
     default_profile_loc = Path(__file__).parent / "profile.sh"
     default_run_tests_loc = Path(__file__).parent / "run_tests.sh"
@@ -92,7 +103,9 @@ class DockerContext:
     building_data: str
     profile_data: str
     run_tests_data: str
-    test_commands: str
+    final_building_data: str
+    # Unix timestamp (float) when this context was registered. Defaults to 0.0
+    created_unix: float
 
     # Cached, reproducible tar bytes per (probe: bool). Immutable => thread-safe reuse.
     _context_tar_bytes: dict[bool, bytes]
@@ -107,7 +120,9 @@ class DockerContext:
         run_building_data: str | None = None,
         profile_data: str | None = None,
         run_tests_data: str | None = None,
-        test_commands: str | None = None,
+        final_building_data: str | None = None,
+        *,
+        created_unix: float | None = None,
     ) -> None:
         if dockerfile_data is None:
             dockerfile_data = self.default_dockerfile_loc.read_text()
@@ -125,8 +140,8 @@ class DockerContext:
             profile_data = self.default_profile_loc.read_text()
         if run_tests_data is None:
             run_tests_data = self.default_run_tests_loc.read_text()
-        if test_commands is None:
-            test_commands = ""
+        if final_building_data is None:
+            final_building_data = self.default_docker_build_final_loc.read_text()
 
         self.dockerfile_data = dockerfile_data
         self.entrypoint_data = entrypoint_data
@@ -136,9 +151,12 @@ class DockerContext:
         self.building_data = building_data
         self.profile_data = profile_data
         self.run_tests_data = run_tests_data
-        self.test_commands = test_commands
+
+        # By default, creation time is unix epoch 0.0. It is updated on registry registration.
+        self.created_unix = 0.0 if created_unix is None else float(created_unix)
 
         self._context_tar_bytes = {}
+        self.final_building_data = final_building_data
 
     @staticmethod
     def add_bytes(tar: tarfile.TarFile, name: str, data: bytes, mode: int = 0o644) -> None:
@@ -165,6 +183,7 @@ class DockerContext:
             DockerContext.add_bytes(tar, "docker_build_base.sh", self.base_building_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "profile.sh", self.profile_data.encode("utf-8"), mode=0o755)
             DockerContext.add_bytes(tar, "run_tests.sh", self.run_tests_data.encode("utf-8"), mode=0o755)
+            DockerContext.add_bytes(tar, "docker_build_final.sh", self.final_building_data.encode("utf-8"), mode=0o755)
             if not probe:
                 DockerContext.add_bytes(tar, "docker_build_pkg.sh", self.building_data.encode("utf-8"), mode=0o755)
         buf.seek(0)
@@ -190,7 +209,7 @@ class DockerContext:
         repo, target = image_name.rsplit(":", 1)
         return repo, target
 
-    def build_container(
+    def build_container(  # noqa: C901
         self,
         client: docker.DockerClient,
         image_name: str,
@@ -225,9 +244,25 @@ class DockerContext:
             if len(build_args) == 0 and not probe:
                 raise RuntimeError(f"Docker image '{image_name}' not found and no REPO_URL provided for build.")
 
+            # Ensure all build-arg values are strings (Docker expects strings)
+            safe_build_args: dict[str, str] = {}
+            for k, v in (build_args or {}).items():
+                if isinstance(v, str):
+                    safe_build_args[k] = v
+                elif isinstance(v, (bytes, bytearray)):
+                    try:
+                        safe_build_args[k] = v.decode("utf-8", errors="replace")
+                    except Exception:
+                        safe_build_args[k] = str(v)
+                else:
+                    try:
+                        safe_build_args[k] = json.dumps(v)
+                    except Exception:
+                        safe_build_args[k] = str(v)
+
             # Pretty log
-            if len(build_args):
-                build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in build_args.items())
+            if len(safe_build_args):
+                build_args_str = " --build-arg ".join(f"{k}={v}" for k, v in safe_build_args.items())
                 logger.info("$ docker build -t %s . --build-arg %s", image_name, build_args_str)
             else:
                 logger.info("$ docker build -t %s .", image_name)
@@ -238,7 +273,7 @@ class DockerContext:
                     fileobj=io.BytesIO(self._get_context_bytes(probe=probe)),
                     custom_context=True,
                     tag=image_name,
-                    buildargs={**build_args, "BUILDKIT_INLINE_CACHE": "1"},
+                    buildargs={**safe_build_args, "BUILDKIT_INLINE_CACHE": "1"},
                     target=target,
                     rm=True,
                     labels=run_labels,
@@ -593,9 +628,26 @@ class DockerContext:
                 build_args = {**build_args, "BASE_IMAGE": base_image}
                 cache_from = [base_image]
 
+            # Ensure all build-arg values are strings (Docker expects strings)
+            safe_build_args: dict[str, str] = {}
+            for k, v in (build_args or {}).items():
+                if isinstance(v, str):
+                    safe_build_args[k] = v
+                elif isinstance(v, (bytes, bytearray)):
+                    try:
+                        safe_build_args[k] = v.decode("utf-8", errors="replace")
+                    except Exception:
+                        safe_build_args[k] = str(v)
+                else:
+                    # JSON-encode non-string args (e.g., lists/dicts)
+                    try:
+                        safe_build_args[k] = json.dumps(v)
+                    except Exception:
+                        safe_build_args[k] = str(v)
+
             # Pretty log line for transparency
-            if build_args:
-                build_args_str = " --build-arg ".join(f"{k}='{v}'" for k, v in build_args.items())
+            if safe_build_args:
+                build_args_str = " --build-arg ".join(f"{k}='{v}'" for k, v in safe_build_args.items())
                 logger.info("$ docker build -t %s . --build-arg %s", image_name, build_args_str)
             else:
                 logger.info("$ docker build -t %s .", image_name)
@@ -613,80 +665,103 @@ class DockerContext:
                 cache_from_list.append(s3_cache_mount)
                 logger.info("Using S3 cache: %s", s3_cache_mount)
 
-            try:
-                stream = api.build(
-                    fileobj=io.BytesIO(tar_bytes),
-                    custom_context=True,
-                    tag=image_name,
-                    buildargs={**build_args, "BUILDKIT_INLINE_CACHE": "1"},
-                    decode=True,
-                    rm=True,
-                    pull=pull,
-                    target=target,
-                    labels=run_labels,
-                    network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
-                    cache_from=cache_from_list,
-                )
-            except DockerException:
-                logger.exception("Failed to initiate build for '%s'", image_name)
-                success = False
-                return BuildResult(
-                    ok=False,
-                    image_name=image_name,
-                    image_id=None,
-                    rc=1,
-                    duration_s=time.time() - t0,
-                    stderr_tail="",
-                    stdout_tail="",
-                )
-
+            # Try build with cache first, then retry without cache if we hit a broken cache error
             error_seen = None
-            try:
-                for chunk in stream:
-                    # Time check first
-                    if time.time() - t0 > timeout_s:
-                        error_seen = "[TIMEOUT]"
-                        break
+            duration = 0.0
+            for attempt in range(2):
+                nocache_param = attempt == 1  # Second attempt uses nocache=True
+                if nocache_param:
+                    logger.warning("Retrying build for '%s' with nocache=True due to broken cache error", image_name)
 
-                    # Typical keys: 'stream', 'status', 'error', 'errorDetail'
-                    if chunk.get("stream"):
-                        s = str(chunk["stream"])
-                        if s:
-                            stdout_buf.append(s)
-                    if "status" in chunk and chunk.get("progressDetail"):
-                        s = str(chunk.get("status", ""))
-                        if s:
-                            stdout_buf.append(s + "\n")
-                    if "error" in chunk or "errorDetail" in chunk:
-                        error_seen = (chunk.get("error") or str(chunk.get("errorDetail", ""))).strip()
-                        if error_seen:
-                            stderr_buf.append(error_seen + "\n")
-                        break
-            except APIError:
-                logger.exception("Build stream APIError for '%s'", image_name)
-                error_seen = "APIError during build"
-
-            duration = time.time() - t0
-
-            # Success path: ensure image exists
-            if not error_seen:
                 try:
-                    img = client.images.get(image_name)
-                    logger.info("Build completed successfully for '%s' in %.1f sec.", image_name, duration)
-                    success = True
-                    return BuildResult(
-                        ok=True,
-                        image_name=image_name,
-                        image_id=img.id,
-                        rc=0,
-                        duration_s=duration,
-                        stderr_tail="".join(stderr_buf)[-tail_chars:],
-                        stdout_tail="".join(stdout_buf)[-tail_chars:],
+                    stream = api.build(
+                        fileobj=io.BytesIO(tar_bytes),
+                        custom_context=True,
+                        tag=image_name,
+                        buildargs={**safe_build_args, "BUILDKIT_INLINE_CACHE": "1"},
+                        decode=True,
+                        rm=True,
+                        pull=pull,
+                        target=target,
+                        labels=run_labels,
+                        network_mode=os.environ.get("DOCKER_NETWORK_MODE", None),
+                        cache_from=cache_from_list if not nocache_param else None,
+                        nocache=nocache_param,
                     )
-                except ImageNotFound:
-                    error_seen = "Build completed but image not found"
+                except DockerException:
+                    logger.exception("Failed to initiate build for '%s'", image_name)
+                    success = False
+                    return BuildResult(
+                        ok=False,
+                        image_name=image_name,
+                        image_id=None,
+                        rc=1,
+                        duration_s=time.time() - t0,
+                        stderr_tail="",
+                        stdout_tail="",
+                    )
 
-            # Failure
+                try:
+                    for chunk in stream:
+                        # Time check first
+                        if time.time() - t0 > timeout_s:
+                            error_seen = "[TIMEOUT]"
+                            break
+
+                        # Typical keys: 'stream', 'status', 'error', 'errorDetail'
+                        if chunk.get("stream"):
+                            s = str(chunk["stream"])
+                            if s:
+                                stdout_buf.append(s)
+                        if "status" in chunk and chunk.get("progressDetail"):
+                            s = str(chunk.get("status", ""))
+                            if s:
+                                stdout_buf.append(s + "\n")
+                        if "error" in chunk or "errorDetail" in chunk:
+                            error_seen = (chunk.get("error") or str(chunk.get("errorDetail", ""))).strip()
+                            if error_seen:
+                                stderr_buf.append(error_seen + "\n")
+                            break
+                except APIError:
+                    logger.exception("Build stream APIError for '%s'", image_name)
+                    error_seen = "APIError during build"
+
+                duration = time.time() - t0
+
+                # Success path: ensure image exists
+                if not error_seen:
+                    try:
+                        img = client.images.get(image_name)
+                        logger.info("Build completed successfully for '%s' in %.1f sec.", image_name, duration)
+                        success = True
+                        return BuildResult(
+                            ok=True,
+                            image_name=image_name,
+                            image_id=img.id,
+                            rc=0,
+                            duration_s=duration,
+                            stderr_tail="".join(stderr_buf)[-tail_chars:],
+                            stdout_tail="".join(stdout_buf)[-tail_chars:],
+                        )
+                    except ImageNotFound:
+                        error_seen = "Build completed but image not found"
+
+                # Check if this is a broken cache error that we should retry
+                if attempt == 0 and error_seen and "unable to find image" in error_seen.lower():
+                    logger.warning(
+                        "Detected broken cache error for '%s': %s. Will retry with nocache=True.",
+                        image_name,
+                        error_seen,
+                    )
+                    # Clear buffers for retry
+                    stdout_buf.clear()
+                    stderr_buf.clear()
+                    continue  # Retry with nocache=True
+
+                # Either successful (returned above) or failed with non-retryable error
+                break
+
+            # Failure (exhausted retries or non-retryable error)
             rc = 124 if error_seen == "[TIMEOUT]" else 1
             logger.error(
                 "Build failed for '%s' in %.1f sec: [%s][%s]",
@@ -715,8 +790,102 @@ class DockerContext:
                     pass
                 except DockerException:
                     logger.exception("Failed to delete image '%s' after build.", image_name)
+                except Exception:
+                    logger.exception("Unexpected error deleting image '%s' after build.", image_name)
 
-    def to_dict(self) -> dict[str, str]:
+    def build_and_publish_to_ecr(
+        self,
+        client: docker.DockerClient,
+        task: Task,
+        region: str,
+        *,
+        repository_mode: str = "single",  # "single" or "mirror"
+        single_repo: str = "formulacode/all",
+        ecr_repo_prefix: str | None = None,
+        skip_existing: bool = True,
+        parallelism: int = 1,
+        force: bool = False,
+        run_labels: dict[str, str] | None = None,
+        timeout_s: float = 15 * 60,
+        tail_chars: int = 10_000,
+        pull: bool = False,
+        use_buildx: bool | None = None,
+        boto3_session: Any = None,
+    ) -> tuple[BuildResult, dict[str, str]]:
+        """
+        Build the Docker image for ``task`` and publish it to AWS ECR.
+
+        Returns (BuildResult, {local_ref: ecr_ref}). If the build fails, the push step
+        is skipped and the mapping is empty.
+        """
+        if task.sha is None and task.tag in {"pkg", "run"}:
+            raise ValueError("Task.sha must be set for building package/run images")
+
+        image_name = task.get_image_name()
+        repo_url = f"https://www.github.com/{task.owner}/{task.repo}"
+        build_args: dict[str, str] = {"REPO_URL": repo_url}
+        if task.sha is not None:
+            build_args["COMMIT_SHA"] = task.sha
+        if getattr(task, "env_payload", ""):
+            build_args["ENV_PAYLOAD"] = task.env_payload
+        if getattr(task, "python_version", ""):
+            build_args["PY_VERSION"] = task.python_version
+        if getattr(task, "benchmarks", ""):
+            build_args["BENCHMARKS"] = task.benchmarks
+
+        if run_labels is None:
+            run_labels = {
+                "datasmith.task": f"{task.owner}/{task.repo}",
+                "datasmith.sha": task.sha or "unknown",
+                "datasmith.run": "publish",
+            }
+
+        logger.info("Building image %s for ECR publish", image_name)
+        build_res = self.build_container_streaming(
+            client=client,
+            image_name=image_name,
+            build_args=build_args,
+            run_labels=run_labels,
+            probe=False,
+            force=force,
+            delete_img=False,
+            timeout_s=timeout_s,
+            tail_chars=tail_chars,
+            pull=pull,
+            s3_cache_config=None,
+            use_buildx=use_buildx,
+        )
+
+        if not build_res.ok:
+            logger.error(
+                "Build failed for %s (rc=%s); skipping ECR publish.",
+                image_name,
+                build_res.rc,
+            )
+            return build_res, {}
+
+        logger.info("Build succeeded for %s; publishing to ECR (region=%s)", image_name, region)
+        push_results = publish_images_to_ecr(
+            local_refs=[image_name],
+            region=region,
+            repository_mode=repository_mode,
+            single_repo=single_repo,
+            ecr_repo_prefix=ecr_repo_prefix,
+            skip_existing=skip_existing,
+            verbose=True,
+            parallelism=parallelism,
+            boto3_session=boto3_session,
+            docker_client=client,
+        )
+
+        if image_name in push_results:
+            logger.info("Published %s to %s", image_name, push_results[image_name])
+        else:
+            logger.warning("ECR publish did not return mapping for %s", image_name)
+
+        return build_res, push_results
+
+    def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable mapping of this context's contents."""
         return {
             "dockerfile_data": self.dockerfile_data,
@@ -727,7 +896,8 @@ class DockerContext:
             "run_building_data": self.run_building_data,
             "profile_data": self.profile_data,
             "run_tests_data": self.run_tests_data,
-            "test_commands": self.test_commands,
+            "final_building_data": self.final_building_data,
+            "created_unix": self.created_unix,
         }
 
     @classmethod
@@ -745,7 +915,8 @@ class DockerContext:
             run_building_data=data.get("run_building_data", None),
             profile_data=data.get("profile_data", None),
             run_tests_data=data.get("run_tests_data", None),
-            test_commands=data.get("test_commands", None),
+            final_building_data=data.get("final_building_data", None),
+            created_unix=float(data.get("created_unix", 0.0) or 0.0),
         )
 
     def __hash__(self) -> int:
@@ -758,7 +929,7 @@ class DockerContext:
             self.run_building_data,
             self.profile_data,
             self.run_tests_data,
-            self.test_commands,
+            self.final_building_data,
         ))
 
 
@@ -770,7 +941,7 @@ class ContextRegistry:
     all contexts are stored under a canonical key with tag='pkg'.
     """
 
-    VALID_TAGS: ClassVar[set[str]] = {"env", "pkg", "run", "base"}
+    VALID_TAGS: ClassVar[set[str]] = {"env", "pkg", "run", "base", "final"}
 
     def __init__(self, registry: dict[Task, DockerContext] | None = None, default_context: DockerContext | None = None):
         if registry is None:
@@ -854,7 +1025,7 @@ class ContextRegistry:
 
         # if the tag is "env" and we already have a "pkg" version, warn the user
         # and instead of changing the context completely, overwrite all files
-        # except the building_data and test_commands (which are pkg-specific)
+        # except the building_data (which are pkg-specific)
         if t.tag == "env" and canonical in self.registry:
             existing = self.registry[canonical]
             context = DockerContext(
@@ -862,11 +1033,20 @@ class ContextRegistry:
                 entrypoint_data=context.entrypoint_data,
                 env_building_data=context.env_building_data,
                 building_data=existing.building_data,
-                test_commands=existing.test_commands,
+                base_building_data=context.base_building_data,
+                run_building_data=context.run_building_data,
+                profile_data=context.profile_data,
+                run_tests_data=existing.run_tests_data,
             )
             logger.warning(
-                f"Registering 'env' context for '{canonical}' which already has a 'pkg' version; preserving 'pkg' building_data and test_commands."
+                f"Registering 'env' context for '{canonical}' which already has a 'pkg' version; preserving 'pkg' building_data."
             )
+        # Update creation timestamp on every registration
+        try:
+            context.created_unix = float(time.time())
+        except Exception:
+            context.created_unix = 0.0
+
         self.registry[canonical] = context
         logger.debug(f"Registered Docker context under canonical key: {canonical}")
 
@@ -896,6 +1076,20 @@ class ContextRegistry:
 
             logger.info(f"No context found for key '{user_task}'. Using default context.")
             return self.registry[Task(owner="default", repo="default", sha=None, tag="pkg")]
+
+    def pop(self, key: str | Task) -> DockerContext | None:
+        """Remove a context by key (canonicalized to tag='pkg')."""
+        with self._lock:
+            user_task = self.parse_key(key) if isinstance(key, str) else key
+            canonical = self._canonicalize(user_task)
+            if canonical in self.registry:
+                logger.debug(f"Popping context for key '{user_task}' via '{canonical}'.")
+                return self.registry.pop(canonical)
+            if user_task in self.registry:
+                logger.debug(f"Popping context for key '{user_task}' directly.")
+                return self.registry.pop(user_task)
+            logger.debug(f"No context found to pop for key '{user_task}'.")
+            return None
 
     def get_similar(self, key: str | Task) -> list[tuple[Task, DockerContext]]:  # noqa: C901
         """

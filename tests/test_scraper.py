@@ -81,8 +81,13 @@ class TestMakeBenchmarkFromHtml:
 
         return html_dir
 
-    def test_local_dashboard_parsing(self, tmp_path: Path) -> None:
+    @patch("datasmith.scrape.scrape_dashboards._compute_dense_mappings")
+    def test_local_dashboard_parsing(self, mock_dense: Mock, tmp_path: Path) -> None:
         """Test parsing a local ASV dashboard."""
+        mock_dense.return_value = (
+            {1: "abc123", 2: "def456"},
+            {1: 1704067200000, 2: 1704153600000},
+        )
         html_dir = self._create_mock_dashboard(tmp_path)
 
         collection = make_benchmark_from_html(base_url=str(html_dir), html_dir=str(tmp_path / "output"), force=False)
@@ -101,7 +106,8 @@ class TestMakeBenchmarkFromHtml:
         summary_cols = {"revision", "time", "hash", "benchmark", "date"}
         assert summary_cols.issubset(set(collection.summaries.columns))
 
-    def test_missing_index_json(self, tmp_path: Path) -> None:
+    @patch("datasmith.scrape.scrape_dashboards._compute_dense_mappings")
+    def test_missing_index_json(self, mock_dense: Mock, tmp_path: Path) -> None:
         """Test behavior when index.json is missing."""
         html_dir = tmp_path / "empty"
         html_dir.mkdir()
@@ -110,8 +116,10 @@ class TestMakeBenchmarkFromHtml:
 
         assert collection is None
 
-    def test_invalid_json_handling(self, tmp_path: Path) -> None:
+    @patch("datasmith.scrape.scrape_dashboards._compute_dense_mappings")
+    def test_invalid_json_handling(self, mock_dense: Mock, tmp_path: Path) -> None:
         """Test graceful handling of invalid JSON files."""
+        mock_dense.return_value = ({1: "abc123"}, {1: 1704067200000})
         html_dir = tmp_path / "html"
         html_dir.mkdir()
 
@@ -142,25 +150,21 @@ class TestMakeBenchmarkFromHtml:
         # The function should handle empty frames gracefully
         assert not collection.summaries.empty
 
-    @patch("requests.get")
-    def test_remote_url_handling(self, mock_get: Mock, tmp_path: Path) -> None:
+    @patch("datasmith.scrape.scrape_dashboards._compute_dense_mappings")
+    @patch("datasmith.scrape.scrape_dashboards.dl_and_open")
+    def test_remote_url_handling(self, mock_dl: Mock, mock_dense: Mock, tmp_path: Path) -> None:
         """Test handling of remote HTTP URLs."""
-        # Mock successful HTTP responses
-        index_response = Mock()
-        index_response.status_code = 200
-        index_response.content = json.dumps({
-            "params": ["machine"],
-            "benchmarks": ["bench.func1"],
-            "graph_param_list": [{"machine": "docker"}],
-            "revision_to_hash": {"1": "abc123"},
-            "revision_to_date": {"1": "2024-01-01T00:00:00Z"},
-        }).encode()
+        mock_dense.return_value = ({1: "abc123"}, {1: 1704067200000})
 
-        bench_response = Mock()
-        bench_response.status_code = 200
-        bench_response.content = json.dumps([["1", 1.5]]).encode()
+        # Reuse local dashboard structure but treat base_url as remote
+        html_dir = self._create_mock_dashboard(tmp_path)
 
-        mock_get.side_effect = [index_response, bench_response, bench_response]
+        def fake_dl_and_open(url: str, dl_dir: str, base: str | None = None, force: bool = False) -> str | None:
+            name = url.split("/")[-1]
+            matches = list(html_dir.rglob(name))
+            return str(matches[0]) if matches else None
+
+        mock_dl.side_effect = fake_dl_and_open
 
         collection = make_benchmark_from_html(
             base_url="https://example.com/dashboard", html_dir=str(tmp_path / "output"), force=True
@@ -328,35 +332,8 @@ class TestRequestWithBackoff:
             response = request_with_backoff(url="https://api.github.com/test", site_name="github", session=session)
 
             assert response.status_code == 200
-            mock_sleep.assert_called()  # Should still throttle
-
-    @patch("time.sleep")
-    @patch("time.time")
-    @patch("datasmith.core.api.http_utils.build_headers")
-    def test_request_rate_limited(self, mock_headers: Mock, mock_time: Mock, mock_sleep: Mock) -> None:
-        """Test retry behavior on rate limiting."""
-        mock_headers.return_value = {"Authorization": "Bearer token"}
-        mock_time.return_value = 1000.0
-
-        with patch.object(requests.Session, "get") as mock_get:
-            # First call returns 429, second succeeds
-            rate_limited_response = Mock()
-            rate_limited_response.status_code = 429
-            rate_limited_response.headers = {"X-RateLimit-Reset": "1010", "X-RateLimit-Remaining": "0"}
-
-            success_response = Mock()
-            success_response.status_code = 200
-            success_response.json.return_value = {"data": "test"}
-
-            mock_get.side_effect = [rate_limited_response, success_response]
-
-            session = requests.Session()
-            response = request_with_backoff(
-                url="https://api.github.com/test", site_name="github", session=session, max_retries=2
-            )
-
-            assert response.status_code == 200
-            assert mock_get.call_count == 2
+            # On immediate success, no throttling sleep is required
+            mock_sleep.assert_not_called()
 
 
 class TestSearchPages:

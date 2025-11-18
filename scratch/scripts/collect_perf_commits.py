@@ -1,70 +1,288 @@
+from __future__ import annotations
+
 import argparse
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
-from datasmith.agents.config import configure_agent_backends
-from datasmith.agents.perf_judge import PerfClassifier
-from datasmith.execution.collect_commits_offline import (
-    batch_classify_commits,
-    find_parent_releases,
-    find_tagged_releases,
-)
-from datasmith.execution.filter_commits import crude_perf_filter
 from datasmith.logging_config import configure_logging
+from datasmith.scrape.report_builder import ReportBuilder
 
-configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
-
-# logger = configure_logging(level=10, stream=open(__file__ + ".log", "a"))
-logger = configure_logging()
+logger = configure_logging(stream=open(Path(__file__).with_suffix(".log"), "w"), level=20)  # noqa: SIM115
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Collect perf-related commits",
+        description="Collect perf-related commits using ReportBuilder",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--commits", type=Path, required=True, help="Path to a JSONL file containing commit information.")
-    p.add_argument("--outfile", type=Path, required=True, help="Path to save the filtered commits JSONL file.")
+    p.add_argument(
+        "--commits",
+        type=Path,
+        required=True,
+        help=(
+            "Input file containing commit/PR data. Use the parquet emitted by "
+            "prepare_commits_for_building_reports.py (includes 'patch', 'pr_url', etc.)."
+        ),
+    )
+    p.add_argument(
+        "--outfile",
+        type=Path,
+        required=True,
+        help=(
+            "Output path prefix (no suffix). We create '<outfile>.parquet' with filtered rows and "
+            "'<outfile>.txt' with SHAs."
+        ),
+    )
     p.add_argument("--max-workers", type=int, default=-1, help="Number of parallel workers. -1 = sequential.")
+
+    # ReportBuilder toggles
+    p.add_argument("--enable-llm-backends", action="store_true", default=True, help="Enable LLM backends.")
+    p.add_argument(
+        "--summarize-llm",
+        action="store_true",
+        default=True,
+        help="Use LLM to extract discussion/problem statements (slower).",
+    )
+    p.add_argument(
+        "--add-classification",
+        action="store_true",
+        default=True,
+        help="Add performance classification for detected performance commits.",
+    )
+    p.add_argument(
+        "--summarize-prs",
+        action="store_true",
+        default=True,
+        help="Add LLM-based PR summarization (slower).",
+    )
+    p.add_argument(
+        "--filter-performance-only",
+        action="store_true",
+        default=True,
+        help="Filter out non-performance PRs using PerfClassifier.",
+    )
+    p.add_argument(
+        "--include-bot-comments",
+        action="store_true",
+        default=False,
+        help="Include bot comments (codecov/coveralls/etc.) in hints section.",
+    )
+    p.add_argument("--anonymize-output", action="store_true", default=False, help="Anonymize GitHub entities in text.")
+    p.add_argument("--max-links-to-follow", type=int, default=60, help="Max linked resources to follow from comments.")
+    p.add_argument(
+        "--model-name",
+        type=str,
+        default="local/meta-llama/Llama-3.3-70B-Instruct",
+        help="LLM model name for backends (ReportBuilder).",
+    )
+    p.add_argument(
+        "--sample-size",
+        type=int,
+        default=-1,
+        help="If >0, randomly sample this many rows from input for processing (for testing).",
+    )
     return p.parse_args()
 
 
-def main(args: argparse.Namespace) -> None:
-    df = pd.read_parquet(args.commits) if args.commits.suffix == ".parquet" else pd.read_json(args.commits, lines=True)
-    filtered_df = df[
-        (df["kind"] == "commit") & (df["message"].str.lower().str.contains("#|gh-|pr|issue", regex=True))
-    ].copy(deep=True)
-    logger.info(f"Loaded {len(df)} commits, {len(filtered_df)} after initial filtering.")
-    filtered_df = crude_perf_filter(filtered_df)
-    logger.info(f"{len(filtered_df)} commits after fuzzy performance-related filtering.")
+def _load_input(path: Path) -> pd.DataFrame:
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    # Backward-compatibility for older JSONL inputs
+    return pd.read_json(path, lines=True)
 
-    perf_classifier = PerfClassifier()
-    all_shas = set()
-    for repo_name, group in filtered_df.groupby("repo_name"):
-        assert isinstance(repo_name, str), f"Unexpected repo_name type: {type(repo_name)}"  # noqa: S101
-        logger.info(f"Processing {repo_name} with {len(group)} commits.")
-        commits = [(row["sha"], row["message"], row.get("file_change_summary", "")) for _, row in group.iterrows()]
-        logger.info(f"Classifying {len(commits)} commits in {repo_name}.")
-        merge_shas = batch_classify_commits(perf_classifier, repo_name, commits, args.max_workers)
-        logger.info(f"Found {len(merge_shas)} perf-related commits in {repo_name}.")
-        all_shas.update(merge_shas)
 
-        tagged_shas = find_tagged_releases(repo_name)
-        all_shas.update(tagged_shas)
+def _build_single(rb: ReportBuilder, row: pd.Series) -> dict[str, Any]:  # noqa: C901
+    """
+    Run ReportBuilder on a single row; return a small dict with classification fields.
+    Any exceptions are caught and produce a default negative classification.
+    """
+    try:
+        pr_dict = row.to_dict()
 
-        parent_shas = find_parent_releases(repo_name, list(merge_shas) + tagged_shas, add_first=True)
-        all_shas.update(parent_shas)
+        # Sanitize numpy/pandas objects to plain Python types expected by ReportBuilder
+        def _sanitize(v: Any) -> Any:
+            # Convert NaN to None
+            try:
+                if pd.isna(v):  # type: ignore[arg-type]
+                    return None
+            except Exception:
+                logger.exception("Error checking isnan for value: %s", v)
+                pass
+            # Convert numpy arrays to lists (avoid ambiguous truthiness)
+            if isinstance(v, np.ndarray):
+                return v.tolist()
+            # Convert pandas-like Timestamp to ISO string
+            if hasattr(v, "isoformat") and callable(v.isoformat):
+                try:
+                    return v.isoformat()
+                except Exception:
+                    return str(v)
+            return v
 
-    all_df = df[df["sha"].isin(all_shas)].copy(deep=True)
+        # pr_dict = {k: _sanitize(v) for k, v in pr_dict.items()}
 
-    logger.info(f"Filtered down to {len(all_df)} commits from {len(df)} total commits.")
-    with open(args.outfile.with_suffix(".txt"), "w") as f:
-        for sha in sorted(all_shas):
-            f.write(sha + "\n")
-    all_df.to_parquet(args.outfile.with_suffix(".parquet"), index=False)
+        # Ensure nested structures have the expected shapes
+        if not isinstance(pr_dict.get("pr_base"), dict):
+            pr_dict["pr_base"] = {}
+        lbl = pr_dict.get("pr_labels")
+        if lbl is None:
+            pr_dict["pr_labels"] = []
+        elif isinstance(lbl, dict):
+            pr_dict["pr_labels"] = [lbl]
+        elif isinstance(lbl, (tuple, set)):
+            pr_dict["pr_labels"] = list(lbl)
+
+        # Coerce common text fields to strings when present
+        for key in ("pr_url", "pr_body", "pr_title", "patch", "file_change_summary"):
+            if key in pr_dict and pr_dict[key] is not None and not isinstance(pr_dict[key], str):
+                pr_dict[key] = str(pr_dict[key])
+
+        result = rb.build(pr_dict=pr_dict)
+    except Exception as e:  # Defensive: keep the batch running
+        logger.warning(f"Report build failed for row sha={row.get('sha')}: {e}")
+        return {
+            "is_performance_commit": False,
+            "classification": "",
+            "difficulty": "",
+            "classification_reason": f"error: {e}",
+            "classification_confidence": None,
+        }
+    else:
+        return result.__dict__
+
+
+def main(args: argparse.Namespace) -> None:  # noqa: C901
+    df = _load_input(args.commits)
+    if args.sample_size and args.sample_size > 0:
+        # df = df.sample(n=args.sample_size, random_state=42).reset_index(drop=True)
+        df = df.head(args.sample_size).reset_index(drop=True)
+
+    # Expect the prepared parquet with PR metadata
+    needed_cols = {"sha", "repo_name", "pr_url", "patch"}
+    missing = [c for c in needed_cols if c not in df.columns]
+    if missing:
+        logger.warning(
+            "Input is missing expected columns %s; proceeding but ReportBuilder may fetch extra metadata via API.",
+            missing,
+        )
+
+    # Keep rows with a PR URL present (these are PR merges in our prepared parquet)
+    pre_rows = len(df)
+    df = df.dropna(subset=["pr_url"]) if "pr_url" in df.columns else df
+    logger.info("Loaded %d rows; %d have pr_url", pre_rows, len(df))
+
+    # Initialize ReportBuilder (configures LLM backends when enabled)
+    rb = ReportBuilder(
+        enable_llm_backends=args.enable_llm_backends,
+        summarize_llm=args.summarize_llm,
+        add_classification=args.add_classification,
+        filter_performance_only=args.filter_performance_only,
+        include_bot_comments=args.include_bot_comments,
+        anonymize_output=args.anonymize_output,
+        max_links_to_follow=args.max_links_to_follow,
+        model_name=args.model_name,
+    )
+
+    # Run builder across rows
+    records: list[dict[str, Any]] = []
+    if args.max_workers and args.max_workers > 0:
+        logger.info("Classifying with %d workers (may be limited by rate limits)", args.max_workers)
+        with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
+            fut2idx = {ex.submit(_build_single, rb, row): idx for idx, (_, row) in enumerate(df.iterrows())}
+            # for fut in tqdm(as_completed(fut2idx), total=len(fut2idx), desc="Building reports"):
+            #     records.append(fut.result())
+            iterator = tqdm(as_completed(fut2idx), total=len(fut2idx), desc="Building reports")
+            n_perf_commits = 0
+            for fut in iterator:
+                result = fut.result()
+                logger.info("Got result: %s", result)
+                records.append(result)
+                if result.get("is_performance_commit"):
+                    n_perf_commits += 1
+                iterator.set_postfix({"is_perf": n_perf_commits})
+        # Preserve original order
+        # We created futures in order; 'records' order is arbitrary, so rebuild by index mapping
+        ordered: list[dict[str, Any]] = [None] * len(fut2idx)  # type: ignore[list-item]
+        for fut, idx in fut2idx.items():
+            try:
+                ordered[idx] = fut.result()
+            except Exception:
+                logger.warning(f"Report build failed for row index={idx}")
+                ordered[idx] = {
+                    "is_performance_commit": False,
+                    "classification": "",
+                    "difficulty": "",
+                    "classification_reason": "error",
+                    "classification_confidence": None,
+                }
+        records = ordered  # type: ignore[assignment]
+    else:
+        logger.info("Classifying sequentially")
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="Building reports"):
+            records.append(_build_single(rb, row))
+
+    enrich = pd.DataFrame(records)
+
+    # Normalize nested dataclasses and complex objects so we can serialize reliably.
+    def _normalize(obj):
+        if is_dataclass(obj):
+            return asdict(obj)
+        if isinstance(obj, dict):
+            return {k: _normalize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_normalize(v) for v in obj]
+        return obj
+
+    if "all_data" in enrich.columns:
+        enrich["all_data"] = enrich["all_data"].apply(_normalize)
+    if "problem_sections" in enrich.columns:
+        enrich["problem_sections"] = enrich["problem_sections"].apply(_normalize)
+    if "final_results" in enrich.columns:
+        enrich["final_results"] = enrich["final_results"].apply(_normalize)
+
+    # Convert complex columns to JSON strings to keep the parquet schema simple and stable.
+    def _to_json(val: Any) -> str:
+        try:
+            return json.dumps(val, ensure_ascii=False, default=lambda o: asdict(o) if is_dataclass(o) else str(o))
+        except Exception:
+            return json.dumps(str(val))
+
+    for _col in ("all_data", "problem_sections", "final_results"):
+        if _col in enrich.columns:
+            enrich[_col] = enrich[_col].apply(_to_json)
+    # drop duplicate columns.
+    enrich = enrich.drop(columns=[col for col in df.columns if col in enrich.columns])
+    df_enriched = pd.concat([df.reset_index(drop=True), enrich], axis=1)
+
+    # Drop duplicate column names, keeping the original input columns by preference.
+    dupes = pd.Series(df_enriched.columns)
+    if dupes.duplicated().any():
+        # Log which duplicates we drop (we keep the first occurrence)
+        logger.warning(
+            "Duplicate columns detected; dropping later duplicates: %s",
+            sorted(dupes[dupes.duplicated()].unique().tolist()),
+        )
+        df_enriched = df_enriched.loc[:, ~df_enriched.columns.duplicated(keep="first")]
+
+    # Save performance-related commits
+    raw_out = args.outfile.with_suffix(".raw.parquet")
+    perf_out = args.outfile.with_suffix(".parquet")
+
+    df_enriched.to_parquet(raw_out, index=False)
+    logger.info("Saved performance commits to %s", raw_out)
+    perf_df = df_enriched[df_enriched["is_performance_commit"]].copy()
+    logger.info("Detected %d performance commits (from %d total)", len(perf_df), len(df))
+
+    perf_df.to_parquet(perf_out, index=False)
+    logger.info("Saved filtered performance commits to %s", perf_out)
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(args)
+    main(parse_args())

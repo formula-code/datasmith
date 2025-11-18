@@ -1,0 +1,1 @@
+Task(owner='PyWavelets', repo='pywt', sha='577e5a9b3a2eb228539fd3e69301edc603b845df', commit_date=1721126126.0, env_payload='{"dependencies": ["numpy==2.0.0", "scipy==1.14.0"]}', python_version='3.12', tag='pkg', benchmarks='')

@@ -163,12 +163,20 @@ def build_repo_sha_image(
 ) -> BuildResult:
     assert task.sha is not None, "Task.sha must be set"  # noqa: S101
     repo_url = f"https://www.github.com/{task.owner}/{task.repo}"
+    build_args = {
+        "REPO_URL": repo_url,
+        "COMMIT_SHA": task.sha,
+        "ENV_PAYLOAD": task.env_payload,
+    }
+    if task.python_version:
+        build_args["PY_VERSION"] = task.python_version
+
     build_res: BuildResult = docker_ctx.build_container_streaming(
         client=client,
         image_name=task.get_image_name(),
-        build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha, "ENV_PAYLOAD": task.env_payload},
+        build_args=build_args,
         probe=False,
-        force=False,
+        force=force,
         timeout_s=15 * 60,  # 15 minutes
         tail_chars=10_000,
         pull=False,
@@ -222,7 +230,12 @@ async def run_container(  # noqa: C901
         res = ctx.build_container_streaming(
             client=client,
             image_name=task.get_image_name(),
-            build_args={"REPO_URL": repo_url, "COMMIT_SHA": task.sha, "ENV_PAYLOAD": task.env_payload},
+            build_args={
+                "REPO_URL": repo_url,
+                "COMMIT_SHA": task.sha,
+                "ENV_PAYLOAD": task.env_payload,
+                "PY_VERSION": task.python_version or "",
+            },
             probe=False,
             force=False,
             timeout_s=1800,  # 30 minutes
@@ -366,7 +379,7 @@ async def run_container(  # noqa: C901
 
 
 def log_container_output(container: Container, archive: str = "/output") -> dict[str, str]:
-    stream, stat = container.get_archive(archive)
+    stream, _stat = container.get_archive(archive)
     # 3) Load tar stream into memory and walk files
     buf = io.BytesIO()
     for chunk in stream:
@@ -459,7 +472,7 @@ async def orchestrate(
             status = "OK" if rc == 0 else f"FAIL({rc})"
             files = files if rc == 0 else {}
             print(status, files)
-            logger.info("■ cores=%s → %s", cpuset_str, status)
+            logger.info("■ cores=%s -> %s", cpuset_str, status)
             if len(files):
                 interim_path = Path(os.environ["CACHE_LOCATION"]).parent / "interim"
                 os.makedirs(interim_path, exist_ok=True)

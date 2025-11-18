@@ -12,6 +12,7 @@ from git import Commit
 from .constants import (
     ALLOWLIST_COMMON_PYPI,
     CONDA_SYSTEM_PACKAGES,
+    EXTRA_MARKER_RE,
     GENERIC_LOCAL_NAMES,
     NOT_REQUIREMENTS,
     STDLIB,
@@ -223,10 +224,6 @@ def filter_pypi_packages(requirements: Iterable[str]) -> list[str]:
         # Extract package name (before any version specifier or extras)
         pkg_name = re.split(r"[<>=!;\s\[]", req, maxsplit=1)[0].strip().lower()
 
-        # Skip python version specifiers
-        if pkg_name in {"python", "pip", "setuptools", "wheel"}:
-            continue
-
         # Skip conda-only/system packages
         if pkg_name in CONDA_SYSTEM_PACKAGES:
             continue
@@ -286,6 +283,49 @@ def is_valid_pypi_requirement(req: str) -> bool:
     return len(pkg_name) != 1
 
 
+def fix_marker_spacing(req: str) -> str:
+    """
+    Fix missing spaces around 'and' and 'or' operators in PEP 508 markers.
+    Also strips inline comments that don't have proper spacing.
+
+    Converts malformed markers like:
+    - "pydap;python_version<"3.10"andextra=="docs""
+    to "pydap;python_version<"3.10" and extra=="docs""
+    - "numpy>=1.21#comment" to "numpy>=1.21"
+
+    Args:
+        req: Requirement string that may have malformed markers
+
+    Returns:
+        Requirement string with properly spaced markers
+    """
+    # Strip inline comments that don't have proper spacing
+    # PEP 508 allows comments only after whitespace
+    # Match # that's not preceded by whitespace and remove everything after it
+    if "#" in req:
+        # Split on first # that's not preceded by whitespace
+        match = re.search(r"(?<!\s)#", req)
+        if match:
+            req = req[: match.start()]
+
+    if ";" not in req:
+        return req
+
+    # Split into package spec and marker
+    parts = req.split(";", 1)
+    if len(parts) != 2:
+        return req
+
+    pkg_spec, marker = parts
+
+    # Add spaces around 'and' and 'or' if missing
+    # Match 'and' or 'or' that don't have spaces around them
+    marker = re.sub(r"(?<=[^\s])and(?=[^\s])", " and ", marker)
+    marker = re.sub(r"(?<=[^\s])or(?=[^\s])", " or ", marker)
+
+    return f"{pkg_spec};{marker}"
+
+
 def normalize_requirement(req: str) -> list[str]:
     """
     Normalize a token into one or more requirement strings we should keep for resolution.
@@ -302,6 +342,9 @@ def normalize_requirement(req: str) -> list[str]:
     if not req or not req.strip():
         return []
     req = req.strip()
+
+    # Fix marker spacing issues (e.g., "andextra" -> " and extra")
+    req = fix_marker_spacing(req)
 
     # Reject template variables
     if "{" in req or "}" in req or "$" in req:
@@ -420,6 +463,7 @@ def filter_requirements_for_pypi(  # noqa: C901
     """
     Remove things that are clearly not PyPI-installable:
       - stdlib, conda/system tools, known non-requirements
+      - packages in the dynamic blocklist (learned from previous failures)
       - the project's own import name
       - names that are obviously local modules/packages in the repo
     Keep direct URLs that look installable (whl/sdist).
@@ -432,16 +476,26 @@ def filter_requirements_for_pypi(  # noqa: C901
     Returns:
         Filtered list of PyPI-installable requirements
     """
+    # Import here to avoid circular dependency
+    from .blocklist import get_blocklist, normalize_package_name
+
     local_names = project_local_names(project_dir)
     own_names = set()
     if own_import_name:
         own_names |= {own_import_name, own_import_name.replace("-", "_"), own_import_name.replace("_", "-")}
+
+    # Get dynamic blocklist of packages that failed in previous runs
+    dynamic_blocklist = get_blocklist()
 
     out: list[str] = []
     for raw in requirements:
         if not raw or not raw.strip():
             continue
         raw = raw.strip()
+
+        # Fix marker spacing issues (e.g., "andextra" -> " and extra")
+        raw = fix_marker_spacing(raw)
+
         # Direct URL handled first
         if raw.startswith(("http://", "https://", "git+", "hg+", "svn+", "bzr+", "file://")):
             if is_valid_direct_url(raw):
@@ -467,6 +521,12 @@ def filter_requirements_for_pypi(  # noqa: C901
         if low in STDLIB or name in NOT_REQUIREMENTS:
             continue
 
+        # Dynamic blocklist (learned from failures)
+        # Normalize package name according to PEP 503 for proper comparison
+        normalized_name = normalize_package_name(name)
+        if normalized_name in dynamic_blocklist:
+            continue
+
         # conda/system/tooling
         if low in CONDA_SYSTEM_PACKAGES:
             continue
@@ -484,4 +544,22 @@ def filter_requirements_for_pypi(  # noqa: C901
 
         out.append(raw)
 
-    return out
+    # strip the EXTRA_MARKER_RE if it exists.
+    stripped: list[str] = []
+    for r in out:
+        # Remove the `; extra == "..."` marker (and any surrounding spaces)
+        r2 = EXTRA_MARKER_RE.sub("", r).strip()
+        # If we end up with a dangling semicolon (e.g., only marker was present), drop it
+        r2 = re.sub(r"\s*;\s*$", "", r2)
+        stripped.append(r2)
+
+    # remove duplicate while preserving order.
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for r in stripped:
+        # use exact string match after previous normalization
+        if r not in seen:
+            seen.add(r)
+            deduped.append(r)
+
+    return deduped

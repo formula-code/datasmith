@@ -72,12 +72,13 @@ def update_cr(cr: ContextRegistry) -> ContextRegistry:
         new_v = deepcopy(v)
         new_v.entrypoint_data = DockerContext().entrypoint_data
         new_v.dockerfile_data = DockerContext().dockerfile_data
-        new_v.building_data = patch_dockerfile_data(v.building_data)
+        new_v.building_data = patch_dockerfile_data(v.building_data) or v.building_data
         new_v.env_building_data = DockerContext().env_building_data
         new_v.base_building_data = DockerContext().base_building_data
         new_v.run_building_data = DockerContext().run_building_data
         new_v.profile_data = DockerContext().profile_data
         new_v.run_tests_data = DockerContext().run_tests_data
+        new_v.final_building_data = DockerContext().final_building_data
         new_reg[k] = new_v
 
     cr.registry = new_reg
@@ -112,6 +113,5 @@ def merge_registries(registries: list[Path]) -> dict:
     for reg in registries:
         reg_json = json.loads(reg.read_text())
         modified_time = reg.stat().st_mtime
-        print(f"{reg} : {len(reg_json['contexts'])} entries")
         merge_with_mtime(merged_json, reg_json, modified_time)
     return merged_json

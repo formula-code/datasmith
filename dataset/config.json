@@ -1,0 +1,5 @@
+{
+  "context_registry_path": "scratch/formulacode_verified_context_registry.json",
+  "ecr_repo": "formulacode/all",
+  "aws_region": "us-east-1"
+}

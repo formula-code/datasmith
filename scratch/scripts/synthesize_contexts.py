@@ -20,46 +20,25 @@ from datasmith.docker.validation import _err_lock
 from datasmith.logging_config import configure_logging
 from datasmith.notebooks.utils import update_cr
 
-configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
+# configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
-# configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
+configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
+# configure_agent_backends(PORTKEY_MODEL_NAME="meta-llama/Llama-3.3-70B-Instruct-Turbo", local=True)
+
 
 # logger = configure_logging(level=10)
-logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".tiny.log"), "w"))  # noqa: SIM115
+logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
 
-
-all_shas = {
-    "00a45b4dca164105b50ba29e1735e96b573b639c",
-    "068c7c9ae12291f8709a3be2d81700b61df8c015",
-    "15743f6505e12785f5f151789f04fa11f9ab4589",
-    "3663fe84d7463070803d5b1dc487d37c42094b30",
-    "39ee806830bb5bd57fcdf767ee3a2f630f069e03",
-    "4aee6e2646f4d147ae4be05719b8191aca24192d",
-    "4c5f4ca89dc74727c846d2707df84d00f0a39883",
-    "4fcc4ce4f6c57568fcb694d4d22a27468bdd5f4f",
-    "55b55afb2b6a8d1cc1d69ba1de0b4a370fa34c3a",
-    "5fecd231b5f39087590a2959ac49feedfbc798c1",
-    "61aa5a01eb35ce4370102d1fb8b1cf0491c6020c",
-    "6291f668fc0f308e4f048d23ac42e6f3c9f4a1b1",
-    "63249f2aa95ef0b0300ea2f1cc68200cc8b13484",
-    "701537ecca85a333449814c82ac2b78db5f534a8",
-    "75ce25ee3718cef767ca41dcbbf724a28bbe60a5",
-    "86e807db0e73ba53cd58b2b297c8e8dd197af471",
-    "88e4ef0bb461de1df6a06e2d27ec4e36063f49cf",
-    "89898a689c8309ee8c06796b215d606234aad69f",
-    "94c82b75276fa0045aa6e4b9dc447b0a45b7060b",
-    "9ce31f7b61bd03877727ebf0ea94fd1505da61e7",
-    "9dff11652b4d27641f951ce305f7b6eb924fd270",
-    "af930a9aa4f55361a66051ac9ef151cda3742bf8",
-    "b059f2221166b4dea32ff242862e7d0ffe207112",
-    "b9a22d5e1d68e5de5976c4c586e930d372d21234",
-    "c691058d7a264ddef5748dca46d90ef0180024b8",
-    "d065d9264eea7f0ab991c8d87fd1ced6fd173849",
-    "ec5cc654af0b41c40fe1f296235883cfaaa485ec",
-    "ee5d94e0a05da11272a4af1cd731f9822565048e",
-    "f35d24de56e509a02dc05e2827e20058e8ddd9b5",
-    "f7db40403e903711f53f461b5cf3a1eb1213123d",
-}
+# REPOS_TO_SKIP = {
+#     "dwavesystems/dimod",
+#     "napari/napari",
+#     "django-components/django-components",
+#     "astropy/astropy",
+#     "pandas-dev/pandas",
+#     "xdslproject/xdsl",
+#     "pydata/xarray",
+#     "sgkit-dev/sgkit",
+# }
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,6 +89,26 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the context registry JSON file.",
     )
+    parser.add_argument(
+        "--push-to-ecr",
+        action="store_true",
+        help="Whether to push built images to AWS ECR.",
+    )
+    parser.add_argument(
+        "--ignore-exhausted",
+        action="store_true",
+        help="Ignore tasks where all candidates have been exhausted in the context registry.",
+    )
+    parser.add_argument(
+        "--only-exhausted",
+        action="store_true",
+        help="Only tasks where all candidates have been exhausted in the context registry.",
+    )
+    parser.add_argument(
+        "--only-final",
+        action="store_true",
+        help="Only run the final validation step (no intermediate builds).",
+    )
     return parser.parse_args()
 
 
@@ -134,15 +133,21 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]
-            sha = row["sha"]
+            # if repo_name not in REPOS_TO_SKIP:
+            #     logger.debug("Skipping %s as it is in the skip list.", repo_name)
+            #     continue
+            sha = row["pr_base"]["sha"]
             has_asv = row.get("has_asv", True)
             if not has_asv:
                 logger.debug("Skipping %s commit %s as it does not have ASV benchmarks.", repo_name, sha)
                 continue
             owner, repo = repo_name.split("/")
-            commit_date_unix: float = (
-                0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
-            )
+            if isinstance(row["date"], pd.Timestamp):
+                commit_date_unix = row["date"].to_pydatetime().timestamp()
+            else:
+                commit_date_unix: float = (
+                    0.0 if row.get("date", None) is None else datetime.datetime.fromisoformat(row["date"]).timestamp()
+                )
             env_payload = row.get("env_payload", "")
             if (owner, repo) not in all_states:
                 all_states[(owner, repo)] = [(sha, commit_date_unix, env_payload)]
@@ -151,6 +156,22 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
     else:
         raise ValueError("Either --dashboard or --commits must be provided.")
     return all_states
+
+
+def within_3_months(unix_time: float) -> bool:
+    three_months_ago = datetime.datetime.now() - datetime.timedelta(days=90)
+    return datetime.datetime.fromtimestamp(unix_time) >= three_months_ago
+
+
+def last_attempt_exists(args: argparse.Namespace, task: Task) -> bool:
+    total_attempts = args.max_similar_candidates + args.max_attempts - 1
+    last_attempt = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-attempt-{total_attempts}.pkl"
+    return last_attempt.exists()
+
+
+def final_exists(args: argparse.Namespace, task: Task) -> bool:
+    last_attempt = Path(args.output_dir) / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"
+    return last_attempt.exists()
 
 
 def prepare_tasks(
@@ -163,16 +184,23 @@ def prepare_tasks(
         tasks = list({
             Task(owner, repo, sha, commit_date=date, env_payload=env_payload) for sha, date, env_payload in sorted(tup)
         })
-        tasks = list(filter(lambda t: t.sha not in all_shas, tasks))
-        tasks = list(filter(lambda t: t.with_tag("pkg") not in context_registry, tasks))
+        # tasks = list(filter(lambda t: t.with_tag("pkg") not in context_registry, tasks))
+        tasks = [
+            t
+            for t in tasks
+            if (t.with_tag("pkg") not in context_registry)
+            or (not within_3_months(context_registry.get(t.with_tag("pkg")).created_unix))
+        ]
         if limit_per_repo > 0:
             tasks = random.sample(tasks, min(limit_per_repo, len(tasks)))
         all_tasks.extend(tasks)
     return all_tasks
 
 
-def main(args: argparse.Namespace) -> None:
-    client = get_docker_client()
+def main(args: argparse.Namespace) -> None:  # noqa: C901
+    # Size the Docker HTTP connection pool to our concurrency to avoid
+    # adapter/pool starvation when many threads issue Docker API calls.
+    client = get_docker_client(max_concurrency=args.max_workers)
     all_states = process_inputs(args)
     if not args.context_registry.exists():
         logger.warning("main: context registry file %s does not exist; starting fresh", args.context_registry)
@@ -194,6 +222,10 @@ def main(args: argparse.Namespace) -> None:
 
     # Prepare tasks
     tasks = prepare_tasks(all_states, args.limit_per_repo, context_registry)
+    if args.ignore_exhausted:
+        tasks = [t for t in tasks if not last_attempt_exists(args, t)]
+    if args.only_final:
+        tasks = [t for t in tasks if final_exists(args, t)]
 
     (args.output_dir / "results").mkdir(parents=True, exist_ok=True)
     # reset outputs
@@ -206,6 +238,7 @@ def main(args: argparse.Namespace) -> None:
     }
     logger.debug("main: machine_defaults keys=%d", len(machine_defaults))
     logger.info("main: Starting work on %d tasks[%d workers]", len(tasks), args.max_workers)
+    random.shuffle(tasks)
 
     results: list[dict] = []
     if args.max_workers < 1:
@@ -222,9 +255,9 @@ def main(args: argparse.Namespace) -> None:
             with _err_lock, open(args.output_dir / "results.jsonl", "a", encoding="utf-8") as jf:
                 jf.write(json.dumps(res) + "\n")
 
-            # if int(res["rc"]) != 1:
-            logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
-            context_registry.save_to_file(path=args.context_registry)
+            if int(res["rc"]) != 1:
+                logger.info("main: SUCCESS %s/%s@%s", res["owner"], res["repo"], res["sha"])
+                context_registry.save_to_file(path=args.context_registry)
     else:
         with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
             futures = [
@@ -274,7 +307,7 @@ def main(args: argparse.Namespace) -> None:
         print("\n=== FAILURES ===")
         for r in failed:
             print(f"{r['image_name']}: rc={r['rc']} stage={r['stage']}")
-        print(f"\nDetails: {args.output_dir / 'errors.txt'}")
+        print(f"\nDetails: {args.output_dir / 'all_files_by_image.json'}")
     else:
         print("All containers validated successfully.")
 

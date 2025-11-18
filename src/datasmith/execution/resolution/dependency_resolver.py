@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .constants import ANSI_RE
+from .package_filters import fix_marker_spacing
 from .python_manager import run_uv
 
 
@@ -21,6 +22,47 @@ def rfc3339(ts: dt.datetime) -> str:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=dt.timezone.utc)
     return ts.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def uv_compile_from_pyproject(
+    pyproject_path: Path, python_version: str | None, cutoff_rfc3339: str | None
+) -> list[str]:
+    """
+    Use `uv pip compile` to resolve to pinned requirements.
+    Reads from pyproject.toml and prints the compiled file to stdout.
+
+    Args:
+        pyproject_path: Path to pyproject.toml file
+        python_version: Python version to compile for (e.g., "3.8")
+        cutoff_rfc3339: RFC3339 timestamp to exclude packages newer than this date
+
+    Returns:
+        List of pinned requirement strings
+
+    Raises:
+        RuntimeError: If uv pip compile fails
+    """
+    # Fix marker spacing for all requirements
+    if not pyproject_path.exists():
+        return []
+    args = ["pip", "compile", str(pyproject_path.resolve())]
+    if python_version:
+        args.extend(["--python", python_version])
+    args.append("--all-extras")
+    extra_env: dict[str, str] = {}
+    if cutoff_rfc3339:
+        extra_env["UV_EXCLUDE_NEWER"] = cutoff_rfc3339
+    cp = run_uv(args, input_text=None, extra_env=extra_env, cwd=pyproject_path.parent)
+    if cp.returncode != 0:
+        # Bubble up the actual error text
+        raise RuntimeError(f"uv pip compile failed:\n{cp.stderr.decode() or cp.stdout.decode()}")
+    out: list[str] = []
+    for raw in cp.stdout.decode().splitlines():
+        s = strip_ansi(raw).strip()
+        # ignore comments (including those that had ANSI colours)
+        if s and not s.startswith("#"):
+            out.append(s)
+    return out
 
 
 def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutoff_rfc3339: str | None) -> list[str]:
@@ -39,13 +81,15 @@ def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutof
     Raises:
         RuntimeError: If uv pip compile fails
     """
-    reqs = sorted({r.strip() for r in requirements if r and r.strip()})
+    # Fix marker spacing for all requirements
+    reqs = sorted({fix_marker_spacing(r.strip()) for r in requirements if r and r.strip()})
     if not reqs:
         return []
     req_text = "\n".join(reqs) + "\n"
     args = ["pip", "compile", "-"]
     if python_version:
         args.extend(["--python", python_version])
+    args.append("--upgrade")
     extra_env: dict[str, str] = {}
     if cutoff_rfc3339:
         extra_env["UV_EXCLUDE_NEWER"] = cutoff_rfc3339
@@ -76,7 +120,8 @@ def uv_dry_run_install(
     Returns:
         Tuple of (success: bool, log: str)
     """
-    text_lines = [x for x in pinned if x.strip()]
+    # Fix marker spacing for all requirements
+    text_lines = [fix_marker_spacing(x) for x in pinned if x.strip()]
     if not text_lines:
         # Nothing to install; treat as OK but say why.
         return True, "No runtime dependencies."
@@ -99,6 +144,30 @@ def uv_dry_run_install(
         # Fallback: use --python with version string and --system
         args.extend(["--python", python_version, "--system"])
 
+    cp = run_uv(args, input_text=text)
+    ok = cp.returncode == 0
+    log = strip_ansi(cp.stdout.decode() + "\n" + cp.stderr.decode())
+    return ok, log
+
+
+def uv_install_real(pinned: Iterable[str], *, python_executable: str | None = None) -> tuple[bool, str]:
+    """
+    Perform a real install of pinned requirements to surface sdist build failures.
+
+    Args:
+        pinned: Iterable of pinned requirement strings
+        python_executable: Full path to the Python interpreter (e.g., a temp venv)
+
+    Returns:
+        (ok, log) where ok indicates success and log contains combined output
+    """
+    lines = [fix_marker_spacing(x) for x in pinned if x.strip()]
+    if not lines:
+        return True, "No dependencies to install."
+    text = "\n".join(lines) + "\n"
+    args = ["pip", "install", "-r", "-"]
+    if python_executable:
+        args.extend(["--python", python_executable])
     cp = run_uv(args, input_text=text)
     ok = cp.returncode == 0
     log = strip_ansi(cp.stdout.decode() + "\n" + cp.stderr.decode())
@@ -140,7 +209,10 @@ def uv_build_and_read_metadata(project_dir: Path) -> tuple[str | None, str | Non
             elif line.startswith("Version: "):
                 version = line.split("Version:", 1)[1].strip()
             elif line.startswith("Requires-Dist: "):
-                requires_dist.append(line.split("Requires-Dist:", 1)[1].strip())
+                req = line.split("Requires-Dist:", 1)[1].strip()
+                # Fix marker spacing issues (e.g., "andextra" -> " and extra")
+                req = fix_marker_spacing(req)
+                requires_dist.append(req)
             elif line.startswith("Requires-Python: "):
                 requires_python = line.split("Requires-Python:", 1)[1].strip()
     return name, version, requires_dist, requires_python

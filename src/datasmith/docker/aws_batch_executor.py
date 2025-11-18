@@ -13,7 +13,8 @@ from typing import Any
 
 import boto3
 
-from datasmith.docker.context import BuildResult, DockerContext, Task
+from datasmith.core.models import BuildResult, Task
+from datasmith.docker.context import DockerContext
 from datasmith.docker.s3_cache_manager import S3CacheConfig, S3DockerCacheManager
 from datasmith.logging_config import get_logger
 

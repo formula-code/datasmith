@@ -104,6 +104,7 @@ def main(args: argparse.Namespace) -> None:
             task_key = Task(owner=owner, repo=repo, sha=sha, tag="pkg")
             docker_ctx = context_registry.get(task_key)
             env_payload = str(task_key.env_payload) or ""
+            python_version = task_key.python_version or ""
             image_name = f"asv/{owner}/{repo}/{sha}".lower()
             try:
                 docker_ctx.build_container(
@@ -113,6 +114,7 @@ def main(args: argparse.Namespace) -> None:
                         "REPO_URL": f"https://www.github.com/{owner}/{repo}",
                         "COMMIT_SHA": sha,
                         "ENV_PAYLOAD": env_payload,
+                        "PY_VERSION": python_version,
                     },
                     force=True,
                 )

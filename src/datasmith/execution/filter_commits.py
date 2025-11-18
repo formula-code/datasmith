@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Final
 
@@ -36,16 +37,16 @@ _NEGATIVE_PATTERNS: Final = [
     r"^\s*revert\b",
     r"^\s*(?:release|prepare(?:d)? release)\b|\bchangelog\b|\btag(?:ging)?\b",
     r"\bbump(?:ing)?\b|\bversions?\b",  # now matches "version" & "versions"
-    r"\bupdate\s+versions?\b",  # e.g. "Update versions for 12.0.1"
+    # r"\bupdate\s+versions?\b",  # e.g. "Update versions for 12.0.1"
     r"\[(?:\s*)release(?:\s*)\]",  # e.g. "[Release] ..."
-    r"^\s*(?:minor|major|patch)\s*:?\s*\[?release\]?",  # e.g. "MINOR: [Release] ..."
+    r"^\s*(?:minor)\s*:?\s*\[?release\]?",  # e.g. "MINOR: [Release] ..."
     # Docs / typing / formatting / CI
     r"\bdocs?(?:umentation)?\b|\breadme\b|\bdocstring\b",
     r"\btype\s+comments?\b|\btype\s+annotations?\b|\btyping\b|\bmypy\b|\bpyright\b|\bpytype\b",
     r"\btypo\b",
     r"\bformat(?:ting)?\b|\bfmt\b|\blint(?:s|ing)?\b|\bblack\b|\bisort\b|\bruff\b|\bflake8\b",
     r"\bci\b|\bgithub actions\b|\bworkflow\b|\bpre-commit\b|\bcibuildwheel\b|\btravis\b|\bcircleci\b",
-    r"\btests?\b|\bcoverage\b|\bTST:\b",
+    # r"\btests?\b|\bcoverage\b|\bTST:\b",
     # Infra / deps / packaging
     r"\bdependabot\b|\bdeps?\b|\bdependenc(?:y|ies)\b|\bpin(?:ning)?\b|\bunpin\b|\brequirements?\b|\bpyproject\.toml\b",
     r"\bbuild\b|\bwheels?\b|\bpackag(?:e|ing)\b|\bdocker\b|\bk8s\b|\bkubernetes\b|\bhelm\b",
@@ -62,7 +63,7 @@ _BAD_REPOS = {
     # "chempy",
     "calebbell",
     # "dasdae",
-    # "datalad",
+    # "datalad",``
     # "devito",
     # "dottxt-ai",
     # "freegs",
@@ -73,8 +74,8 @@ _BAD_REPOS = {
     # "janim",
     # "oggm",
     # "innobi",
-    # "newton-physics",
-    # "modin-project",
+    "newton-physics",
+    "modin-project",
     # "makepath",
     # "mars-project",
     # "qcodes",
@@ -84,14 +85,14 @@ _BAD_REPOS = {
     # "pynetdicom",
     # "climpred",
     # "nilearn",
-    "kedro",
+    # "kedro",
     "mujoco",
-    "mongodb-labs",
+    # "mongodb-labs",
     # "mdanalysis",
     # "pvlib",
     # "psygnal",
     "nvidia-warp",
-    # "man-group-arcticdb",
+    "man-group-arcticdb",
     # "pydata-bottleneck",
     # "pybamm-team",
     # "pydicom-pydicom",
@@ -105,16 +106,16 @@ _BAD_REPOS = {
     # "betterproto",
     # "components",
     # "django-components",
-    "apache-arrow",
+    # "apache-arrow",
     "bloomberg-memray",
     # "deepchecks-deepchecks",
     # "ipython-ipyparallel",
     # "lmfit-lmfit",
-    # "man-group-arctic",
+    "man-group-arctic",
     # "neurostuff",
     # "scverse-spatialdata",
     # "tensorwerk-hangar",
-    "dask",
+    # "dask",
     # "unidata-metpy",
     # "scitools-iris",
     "posthog-posthog",
@@ -151,20 +152,23 @@ def is_delinquient_repo(repo_name: str) -> bool:
     return any(bad in normalized for bad in _BAD_REPOS)
 
 
-def crude_perf_filter(df: pd.DataFrame) -> pd.DataFrame:
+def crude_perf_filter(df: pd.DataFrame, filter_repos: bool = True) -> pd.DataFrame:
     """Filter commits DataFrame to likely performance-related ones."""
     filtered_df = df.copy(deep=True)
 
     filtered_df["total_changes"] = filtered_df["total_additions"] + filtered_df["total_deletions"]
     filtered_df["n_files_changed"] = filtered_df["files_changed"].str.split("\n").apply(len)
     filtered_df["is_perf"] = filtered_df["message"].apply(basic_message_filter)
+    max_tokens = int(os.getenv("DSPY_MAX_TOKENS", "16000"))
 
     mask = (
         filtered_df["is_perf"]
-        & (filtered_df["total_changes"] < 4000)
+        & (filtered_df["total_changes"] < 40000)
         & (filtered_df["n_files_changed"] < 500)
-        & (filtered_df["patch"].str.len() < 20000)
-        & (~filtered_df["repo_name"].apply(is_delinquient_repo))
+        & (filtered_df["n_patch_tokens"] >= 5)
+        & (filtered_df["n_patch_tokens"] < max_tokens)
     )
+    if filter_repos:
+        mask &= ~filtered_df["repo_name"].apply(is_delinquient_repo)
 
     return filtered_df.loc[mask].copy(deep=True)

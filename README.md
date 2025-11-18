@@ -6,116 +6,111 @@
 [![Commit activity](https://img.shields.io/github/commit-activity/m/formula-code/datasmith)](https://img.shields.io/github/commit-activity/m/formula-code/datasmith)
 [![License](https://img.shields.io/github/license/formula-code/datasmith)](https://img.shields.io/github/license/formula-code/datasmith)
 
-This is a Python codebase for preparing and analyzing the Hugging Face dataset for **FormulaCode Lite** (5 repositories; \~440 performance‑improving commits) and **FormulaCode** (701 repositories; ??? performance‑improving commits).
+This is a Python codebase for preparing and analyzing the Hugging Face dataset for **FormulaCode** (67 repositories; 964+ performance‑improving commits) and **FormulaCode-V** (?? Repositories; 200 performance-improving commits with manually verified pytest benchmarks).
 
 ![FormulaCode](static/Fig1.png)
 
 FormulaCode is designed to benchmark the capabilities of large language models (LLMs) to optimize the performance of real‑world codebases. It is designed to *complement* existing benchmarks (e.g. SWE‑Bench) by using the same API and methodology as SWE‑Bench.
 
-### Key improvements
+## Key improvements
 
 1. **Human‑relative metric** – FormulaCode scores an optimizer relative to the speed‑up achieved by the human author of the original commit, preventing “memorize‑and‑saturate” tactics.
 2. **Finer‑grained feedback** – Performance measurements provide a dense reward signal that helps RL or evolutionary algorithms iterate more effectively than binary pass/fail unit tests.
 3. **Performance benchmarks vs. unit tests** – Unit tests protect against functional regressions but can be over‑fit; realistic workload benchmarks capture the critical performance hot‑paths developers actually care about.
-4. **Real‑world impact** – When an LLM outperforms the human baseline on a FormulaCode task, the resulting patch is often state‑of‑the‑art and can be upstreamed directly to the library.
+
+4. **Real‑world impact** – FormulaCode uses a library's _pre-defined_ performance categorization workloads. As such, if an LLM statistically outperforms the human baseline on a FormulaCode task, the resulting patch is often state‑of‑the‑art and can be upstreamed to the library. However, this is contingent on the patch being thoroughly validated after manual verification, of course.
+
+
+## Installation
+Make a `tokens.env` file with your GitHub and Codecov credentials.
+```bash
+# Cache and backup locations
+CACHE_LOCATION=/home/???/formulacode/datasmith/scratch/artifacts/cache.db
+BACKUP_DIR=/home/???/formulacode/backup/
+
+# Scraping tokens
+GH_TOKENs=github_pat_???,github_pat_???
+CODECOV_TOKEN=54c6???
+
+# LLM configuration for context synthesis
+DSPY_MODEL_NAME=openai/meta-llama/Llama-3.3-70B-Instruct
+DSPY_URL=http://localhost:30000/v1
+DSPY_API_KEY=local
+DSPY_TEMPERATURE=0.7
+
+# For ECR access
+AWS_REGION=us-east-1
+
+# Depends on the system.
+#DOCKER_USE_BUILDX=0
+DOCKER_NETWORK_MODE=host
+```
+
+Then, install [uv](https://astral.sh/uv/) and set up the development environment:
+```bash
+$ curl -LsSf https://astral.sh/uv/install.sh | sh
+# Installs pre-commit hooks and dev dependencies.
+$ make install
+# Resolve initial formatting issues.
+$ uv run pre-commit run -a
+$ make check
+# Run tests to verify installation.
+$ make test
+```
+
+Ensure your machine can run CRON tasks. This will be necessary for updating FormulaCode every month.
+
+```bash
+$ crontab -l
+# Edit this file to introduce tasks to be run by cron.
+#
+# Each task to run has to be defined through a single line
+# indicating with different fields when the task will be run
+# and what command to run for the task
+#
+# To define the time you can provide concrete values for
+# minute (m), hour (h), day of month (dom), month (mon),
+# and day of week (dow) or use '*' in these fields (for 'any').
+#
+# Notice that tasks will be started based on the cron's system
+# daemon's notion of time and timezones.
+#
+# Output of the crontab jobs (including errors) is sent through
+# email to the user the crontab file belongs to (unless redirected).
+#
+# For example, you can run a backup of all your user accounts
+# at 5 a.m every week with:
+# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
+#
+# For more information see the manual pages of crontab(5) and cron(8)
+#
+# m h  dom mon dow   command
+
+# Clean up Docker containers every day at midnight
+0 * * * * /usr/bin/docker container prune -f
+
+# Clean up dangling Docker images every week
+0 0 * * 0 /usr/bin/docker image prune -f
+
+# Run FormulaCode update script on the 25th day of every month at 2am
+0 2 25 * * cd /home/???/formulacode/datasmith && ./.venv/bin/python scratch/scripts/update_formulacode.py >> scratch/logs/update_formulacode_{date +\%Y\%m\%d}.log 2>&1
+$ crontab -e
+# <Make the necessary edits>
+```
+
 
 ## Data layout
 The general layout of the artifacts is as follows:
 ```bash
 scratch/artifacts
+├── cache.db                    # See `CACHE_LOCATION` env var
 ├── raw/                        # Raw downloads & lists produced by scripts
 │   ├── downloads/              # Per‑repo dashboard archives
 │   ├── online_dashboards.jsonl # Updated config for dashboard scraper
 │   ├── repos_discovered.csv      # Candidates from GitHub search
 │   ├── repos_valid.csv
-│   ├── commits_all.jsonl
-│   └── commits_filtered.jsonl
-├── benchmark_results/          # asv run outputs
-│   ├── results/                # Individual asv JSON files
-│   └── published/              # Collated *.fc.pkl & HTML dashboards
-├── replication/                # Outputs of replication_experiment.py
-├── cache.db                    # See `CACHE_LOCATION` env var
-└── backup/                     # Optional BACKUP_DIR for long‑term storage
+└── processed/.                 # Outputs of various processing scripts
 ```
-
-## Docker Builder
-
-Datasmith uses a **Templated Docker Builder** to create reproducible build environments for benchmarking tasks. The builder replaces flat shell scripts with a structured, template-driven system that provides:
-
-- **3-tier layer caching**: 5-10x storage/bandwidth reduction (inspired by SWE-Bench)
-- **Reproducibility**: Pinned base images, frozen packages, provenance tracking
-- **LLM-safe workflows**: Validated editable regions for agent-driven builds
-- **Clean separation**: Lightweight task definitions vs. implementation details
-
-### Quick Start
-
-```python
-from datasmith.docker.builder import Builder, TaskInstance, RepoMetadata
-
-# Define a task
-repo = RepoMetadata(owner="numpy", name="numpy")
-task = TaskInstance(
-    id="numpy__numpy-20590",
-    repo=repo,
-    commit_sha="abc123def456",
-    python_version="3.10",
-)
-
-# Build context with layer caching
-builder = Builder()
-context = builder.build_from_task(task)
-tarball = context.build_tarball(
-    cache_from=[
-        "ecr.io/datasmith/base:latest",
-        "ecr.io/datasmith/env:py310",
-    ]
-)
-```
-
-### CLI Usage
-
-```bash
-# Validate task definition
-python -m datasmith.docker.builder validate --task task.json
-
-# Render build context
-python -m datasmith.docker.builder render \
-  --task task.json \
-  --out-dir build/
-
-# Compare with baseline
-python -m datasmith.docker.builder diff \
-  --task task.json \
-  --baseline legacy/ \
-  --show-diff
-```
-
-### Documentation
-
-- **[Builder README](src/datasmith/docker/builder/README.md)**: Architecture, API reference, usage examples
-- **[CLI Reference](src/datasmith/docker/builder/CLI.md)**: Command-line interface documentation
-- **[Migration Guide](docs/MIGRATION_GUIDE.md)**: Migrating from legacy system
-- **[Architecture Spec](TEMPLATED_BUILDER.md)**: Detailed design document
-
-### Key Features
-
-**Layer Caching**:
-- **Base layer** (~500MB): System packages, shared by all tasks
-- **Environment layer** (~300MB each): Python matrix, shared by tasks with same Python version
-- **Instance layer** (~200MB each): Task-specific setup
-
-**Storage savings**: From ~2TB (1000 × 2GB) to ~218GB (9x reduction)
-
-**Reproducibility**:
-- Pinned base images (SHA256 digests)
-- Frozen system packages
-- Build provenance metadata
-- Lockfile verification
-
-**Integration**:
-- Backward compatible with existing orchestrators/validators
-- No changes needed for current consumers
-- Drop-in replacement via compatibility layer
 
 
 ## Dataset building
@@ -144,136 +139,67 @@ CACHE_LOCATION=/home/???/formulacode/datasmith/scratch/artifacts/cache.db
 BACKUP_DIR=/home/???/formulacode/backup/
 ```
 
-## FormulaCode-Lite
-
-FormulaCode Lite is a small dataset of 5 repositories with ~440 performance improving commits that was presented in the workshop paper. These repositories have a combined 157,000+ GitHub stars and 200,000+ academic citations and each repository uses Airspeed Velocity for regression testing. FormulaCode Lite was an initial proof-of-concept for the methodology used to build the larger FormulaCode dataset.
-
-![img](static/Fig2.png)
-
-
-### Scrape online dashboards
-
-Each of these repositories has a publicly accessible perpetually updating dashboard (e.g. Astropy's dashboard lives [here](https://spacetelescope.github.io/bench/astropy-benchmarks)) that tracks the performance of each commit against various benchmarks. These dashboards were manually curated and placed in a file called `scratch/artifacts/raw/online_dashboards.jsonl`.
-
-```json
-{"url": "https://asv-runner.github.io/asv-collection/pandas/", "output_dir": "artifacts/processed/downloads/pandas"}
-{"url": "https://pv.github.io/scipy-bench/", "output_dir": "artifacts/processed/downloads/scipy"}
-{"url": "https://scikit-learn.org/scikit-learn-benchmarks/", "output_dir": "artifacts/processed/downloads/sklearn"}
-{"url": "https://spacetelescope.github.io/bench/astropy-benchmarks/", "output_dir": "artifacts/processed/downloads/astropy"}
-{"url": "https://pv.github.io/numpy-bench/", "output_dir": "artifacts/processed/downloads/numpy"}
-```
-As all these dashboards have the same structure, we developed an ethical scraper that can scrape these dashboards and download the performance data in a structured format. The scraper is invoked using `scripts/download_dataset.py` and can be run as follows:
-
-```bash
-$ python scratch/scripts/download_dataset.py \
-       --force \
-       --dashboards scratch/artifacts/raw/online_dashboards.jsonl
-# machines: 100%|██████████████████████████████████████| 7/7 [00:56<00:00,  8.05s/it]
-# Collected 46,143 rows from 805 benchmark files.
-# summaries: 100%|█████████████████████████████████| 115/115 [00:09<00:00, 12.56it/s]
-# Saved 46,143 benchmark rows and 22,577 summary rows -> /home/???/formulacode/datasmith/scratch/artifacts/processed/downloads/sklearn/dashboard.fc.pkl
-# Data downloaded to scratch/artifacts/processed/downloads/sklearn
-# ...
-```
-
-This should create a directory called `scratch/artifacts/processed/downloads` that contains the downloaded data for each repository. The data is stored in a structured format that can be easily processed later. More information about the format is available in `datasmith/benchmark/collection.py`.
-
-
-### 2. Detect performance improving commits
-
-To detect performance improving commits, we provide two methods:
-1. **asv's internal regression detection**: Airspeed Velocity maintains a built-in regression detection mechanism that is finetuned to detect changes in performance when the underlying data is noisy.
-2. **rupture's RBF kernel**: This is a more general-purpose method that detects changes in the performance data using a kernel-based change point detection algorithm.
-
-Either method can be used by passing `--method 'asv'` or `--method 'rbf'` to the script. The `rupture` method is enabled by default as we might not have mean + standard deviation data for all commits in the dataset (that is required by `asv.step_detect`).
-
-```bash
-$ python scratch/scripts/detect_breakpoints.py \
-       --build-reports \
-       --method rbf \
-       --compute-coverage \
-       --dataset scratch/artifacts/processed/downloads/astropy/dashboard.fc.pkl
-# Found 1,085 potential downward shifts.
-# Codecov: 100%|███████████████████████████████| 119/119 [08:50<00:00,  4.46s/commit]
-# Building GitHub commit reports and merged dataframe ...
-# Reports: 100%|█████████████████████████████████| 40/40 [02:55<00:00,  4.38s/commit]
-# Enriched breakpoints saved to '/home/???/formulacode/datasmith/scratch/artifacts/processed/downloads/astropy/breakpoints.fc.pkl'.
-```
-
-The `breakpoints.fc.pkl` collection contains all the information about the detected performance improving commits, a markdown report for each commit with useful hints for the optimizer, and a merged CSV file that contains the performance data for all commits in the repository. These files can then be used in the evaluation harness for benchmarking the performance of an optimizer `[@TODO:link formula-code/evaluation-harness]`.
-
-### 3. Synthesize Contexts.
-
-For each commit-sha pair in the breakpoints, we must synthesize contexts for all commit-sha pairs in the breakpoints.
-
-```bash
-$ python scratch/scripts/synthesize_contexts.py \
-       --dashboard scratch/artifacts/processed/downloads/astropy/dashboard.fc.pkl \
-       --output-dir scratch/artifacts/processed/downloads/astropy/contexts/ \
-       --context-registry scratch/artifacts/processed/downloads/astropy/context_registry.json \
-       --max-workers 16 \
-       --limit-per-repo 2 \
-       --max-attempts 3 \
-       --max-steps 10
-```
-
-
 
 ## FormulaCode
 
-FormulaCode is a larger dataset of 701 repositories with ??? performance improving commits that is being prepared for a future publication. The dataset is built using the same methodology as FormulaCode Lite, but with a larger set of repositories and more quality-of-life features improvements.
 
-![img](static/CommitDist2.png)
+FormulaCode is a dataset of 101 repositories with 4M+ PRs with an automated pipeline to scrape, filter, benchmark, and analyze performance-improving commits in open-source repositories that use Airspeed Velocity (asv) for benchmarking. To update formulacode simply run:
+
+```
+$ python scratch/scripts/update_formulacode.py --start-date 2025-10-01 --end-date 2025-11-01
+```
+
+The next sections describe each step of the pipeline in detail.
 
 ### 1. Scrape Github for asv-compatible repositories
 
-We start by collecting all repositories that use Airspeed Velocity (asv) for benchmarking. We developed two scripts for this purpose:
+We start by collecting all repositories that use Airspeed Velocity (asv) for benchmarking. This can be done in one of two ways:
 
-1. Google BigQuery: Google maintains a public dataset of GitHub repositories that can be queried using SQL. We use this to find all repositories that have a `asv.conf.json` file in their root directory.
+1. Google BigQuery: Google maintains a public dataset of GitHub repositories that can be queried using SQL.
 
 2. Github Search API: We use the GitHub Search API to find all repositories that have a `asv.conf.json` file in their root directory. This is a more comprehensive search that can find repositories that are not indexed by Google BigQuery. _This version is implemented here._
 
 To run the script, you need to have a GitHub token with `repo` and `read:org` permissions. You can create a token by following the instructions [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token).
 
-
-The scraper can be run using the following command:
+Run:
 ```bash
-$ python scratch/scripts/scrape_repositories.py \
-       --outfile scratch/artifacts/pipeflush/repos_discovered.csv \
-       --min-stars 100 \
-       --filtered-outfile scratch/artifacts/pipeflush/repos_valid.csv
+$ python scratch/scripts/collect_commits.py \
+       --dashboards scratch/artifacts/pipeflush/repos_valid.csv \
+       --outfile    scratch/artifacts/pipeflush/commits_all.jsonl \
+       --max-pages  50
 # Writes scratch/artifacts/processed/repos_discovered.csv and scratch/artifacts/processed/repos_valid.csv
 ```
 
 The `scratch/artifacts/processed/repos_valid.csv` file contains a subset of the repositories that aren't forks / reuploads / has atleast {min-stars} stars / pass other sanity checks. We found ~700 filtered repositories for this dataset.
 
 
-### 4. Collect relevant commits for all repositories
+### 2. Collect relevant commits for all repositories
 
-Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch (the top 5000 PRs, sorted by popularity). We use the `collect_commits.py` script to do this. The `filter_commits.py` script then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes). The script also limits the number of repositories to a maximum of 350 to ensure we don't burden the GitHub API with too many requests. The scripts can be run as follows:
+Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch and then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes) or could not be installed (e.g. runnning `uv pip install -e .` causes issues).
 
 ```bash
-# $ python scratch/scripts/collect_commits.py \
-#        --dashboards scratch/artifacts/raw/repos_valid.csv \
-#        --outfile    scratch/artifacts/raw/commits_all.jsonl \
-#        --max-pages  50
-
-# Needs to be a parquet file because the filtered commits are often very large.
 $ python scratch/scripts/collect_and_filter_commits.py \
        --filtered-benchmarks-pth scratch/artifacts/pipeflush/repos_valid.csv \
-       --output-pth scratch/artifacts/pipeflush/commits_filtered.parquet \
-       --max-repos 350 \
-       --threads   32 \
+       --output-pth scratch/artifacts/pipeflush/merge_commits_filtered.parquet \
+       --threads   8 \
        --procs     32
 
+$ python scratch/scripts/prepare_commits_for_building_reports.py \
+       --input scratch/artifacts/pipeflush/merge_commits_filtered.parquet \
+       --output scratch/artifacts/pipeflush/merge_commits_filtered_with_patch.parquet \
+       --max-workers 200 \
+       --filter-repos \
+       --fetch-patches
+
 $ python scratch/scripts/collect_perf_commits.py \
-       --commits  scratch/artifacts/pipeflush/commits_filtered.parquet \
-       --outfile    scratch/artifacts/pipeflush/commits_perfonly.jsonl \
+       --commits  scratch/artifacts/processed/merge_commits_filtered_numpy_with_patch.parquet \
+       --outfile    scratch/artifacts/processed/perfonly_commits_numpy_with_patch.parquet \
        --max-workers -1
 ```
 
+### 3. Build contexts for all commits
 
-__Build contexts for all commits__. Each context is a (repo, commit) pair with an associated build_env.sh script to install dependencies. Some reasons a context might fail to build (and get filtered out):
+Each context is a (repo, commit) pair with an associated build_env.sh script to install dependencies. Some reasons a context might fail to build (and get filtered out):
 
 1. Commit couldn't be checked out
 2. Commit didn't have an asv.conf.json file
@@ -286,149 +212,31 @@ $ python scratch/scripts/synthesize_contexts.py \
        --output-dir scratch/artifacts/pipeflush/results_synthesis/ \
        --context-registry scratch/artifacts/pipeflush/context_registry.json \
        --max-workers 32 \
-       --limit-per-repo 2 \
        --max-attempts 3 \
-       --max-steps 10
-
-# This should create a file called scratch/context_registry.json with all the contexts + build.sh scripts to build those contexts.
-
-# Verify that the contexts can be built and the benchmarks can be run.
-$ python scratch/scripts/parallel_validate_containers.py \
-       --commits scratch/artifacts/pipeflush/commits_perfonly.parquet \
-       --output-dir scratch/artifacts/pipeflush/results_verification/ \
-       --context-registry scratch/context_registry.json \
-       --max-workers 32 \
-       --limit-per-repo 2
+       --max-steps 10 \
+       --max-similar-candidates 5 \
+       --ignore-exhausted \
+       --push-to-ecr
 ```
-### 5. Benchmark all commits
 
-> [!IMPORTANT]
-> We haven't finished benchmarking all commits yet. The resources required to benchmark all commits (initially) is very large. We present a basic, scalable benchmarking script that can be used to benchmark all commits in parallel (without any of the code needed to deploy to AWS/GCP/SLURM/etc.)
+### 4. Upload to AWS ECR
 
-Once we've collected the relevant commits, we can benchmark their performance using `asv`. `asv` includes many quality-of-life features to ensure that benchmarks are robust to noise and that the results are reproducible. Our script benchmarks multiple commits in parallel. Proper benchmarking requires some system tuning. Refer to the [asv tuning guidelines](https://asv.readthedocs.io/en/latest/tuning.html) for more details.
-
-The `dependency_recommendations.json` file is a dictionary that contains recommended dependencies for each package. The key is an input to `pandas.query` for the `filtered-commits` dataframe, and the value is a list of dependencies that should be installed before running the benchmarks. For example, certain commits in `scikit_learn_scikit_learn` repository require `numpy==1.22.0` to run properly. This is a stop-gap solution to ensure that the benchmarks run correctly.
+We rebuild the Docker images from scratch and then upload them to AWS ECR for later use.
 
 ```bash
-# in a root shell:
-(sudo) $ export OPENBLAS_NUM_THREADS=1
-(sudo) $ export MKL_NUM_THREADS=1
-(sudo) $ export OMP_NUM_THREADS=1
-(sudo) $ sudo python -m pyperf system tune
-# in userspace:
-$ python scratch/scripts/benchmark_commits.py \
-       --filtered-commits scratch/artifacts/raw/commits_filtered_sm.jsonl \
-       --context-registry  scratch/context_registry.json \
-       --max-concurrency 30 \
-       --num-cores       2  \
-       --asv-args "--python=same --append-samples -a rounds=2 -a repeat=2" \
-       --output-dir      scratch/artifacts/benchmark_results_sm/
-```
-
-Generally, each benchmark takes ~2 minutes to run, so benchmarking 70,000 commits on 16 dedicated 4-core machines takes around 6 days. The script will create a directory called `scratch/artifacts/benchmark_results/` that contains the results of the benchmarks for each commit. The results are stored in a structured format that can be easily processed later.
-
-### 6. Collate benchmark results
-
-This step aggregates the benchmark results and generates the `*.fc.pkl` file. The `detect_breakpoints.py` script can then be used unchanged to detect performance improving commits. The script can be run as follows:
-
-```bash
-$ python scratch/scripts/collate_benchmark_results.py \
-       --results-dir     scratch/artifacts/benchmark_results/results \
-       --output-dir      scratch/artifacts/benchmark_results/published/ \
-       --commit-metadata scratch/artifacts/raw/commits_filtered.jsonl \
-       --default-machine-name "docker"
-# machines: 100%|██████████████████████████████████████████████| 1/1 [00:00<00:00,  1.53it/s]
-# Collected 53,705 rows from 115 benchmark files.
-# summaries: 100%|████████████████████████████████████████| 115/115 [00:00<00:00, 234.43it/s]
-# Saved 53,705 benchmark rows and 35,765 summary rows -> /home/???/formulacode/datasmith/benchmark_results/published/html/scikit-learn_scikit-learn/dashboard.fc.pkl
-# Benchmark results aggregated and saved to /home/???/formulacode/datasmith/benchmark_results/published/html.
-$ python scratch/scripts/detect_breakpoints.py \
-       --build-reports \
-       --method rbf \
-       --compute-coverage \
-       --dataset scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/dashboard.fc.pkl
-
-$ python scratch/scripts/validate_containers.py \
-       --dashboard scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/dashboard.fc.pkl \
-       --output-dir scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/containers/
-# ...
-```
-
-The generated `breakpoints.fc.pkl` file contains all the information about the detected performance improving commits, a markdown report for each commit with useful hints for the optimizer, and a merged CSV file that contains the performance data for all commits in the repository. These files can then be used in the evaluation harness for benchmarking the performance of an optimizer `[@TODO:link formula-code/evaluation-harness]`.
-
-### Replication Experiment
-
-How closely do our benchmarked metrics match the original performance improvements? We can answer this question by running the `scripts/replication_experiment.py` script. This script takes in two `breakpoints.fc.pkl` files, ensures that they point to the same repository, finds the common set of commits, and then computes the correlation between the performance improvements in the two datasets as well as some basic statistics and plots about the performance improvements. The script can be run as follows:
-
-```bash
-$ python scratch/scripts/replication_experiment.py \
-       --dataset1 scratch/artifacts/benchmark_results/published/html/scikit-learn_scikit-learn/breakpoints.fc.pkl \
-       --dataset2 scratch/artifacts/raw/downloads/sklearn/breakpoints.fc.pkl \
-       --output-dir scratch/artifacts/replication/
-```
-### Pipeline flowchart
-
-```mermaid
-flowchart TD
-    %%  ─────────────────────  global styles  ─────────────────────
-    classDef art  fill:#FEF9E7,stroke:#8C6D1F,stroke-width:1px,color:#000;
-    classDef rule fill:#D6EAF8,stroke:#1B4F72,stroke-width:1px,color:#000;
-
-    %%  ─────────────────────  Lite pipeline  ─────────────────────
-    subgraph Lite["🟢 FormulaCode-Lite"]
-      direction TB
-      A1[online_dashboards.jsonl]:::art
-      B1(download_dataset.py):::rule
-      C1[dashboard.fc.pkl]:::art
-      D1(detect_breakpoints.py):::rule
-      E1[breakpoints.fc.pkl]:::art
-
-      A1 --> B1 --> C1 --> D1 --> E1
-    end
-
-    %%  ─────────────────────  Full pipeline  ─────────────────────
-    subgraph Full["🔵 FormulaCode (full)"]
-      direction TB
-      A2(scrape_repositories.py):::rule
-      B2[repos_discovered.csv]:::art
-      C2[repos_valid.csv]:::art
-      D2(collect_commits.py):::rule
-      E2[commits_all.jsonl]:::art
-      F2(filter_commits.py):::rule
-      G2[commits_relevant.jsonl]:::art
-      H2(benchmark_commits.py):::rule
-      I2[benchmark_results/results]:::art
-      J2(collate_benchmark_results.py):::rule
-      K2["dashboard.fc.pkl<br/>(published)"]:::art
-      L2(detect_breakpoints.py):::rule
-      M2[breakpoints.fc.pkl]:::art
-
-      A2 --> B2 --> C2
-      C2 --> D2 --> E2 --> F2 --> G2
-      G2 --> H2 --> I2 --> J2 --> K2 --> L2 --> M2
-      %% G2 also feeds J2 (commit metadata)
-      G2 -.-> J2
-    end
-
-    %%  ─────────────────────  Replication experiment  ─────────────────────
-    subgraph Rep["🟣 Replication experiment"]
-      direction TB
-      R1(replication_experiment.py):::rule
-      R2[replication/*]:::art
-      E1 --> R1
-      M2 --> R1 --> R2
-    end
+$ python scratch/scripts/build_and_publish_to_ecr.py \
+       --commits scratch/artifacts/processed/perfonly_commits_with_patch_final.parquet \
+       --context-registry scratch/artifacts/pipeflush/context_registry.json \
+       --max-workers 5 \
+       --skip-existing
 ```
 
 
+### 5. Evaluate all commits
 
-## TODOs
+This is done in FormulaCode's fork of the terminal-bench evaluation framework.
 
-- [X] FormulaCode Lite: Add ethical scraper.
-- [X] FormulaCode: Add script to find and filter all asv repositories.
-- [X] FormulaCode: Large scale benchmarking for all commits in the dataset
-- [ ] FormulaCode: Parameter tuning for large scale benchmarking scripts.
-- [ ] FormulaCode: `asv` supports profiling the benchmarking function. We should collect such profiling data for all commits in the dataset.
-- [ ] FormulaCode: In `search_commits` replace the endpoint with `"/search/issues?q=type:pr+is:merged+repo:{repo_name}&per_page={per_page}&page={page}&advanced_search=true` endpoint to use each query more efficiently.
-- [ ] FormulaCode: Make an object oriented API for the dataset. Do not rely on a folder structure.
-- [ ] FormualCode Docker: need to get relative path from asv.conf.json instead of assuming root directory is the base directory.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
