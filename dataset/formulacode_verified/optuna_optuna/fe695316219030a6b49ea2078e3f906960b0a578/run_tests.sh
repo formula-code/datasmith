@@ -792,7 +792,6 @@ if __name__ == "__main__":
 EOF
 
 if [ ! -f jinja_patch_plugin_pandas.py ]; then
-    uv pip install jinja2
     cat > jinja_patch_plugin_pandas.py << 'PY'
 import importlib, pathlib, jinja2
 
@@ -811,6 +810,5 @@ _patch()
 PY
 fi
 
-uv pip install -U pytest
 python formulacode_testrunner.py --all --base ${FORMULACODE_BASE_COMMIT} --extra-args "-p jinja_patch_plugin_pandas"
 exit $?

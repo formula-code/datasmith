@@ -104,6 +104,10 @@ HEAD_SHA="$(git rev-parse --verify HEAD)"
 
 lock_repo_to_current_commit
 
+# install some band-aid packages
+micromamba run -n "$ENV_NAME" uv pip install -q --upgrade jinja2 || true
+micromamba run -n "$ENV_NAME" uv pip install -q --upgrade pytest || true
+
 
 # Persist env variables for future shells and auto-activate
 cat >>/etc/profile.d/asv_build_vars.sh <<EOF
