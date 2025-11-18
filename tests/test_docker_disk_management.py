@@ -5,7 +5,6 @@ This module tests disk space monitoring, threshold checking, and automatic pruni
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,7 +14,6 @@ from datasmith.docker.disk_management import (
     docker_data_root,
     free_gb,
     guard_and_prune,
-    guard_loop,
 )
 
 # Mark all async tests with anyio, using only asyncio backend
@@ -143,143 +141,4 @@ class TestGuardAndPrune:
                 data_root="/var/lib/docker",
                 run_id=None,
                 hard_fail=True,
-            )
-
-
-class TestGuardLoop:
-    """Tests for guard_loop function."""
-
-    async def test_guard_loop_immediate_check(self, anyio_backend_name: str) -> None:
-        """Test that guard_loop performs an immediate check on startup."""
-        if anyio_backend_name != "asyncio":
-            pytest.skip("guard_loop only supports asyncio backend")
-        client = MagicMock()
-        stop_event = asyncio.Event()
-        stop_event.set()  # Stop immediately after first check
-
-        with patch("datasmith.docker.disk_management.guard_and_prune", new_callable=AsyncMock) as mock_guard:
-            await guard_loop(
-                client=client,
-                min_free_gb=50.0,
-                data_root="/var/lib/docker",
-                run_id=None,
-                interval_s=60,
-                hard_fail=False,
-                stop_event=stop_event,
-            )
-
-            # Should be called at least once (immediate check)
-            assert mock_guard.call_count >= 1
-
-    async def test_guard_loop_periodic_checks(self, anyio_backend_name: str) -> None:
-        """Test that guard_loop performs periodic checks."""
-        if anyio_backend_name != "asyncio":
-            pytest.skip("guard_loop only supports asyncio backend")
-        client = MagicMock()
-        stop_event = asyncio.Event()
-
-        call_count = 0
-
-        async def mock_guard_fn(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 3:  # Stop after 3 calls
-                stop_event.set()
-
-        with patch("datasmith.docker.disk_management.guard_and_prune", side_effect=mock_guard_fn):
-            await guard_loop(
-                client=client,
-                min_free_gb=50.0,
-                data_root="/var/lib/docker",
-                run_id=None,
-                interval_s=0.01,  # Very short interval for testing
-                hard_fail=False,
-                stop_event=stop_event,
-            )
-
-            # Should have been called multiple times
-            assert call_count >= 2
-
-    async def test_guard_loop_respects_stop_event(self, anyio_backend_name: str) -> None:
-        """Test that guard_loop stops when stop_event is set."""
-        if anyio_backend_name != "asyncio":
-            pytest.skip("guard_loop only supports asyncio backend")
-        client = MagicMock()
-        stop_event = asyncio.Event()
-
-        # Set stop event after a short delay
-        async def set_stop():
-            await asyncio.sleep(0.05)
-            stop_event.set()
-
-        with patch("datasmith.docker.disk_management.guard_and_prune", new_callable=AsyncMock):
-            # Run both tasks concurrently
-            await asyncio.gather(
-                guard_loop(
-                    client=client,
-                    min_free_gb=50.0,
-                    data_root="/var/lib/docker",
-                    run_id=None,
-                    interval_s=1,
-                    hard_fail=False,
-                    stop_event=stop_event,
-                ),
-                set_stop(),
-            )
-
-            # If we get here, the loop stopped properly
-
-    async def test_guard_loop_handles_exceptions(self, anyio_backend_name: str) -> None:
-        """Test that guard_loop continues even if guard_and_prune raises exceptions."""
-        if anyio_backend_name != "asyncio":
-            pytest.skip("guard_loop only supports asyncio backend")
-        client = MagicMock()
-        stop_event = asyncio.Event()
-
-        call_count = 0
-
-        async def mock_guard_failing(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 3:
-                stop_event.set()
-            raise RuntimeError("Simulated error")
-
-        with patch("datasmith.docker.disk_management.guard_and_prune", side_effect=mock_guard_failing):
-            # Should not raise exception
-            await guard_loop(
-                client=client,
-                min_free_gb=50.0,
-                data_root="/var/lib/docker",
-                run_id=None,
-                interval_s=0.01,
-                hard_fail=False,
-                stop_event=stop_event,
-            )
-
-            # Should have attempted multiple times despite errors
-            assert call_count >= 2
-
-    async def test_guard_loop_initial_systemexit_propagates(self, anyio_backend_name: str) -> None:
-        """Test that SystemExit from initial check propagates."""
-        if anyio_backend_name != "asyncio":
-            pytest.skip("guard_loop only supports asyncio backend")
-        client = MagicMock()
-        stop_event = asyncio.Event()
-
-        async def mock_guard_systemexit(*args, **kwargs):
-            raise SystemExit("Disk space critical")
-
-        with (
-            patch("datasmith.docker.disk_management.guard_and_prune", side_effect=mock_guard_systemexit),
-            pytest.raises(SystemExit, match="Disk space critical"),
-        ):
-            await guard_loop(
-                client=client,
-                min_free_gb=50.0,
-                data_root="/var/lib/docker",
-                run_id=None,
-                interval_s=60,
-                hard_fail=True,
-                stop_event=stop_event,
             )
