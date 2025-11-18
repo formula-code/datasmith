@@ -10,7 +10,6 @@ from unittest.mock import Mock, patch
 import pytest
 
 from datasmith.agents.problem_extractor import (
-    CommentExtractorSignature,
     ProblemExtraction,
     ProblemExtractor,
     ProblemExtractorSignature,
@@ -74,16 +73,11 @@ class TestProblemExtractorSignatures:
         # Check that we can instantiate the signature
         sig = ProblemExtractorSignature
         # Verify signature has the expected field names in __annotations__
-        assert "github_text" in sig.__annotations__
-        assert "related_issues" in sig.__annotations__
-        assert "problem_statement" in sig.__annotations__
-        assert "solution_overview" in sig.__annotations__
-
-    def test_comment_extractor_signature_fields(self):
-        """Test that CommentExtractorSignature has required fields."""
-        sig = CommentExtractorSignature
-        assert "comment_thread" in sig.__annotations__
-        assert "extracted_discussion" in sig.__annotations__
+        assert "pr_body" in sig.__annotations__
+        assert "pr_comments" in sig.__annotations__
+        assert "reasoning" in sig.__annotations__
+        assert "extracted_problem_description" in sig.__annotations__
+        assert "extracted_solution_overview" in sig.__annotations__
 
 
 class TestProblemExtractorInitialization:
@@ -121,20 +115,23 @@ class TestProblemExtraction:
         """Test that extract_problem returns (extracted, validation) tuple."""
         # Mock the predictor response
         mock_result = Mock()
-        mock_result.problem_statement = "Test extracted problem"
-        mock_result.solution_overview = None
+        mock_result.extracted_problem_description = "This is a test extracted problem statement with enough length."
+        mock_result.extracted_solution_overview = None
         mock_predict.return_value = Mock(return_value=mock_result)
 
         # Create extractor with mocked predictor
         extractor.problem_predictor = mock_predict.return_value
 
-        result = extractor.extract_problem("test message", "test issues")
+        result = extractor.extract_problem(
+            pr_body="test message body with sufficient length",
+            pr_comments="test comments with sufficient length",
+        )
 
         assert isinstance(result, tuple)
         assert len(result) == 2
         extracted, validation = result
         assert isinstance(extracted, ProblemExtraction)
-        assert extracted.problem_statement == "Test extracted problem"
+        assert extracted.problem_statement == "This is a test extracted problem statement with enough length."
         assert isinstance(validation, dict)
 
     @patch("datasmith.agents.problem_extractor.dspy.Predict")
@@ -143,15 +140,19 @@ class TestProblemExtraction:
         extractor.validate_lcs = False
 
         mock_result = Mock()
-        mock_result.problem_statement = "Test problem"
+        mock_result.extracted_problem_description = "This is a test problem description that is long enough."
+        mock_result.extracted_solution_overview = None
         mock_predict.return_value = Mock(return_value=mock_result)
         extractor.problem_predictor = mock_predict.return_value
 
-        extracted, validation = extractor.extract_problem("message", "issues")
+        extracted, validation = extractor.extract_problem(
+            pr_body="issue body text that is long enough",
+            pr_comments="related comments text that is long enough",
+        )
 
         assert validation["validation_enabled"] is False
         assert validation["overall_pass"] is True
-        assert extracted.problem_statement == "Test problem"
+        assert extracted.problem_statement == "This is a test problem description that is long enough."
 
     @patch("datasmith.agents.problem_extractor.dspy.Predict")
     def test_extract_problem_handles_exceptions(self, mock_predict, extractor):
@@ -160,49 +161,13 @@ class TestProblemExtraction:
         mock_predict.return_value = Mock(side_effect=Exception("Test error"))
         extractor.problem_predictor = mock_predict.return_value
 
-        extracted, validation = extractor.extract_problem("message", "issues")
+        extracted, validation = extractor.extract_problem(pr_body="message body", pr_comments="issues text")
 
         assert isinstance(extracted, ProblemExtraction)
         assert extracted.problem_statement is not None
         assert "[extraction failed:" in extracted.problem_statement
         assert validation["overall_pass"] is False
         assert "error" in validation
-
-
-class TestCommentExtraction:
-    """Test comment/discussion extraction."""
-
-    @pytest.fixture
-    def extractor(self):
-        """Create ProblemExtractor instance."""
-        return ProblemExtractor(validate_lcs=True, min_lcs=0.85, log_validation=False)
-
-    @patch("datasmith.agents.problem_extractor.dspy.Predict")
-    def test_extract_comments_returns_tuple(self, mock_predict, extractor):
-        """Test that extract_comments returns (extracted, validation) tuple."""
-        mock_result = Mock()
-        mock_result.extracted_discussion = "Test discussion"
-        mock_predict.return_value = Mock(return_value=mock_result)
-        extractor.comment_predictor = mock_predict.return_value
-
-        result = extractor.extract_comments("test comments")
-
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-        extracted, validation = result
-        assert isinstance(extracted, str)
-        assert isinstance(validation, dict)
-
-    @patch("datasmith.agents.problem_extractor.dspy.Predict")
-    def test_extract_comments_handles_exceptions(self, mock_predict, extractor):
-        """Test that comment extraction handles exceptions gracefully."""
-        mock_predict.return_value = Mock(side_effect=Exception("Test error"))
-        extractor.comment_predictor = mock_predict.return_value
-
-        extracted, validation = extractor.extract_comments("comments")
-
-        assert "[extraction failed:" in extracted
-        assert validation["overall_pass"] is False
 
 
 class TestValidation:
@@ -325,33 +290,24 @@ class TestEndToEnd:
         """Test complete extraction workflow."""
         # Mock good extractive output
         mock_problem_result = Mock()
-        mock_problem_result.problem_statement = SAMPLE_ISSUE_SOURCE.strip()
-        mock_problem_result.solution_overview = None
+        mock_problem_result.extracted_problem_description = SAMPLE_ISSUE_SOURCE.strip()
+        mock_problem_result.extracted_solution_overview = None
 
-        mock_comment_result = Mock()
-        mock_comment_result.extracted_discussion = SAMPLE_COMMENT_THREAD.strip()
-
-        # Set up predictors
+        # Set up predictor
         problem_mock = Mock(return_value=mock_problem_result)
-        comment_mock = Mock(return_value=mock_comment_result)
 
-        with (
-            patch.object(extractor_no_validation, "problem_predictor", problem_mock),
-            patch.object(extractor_no_validation, "comment_predictor", comment_mock),
-        ):
-            # Extract problem
-            problem, p_validation = extractor_no_validation.extract_problem(SAMPLE_ISSUE_SOURCE, "")
-
-            # Extract comments
-            discussion, d_validation = extractor_no_validation.extract_comments(SAMPLE_COMMENT_THREAD)
+        with patch.object(extractor_no_validation, "problem_predictor", problem_mock):
+            # Extract problem using both issue and comment text
+            problem, p_validation = extractor_no_validation.extract_problem(
+                pr_body=SAMPLE_ISSUE_SOURCE,
+                pr_comments=SAMPLE_COMMENT_THREAD,
+            )
 
             # Check results
             assert isinstance(problem, ProblemExtraction)
             assert problem.problem_statement is not None
             assert problem.to_markdown()
-            assert len(discussion) > 0
             assert p_validation["overall_pass"] is True
-            assert d_validation["overall_pass"] is True
 
 
 class TestValidationReporting:

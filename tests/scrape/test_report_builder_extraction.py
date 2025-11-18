@@ -52,6 +52,7 @@ index abc123..def456 100644
     "message": "Add experimental_canvas_size_limits to Points layer",
     "date": "2023-05-15T10:30:00Z",
     "pr_number": 123,
+    "pr_merged_at": "2023-05-16T10:30:00Z",
 }
 
 
@@ -85,80 +86,22 @@ class TestReportBuilderWithProblemExtractor:
             )
 
             # Verify ProblemExtractor was initialized with correct params
-            mock_extractor.assert_called_once_with(
-                validate_lcs=True,
-                min_lcs=0.85,
-                log_validation=True,
-            )
+            mock_extractor.assert_called_once_with(validate_lcs=True)
 
-    @patch("datasmith.scrape.report_builder.issue_comments")
-    @patch("datasmith.scrape.report_builder.review_comments")
-    @patch("datasmith.scrape.report_builder.reviews")
+    @patch("datasmith.scrape.report_builder.issue_timeline")
     @patch("datasmith.scrape.report_builder.extract_issues_from_description")
-    def test_build_without_llm(
-        self, mock_extract, mock_reviews, mock_review_comments, mock_issue_comments, builder_no_llm
-    ):
+    def test_build_without_llm(self, mock_extract, mock_timeline, builder_no_llm):
         """Test building report without LLM extraction."""
         # Mock the data fetching
-        mock_issue_comments.return_value = []
-        mock_review_comments.return_value = []
-        mock_reviews.return_value = []
-        mock_extract.return_value = ([SAMPLE_PR_DICT["pr_body"]], [])
+        mock_timeline.return_value = []
+        mock_extract.return_value = []
 
         result = builder_no_llm.build(SAMPLE_PR_DICT)
 
         # Should succeed without LLM
-        assert result.report_md != "NOT_A_VALID_PR"
-        # Problem statement should be raw (not extracted)
-        assert "Points in napari are sometimes invisible" in result.problem_statement
-
-
-class TestExtractDiscussionMethod:
-    """Test _extract_discussion method."""
-
-    @pytest.fixture
-    def builder_with_mock_extractor(self):
-        """Create builder with mocked ProblemExtractor."""
-        with patch("datasmith.scrape.report_builder.configure_agent_backends"):
-            builder = ReportBuilder(
-                enable_llm_backends=False,  # Don't actually initialize backends
-            )
-            # Manually create mock extractor
-            builder.problem_extractor = Mock()
-            builder.summarize_llm = True
-            return builder
-
-    def test_extract_discussion_with_extractor(self, builder_with_mock_extractor):
-        """Test that _extract_discussion uses ProblemExtractor."""
-        # Mock the extractor response
-        mock_extracted = "This is the extracted discussion"
-        mock_validation = {
-            "validation_enabled": True,
-            "overall_pass": True,
-            "avg_lcs": 0.92,
-            "avg_ngram": 0.88,
-        }
-        builder_with_mock_extractor.problem_extractor.extract_comments.return_value = (
-            mock_extracted,
-            mock_validation,
-        )
-
-        result = builder_with_mock_extractor._extract_discussion("test comments")
-
-        assert result == mock_extracted
-        builder_with_mock_extractor.problem_extractor.extract_comments.assert_called_once_with(
-            comment_thread="test comments"
-        )
-
-    def test_extract_discussion_handles_failure(self, builder_with_mock_extractor):
-        """Test that _extract_discussion handles extraction failures."""
-        # Mock extractor to raise exception
-        builder_with_mock_extractor.problem_extractor.extract_comments.side_effect = Exception("Test error")
-
-        result = builder_with_mock_extractor._extract_discussion("test comments")
-
-        assert "[extraction failed:" in result
-        assert "Test error" in result
+        assert result.final_md != "NOT_A_VALID_PR"
+        # Raw problem statement should contain the original text
+        assert "Points in napari are sometimes invisible" in result.raw_problem_statement
 
 
 class TestExtractProblemStatementMethod:
@@ -191,9 +134,8 @@ class TestExtractProblemStatementMethod:
 
         assert isinstance(result, ProblemExtraction)
         assert result.problem_statement == "This is the extracted problem statement"
-        assert result.problem_statement == "This is the extracted problem statement"
         builder_with_mock_extractor.problem_extractor.extract_problem.assert_called_once_with(
-            message="issue text", related_issues="related issues"
+            pr_body="issue text", pr_comments="related issues"
         )
 
     def test_extract_problem_statement_logs_warning_on_low_quality(self, builder_with_mock_extractor, caplog):
@@ -211,13 +153,13 @@ class TestExtractProblemStatementMethod:
             mock_validation,
         )
 
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             result = builder_with_mock_extractor._extract_problem_statement("issue text", "related issues")
 
         # Should still return the extracted data
         assert isinstance(result, ProblemExtraction)
-        # Should log warning
-        assert "low extractiveness" in caplog.text.lower()
+        # Should log validation metrics even for low extractiveness
+        assert "problem statement extraction validation" in caplog.text.lower()
 
 
 class TestExtractiveQualityMeasurement:
@@ -260,20 +202,14 @@ class TestExtractiveQualityMeasurement:
 class TestEndToEndWithMockedLLM:
     """End-to-end tests with mocked LLM responses."""
 
-    @patch("datasmith.scrape.report_builder.issue_comments")
-    @patch("datasmith.scrape.report_builder.review_comments")
-    @patch("datasmith.scrape.report_builder.reviews")
+    @patch("datasmith.scrape.report_builder.issue_timeline")
     @patch("datasmith.scrape.report_builder.extract_issues_from_description")
     @patch("datasmith.scrape.report_builder.configure_agent_backends")
-    def test_full_build_with_mocked_extraction(
-        self, mock_config, mock_extract, mock_reviews, mock_review_comments, mock_issue_comments
-    ):
+    def test_full_build_with_mocked_extraction(self, mock_config, mock_extract, mock_timeline):
         """Test complete build workflow with mocked LLM extraction."""
         # Setup mocks
-        mock_issue_comments.return_value = []
-        mock_review_comments.return_value = []
-        mock_reviews.return_value = []
-        mock_extract.return_value = ([SAMPLE_PR_DICT["pr_body"]], [])
+        mock_timeline.return_value = []
+        mock_extract.return_value = []
 
         # Create builder with mocked extractor
         builder = ReportBuilder(enable_llm_backends=False)
@@ -324,19 +260,14 @@ class TestBackwardCompatibility:
     def test_output_structure_unchanged(self):
         """Test that output structure remains the same."""
         with (
-            patch("datasmith.scrape.report_builder.issue_comments", return_value=[]),
-            patch("datasmith.scrape.report_builder.review_comments", return_value=[]),
-            patch("datasmith.scrape.report_builder.reviews", return_value=[]),
-            patch(
-                "datasmith.scrape.report_builder.extract_issues_from_description",
-                return_value=([SAMPLE_PR_DICT["pr_body"]], []),
-            ),
+            patch("datasmith.scrape.report_builder.issue_timeline", return_value=[]),
+            patch("datasmith.scrape.report_builder.extract_issues_from_description", return_value=[]),
         ):
             builder = ReportBuilder(enable_llm_backends=False)
             result = builder.build(SAMPLE_PR_DICT)
 
             # Check that result has expected attributes
-            assert hasattr(result, "report_md")
+            assert hasattr(result, "final_md")
             assert hasattr(result, "problem_statement")
             assert hasattr(result, "hints")
             assert hasattr(result, "classification")

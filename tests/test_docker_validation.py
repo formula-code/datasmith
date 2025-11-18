@@ -7,10 +7,15 @@ from typing import Callable
 from unittest.mock import MagicMock
 
 import pytest
-from docker.errors import ImageNotFound
 
-from datasmith.core.models import BuildResult, Task
-from datasmith.docker.validation import DockerValidator, ValidationConfig
+from datasmith.core.models import Task
+from datasmith.docker.validation import (
+    AcceptanceResult,
+    DockerValidator,
+    ProfileValidationResult,
+    TestValidationResult,
+    ValidationConfig,
+)
 
 
 @pytest.fixture()
@@ -29,80 +34,101 @@ def _validator(tmp_path: Path, client: MagicMock, context_registry: MagicMock) -
     )
 
 
-def test_skip_when_image_already_exists(tmp_path: Path, make_task: Callable[[str], Task]) -> None:
-    client = MagicMock()
-    client.images.get.return_value = object()  # image present
-    context_registry = MagicMock()
-
-    validator = _validator(tmp_path, client, context_registry)
-    result = validator.validate_task(make_task(), run_labels={})
-
-    assert result["stage"] == "build-skipped"
-    client.images.get.assert_called_once()
-    context_registry.get.assert_not_called()
-
-
-def test_build_failure_records_error(tmp_path: Path, make_task: Callable[[str], Task]) -> None:
-    client = MagicMock()
-    client.images.get.side_effect = ImageNotFound("missing", response=None)
-    context_registry = MagicMock()
-
-    build_result = BuildResult(
-        ok=False,
-        image_name="owner-repo:pkg",
-        image_id=None,
-        rc=1,
-        duration_s=2.0,
-        stderr_tail="boom",
-        stdout_tail="",
-    )
-
-    docker_ctx_mock = MagicMock()
-    docker_ctx_mock.build_container_streaming.return_value = build_result
-
-    # Mock context_registry.get() and get_default()
-    context_registry.get.return_value = docker_ctx_mock
-    context_registry.get_default.return_value = MagicMock()  # Different from docker_ctx_mock
-
-    validator = _validator(tmp_path, client, context_registry)
-    result = validator.validate_task(make_task(), run_labels={})
-
-    assert result["ok"] is False
-    assert (tmp_path / "errors.txt").read_text().strip().startswith("$ docker build")
-
-
-def test_successful_validation_runs_profile(
+def test_validate_task_profile_and_tests_success(
     tmp_path: Path, make_task: Callable[[str], Task], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """validate_task should return accepted=True when both profile and tests pass."""
     client = MagicMock()
-    client.images.get.side_effect = ImageNotFound("missing", response=None)
     context_registry = MagicMock()
-
-    build_result = BuildResult(
-        ok=True,
-        image_name="owner-repo:pkg",
-        image_id="sha256:123",
-        rc=0,
-        duration_s=2.0,
-        stderr_tail="",
-        stdout_tail="logs",
-    )
-
-    docker_ctx_mock = MagicMock()
-    docker_ctx_mock.build_container_streaming.return_value = build_result
-
-    # Mock context_registry.get() and get_default()
-    context_registry.get.return_value = docker_ctx_mock
-    context_registry.get_default.return_value = MagicMock()  # Different from docker_ctx_mock
-
-    monkeypatch.setattr(
-        "datasmith.docker.validation._run_quick_profile",
-        MagicMock(return_value=(True, "preview")),
-    )
-
     validator = _validator(tmp_path, client, context_registry)
+
+    profile_res = ProfileValidationResult(
+        ok=True,
+        stdout="profile ok",
+        stderr="",
+        duration_s=1.0,
+        benchmarks="",
+    )
+    tests_res = TestValidationResult(
+        ok=True,
+        stdout="tests ok",
+        stderr="",
+        duration_s=2.0,
+        suite_name="suite",
+    )
+
+    monkeypatch.setattr(validator, "validate_profile", MagicMock(return_value=profile_res))
+    monkeypatch.setattr(validator, "validate_tests", MagicMock(return_value=tests_res))
+
     result = validator.validate_task(make_task(), run_labels={})
 
-    assert result["ok"] is True
-    assert result["stderr_tail"] == "preview"
-    context_registry.get.assert_called_once()
+    assert isinstance(result, AcceptanceResult)
+    assert result.accepted is True
+    assert result.reason == "All validations passed"
+    validator.validate_profile.assert_called_once()
+    validator.validate_tests.assert_called_once()
+
+
+def test_validate_task_profile_failure_skips_tests(
+    tmp_path: Path, make_task: Callable[[str], Task], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """validate_task should not run tests when profile fails."""
+    client = MagicMock()
+    context_registry = MagicMock()
+    validator = _validator(tmp_path, client, context_registry)
+
+    profile_res = ProfileValidationResult(
+        ok=False,
+        stdout="",
+        stderr="profile failed",
+        duration_s=1.0,
+        benchmarks="",
+    )
+
+    tests_mock = MagicMock()
+
+    monkeypatch.setattr(validator, "validate_profile", MagicMock(return_value=profile_res))
+    monkeypatch.setattr(validator, "validate_tests", tests_mock)
+
+    result = validator.validate_task(make_task(), run_labels={})
+
+    assert isinstance(result, AcceptanceResult)
+    assert result.accepted is False
+    assert result.tests is None
+    assert result.reason == "Profile validation failed"
+    validator.validate_profile.assert_called_once()
+    tests_mock.assert_not_called()
+
+
+def test_validate_task_tests_failure_sets_reason(
+    tmp_path: Path, make_task: Callable[[str], Task], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """validate_task should mark acceptance False when tests fail."""
+    client = MagicMock()
+    context_registry = MagicMock()
+    validator = _validator(tmp_path, client, context_registry)
+
+    profile_res = ProfileValidationResult(
+        ok=True,
+        stdout="profile ok",
+        stderr="",
+        duration_s=1.0,
+        benchmarks="",
+    )
+    tests_res = TestValidationResult(
+        ok=False,
+        stdout="",
+        stderr="tests failed",
+        duration_s=2.0,
+        suite_name="suite",
+    )
+
+    monkeypatch.setattr(validator, "validate_profile", MagicMock(return_value=profile_res))
+    monkeypatch.setattr(validator, "validate_tests", MagicMock(return_value=tests_res))
+
+    result = validator.validate_task(make_task(), run_labels={})
+
+    assert isinstance(result, AcceptanceResult)
+    assert result.accepted is False
+    assert result.tests is tests_res
+    assert result.reason == "Test validation failed"

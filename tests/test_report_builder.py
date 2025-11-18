@@ -205,12 +205,10 @@ class TestReportBuilder:
 
     def test_iso_format(self):
         """Test timestamp formatting."""
-        from datasmith.scrape.report_builder import ReportBuilder
-
-        rb = ReportBuilder()
+        from datasmith.scrape.report_utils import iso
 
         ts = "2022-05-24T13:48:06Z"
-        formatted = rb._iso_format(ts)
+        formatted = iso(ts)
 
         # Should be in format HH:MM DD/MM/YYYY
         assert "13:48" in formatted
@@ -218,12 +216,10 @@ class TestReportBuilder:
 
     def test_extract_links(self):
         """Test link extraction from text."""
-        from datasmith.scrape.report_builder import ReportBuilder
-
-        rb = ReportBuilder()
+        from datasmith.scrape.report_utils import extract_links
 
         text = "See https://example.com and http://test.org for more info"
-        links = rb._extract_links(text)
+        links = extract_links(text)
 
         assert len(links) == 2
         assert "https://example.com" in links

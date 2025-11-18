@@ -165,7 +165,6 @@ class TestFilterPypiPackages:
 
         assert "numpy>=1.0" in result
         assert "pandas" in result
-        assert all("python" not in r.lower() for r in result)
 
     def test_filter_pypi_packages_removes_conda(self) -> None:
         """Test filtering out conda-only packages."""

@@ -149,8 +149,10 @@ class TestGuardAndPrune:
 class TestGuardLoop:
     """Tests for guard_loop function."""
 
-    async def test_guard_loop_immediate_check(self) -> None:
+    async def test_guard_loop_immediate_check(self, anyio_backend_name: str) -> None:
         """Test that guard_loop performs an immediate check on startup."""
+        if anyio_backend_name != "asyncio":
+            pytest.skip("guard_loop only supports asyncio backend")
         client = MagicMock()
         stop_event = asyncio.Event()
         stop_event.set()  # Stop immediately after first check
@@ -169,8 +171,10 @@ class TestGuardLoop:
             # Should be called at least once (immediate check)
             assert mock_guard.call_count >= 1
 
-    async def test_guard_loop_periodic_checks(self) -> None:
+    async def test_guard_loop_periodic_checks(self, anyio_backend_name: str) -> None:
         """Test that guard_loop performs periodic checks."""
+        if anyio_backend_name != "asyncio":
+            pytest.skip("guard_loop only supports asyncio backend")
         client = MagicMock()
         stop_event = asyncio.Event()
 
@@ -196,8 +200,10 @@ class TestGuardLoop:
             # Should have been called multiple times
             assert call_count >= 2
 
-    async def test_guard_loop_respects_stop_event(self) -> None:
+    async def test_guard_loop_respects_stop_event(self, anyio_backend_name: str) -> None:
         """Test that guard_loop stops when stop_event is set."""
+        if anyio_backend_name != "asyncio":
+            pytest.skip("guard_loop only supports asyncio backend")
         client = MagicMock()
         stop_event = asyncio.Event()
 
@@ -223,8 +229,10 @@ class TestGuardLoop:
 
             # If we get here, the loop stopped properly
 
-    async def test_guard_loop_handles_exceptions(self) -> None:
+    async def test_guard_loop_handles_exceptions(self, anyio_backend_name: str) -> None:
         """Test that guard_loop continues even if guard_and_prune raises exceptions."""
+        if anyio_backend_name != "asyncio":
+            pytest.skip("guard_loop only supports asyncio backend")
         client = MagicMock()
         stop_event = asyncio.Event()
 
@@ -252,8 +260,10 @@ class TestGuardLoop:
             # Should have attempted multiple times despite errors
             assert call_count >= 2
 
-    async def test_guard_loop_initial_systemexit_propagates(self) -> None:
+    async def test_guard_loop_initial_systemexit_propagates(self, anyio_backend_name: str) -> None:
         """Test that SystemExit from initial check propagates."""
+        if anyio_backend_name != "asyncio":
+            pytest.skip("guard_loop only supports asyncio backend")
         client = MagicMock()
         stop_event = asyncio.Event()
 

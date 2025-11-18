@@ -116,7 +116,7 @@ def test_qiskit_10651_problem_solution_segmentation_extractive():
     from datasmith.agents.problem_extractor import ProblemExtractor
 
     extractor = ProblemExtractor(validate_lcs=True)
-    extraction, validation = extractor.extract_problem(message=body, related_issues="")
+    extraction, validation = extractor.extract_problem(pr_body=body, pr_comments="")
 
     # Expect both fields to be highly extractive when present
     if extraction.problem_statement:
