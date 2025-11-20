@@ -17,6 +17,9 @@ eval "$(micromamba shell hook --shell=bash)"
 micromamba activate "$ENV_NAME" || true
 set -ux
 
+# --- task-specific test dependency: attrs (imported as `attr`) ---
+python -m pip install attrs
+
 
 
 # if argument is given, set FORMULACODE_BASE_COMMIT to that argument

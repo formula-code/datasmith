@@ -810,5 +810,9 @@ _patch()
 PY
 fi
 
+# ---- ensure pytest plugin dependency is present ----
+python -m pip install jinja2
+
+
 python formulacode_testrunner.py --all --base ${FORMULACODE_BASE_COMMIT} --extra-args "-p jinja_patch_plugin_pandas"
 exit $?

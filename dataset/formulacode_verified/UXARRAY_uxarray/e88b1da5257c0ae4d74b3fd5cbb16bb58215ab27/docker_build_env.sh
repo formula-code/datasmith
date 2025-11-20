@@ -188,8 +188,42 @@ fi
 # print(" ".join(cfg.pythons))
 # PY
 # )
-source /etc/profile.d/asv_build_vars.sh || true
-PY_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+# source /etc/profile.d/asv_build_vars.sh || true
+# PY_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+
+PY_VERSIONS=$(python - "$CONF_NAME" <<'PY'
+import sys
+import re
+from pathlib import Path
+
+conf_path = Path(sys.argv[1])
+text = conf_path.read_text(encoding="utf-8")
+
+# Grab the bracket content after "pythons": [...]
+m = re.search(r'"pythons"\s*:\s*\[([^\]]*)\]', text)
+if not m:
+    print("")
+    sys.exit(0)
+
+inner = m.group(1)
+
+# Extract all quoted strings inside the list
+vers = re.findall(r'"([^"]+)"', inner)
+
+def ok(v: str) -> bool:
+    try:
+        parts = [int(x) for x in v.split(".")]
+    except Exception:
+        return False
+    major = parts[0]
+    minor = parts[1] if len(parts) > 1 else 0
+    # keep python >= 3.7
+    return (major, minor) >= (3, 7)
+
+vers = [v for v in vers if ok(v)]
+print(" ".join(vers))
+PY
+)
 
 if [[ -z "$PY_VERSIONS" ]]; then
     echo "No Satisfying PY_VERSIONS found in $CONF_NAME" >&2

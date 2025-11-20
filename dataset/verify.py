@@ -240,12 +240,12 @@ def main() -> None:
 
     if args.task.name == "formulacode_verified" or (args.task.parent.name == "formulacode_verified"):
         globbed = args.task.rglob("*/*") if args.task.name == "formulacode_verified" else args.task.glob("*")
-        tasks = [d for d in globbed if d.is_dir() and ((d / "verification_success.json").exists())]
+        tasks = [d for d in globbed if d.is_dir()]
         all_successes = []
         success_pth = args.task / "all_verification_successes.jsonl"
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=16) as executor:
+        with ThreadPoolExecutor(max_workers=32) as executor:
             futures = []
             for task_dir in tasks:
                 task, context = load(task_dir)

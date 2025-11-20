@@ -74,6 +74,14 @@ RUN chmod +x /workspace/repo/docker_build_env.sh && \
     echo "${ENV_PAYLOAD}" > /tmp/env_payload.json && \
     /workspace/repo/docker_build_env.sh --env-payload /tmp/env_payload.json
 
+# Ensure test dependency 'ddt' is installed in every conda env we just created
+RUN for env in /opt/conda/envs/*; do \
+      if [ -d "$env" ] && [ -x "$env/bin/python" ]; then \
+        "$env/bin/python" -m pip install ddt; \
+      fi; \
+    done
+
+
 # ---------- PKG STAGE ----------
 FROM env AS pkg
 ARG PY_VERSION=""

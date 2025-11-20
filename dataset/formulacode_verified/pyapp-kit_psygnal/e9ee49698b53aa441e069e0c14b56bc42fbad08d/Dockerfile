@@ -15,7 +15,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        jq cmake ninja-build libopenmpi-dev libgeos-dev pkg-config graphviz libgraphviz-dev && \
+        jq cmake ninja-build libopenmpi-dev libgeos-dev pkg-config graphviz libgraphviz-dev libgl1 && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
@@ -26,7 +26,8 @@ ENV MAMBA_ROOT_PREFIX=/opt/conda \
     MAMBA_DOCKERFILE_ACTIVATE=1 \
     OPENBLAS_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
-    OMP_NUM_THREADS=1
+    OMP_NUM_THREADS=1 \
+    QT_QPA_PLATFORM=offscreen
 
 RUN micromamba install -y -p $MAMBA_ROOT_PREFIX -c conda-forge \
         python=3.10 \
@@ -67,6 +68,9 @@ RUN git clone "$REPO_URL" /workspace/repo
 WORKDIR /workspace/repo
 RUN git checkout "$COMMIT_SHA"
 LABEL vcs.url="$REPO_URL" vcs.ref="$COMMIT_SHA"
+
+# Create a minimal tox.ini file to pass pytest tests
+RUN if [ ! -f tox.ini ]; then printf '[pytest]\n' > tox.ini; fi
 
 # ---- ENV STAGE: create envs, persist vars, install smoke tool ----
 COPY docker_build_env.sh /workspace/repo/docker_build_env.sh
