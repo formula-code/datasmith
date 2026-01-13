@@ -1,0 +1,4 @@
+{
+  "local_image": "optuna-optuna-fe695316219030a6b49ea2078e3f906960b0a578:final",
+  "dockerhub_image": "docker.io/formulacode/all:optuna-optuna-fe695316219030a6b49ea2078e3f906960b0a578--final"
+}

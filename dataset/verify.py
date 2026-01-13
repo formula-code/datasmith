@@ -47,9 +47,9 @@ def load(task_dir: Path) -> tuple[Task, DockerContext]:
     return task, context
 
 
-def _load_config() -> dict:
+def _load_config(task_dir: Path) -> dict:
     """Load dataset verification config (JSON) from dataset/config.*."""
-    cfg_path = Path("dataset") / "config.json"
+    cfg_path = task_dir / "config.json"
     if cfg_path.exists():
         return json.loads(cfg_path.read_text())
     raise FileNotFoundError("Expected dataset/config.json or dataset/config.py to exist.")
@@ -259,7 +259,10 @@ def main() -> None:
     parser.add_argument("--task", type=Path, required=True, help="Path to the task directory")
     args = parser.parse_args()
 
-    config = _load_config()
+    # get the top-level dataset directory
+    dataset_dir = args.task.parents[-2]
+
+    config = _load_config(dataset_dir)
     registry_path = Path(config["context_registry_path"])
 
     context_registry = ContextRegistry.load_from_file(registry_path)
@@ -273,7 +276,7 @@ def main() -> None:
         globbed = args.task.rglob("*/*") if args.task.name == "formulacode_verified" else args.task.glob("*")
         tasks = [d for d in globbed if d.is_dir() and (not d.name.startswith(".")) and ("cache" not in str(d))]
         all_successes = []
-        success_pth = args.task / "all_verification_successes.jsonl"
+        success_pth = args.task.parent / "all_verification_successes.jsonl"
         from concurrent.futures import ThreadPoolExecutor
 
         # Pre-load all tasks to track them in exception handling
@@ -283,6 +286,15 @@ def main() -> None:
         with ThreadPoolExecutor(max_workers=64) as executor:
             for task_dir in tasks:
                 task, context = load(task_dir)
+                # load the task_dir / failure.json file if it exists, and see the exit code is == 124
+                failure_path = task_dir / "failure.json"
+                if not failure_path.exists():
+                    continue
+                else:
+                    failure_info = json.loads(failure_path.read_text())
+                    if failure_info.get("return_code") != 124:
+                        continue
+
                 task_map[task_dir] = task
                 future = executor.submit(
                     verify_task_with_context,
