@@ -22,8 +22,8 @@ from datasmith.notebooks.utils import update_cr
 
 # configure_agent_backends(PORTKEY_MODEL_NAME="@anthropic/claude-3-5-sonnet-latest")
 # configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo")
-configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
-# configure_agent_backends(PORTKEY_MODEL_NAME="meta-llama/Llama-3.3-70B-Instruct-Turbo", local=True)
+# configure_agent_backends(PORTKEY_MODEL_NAME="@togetherai/deepseek-ai/DeepSeek-V3")
+configure_agent_backends(PORTKEY_MODEL_NAME="None", local=True)
 
 
 # logger = configure_logging(level=10)
@@ -77,11 +77,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-similar-candidates",
         type=int,
-        default=1,
-        help="Number of similar candidates [sorted by recency] to try out before running agent. (default: 1)",
+        default=5,
+        help="Number of similar candidates [sorted by recency] to try out before running agent. (default: 5)",
     )
     parser.add_argument(
-        "--limit-per-repo", type=int, default=5, help="Cap SHAs per repo (keeps your small-scale test). -1 = no limit."
+        "--limit-per-repo", type=int, default=-1, help="Cap SHAs per repo (keeps your small-scale test). -1 = no limit."
     )
     parser.add_argument(
         "--context-registry",
@@ -93,6 +93,11 @@ def parse_args() -> argparse.Namespace:
         "--push-to-ecr",
         action="store_true",
         help="Whether to push built images to AWS ECR.",
+    )
+    parser.add_argument(
+        "--push-to-dockerhub",
+        action="store_true",
+        help="Whether to push built images to Docker Hub.",
     )
     parser.add_argument(
         "--ignore-exhausted",

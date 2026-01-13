@@ -294,22 +294,40 @@ def find_tagged_releases(repo_name: str) -> list[str]:
         return find_tagged_commits(repo)
 
 
-def find_perf_commits(
+def find_perf_commits(  # noqa: C901
     repo_name: str,
     n_workers: int = -1,
     limit: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> list[str]:
     """
     Return a list of commit SHAs that closed pull requests, **without**
     calling any GitHub API endpoints.  Internally:
 
-        • clones the repo (metadata-only) into a tmp dir
-        • walks the commit history
-        • selects commits whose message looks like a PR merge
+        - clones the repo (metadata-only) into a tmp dir
+        - walks the commit history
+        - selects commits whose message looks like a PR merge
 
     The only element of *query* we still honour is `base=<branch>`.
     Uses an AI Agent to find performance-related commits.
+
+    Args:
+        repo_name: GitHub repository in "owner/repo" format.
+        n_workers: Number of parallel workers (-1 = sequential).
+        limit: Max commits to process (None = all).
+        since: Only include commits after this date (ISO format, e.g. "2025-01-01").
+        until: Only include commits before this date (ISO format, e.g. "2025-02-01").
+
+    Returns:
+        List of commit SHAs that are performance-related.
     """
+    from datetime import datetime, timezone
+
+    # Parse date filters
+    since_dt = datetime.fromisoformat(since).replace(tzinfo=timezone.utc) if since else None
+    until_dt = datetime.fromisoformat(until).replace(tzinfo=timezone.utc) if until else None
+
     perf_classifier = PerfClassifier()
 
     with tempfile.TemporaryDirectory(prefix="gh-history-") as workdir:
@@ -338,6 +356,30 @@ def find_perf_commits(
 
         commits = list(repo.iter_commits(ref_to_walk))
         # commits = [c for c in commits if has_asv(repo, c)]
+
+        # Filter by date range if specified
+        if since_dt or until_dt:
+            original_count = len(commits)
+            filtered_commits = []
+            for c in commits:
+                commit_dt = c.committed_datetime
+                # Ensure timezone-aware comparison
+                if commit_dt.tzinfo is None:
+                    commit_dt = commit_dt.replace(tzinfo=timezone.utc)
+                if since_dt and commit_dt < since_dt:
+                    continue
+                if until_dt and commit_dt >= until_dt:
+                    continue
+                filtered_commits.append(c)
+            commits = filtered_commits
+            logger.info(
+                "Date filter applied: %d -> %d commits (since=%s, until=%s)",
+                original_count,
+                len(commits),
+                since,
+                until,
+            )
+
         commits = commits[:limit] if limit else commits
 
         summary_info: dict[Commit, str] = {}

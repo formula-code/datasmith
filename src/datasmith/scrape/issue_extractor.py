@@ -75,7 +75,7 @@ def _extract_issue_refs(text: str, default_owner: str, default_repo: str) -> lis
 def _extract_cross_reference_bodies(timeline: list[dict[str, Any]]) -> list[str]:
     """Return a list of cross-reference bodies from the GitHub issue timeline."""
     cross_ref_timeline = [e for e in timeline if e.get("event") == "cross-referenced"]
-    bodies: list[str] = []
+    bodies: set[str] = set()
     for event in cross_ref_timeline:
         try:
             src_issue = event.get("source", {}).get("issue")
@@ -83,10 +83,10 @@ def _extract_cross_reference_bodies(timeline: list[dict[str, Any]]) -> list[str]
                 continue
             body = src_issue.get("body")
             if body:
-                bodies.append(body)
+                bodies.add(body)
         except Exception as exc:  # pragma: no cover - defensive logging path
             logger.debug("Failed to extract cross-reference body: %s", exc, exc_info=True)
-    return bodies
+    return list(bodies)
 
 
 def _format_issue_stat(index: int, title: str, comments: list[str], cross_references: list[str]) -> str:
@@ -146,6 +146,8 @@ def _build_issue_payload(
                 # If parsing fails, include conservatively but record it for diagnostics
                 logger.debug("Failed to parse timeline timestamp %s: %s", created_at, exc, exc_info=True)
         comments.append(body)
+    # Deduplicate while preserving order
+    comments = list(dict.fromkeys(comments))
     formatted_text = _format_issue_stat(index, issue_thread.get("title", ""), comments, xref_bodies)
 
     return {
@@ -209,8 +211,8 @@ def extract_issues_from_description(
                     title=issue.get("title", ""),
                     url=url,
                     description=issue.get("body", "") or "",
-                    comments=tuple(c for c in issue.get("comments", []) if c),
-                    cross_references=tuple(x for x in issue.get("cross_references", []) if x),
+                    comments=tuple(dict.fromkeys(c for c in issue.get("comments", []) if c)),
+                    cross_references=tuple(dict.fromkeys(x for x in issue.get("cross_references", []) if x)),
                     created_at=issue.get("created_at"),
                     closed_at=issue.get("closed_at"),
                 )

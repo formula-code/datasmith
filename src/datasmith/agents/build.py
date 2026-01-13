@@ -176,6 +176,16 @@ def _handle_success(
             skip_existing=False,
             timeout_s=args.build_timeout,
         )
+    elif getattr(args, "push_to_dockerhub", False):
+        logger.info("agent_build_and_validate: pushed %s to Docker Hub", task.with_tag("final").get_image_name())
+        ctx.build_and_publish_to_dockerhub(
+            client=client,
+            task=task.with_tag("final").with_benchmarks(build_result.benchmarks),
+            namespace=os.environ.get("DOCKERHUB_NAMESPACE", ""),
+            force=True,
+            skip_existing=False,
+            timeout_s=args.build_timeout,
+        )
 
     out_dir = cast(Path, args.output_dir)
     final_pickle = out_dir / f"{task.owner}-{task.repo}-{task.sha}-final.pkl"

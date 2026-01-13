@@ -75,9 +75,10 @@ class TestProblemExtractorSignatures:
         # Verify signature has the expected field names in __annotations__
         assert "pr_body" in sig.__annotations__
         assert "pr_comments" in sig.__annotations__
-        assert "reasoning" in sig.__annotations__
-        assert "extracted_problem_description" in sig.__annotations__
-        assert "extracted_solution_overview" in sig.__annotations__
+        assert "initial_observations" in sig.__annotations__
+        assert "triage_attempts" in sig.__annotations__
+        assert "solution_overview" in sig.__annotations__
+        assert "solution_observations" in sig.__annotations__
 
 
 class TestProblemExtractorInitialization:
@@ -86,20 +87,12 @@ class TestProblemExtractorInitialization:
     def test_default_initialization(self):
         """Test default initialization."""
         extractor = ProblemExtractor()
-        assert extractor.validate_lcs is True
-        assert extractor.min_lcs == 0.75
-        assert extractor.log_validation is True
+        assert extractor.problem_predictor is not None
 
     def test_custom_initialization(self):
-        """Test custom initialization parameters."""
-        extractor = ProblemExtractor(
-            validate_lcs=False,
-            min_lcs=0.75,
-            log_validation=False,
-        )
-        assert extractor.validate_lcs is False
-        assert extractor.min_lcs == 0.75
-        assert extractor.log_validation is False
+        """Test that extractor initializes correctly."""
+        extractor = ProblemExtractor()
+        assert extractor.problem_predictor is not None
 
 
 class TestProblemExtraction:
@@ -108,15 +101,17 @@ class TestProblemExtraction:
     @pytest.fixture
     def extractor(self):
         """Create ProblemExtractor instance."""
-        return ProblemExtractor(validate_lcs=True, min_lcs=0.85, log_validation=False)
+        return ProblemExtractor()
 
     @patch("datasmith.agents.problem_extractor.dspy.Predict")
-    def test_extract_problem_returns_tuple(self, mock_predict, extractor):
-        """Test that extract_problem returns (extracted, validation) tuple."""
+    def test_extract_problem_returns_extraction(self, mock_predict, extractor):
+        """Test that extract_problem returns ProblemExtraction."""
         # Mock the predictor response
         mock_result = Mock()
-        mock_result.extracted_problem_description = "This is a test extracted problem statement with enough length."
-        mock_result.extracted_solution_overview = None
+        mock_result.initial_observations = "This is a test extracted problem statement with enough length."
+        mock_result.triage_attempts = None
+        mock_result.solution_overview = None
+        mock_result.solution_observations = None
         mock_predict.return_value = Mock(return_value=mock_result)
 
         # Create extractor with mocked predictor
@@ -127,32 +122,29 @@ class TestProblemExtraction:
             pr_comments="test comments with sufficient length",
         )
 
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-        extracted, validation = result
-        assert isinstance(extracted, ProblemExtraction)
-        assert extracted.problem_statement == "This is a test extracted problem statement with enough length."
-        assert isinstance(validation, dict)
+        assert isinstance(result, ProblemExtraction)
+        assert result.initial_observations == "This is a test extracted problem statement with enough length."
 
     @patch("datasmith.agents.problem_extractor.dspy.Predict")
-    def test_extract_problem_validation_disabled(self, mock_predict, extractor):
-        """Test extraction with validation disabled."""
-        extractor.validate_lcs = False
-
+    def test_extract_problem_with_all_fields(self, mock_predict, extractor):
+        """Test extraction with all four fields populated."""
         mock_result = Mock()
-        mock_result.extracted_problem_description = "This is a test problem description that is long enough."
-        mock_result.extracted_solution_overview = None
+        mock_result.initial_observations = "This is a test problem description that is long enough."
+        mock_result.triage_attempts = "We checked the performance metrics."
+        mock_result.solution_overview = "Changed the algorithm to use caching."
+        mock_result.solution_observations = "Performance improved by 50%."
         mock_predict.return_value = Mock(return_value=mock_result)
         extractor.problem_predictor = mock_predict.return_value
 
-        extracted, validation = extractor.extract_problem(
+        extracted = extractor.extract_problem(
             pr_body="issue body text that is long enough",
             pr_comments="related comments text that is long enough",
         )
 
-        assert validation["validation_enabled"] is False
-        assert validation["overall_pass"] is True
-        assert extracted.problem_statement == "This is a test problem description that is long enough."
+        assert extracted.initial_observations == "This is a test problem description that is long enough."
+        assert extracted.triage_attempts == "We checked the performance metrics."
+        assert extracted.solution_overview == "Changed the algorithm to use caching."
+        assert extracted.solution_observations == "Performance improved by 50%."
 
     @patch("datasmith.agents.problem_extractor.dspy.Predict")
     def test_extract_problem_handles_exceptions(self, mock_predict, extractor):
@@ -161,73 +153,13 @@ class TestProblemExtraction:
         mock_predict.return_value = Mock(side_effect=Exception("Test error"))
         extractor.problem_predictor = mock_predict.return_value
 
-        extracted, validation = extractor.extract_problem(pr_body="message body", pr_comments="issues text")
+        extracted = extractor.extract_problem(pr_body="message body", pr_comments="issues text")
 
         assert isinstance(extracted, ProblemExtraction)
-        assert extracted.problem_statement is not None
-        assert "[extraction failed:" in extracted.problem_statement
-        assert validation["overall_pass"] is False
-        assert "error" in validation
+        assert extracted.initial_observations is not None
+        assert "[extraction failed:" in extracted.initial_observations
 
 
-class TestValidation:
-    """Test validation functionality."""
-
-    @pytest.fixture
-    def extractor(self):
-        """Create ProblemExtractor instance."""
-        return ProblemExtractor(validate_lcs=True, min_lcs=0.85, log_validation=False)
-
-    def test_validate_extraction_verbatim_text(self, extractor):
-        """Test validation with verbatim extracted text."""
-        source = "Points are hardly visible when using large coordinate values."
-        extracted = "Points are hardly visible when using large coordinate values."
-
-        validation = extractor._validate_extraction(extracted=extracted, source=source, extraction_type="test")
-
-        assert validation["overall_pass"] is True
-        assert validation["avg_lcs"] >= 0.95  # Should be very high for verbatim
-
-    def test_validate_extraction_abstractive_text(self, extractor):
-        """Test validation with too-abstractive text."""
-        source = "Points are hardly visible when using large coordinate values."
-        extracted = "There has been discussion about point visibility issues."
-
-        validation = extractor._validate_extraction(extracted=extracted, source=source, extraction_type="test")
-
-        # This should fail because it's too abstractive
-        assert validation["overall_pass"] is False
-        assert validation["avg_lcs"] < 0.85
-
-    def test_validate_extraction_disabled(self, extractor):
-        """Test that validation can be disabled."""
-        extractor.validate_lcs = False
-
-        validation = extractor._validate_extraction(extracted="anything", source="source", extraction_type="test")
-
-        assert validation["validation_enabled"] is False
-        assert validation["overall_pass"] is True
-
-    def test_validate_extraction_with_code_blocks(self, extractor):
-        """Test validation with code blocks."""
-        source = """
-        Example code:
-        ```python
-        viewer.add_points([(20, 20)])
-        ```
-        """
-        # Exact code preservation
-        extracted = """
-        Example code:
-        ```python
-        viewer.add_points([(20, 20)])
-        ```
-        """
-
-        validation = extractor._validate_extraction(extracted=extracted, source=source, extraction_type="test")
-
-        # Should pass with verbatim code
-        assert validation["overall_pass"] is True
 
 
 class TestCodeBlockPreservation:
@@ -283,74 +215,31 @@ class TestEndToEnd:
 
     @pytest.fixture
     def extractor_no_validation(self):
-        """Create extractor without validation for faster testing."""
-        return ProblemExtractor(validate_lcs=False, log_validation=False)
+        """Create extractor for testing."""
+        return ProblemExtractor()
 
     def test_full_extraction_workflow(self, extractor_no_validation):
         """Test complete extraction workflow."""
         # Mock good extractive output
         mock_problem_result = Mock()
-        mock_problem_result.extracted_problem_description = SAMPLE_ISSUE_SOURCE.strip()
-        mock_problem_result.extracted_solution_overview = None
+        mock_problem_result.initial_observations = SAMPLE_ISSUE_SOURCE.strip()
+        mock_problem_result.triage_attempts = None
+        mock_problem_result.solution_overview = None
+        mock_problem_result.solution_observations = None
 
         # Set up predictor
         problem_mock = Mock(return_value=mock_problem_result)
 
         with patch.object(extractor_no_validation, "problem_predictor", problem_mock):
             # Extract problem using both issue and comment text
-            problem, p_validation = extractor_no_validation.extract_problem(
+            problem = extractor_no_validation.extract_problem(
                 pr_body=SAMPLE_ISSUE_SOURCE,
                 pr_comments=SAMPLE_COMMENT_THREAD,
             )
 
             # Check results
             assert isinstance(problem, ProblemExtraction)
-            assert problem.problem_statement is not None
+            assert problem.initial_observations is not None
             assert problem.to_markdown()
-            assert p_validation["overall_pass"] is True
 
 
-class TestValidationReporting:
-    """Test validation reporting functionality."""
-
-    @pytest.fixture
-    def extractor(self):
-        """Create extractor with validation enabled."""
-        return ProblemExtractor(validate_lcs=True, min_lcs=0.85, log_validation=False)
-
-    def test_validation_report_structure(self, extractor):
-        """Test that validation report has expected structure."""
-        validation = extractor._validate_extraction(
-            extracted="Points are hardly visible",
-            source="Points are hardly visible when using large images",
-            extraction_type="test",
-        )
-
-        # Check report structure
-        assert "overall_pass" in validation
-        assert "avg_lcs" in validation
-        assert "avg_ngram" in validation
-        assert "details" in validation
-        assert "validation_enabled" in validation
-
-    def test_validation_report_passing(self, extractor):
-        """Test validation report for passing extraction."""
-        source = "Points are hardly visible"
-        extracted = "Points are hardly visible"
-
-        validation = extractor._validate_extraction(extracted=extracted, source=source, extraction_type="test")
-
-        assert validation["overall_pass"] is True
-        assert validation["avg_lcs"] >= 0.95
-
-    def test_validation_report_failing(self, extractor):
-        """Test validation report for failing extraction."""
-        source = "Points are hardly visible when using large coordinate values"
-        extracted = "There has been some discussion about point size issues"
-
-        validation = extractor._validate_extraction(extracted=extracted, source=source, extraction_type="test")
-
-        assert validation["overall_pass"] is False
-        assert validation["avg_lcs"] < 0.85
-        assert "details" in validation
-        assert "FAIL" in validation["details"]

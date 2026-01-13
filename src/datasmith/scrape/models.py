@@ -128,7 +128,7 @@ class LinkSummary:
     closed_at: str | None = None
 
 
-@dataclass(eq=True, frozen=True)
+@dataclass(frozen=True)
 class IssueExpanded:
     """Expanded single-issue details used in the Referenced Issues section."""
 
@@ -141,6 +141,16 @@ class IssueExpanded:
     # Issue timestamps
     created_at: str | None = None
     closed_at: str | None = None
+
+    def __eq__(self, other: object) -> bool:
+        """Two issues are equal if they have the same URL."""
+        if not isinstance(other, IssueExpanded):
+            return NotImplemented
+        return self.url == other.url
+
+    def __hash__(self) -> int:
+        """Hash based on URL only for set deduplication."""
+        return hash(self.url)
 
     def with_comments(self, comments: tuple[str]) -> IssueExpanded:
         """Return a new IssueExpanded with updated comments."""

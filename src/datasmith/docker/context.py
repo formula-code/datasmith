@@ -20,6 +20,7 @@ from docker.errors import APIError, DockerException, ImageNotFound
 
 from datasmith.core.models.build import BuildResult
 from datasmith.core.models.task import Task
+from datasmith.docker.dockerhub import publish_images_to_dockerhub
 from datasmith.docker.ecr import publish_images_to_ecr
 from datasmith.docker.s3_cache_manager import S3DockerCacheManager
 from datasmith.execution.utils import _get_commit_info
@@ -882,6 +883,121 @@ class DockerContext:
             logger.info("Published %s to %s", image_name, push_results[image_name])
         else:
             logger.warning("ECR publish did not return mapping for %s", image_name)
+
+        return build_res, push_results
+
+    def build_and_publish_to_dockerhub(
+        self,
+        client: docker.DockerClient,
+        task: Task,
+        namespace: str,
+        *,
+        repository_mode: str = "single",  # "single" or "mirror"
+        single_repo: str = "all",
+        dockerhub_repo_prefix: str | None = None,
+        skip_existing: bool = True,
+        parallelism: int = 1,
+        force: bool = False,
+        run_labels: dict[str, str] | None = None,
+        timeout_s: float = 15 * 60,
+        tail_chars: int = 10_000,
+        pull: bool = False,
+        use_buildx: bool | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> tuple[BuildResult, dict[str, str]]:
+        """
+        Build the Docker image for ``task`` and publish it to DockerHub.
+
+        Returns (BuildResult, {local_ref: dockerhub_ref}). If the build fails,
+        the push step is skipped and the mapping is empty.
+
+        Args:
+            client: Docker client instance
+            task: Task to build and publish
+            namespace: DockerHub namespace (username or organization)
+            repository_mode: "single" (all images in one repo) or "mirror" (one repo per image)
+            single_repo: Repository name for single mode
+            dockerhub_repo_prefix: Prefix for mirror mode repos
+            skip_existing: Skip pushing images that already exist
+            parallelism: Number of concurrent push operations
+            force: Force rebuild even if image exists
+            run_labels: Docker labels for the container
+            timeout_s: Build timeout in seconds
+            tail_chars: Number of characters to keep from build logs
+            pull: Pull base image before building
+            use_buildx: Use Docker BuildKit/buildx
+            username: DockerHub username (or from DOCKERHUB_USERNAME env)
+            password: DockerHub password/token (or from DOCKERHUB_TOKEN env)
+
+        Returns:
+            Tuple of (BuildResult, push_results_dict)
+        """
+        if task.sha is None and task.tag in {"pkg", "run"}:
+            raise ValueError("Task.sha must be set for building package/run images")
+
+        image_name = task.get_image_name()
+        repo_url = f"https://www.github.com/{task.owner}/{task.repo}"
+        build_args: dict[str, str] = {"REPO_URL": repo_url}
+        if task.sha is not None:
+            build_args["COMMIT_SHA"] = task.sha
+        if getattr(task, "env_payload", ""):
+            build_args["ENV_PAYLOAD"] = task.env_payload
+        if getattr(task, "python_version", ""):
+            build_args["PY_VERSION"] = task.python_version
+        if getattr(task, "benchmarks", ""):
+            build_args["BENCHMARKS"] = task.benchmarks
+
+        if run_labels is None:
+            run_labels = {
+                "datasmith.task": f"{task.owner}/{task.repo}",
+                "datasmith.sha": task.sha or "unknown",
+                "datasmith.run": "publish",
+            }
+
+        logger.info("Building image %s for DockerHub publish", image_name)
+        build_res = self.build_container_streaming(
+            client=client,
+            image_name=image_name,
+            build_args=build_args,
+            run_labels=run_labels,
+            probe=False,
+            force=force,
+            delete_img=False,
+            timeout_s=timeout_s,
+            tail_chars=tail_chars,
+            pull=pull,
+            s3_cache_config=None,
+            use_buildx=use_buildx,
+        )
+
+        if not build_res.ok:
+            logger.error(
+                "Build failed for %s (rc=%s); skipping DockerHub publish.",
+                image_name,
+                build_res.rc,
+            )
+            return build_res, {}
+
+        logger.info("Build succeeded for %s; publishing to DockerHub (namespace=%s)", image_name, namespace)
+        push_results = publish_images_to_dockerhub(
+            local_refs=[image_name],
+            namespace=namespace,
+            repository_mode=repository_mode,
+            single_repo=single_repo,
+            dockerhub_repo_prefix=dockerhub_repo_prefix,
+            skip_existing=skip_existing,
+            verbose=True,
+            parallelism=parallelism,
+            docker_client=client,
+            username=username,
+            password=password,
+        )
+
+        if image_name in push_results:
+            logger.info("Published %s to %s", image_name, push_results[image_name])
+        else:
+            logger.warning("DockerHub publish did not return mapping for %s", image_name)
 
         return build_res, push_results
 

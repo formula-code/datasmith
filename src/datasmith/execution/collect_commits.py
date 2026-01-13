@@ -92,13 +92,33 @@ def search_commits(
     return merge_commits
 
 
-def collect_merge_shas(repo: str) -> list[dict]:
+def collect_merge_shas(  # noqa: C901
+    repo: str,
+    since: str | None = None,
+    until: str | None = None,
+) -> list[dict]:
     """
     Return (merge_commit_sha, merged_at) for PRs that are closed AND have a non-null merge_commit_sha.
+
     Optimizations:
-      • No per-PR verification or fallback calls
-      • Filters by default base branch to shrink result set
+      - No per-PR verification or fallback calls
+      - Filters by default base branch to shrink result set
+      - When date range is specified, sorts by created date and stops early
+
+    Args:
+        repo: GitHub repository in "owner/repo" format.
+        since: Only include PRs merged after this date (ISO format, e.g. "2025-01-01").
+        until: Only include PRs merged before this date (ISO format, e.g. "2025-02-01").
+
+    Returns:
+        List of PR dicts with merge_commit_sha and merged_at fields.
     """
+    from datetime import datetime, timezone
+
+    # Parse date filters
+    since_dt = datetime.fromisoformat(since).replace(tzinfo=timezone.utc) if since else None
+    until_dt = datetime.fromisoformat(until).replace(tzinfo=timezone.utc) if until else None
+
     # (Optional) limit to default branch so you don't scan PRs into other bases
     try:
         meta = get_github_metadata(f"repos/{repo}") or {}
@@ -106,24 +126,68 @@ def collect_merge_shas(repo: str) -> list[dict]:
     except Exception:
         default_base = None
 
-    params = {"state": "closed", "sort": "updated", "direction": "desc"}
+    # When filtering by date, sort by created desc so we can stop early
+    # PRs created before `since` cannot have merged_at >= since (if created < since, skip remaining)
+    sort_by = "created" if (since_dt or until_dt) else "updated"
+    params = {"state": "closed", "sort": sort_by, "direction": "desc"}
     if default_base:
         params["base"] = default_base  # reduces pages for repos with many non-default-base PRs
 
-    prs = _paginate_github(f"repos/{repo}/pulls", params=params, per_page=100, max_pages=250)
-
     out: list[dict] = []
     seen: set[str] = set()
-    for pr in prs:
-        merged_at = pr.get("merged_at")
-        merge_sha = pr.get("merge_commit_sha")
-        if merged_at and merge_sha:
-            sha = str(merge_sha).strip()
-            if sha and sha not in seen:
-                out.append(pr)
-                seen.add(sha)
+    endpoint = f"repos/{repo}/pulls"
+    page = 1
+    max_pages = 250
+    per_page = 100
 
-    logger.info("Collected %d merged PR SHAs (non-null) from %s.", len(out), repo)
+    while page <= max_pages:
+        merged_params = dict(params)
+        merged_params.update({"per_page": str(per_page), "page": str(page)})
+
+        data = get_github_metadata(endpoint, params=merged_params)
+        if data is None or not isinstance(data, list) or not data:
+            break
+
+        stop_pagination = False
+        for pr in data:
+            merged_at = pr.get("merged_at")
+            merge_sha = pr.get("merge_commit_sha")
+
+            # Early termination: if sorting by created desc and this PR was created before `since`,
+            # all subsequent PRs will also be created before `since`, so stop
+            if since_dt:
+                created_at = pr.get("created_at")
+                if created_at:
+                    try:
+                        created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        if created_dt < since_dt:
+                            stop_pagination = True
+                            break
+                    except (ValueError, AttributeError):
+                        pass
+
+            if merged_at and merge_sha:
+                # Filter by merged_at date range
+                if since_dt or until_dt:
+                    try:
+                        merged_dt = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+                        if since_dt and merged_dt < since_dt:
+                            continue
+                        if until_dt and merged_dt >= until_dt:
+                            continue
+                    except (ValueError, AttributeError):
+                        continue
+
+                sha = str(merge_sha).strip()
+                if sha and sha not in seen:
+                    out.append(pr)
+                    seen.add(sha)
+
+        if stop_pagination or len(data) < per_page:
+            break
+        page += 1
+
+    logger.info("Collected %d merged PR SHAs from %s (since=%s, until=%s).", len(out), repo, since, until)
     return out
 
 

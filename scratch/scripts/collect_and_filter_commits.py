@@ -37,6 +37,18 @@ def parse_args() -> argparse.Namespace:
 
     # Optional knobs. keep defaults sensible
     p.add_argument("--threads", type=int, default=16, help="Worker threads for finding asv.conf.json (I/O-bound).")
+    p.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help="Only include PRs merged after this date (ISO format, e.g. 2025-01-01).",
+    )
+    p.add_argument(
+        "--until",
+        type=str,
+        default=None,
+        help="Only include PRs merged before this date (ISO format, e.g. 2025-02-01).",
+    )
     return p.parse_args()
 
 
@@ -73,7 +85,7 @@ def main() -> None:
 
     all_repo_names = list(set(benchmarks["repo_name"]))
 
-    # download all repos to a temp dir
+# download all repos to a temp dir
     with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
         commit2kind = {}
         commit2repo = {}
@@ -85,7 +97,11 @@ def main() -> None:
             for f in tqdm(as_completed(futures), total=len(futures), desc="Cloning repos"):
                 repo_name, repo = f.result()
                 all_repos[repo_name] = repo
-                merge_prs = repo2mergepr.get(repo_name, []) if repo2mergepr else collect_merge_shas(repo_name)
+                merge_prs = (
+                    repo2mergepr.get(repo_name, [])
+                    if repo2mergepr
+                    else collect_merge_shas(repo_name, since=args.since, until=args.until)
+                )
                 commit2pr.update({pr.get("merge_commit_sha"): pr for pr in merge_prs})
                 merge_shas = [pr.get("merge_commit_sha") for pr in merge_prs if pr.get("merge_commit_sha")]
 

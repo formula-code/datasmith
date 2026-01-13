@@ -36,6 +36,19 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Stop after this many pages (API caps at 1 000 results)",
     )
+    p.add_argument
+    p.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help="Only include commits after this date (ISO format, e.g. 2025-01-01)",
+    )
+    p.add_argument(
+        "--until",
+        type=str,
+        default=None,
+        help="Only include commits before this date (ISO format, e.g. 2025-02-01)",
+    )
     return p.parse_args()
 
 
@@ -52,6 +65,8 @@ if __name__ == "__main__":
         perf_commits = find_perf_commits(
             repo_name=repo_name,
             n_workers=-1,
+            since=args.since,
+            until=args.until,
         )
         tagged_commits = find_tagged_releases(repo_name=repo_name)
         # parent_commits = find_parent_commits(repo_name=repo_name, commits=perf_commits + tagged_commits)

@@ -199,12 +199,8 @@ def verify_task_with_context(
 
     # Build and publish the final image to DockerHub (force push).
     dockerhub_repo = config.get("dockerhub_repo", "all")
-    dockerhub_namespace = (
-        config.get("dockerhub_namespace") or os.environ.get("DOCKERHUB_NAMESPACE")
-    )
-    dockerhub_username = (
-        config.get("dockerhub_username") or os.environ.get("DOCKERHUB_USERNAME")
-    )
+    dockerhub_namespace = config.get("dockerhub_namespace") or os.environ.get("DOCKERHUB_NAMESPACE")
+    dockerhub_username = config.get("dockerhub_username") or os.environ.get("DOCKERHUB_USERNAME")
     dockerhub_password = (
         config.get("dockerhub_password") or os.environ.get("DOCKERHUB_TOKEN") or os.environ.get("DOCKERHUB_PASSWORD")
     )
@@ -275,7 +271,7 @@ def main() -> None:
 
     if args.task.name == "formulacode_verified" or (args.task.parent.name == "formulacode_verified"):
         globbed = args.task.rglob("*/*") if args.task.name == "formulacode_verified" else args.task.glob("*")
-        tasks = [d for d in globbed if d.is_dir() and (not d.name.startswith(".")) and ('cache' not in str(d))]
+        tasks = [d for d in globbed if d.is_dir() and (not d.name.startswith(".")) and ("cache" not in str(d))]
         all_successes = []
         success_pth = args.task / "all_verification_successes.jsonl"
         from concurrent.futures import ThreadPoolExecutor

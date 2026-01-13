@@ -118,7 +118,7 @@ class TestExtractProblemStatementMethod:
 
     def test_extract_problem_statement_with_extractor(self, builder_with_mock_extractor):
         """Test that _extract_problem_statement uses ProblemExtractor."""
-        mock_extracted = ProblemExtraction(problem_statement="This is the extracted problem statement")
+        mock_extracted = ProblemExtraction(initial_observations="This is the extracted problem statement")
         mock_validation = {
             "validation_enabled": True,
             "overall_pass": True,
@@ -133,14 +133,14 @@ class TestExtractProblemStatementMethod:
         result = builder_with_mock_extractor._extract_problem_statement("issue text", "related issues")
 
         assert isinstance(result, ProblemExtraction)
-        assert result.problem_statement == "This is the extracted problem statement"
+        assert result.initial_observations == "This is the extracted problem statement"
         builder_with_mock_extractor.problem_extractor.extract_problem.assert_called_once_with(
             pr_body="issue text", pr_comments="related issues"
         )
 
     def test_extract_problem_statement_logs_warning_on_low_quality(self, builder_with_mock_extractor, caplog):
         """Test that low extraction quality triggers warning."""
-        mock_extracted = ProblemExtraction(problem_statement="Extracted text")
+        mock_extracted = ProblemExtraction(initial_observations="Extracted text")
         mock_validation = {
             "validation_enabled": True,
             "overall_pass": False,  # Failed validation
@@ -217,7 +217,7 @@ class TestEndToEndWithMockedLLM:
         # Mock the extractor
         mock_extractor = Mock()
         mock_extractor.extract_problem.return_value = (
-            ProblemExtraction(problem_statement="Points are hardly visible. Points are super big."),
+            ProblemExtraction(initial_observations="Points are hardly visible. Points are super big."),
             {"validation_enabled": True, "overall_pass": True, "avg_lcs": 0.95},
         )
         mock_extractor.extract_comments.return_value = (
@@ -237,7 +237,7 @@ class TestEndToEndWithMockedLLM:
         assert result.final_md != "NOT_A_VALID_PR"
         assert "Points are hardly visible" in result.problem_statement
         assert result.problem_sections is not None
-        assert result.problem_sections.problem_statement
+        assert result.problem_sections.initial_observations
         assert result.is_performance_commit is False  # No perf detection
 
 

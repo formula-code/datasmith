@@ -107,9 +107,7 @@ class ReportBuilder:
         if self.enable_llm_backends:
             configure_agent_backends(PORTKEY_MODEL_NAME=model_name.replace("local/", ""), local="local" in model_name)
             # Disable LCS/verbatim validation to simplify extraction and reduce noise
-            self.problem_extractor = ProblemExtractor(
-                validate_lcs=True,
-            )
+            self.problem_extractor = ProblemExtractor()
             self.classify_judge = ClassifyJudge()
             self.perf_classifier = PerfClassifier()
         else:
@@ -196,7 +194,10 @@ class ReportBuilder:
 
         return items, comment_links
 
-    def _extract_problem_statement(self, pr_body: str, pr_comments: str) -> ProblemExtraction:
+    def _extract_problem_statement(
+        self, pr_body: str, pr_comments: str, pr_title: str
+        # pr_patch: str | None = None
+    ) -> ProblemExtraction:
         """Extract (not summarize) problem statement from issue.
 
         Uses an extractive approach to keep high overlap (typically 60%+ LCS)
@@ -207,29 +208,36 @@ class ReportBuilder:
         Args:
             pr_body: Main issue description
             pr_comments: Related issue statistics/content
-            issue_stat: Related issue statistics/content
+            pr_title: The GitHub PR title
+            # pr_patch: The GitHub PR code patch/diff
 
         Returns:
             A structured ``ProblemExtraction`` instance.
         """
         if self.problem_extractor is None or (not self.summarize_llm):
-            return ProblemExtraction(problem_statement="", solution_overview=pr_body + "\n\n" + pr_comments + "\n\n")
-
-        try:
-            extraction, validation_report = self.problem_extractor.extract_problem(
-                pr_body=pr_body,
-                pr_comments=pr_comments,
+            return ProblemExtraction(
+                initial_observations="",
+                triage_attempts=None,
+                solution_overview=pr_body + "\n\n" + pr_comments + "\n\n",
+                solution_observations=None
             )
 
-            # Log validation metrics
-            if validation_report.get("validation_enabled"):
-                avg_lcs = validation_report.get("avg_lcs", 0)
-                avg_ngram = validation_report.get("avg_ngram", 0)
-                logger.info(f"Problem statement extraction validation: LCS={avg_lcs:.2%}, n-gram={avg_ngram:.2%}")
+        try:
+            extraction = self.problem_extractor.extract_problem(
+                pr_title=pr_title,
+                pr_body=pr_body,
+                pr_comments=pr_comments,
+                # pr_patch=pr_patch,
+            )
 
         except Exception as e:
             logger.error(f"Problem statement extraction failed: {e}", exc_info=True)
-            return ProblemExtraction(problem_statement="", solution_overview=pr_body + "\n\n" + pr_comments + "\n\n")
+            return ProblemExtraction(
+                initial_observations="",
+                triage_attempts=None,
+                solution_overview=pr_body + "\n\n" + pr_comments + "\n\n",
+                solution_observations=None
+            )
         else:
             return extraction
 
@@ -316,7 +324,7 @@ class ReportBuilder:
         _topics_list = [] if not isinstance(_topics_val, (list, tuple, set)) else list(_topics_val)
         _topics_str = ", ".join([str(t) for t in _topics_list]) if _topics_list else ""
         repo_description_rendered = repo_template.render(
-            repo_name=_repo.get("name", f"{owner}/{repo}"),
+            repo_name=f"{owner}/{repo}",
             repo_description=_repo.get("description", ""),
             repo_topics=_topics_str,
             repo_language=_repo.get("language", ""),
@@ -360,7 +368,7 @@ class ReportBuilder:
             issues_rendered = anonymize_github_issue(issues_rendered)
 
         # Reject PRs with no referenced issues and no body content
-        if not issues_sorted and not (pr_body or "").strip():
+        if (not issues_sorted) or (not (pr_body or "").strip()):
             return ReportResult(
                 final_md="NOT_A_VALID_PR",
                 all_data={
@@ -408,29 +416,58 @@ class ReportBuilder:
         bisected_pr_information = self._extract_problem_statement(
             pr_body=pr_body_text,
             pr_comments=pr_raw_comments_text,
+            pr_title=pr_title,
+            # pr_patch="",
         )
 
-        hints_template = self.jinja_env.get_template("hints.md.j2")
-        hints_block = hints_template.render(problem_description=bisected_pr_information.problem_statement)
+        # if bisected_pr_information.initial_observations is empty or issues_rendered is empty,
+        # treat it as NOT_A_VALID_PR
+        if not (bisected_pr_information.initial_observations or "").strip() or not issues_rendered.strip():
+            logger.debug("NOT A VALID PR (no problem statement or no linked issues)")
+            return ReportResult(
+                final_md="NOT_A_VALID_PR",
+                all_data={
+                    "issues_expanded": issues_sorted,
+                    "raw_issue_data": [
+                        {
+                            "number": it.number,
+                            "title": it.title,
+                            "url": it.url,
+                            "description": it.description,
+                            "comments": list(it.comments),
+                            "cross_references": list(it.cross_references),
+                            "created_at": it.created_at,
+                            "closed_at": it.closed_at,
+                        }
+                        for it in issues_sorted
+                    ],
+                    "git_issue_str": issues_rendered,
+                },
+                problem_statement="",
+                hints="",
+                classification="",
+                difficulty="",
+                is_performance_commit=False,
+            )
 
         # if there are no linked issues, but we have a problem statement,
         # we should set problem statement to the hints block,
         # and not give any other hints.
-        if not issues_sorted and (bisected_pr_information.problem_statement or "").strip():
-            issues_rendered = hints_block
-            hints_block = ""
+        hints_block = ""
+        if not issues_sorted and (bisected_pr_information.initial_observations or "").strip():
+            issues_rendered = ""
 
         # now make a structured final.md.j2
         final_template = self.jinja_env.get_template("final.md.j2")
         final_template_rendered = final_template.render(
             repo_description=repo_description_rendered,
-            problem_statement=issues_rendered,
-            hints=hints_block,
+            initial_observations=bisected_pr_information.initial_observations,
+            issues=issues_rendered,
         )
         final_template_no_hints_rendered = final_template.render(
             repo_description=repo_description_rendered,
-            problem_statement=issues_rendered,
-            hints="",
+            initial_observations=bisected_pr_information.initial_observations,
+            issues="",
         )
         if self.anonymize_output:
             final_template_rendered = anonymize_github_issue(final_template_rendered)
@@ -499,7 +536,7 @@ class ReportBuilder:
                 ],
                 "git_issue_str": issues_rendered,
             },
-            problem_statement=bisected_pr_information.problem_statement or "",
+            problem_statement=bisected_pr_information.initial_observations or "",
             problem_statement_with_sol=bisected_pr_information.to_problem_with_solution_markdown()
             if bisected_pr_information
             else "",

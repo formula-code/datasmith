@@ -38,7 +38,12 @@ DSPY_URL=http://localhost:30000/v1
 DSPY_API_KEY=local
 DSPY_TEMPERATURE=0.7
 
-# For ECR access
+# For DockerHub publishing (dataset verification)
+DOCKERHUB_NAMESPACE=formulacode          # Required for dataset verification
+DOCKERHUB_USERNAME=myuser                # Required for dataset verification
+DOCKERHUB_TOKEN=dckr_pat_xxxxx          # Required for dataset verification
+
+# For ECR access (legacy/optional)
 AWS_REGION=us-east-1
 
 # Depends on the system.
@@ -151,6 +156,109 @@ $ python scratch/scripts/update_formulacode.py --start-date 2025-10-01 --end-dat
 
 The next sections describe each step of the pipeline in detail.
 
+### FormulaCode update pipeline (bird's-eye view)
+
+The diagram below summarizes how `scratch/scripts/update_formulacode.py` orchestrates the monthly update pipeline and how each downstream script delegates to internal modules and services.
+
+```mermaid
+sequenceDiagram
+    participant U as update_formulacode.py
+    participant ENV as env setup
+    participant C1 as collect_commits.py
+    participant C2 as collect_and_filter_commits.py
+    participant C3 as prepare_commits_for_building_reports.py
+    participant C4 as collect_perf_commits.py
+    participant C5 as synthesize_contexts.py
+    participant C6 as build_and_publish_to_ecr.py
+    participant CSV as repos_valid.csv
+    participant GH as github or offline store
+    participant TMP as temp repo dir
+    participant MI as merge info
+    participant FS as file system
+    participant LLM as llm backends
+    participant SQL as sqlite cache
+    participant CR as context registry
+    participant DOCK as docker build
+    participant ECR as aws ecr
+
+    %% Orchestrator setup (grey)
+    rect rgb(230,230,230)
+        U->>ENV: step 0 setup environment and logging
+        ENV->>U: environment ready
+    end
+
+    %% Step 1 collect_commits.py (blue)
+    rect rgb(210,225,255)
+        U->>C1: step 1 collect commits
+        C1->>CSV: read repos_valid.csv
+        C1->>GH: find perf commits for each repo
+        C1->>GH: find tagged releases
+        C1->>FS: write commits jsonl
+    end
+
+    %% Step 2 collect_and_filter_commits.py (green)
+    rect rgb(210,245,220)
+        U->>C2: step 2 collect and filter commits
+        C2->>CSV: read repos_valid.csv
+        C2->>TMP: clone repo into temp dir
+        C2->>MI: collect merge shas and commit info
+        C2->>FS: write merge_commits_filtered parquet
+    end
+
+    %% Step 3 prepare_commits_for_building_reports.py (yellow)
+    rect rgb(255,250,210)
+        U->>C3: step 3 prepare commits for reports
+        C3->>FS: read merge_commits_filtered parquet
+        C3->>C3: tokenize patches and crude perf filter
+        C3->>C3: analyze commits in threads
+        C3->>DOCK: make tasks with container names
+        C3->>FS: optional get patch from diff url
+        C3->>FS: write parquet with patch
+    end
+
+    %% Step 4 collect_perf_commits.py (red-ish)
+    rect rgb(255,225,220)
+        U->>C4: step 4 classify performance commits
+        C4->>FS: read prepared parquet
+        C4->>C4: report builder per row
+        C4->>SQL: cache completion in sqlite
+        C4->>LLM: call llm backends
+        LLM->>C4: performance classification
+        C4->>FS: write raw parquet
+        C4->>FS: write perf only parquet
+    end
+
+    %% Step 5 synthesize_contexts.py (purple)
+    rect rgb(235,220,255)
+        U->>C5: step 5 synthesize contexts
+        C5->>C5: configure agent backends
+        C5->>FS: load perf only parquet
+        C5->>CR: load context registry and update
+        CR->>C5: context registry ready
+        C5->>DOCK: build base image
+        DOCK->>C5: base image built
+        C5->>C5: prepare task list per repo and commit
+        C5->>C5: agent build and validate in threads
+        C5->>FS: write results jsonl and all files by image json
+        C5->>CR: update context_registry json
+    end
+
+    %% Step 6 build_and_publish_to_ecr.py (teal)
+    rect rgb(210,245,245)
+        U->>C6: step 6 build and publish
+        C6->>FS: read perf only parquet
+        C6->>CR: load context registry and update
+        C6->>DOCK: build base image
+        DOCK->>C6: base image built
+        C6->>C6: prepare task list for recent package images
+        C6->>ECR: optional filter tasks not on ecr
+        ECR->>C6: list of existing images
+        C6->>DOCK: build using docker validator
+        DOCK->>C6: built images
+        C6->>ECR: publish images to aws ecr
+    end
+```
+
 ### 1. Scrape Github for asv-compatible repositories
 
 We start by collecting all repositories that use Airspeed Velocity (asv) for benchmarking. This can be done in one of two ways:
@@ -192,8 +300,8 @@ $ python scratch/scripts/prepare_commits_for_building_reports.py \
        --fetch-patches
 
 $ python scratch/scripts/collect_perf_commits.py \
-       --commits  scratch/artifacts/processed/merge_commits_filtered_numpy_with_patch.parquet \
-       --outfile    scratch/artifacts/processed/perfonly_commits_numpy_with_patch.parquet \
+       --commits  scratch/artifacts/processed/merge_commits_filtered_with_patch.parquet \
+       --outfile    scratch/artifacts/processed/perfonly_commits_with_patch.parquet \
        --max-workers -1
 ```
 
@@ -216,7 +324,7 @@ $ python scratch/scripts/synthesize_contexts.py \
        --max-steps 10 \
        --max-similar-candidates 5 \
        --ignore-exhausted \
-       --push-to-ecr
+       --push-to-dockerhub
 ```
 
 ### 4. Upload to AWS ECR
@@ -231,6 +339,79 @@ $ python scratch/scripts/build_and_publish_to_ecr.py \
        --skip-existing
 ```
 
+### 4b. Alternative: Upload to DockerHub
+
+As an alternative to AWS ECR, you can publish Docker images to DockerHub for easier public sharing and distribution.
+
+#### Setup
+
+First, generate a DockerHub access token:
+1. Visit https://hub.docker.com/settings/security
+2. Click "New Access Token"
+3. Give it a descriptive name (e.g., "datasmith-publisher")
+4. Copy the token
+
+Then configure your environment:
+
+```bash
+# Add to your tokens.env file
+export DOCKERHUB_NAMESPACE=formulacode     # Your DockerHub username or organization
+export DOCKERHUB_USERNAME=myusername       # Your DockerHub username
+export DOCKERHUB_TOKEN=dckr_pat_xxxxx      # Access token from above
+```
+
+Or use Docker login:
+```bash
+$ docker login docker.io
+# Enter your username and token when prompted
+```
+
+#### Usage
+
+```bash
+$ python scratch/scripts/build_and_publish_to_dockerhub.py \
+       --commits scratch/artifacts/processed/perfonly_commits_with_patch_final.parquet \
+       --context-registry scratch/artifacts/pipeflush/context_registry.json \
+       --namespace formulacode \
+       --max-workers 5 \
+       --skip-existing
+```
+
+#### Options
+
+- `--namespace`: **Required.** DockerHub namespace (your username or organization)
+- `--username`: DockerHub username (or use `DOCKERHUB_USERNAME` env var)
+- `--password`: DockerHub token (or use `DOCKERHUB_TOKEN` env var)
+- `--repository-mode`: `single` (default) or `mirror`
+  - `single`: All images in one repository with encoded tags (e.g., `formulacode/all:owner-repo-sha--final`)
+  - `mirror`: Each project gets its own repository (e.g., `formulacode/owner-repo:sha-final`)
+- `--single-repo`: Repository name for single mode (default: `all`)
+- `--skip-existing`: Skip images that already exist on DockerHub
+- `--max-workers`: Number of parallel build/push operations (default: 8)
+
+#### Important Notes
+
+- **Public Visibility**: New DockerHub repositories default to PUBLIC. Change to private manually on DockerHub if needed.
+- **Rate Limits**: DockerHub free tier has rate limits. The script handles this with exponential backoff, but consider a paid plan for high-volume publishing.
+- **Organization Repositories**: For organization namespaces, repositories may need to be manually created on DockerHub before first push.
+- **Push Concurrency**: Default push concurrency is lower for DockerHub (8) vs ECR (12) to avoid rate limiting.
+
+#### Environment Variables
+
+```bash
+# DockerHub-specific (add to tokens.env)
+DOCKERHUB_NAMESPACE=formulacode          # Required
+DOCKERHUB_USERNAME=myuser                # Required
+DOCKERHUB_TOKEN=dckr_pat_xxxxx          # Required
+DOCKERHUB_RATE_LIMIT_WAIT=60            # Optional: seconds to wait on rate limit (default: 60)
+DOCKERHUB_SINGLE_REPO=all               # Optional: repo name for single mode (default: all)
+
+# Build settings (shared with ECR)
+BUILD_CONCURRENCY=24                     # Max parallel builds
+PUSH_CONCURRENCY=8                      # Max parallel pushes (lower for DockerHub)
+DOCKER_USE_BUILDX=0                     # Use Docker BuildKit
+DOCKER_NETWORK_MODE=host                # Build network mode
+```
 
 ### 5. Evaluate all commits
 

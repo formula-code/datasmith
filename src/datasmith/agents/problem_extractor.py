@@ -20,28 +20,31 @@ from typing import Any
 import dspy
 
 from datasmith.logging_config import configure_logging
-from datasmith.scrape.verbatim_checker import (
-    validate_section_extractiveness,
-)
-
-# Verbatim validation disabled: previously imported utilities for LCS checks
-# have been removed to simplify extraction and avoid noisy logs.
 
 logger = configure_logging()
 
 
 @dataclass
 class ProblemExtraction:
-    """Structured representation of an extracted problem statement.
+    """
+    Structured representation of an extracted problem and solution narrative.
+
+    This dataclass captures the four phases of a performance optimization or bug fix:
+    1. initial_observations: Objective symptoms of the problematic behavior
+    2. triage_attempts: Investigative steps and reasoning used to narrow down the issue
+    3. solution_overview: Description of the change(s) made
+    4. solution_observations: Observations after applying the change
 
     Notes on rendering:
-    - Use ``to_problem_markdown`` for the problem-only variant.
-    - Use ``to_problem_with_solution_markdown`` to include the solution section.
-    - ``to_markdown`` remains for backward-compatibility and includes the solution when present.
+    - Use ``to_problem_markdown`` for the problem-only variant (initial_observations).
+    - Use ``to_problem_with_solution_markdown`` to include all sections with headers.
+    - ``to_markdown`` remains for backward-compatibility and includes all sections.
     """
 
-    problem_statement: str | None = None
+    initial_observations: str | None = None
+    triage_attempts: str | None = None
     solution_overview: str | None = None
+    solution_observations: str | None = None
 
     def _strip(self, value: str | None) -> str | None:
         if value is None:
@@ -50,32 +53,59 @@ class ProblemExtraction:
         return stripped or None
 
     def to_problem_markdown(self) -> str:
-        """Render only the problem portion in markdown (no solution)."""
-        text = (self.problem_statement or "").strip()
+        """Render only the problem portion in markdown (initial observations only)."""
+        text = (self.initial_observations or "").strip()
         text = re.sub(r"^```json\s*$", "", text, flags=re.MULTILINE)
         return text
 
-    def _normalise_solution(self) -> str | None:
-        if not self.solution_overview:
+    def _normalise_section(self, content: str | None, header_variants: list[str]) -> str | None:
+        """Remove redundant headers from section content."""
+        if not content:
             return None
-        content = self.solution_overview.strip()
+        content = content.strip()
         low = content.lstrip().lower()
-        if low.startswith("## solution overview") or low.startswith("**solution overview**"):
-            lines = content.splitlines()
-            if lines:
-                lines = lines[1:]
-            content = "\n".join(lines).lstrip()
+        for variant in header_variants:
+            if low.startswith(variant.lower()):
+                lines = content.splitlines()
+                if lines:
+                    lines = lines[1:]
+                content = "\n".join(lines).lstrip()
+                break
         return content
 
     def to_problem_with_solution_markdown(self) -> str:
-        """Render problem + a separate Solution Overview section."""
+        """Render problem + all solution sections with headers."""
         sections: list[str] = []
-        problem = (self.problem_statement or "").strip()
-        if problem:
-            sections.append(problem)
-        solution = self._normalise_solution()
+
+        # Initial observations (no header, rendered as-is)
+        initial_obs = (self.initial_observations or "").strip()
+        if initial_obs:
+            sections.append(initial_obs)
+
+        # Triage attempts
+        triage = self._normalise_section(
+            self.triage_attempts,
+            ["## triage attempts", "**triage attempts**"]
+        )
+        if triage:
+            sections.append(f"## Triage Attempts\n\n{triage}")
+
+        # Solution overview
+        solution = self._normalise_section(
+            self.solution_overview,
+            ["## solution overview", "**solution overview**"]
+        )
         if solution:
-            sections.append(f"**Solution Overview**\n\n{solution}")
+            sections.append(f"## Solution Overview\n\n{solution}")
+
+        # Solution observations
+        solution_obs = self._normalise_section(
+            self.solution_observations,
+            ["## solution observations", "**solution observations**"]
+        )
+        if solution_obs:
+            sections.append(f"## Solution Observations\n\n{solution_obs}")
+
         text = "\n\n".join(sections).strip()
         text = re.sub(r"^```json\s*$", "", text, flags=re.MULTILINE)
         return text
@@ -88,86 +118,37 @@ class ProblemExtraction:
         """Return a serialisable representation of the extraction."""
 
         return {
-            "problem_statement": self._strip(self.problem_statement),
+            "initial_observations": self._strip(self.initial_observations),
+            "triage_attempts": self._strip(self.triage_attempts),
             "solution_overview": self._strip(self.solution_overview),
+            "solution_observations": self._strip(self.solution_observations),
         }
 
 
 class ProblemExtractorSignature(dspy.Signature):
     """
-    PURPOSE
-    --------
-    Given a GitHub PR and its comments, decide what verbatim content belongs in:
-      (A) Problem Description — original problem/need/motivation/context
-      (B) Solution Overview — proposed or implemented changes
-    Be STRICTLY EXTRACTIVE: select contiguous spans that already exist in the source.
-    Do NOT rewrite or add words. You may trim leading/trailing whitespace only.
-    Code blocks and error logs MUST be character-exact (including fences/whitespace).
-    ASV benchmarking efforts should ALWAYS be included in the Problem Description if present.
-
-    INPUT
-    -----
-      - `pr_body`: concatenated raw text from the PR title/body
-      - `pr_comments`: concatenated raw text from all PR comments
-
-    WHAT TO RETURN
-    --------------
-    Two plain-text fields (no headings in the content):
-      1) Problem Description (may be empty)
-         - Verbatim spans describing problem/need, symptoms, error messages, repro steps,
-           constraints, affected components, etc.
-         - Ignore pleasantries, greetings, sign-offs, and non-technical commentary.
-      2) Solution Overview (may be empty)
-         - Verbatim spans describing implemented/proposed changes: diffs, function/file names,
-           config/flags, commands, metrics, validations, “Fixes #…”, related links.
-
-    SPAN RULES
-    ----------
-    - Copy whole sentences OR contiguous code/log blocks as they appear in the source.
-    - Do NOT splice non-contiguous text; do NOT insert ellipses unless present in source.
-    - If a sentence alone is incomplete, include the immediately adjacent sentence that
-      completes the thought—still verbatim.
-    - Lists are OK, but output ONE span per line with no bullets/numbers/labels/commentary.
-
-    ORDER & DEDUP
-    -------------
-    - Preserve original chronological order (top -> bottom).
-    - When de-duplicating near-identical spans, keep the FIRST occurrence and preserve order.
-
-    FORMAT & STYLE
-    --------------
-    - Preserve exact tokens: function/variable names, file paths, versions, hashes, issue/PR IDs.
-    - Code/logs must remain character-exact, including markdown fences if present.
-    - Ignore boilerplate (checklists, CI banners) unless they contain unique technical details.
-    - Maintain attribution only when the text itself names people/handles.
-
-    VALIDATION NOTES
-    ----------------
-    - Either field may be an empty string if no evidence exists.
-    - High extractiveness is expected (e.g., LCS/4-gram checks); code/log blocks must be exact.
-    - Do NOT add headings like “Problem Statement” or “Solution Overview” into the content.
-
-    NOTES
-    -----
-    - Favor specificity. When only solution text exists, leave Problem empty (and vice-versa).
+    What problem is this Github PR trying to solve? Extract near-verbatim relevant text following the given JSON output. If no relevant context exists for a field, return an empty string for it.
     """
 
     # Inputs
-    pr_body: str = dspy.InputField(desc="The GitHub PR/issue description")
-
+    pr_title: str = dspy.InputField(desc="The GitHub PR title")
+    pr_body: str = dspy.InputField(desc="The GitHub PR description")
     pr_comments: str = dspy.InputField(desc="Comments on the PR thread.")
+    # pr_patch: str | None = dspy.InputField(desc="The GitHub PR code patch/diff.")
 
-    # Outputs (lists allowed; caller can normalize to string later)
-    reasoning: str | list[Any] | None = dspy.OutputField(
-        desc="(Optional) Empty OR a JSON list of source offsets only (no prose), e.g. "
-        '[{"field":"problem","start":123,"end":256},{"field":"solution","start":...}].'
+    initial_observations: str | list[Any] | None = dspy.OutputField(
+        desc="Objective symptoms of the problematic behavior, described in the present tense. Focus strictly on what is happening (metrics, user impact, frequency). Do not include causes, hypotheses, or explanations."
     )
-    extracted_problem_description: str | list[Any] | None = dspy.OutputField(
-        desc="Verbatim spans evidencing the problem/symptoms/constraints, one span per line (may be empty)."
+    triage_attempts: str | list[Any] | None = dspy.OutputField(
+        desc="The investigative steps and reasoning used to narrow down contributing factors—what you checked, what you ruled out, and what evidence you gathered to understand where the issue originates."
     )
-    extracted_solution_overview: str | list[Any] | None = dspy.OutputField(
-        desc="Verbatim spans describing the implemented/proposed solution, one span per line (may be empty)."
+    solution_overview: str | list[Any] | None = dspy.OutputField(
+        desc="A concise description of the change(s) made and how they address the identified bottleneck or constraint."
     )
+    solution_observations: str | list[Any] | None = dspy.OutputField(
+        desc="What you observe after applying the change—new measurements, behavior differences, and any regressions or trade-offs that appeared."
+    )
+
 
 
 class ProblemExtractor(dspy.Module):
@@ -176,104 +157,65 @@ class ProblemExtractor(dspy.Module):
 
     This module uses the updated signatures:
       - ProblemExtractorSignature(pr_body, pr_comments)
-      - CommentExtractorSignature(comment_thread)
-
-    Validation:
-        - LCS ratio: 75%+ for each section
-        - Code blocks: 100% character-exact match
-        - Technical terms: preserved exactly
-        - Specific values: not generalized
 
     Usage:
         extractor = ProblemExtractor(validate_lcs=True, min_lcs=0.75)
 
         # Extract Problem/Solution buckets from a PR
-        extraction, validation = extractor.extract_problem(
+        extraction = extractor.extract_problem(
+            pr_title=pr_title_text,
             pr_body=pr_body_text,
             pr_comments=all_pr_comments_text,
+            # pr_patch=pr_patch_text,
         )
     """
 
-    def __init__(
-        self,
-        validate_lcs: bool = True,
-        min_lcs: float = 0.75,
-        log_validation: bool = True,
-    ):
+    def __init__(self):
         super().__init__()
-        self.validate_lcs = validate_lcs
-        self.min_lcs = min_lcs
-        self.log_validation = log_validation
-
-        # Updated predictors (signatures themselves already updated by you)
         self.problem_predictor = dspy.Predict(ProblemExtractorSignature)
-        # self.comment_predictor = dspy.Predict(CommentExtractorSignature)
 
     # ---------- PUBLIC API ----------
 
     def extract_problem(
         self,
         *,
+        pr_title: str,
         pr_body: str,
         pr_comments: str,
-    ) -> tuple[ProblemExtraction, dict[str, Any]]:
+        # pr_patch: str | None = None,
+    ) -> ProblemExtraction:
         """
         Extract Problem/Solution buckets from a GitHub PR + comments.
 
         Args:
+            pr_title: The GitHub PR title
             pr_body: The GitHub PR/issue description
             pr_comments: Comments on the PR thread
+            # pr_patch: The GitHub PR code patch/diff
 
         Returns:
-            (ProblemExtraction, validation_report)
+            ProblemExtraction
         """
         # Run extraction with UPDATED input arg names
         try:
             result = self.problem_predictor(
+                pr_title=pr_title,
                 pr_body=pr_body,
                 pr_comments=pr_comments,
+                # pr_patch=pr_patch,
             )
             extraction = self._build_extraction(result)
         except Exception as e:
             logger.error(f"Problem extraction failed: {e}", exc_info=True)
-            fallback = ProblemExtraction(problem_statement=f"[extraction failed: {e}]", solution_overview=None)
-            return fallback, {"overall_pass": False, "error": str(e)}
+            fallback = ProblemExtraction(
+                initial_observations=f"[extraction failed: {e}]",
+                triage_attempts=None,
+                solution_overview=None,
+                solution_observations=None
+            )
+            return fallback
 
-        markdown_output = extraction.to_markdown()
-
-        # Validate against the FULL source (body + both comment sets)
-        full_source = "\n\n".join(s for s in (pr_body, pr_comments) if s)
-        validation_report = self._validate_extraction(
-            extracted=markdown_output,
-            source=full_source,
-            extraction_type="problem_description",
-        )
-
-        return extraction, validation_report
-
-    # def extract_comments(self, *, comment_thread: str) -> tuple[str, dict[str, Any]]:
-    #     """
-    #     Extract discussion points from a GitHub comment thread with validation.
-
-    #     Args:
-    #         comment_thread: Concatenated GitHub comment text
-
-    #     Returns:
-    #         (extracted_discussion, validation_report)
-    #     """
-    #     try:
-    #         result = self.comment_predictor(comment_thread=comment_thread)
-    #         extracted = str(getattr(result, "extracted_discussion", "")).strip()
-    #     except Exception as e:
-    #         logger.error(f"Comment extraction failed: {e}", exc_info=True)
-    #         return f"[extraction failed: {e}]", {"overall_pass": False, "error": str(e)}
-
-    #     validation_report = self._validate_extraction(
-    #         extracted=extracted,
-    #         source=comment_thread,
-    #         extraction_type="discussion",
-    #     )
-    #     return extracted, validation_report
+        return extraction
 
     def _clean_text(self, value: Any | None) -> str | None:
         """Clean and normalize text values from predictions."""
@@ -300,13 +242,19 @@ class ProblemExtractor(dspy.Module):
 
     def _build_extraction(self, prediction: Any) -> ProblemExtraction:
         """
-        Normalize the raw DSPy prediction (using UPDATED output names)
-        into your ProblemExtraction object (which still expects
-        problem_statement / solution_overview).
+        Normalize the raw DSPy prediction into a ProblemExtraction object.
+
+        Extracts the four output fields from ProblemExtractorSignature:
+        - initial_observations
+        - triage_attempts
+        - solution_overview
+        - solution_observations
         """
-        # Primary: new field names
-        problem = self._clean_text(getattr(prediction, "extracted_problem_description", None))
-        solution = self._clean_text(getattr(prediction, "extracted_solution_overview", None))
+        # Extract all four fields from the prediction
+        initial_obs = self._clean_text(getattr(prediction, "initial_observations", None))
+        triage = self._clean_text(getattr(prediction, "triage_attempts", None))
+        solution = self._clean_text(getattr(prediction, "solution_overview", None))
+        solution_obs = self._clean_text(getattr(prediction, "solution_observations", None))
 
         def plausible(s: str | None, *, min_len: int = 20) -> bool:
             if s is None:
@@ -316,66 +264,31 @@ class ProblemExtractor(dspy.Module):
                 return False
             return bool(re.search(r"[A-Za-z]", stripped))
 
-        if not plausible(problem, min_len=20):
-            problem = None
+        # Validate each field
+        if not plausible(initial_obs, min_len=20):
+            initial_obs = None
+        if not plausible(triage, min_len=10):
+            triage = None
         if not plausible(solution, min_len=10):
             solution = None
+        if not plausible(solution_obs, min_len=10):
+            solution_obs = None
 
         extraction = ProblemExtraction(
-            problem_statement=problem or "",
+            initial_observations=initial_obs or "",
+            triage_attempts=triage or "",
             solution_overview=solution or "",
+            solution_observations=solution_obs or "",
         )
 
         # Ensure there's at least some content string (empty strings are allowed)
-        if extraction.problem_statement is None:
-            extraction.problem_statement = ""
+        if extraction.initial_observations is None:
+            extraction.initial_observations = ""
+        if extraction.triage_attempts is None:
+            extraction.triage_attempts = ""
         if extraction.solution_overview is None:
             extraction.solution_overview = ""
+        if extraction.solution_observations is None:
+            extraction.solution_observations = ""
 
         return extraction
-
-    def _validate_extraction(self, extracted: str, source: str, extraction_type: str) -> dict[str, Any]:
-        """Validate extractiveness using LCS and exact n-gram metrics.
-
-        - When ``validate_lcs`` is False, returns a passing stub with validation disabled.
-        - When enabled, enforces code-block exactness and computes per-sentence scores.
-        """
-        if not self.validate_lcs:
-            return {
-                "overall_pass": True,
-                "validation_enabled": False,
-            }
-
-        try:
-            overall_pass, scores = validate_section_extractiveness(
-                extracted,
-                source,
-                min_lcs=self.min_lcs,
-                code_blocks_must_be_exact=True,
-            )
-        except Exception as e:  # never fail the caller due to validator issues
-            return {
-                "overall_pass": False,
-                "validation_enabled": True,
-                "details": f"FAIL: validator error: {e}",
-            }
-
-        avg_lcs = 0.0
-        avg_ngram = 0.0
-        if scores:
-            avg_lcs = sum(s.lcs_ratio for s in scores) / len(scores)
-            avg_ngram = sum(s.exact_match_ratio for s in scores) / len(scores)
-
-        total = len(scores)
-        passed = sum(1 for s in scores if s.is_verbatim)
-        status = "PASS" if overall_pass else "FAIL"
-        details = f"{status}: {passed}/{total} sentences ≥ LCS {self.min_lcs:.2f}; avg LCS={avg_lcs:.3f}, avg 4-gram={avg_ngram:.3f}"
-
-        return {
-            "overall_pass": overall_pass,
-            "validation_enabled": True,
-            "avg_lcs": avg_lcs,
-            "avg_ngram": avg_ngram,
-            "details": details,
-            "type": extraction_type,
-        }
