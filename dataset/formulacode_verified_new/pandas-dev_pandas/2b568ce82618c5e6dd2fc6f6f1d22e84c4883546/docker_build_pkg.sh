@@ -59,18 +59,18 @@ for version in $TARGET_VERSIONS; do
   # Build and install
   log "Building pandas with meson-python"
   cd "$REPO_ROOT"
-  
+
   # Clean any previous builds
   rm -rf build/ dist/ pandas.egg-info/ .eggs/
   find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-  
+
   # Install build dependencies first
   micromamba run -n "$ENV_NAME" python -m pip install --no-deps \
     "Cython==3.0.5" \
     "meson==1.2.1" \
     "meson-python==0.13.1" \
     "numpy>=1.22.4,<2.0.0"
-  
+
   # Build and install using meson-python
   micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e .
 

@@ -3,6 +3,9 @@ set -uo pipefail -x
 
 cd /workspace/repo || exit 1
 
+# Detect which repo this is
+URL=$(git remote -v | grep "(fetch)" | awk '{print $2}')
+
 set +ux
 # make the asv_build_vars.sh script readable.
 chmod 755 /etc/profile.d/asv_build_vars.sh
@@ -17,6 +20,27 @@ eval "$(micromamba shell hook --shell=bash)"
 micromamba activate "$ENV_NAME" || true
 set -ux
 
+# ----------------------------------------------------------------------
+# Hard pin numpy / h5py in the test env via micromamba
+# ----------------------------------------------------------------------
+PYTHON_BIN="/opt/conda/envs/${ENV_NAME}/bin/python"
+echo "[formulacode] Forcing conda numpy=1.26.4, h5py=3.10.0 in ${ENV_NAME}..."
+
+# micromamba's activation/deactivation scripts don't play nicely with `set -u`,
+# so temporarily relax it while they run.
+set +u
+"$PYTHON_BIN" -m pip uninstall -y numpy h5py || true
+
+micromamba install -n "${ENV_NAME}" -c conda-forge -y \
+  "numpy==1.26.4" "h5py==3.10.0"
+set -u
+
+# Sanity check: confirm versions seen by the interpreter we will use for tests
+"$PYTHON_BIN" - <<'PY'
+import numpy, h5py
+print("[formulacode] numpy version:", numpy.__version__)
+print("[formulacode] h5py version:", h5py.__version__)
+PY
 
 
 # if argument is given, set FORMULACODE_BASE_COMMIT to that argument

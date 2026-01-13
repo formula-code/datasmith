@@ -68,6 +68,12 @@ PY
 # Example usage with hardcoded commit SHA
 reset_repo_state ${FORMULACODE_BASE_COMMIT}
 
+# Build / install qiskit (including compiled extensions like qiskit._accelerate)
+if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
+  python -m pip install .
+fi
+
+
 mkdir -p /logs
 cat > formulacode_testrunner.py << 'EOF'
 #!/usr/bin/env python

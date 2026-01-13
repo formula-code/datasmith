@@ -68,6 +68,9 @@ WORKDIR /workspace/repo
 RUN git checkout "$COMMIT_SHA"
 LABEL vcs.url="$REPO_URL" vcs.ref="$COMMIT_SHA"
 
+# Create a minimal tox.ini file to pass pytest tests
+RUN if [ ! -f tox.ini ]; then printf '[pytest]\n' > tox.ini; fi
+
 # ---- ENV STAGE: create envs, persist vars, install smoke tool ----
 COPY docker_build_env.sh /workspace/repo/docker_build_env.sh
 RUN chmod +x /workspace/repo/docker_build_env.sh && \

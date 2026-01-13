@@ -272,6 +272,17 @@ for version in $PY_VERSIONS; do
     fi
 done
 
+# ----------------- signac-specific numpy/h5py pin -----------------
+# For this signac task, NumPy 2.x breaks tests (`np.float_` removed)
+# and may cause ABI mismatches, so force a compatible combo in *all*
+# ASV environments that were created above.
+for v in $PY_VERSIONS; do
+  ENV_NAME="asv_${v}"
+  echo "[signac] Forcing compatible numpy/h5py in ${ENV_NAME}..."
+  # This runs inside the asv_<version> env
+  micromamba run -n "${ENV_NAME}" pip install --no-cache-dir --force-reinstall \
+    "numpy==1.26.4" "h5py==3.10.0" || true
+done
 
 # -------------------------- PERSIST METADATA --------------------------
 # Persist base variables for downstream stages
