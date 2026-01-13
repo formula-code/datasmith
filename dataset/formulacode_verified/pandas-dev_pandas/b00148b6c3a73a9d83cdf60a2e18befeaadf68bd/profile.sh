@@ -44,6 +44,10 @@ BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
 
 source /etc/profile.d/asv_build_vars.sh || true
 
+# Ensure conda environment's libstdc++ is used instead of system's
+# This fixes CXXABI_1.3.15 not found errors
+export LD_LIBRARY_PATH="/opt/conda/envs/${ENV_NAME}/lib:${LD_LIBRARY_PATH:-}"
+
 CURR_DIR="$(pwd)"
 cd /workspace/repo
 

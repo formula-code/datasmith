@@ -109,6 +109,30 @@ micromamba run -n "$ENV_NAME" uv pip install -q --upgrade jinja2 || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade pytest || true
 
 
+micromamba run -n "$ENV_NAME" python -m pip uninstall -y pyarrow
+
+mkdir -p /tmp/pandas_test_shim
+cat > /tmp/pandas_test_shim/sitecustomize.py <<'PY'
+import pandas.arrays as arrays
+
+# pandas < 2.1 doesn't export NumpyExtensionArray; it was named PandasArray
+if not hasattr(arrays, "NumpyExtensionArray") and hasattr(arrays, "PandasArray"):
+    arrays.NumpyExtensionArray = arrays.PandasArray
+PY
+
+cat <<EOF >> /etc/profile.d/asv_utils.sh
+export PYTHONPATH="/tmp/pandas_test_shim:\${PYTHONPATH:-}"
+EOF
+
+# Create minimal tox.ini if it doesn't exist (pytest may look for it)
+if [ ! -f "/workspace/repo/tox.ini" ]; then
+    cat > /workspace/repo/tox.ini << 'TOXEOF'
+[pytest]
+TOXEOF
+fi
+
+
+
 # Persist env variables for future shells and auto-activate
 cat >>/etc/profile.d/asv_build_vars.sh <<EOF
 export ENV_NAME=$ENV_NAME

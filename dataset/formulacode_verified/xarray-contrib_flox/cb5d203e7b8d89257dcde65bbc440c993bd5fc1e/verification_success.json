@@ -1,7 +1,4 @@
 {
-  "ok": true,
-  "stdout": "(timeout after 30s; treated as success)",
-  "stderr": "+ cd /workspace/repo\n+ set +ux\n+ '[' 0 -gt 0 ']'\n+ '[' -n cb\n... [truncated] ...\npackaging==24.2\n + packaging==25.0\n+ python formulacode_testrunner.py --all --base cb5d203e7b8d89257dcde65bbc440c993bd5fc1e --extra-args '-p jinja_patch_plugin_pandas'\n",
-  "duration_s": 31.86689519882202,
-  "suite_name": "NOT USED"
+  "local_image": "xarray-contrib-flox-cb5d203e7b8d89257dcde65bbc440c993bd5fc1e:final",
+  "dockerhub_image": "docker.io/formulacode/all:xarray-contrib-flox-cb5d203e7b8d89257dcde65bbc440c993bd5fc1e--final"
 }

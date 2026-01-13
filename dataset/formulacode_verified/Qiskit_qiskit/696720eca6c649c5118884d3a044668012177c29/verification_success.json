@@ -1,7 +1,4 @@
 {
-  "ok": true,
-  "stdout": "(timeout after 30s; treated as success)",
-  "stderr": "+ cd /workspace/repo\n+ set +ux\n+ '[' 0 -gt 0 ']'\n+ '[' -n 69\n... [truncated] ...\n 44ms\nAudited 5 packages in 0.41ms\n+ python formulacode_testrunner.py --all --base 696720eca6c649c5118884d3a044668012177c29 --extra-args '-p jinja_patch_plugin_pandas'\n",
-  "duration_s": 31.19743061065674,
-  "suite_name": "NOT USED"
+  "local_image": "qiskit-qiskit-696720eca6c649c5118884d3a044668012177c29:final",
+  "dockerhub_image": "docker.io/formulacode/all:qiskit-qiskit-696720eca6c649c5118884d3a044668012177c29--final"
 }

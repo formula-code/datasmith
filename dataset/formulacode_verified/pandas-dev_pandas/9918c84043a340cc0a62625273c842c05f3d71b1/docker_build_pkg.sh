@@ -31,15 +31,19 @@ for version in $TARGET_VERSIONS; do
     log "Using import name: $IMP"
 
     # Install runtime and build dependencies via conda-forge
+    # Note: numpy and scipy versions are from env_payload, don't override them
     micromamba install -y -n "$ENV_NAME" -c conda-forge \
         "python=${version}" \
         pip git \
-        "numpy>=1.21.6,<1.24" \
         "python-dateutil>=2.8.2" \
         "pytz>=2020.1" \
         "cython>=0.29.33,<3" \
         setuptools wheel \
         compilers pkg-config
+
+    # Reinstall scipy to ensure compatibility with numpy version from env_payload
+    log "Reinstalling scipy for numpy compatibility"
+    micromamba run -n "$ENV_NAME" pip install --force-reinstall --no-deps scipy
 
     # Initialize git repo for versioneer
     cd "$REPO_ROOT"

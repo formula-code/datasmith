@@ -37,12 +37,20 @@ for version in $TARGET_VERSIONS; do
         pip git \
         "setuptools>=61.0.0" \
         "cython>=0.29.32,<3" \
-        "numpy>=1.21.0,<2.0.0" \
         "python-dateutil>=2.8.2" \
         "pytz>=2020.1" \
         "versioneer[toml]" \
         wheel \
-        compilers pkg-config
+        compilers pkg-config \
+        libstdcxx-ng libgcc-ng
+
+    # Align optional deps with NumPy < 2.0 for this pandas commit
+    micromamba run -n "$ENV_NAME" python -m pip uninstall -y \
+        numpy scipy numba llvmlite pyarrow tables bottleneck blosc2 numexpr fastparquet \
+        pyreadstat matplotlib xarray || true
+    micromamba run -n "$ENV_NAME" python -m pip install --upgrade --force-reinstall --no-deps "numpy==1.26.4"
+    micromamba run -n "$ENV_NAME" python -m pip install --upgrade --force-reinstall --no-deps "scipy==1.11.4"
+    micromamba run -n "$ENV_NAME" python -m pip install --upgrade --force-reinstall --no-deps "matplotlib==3.8.4"
 
     # Initialize git repo for versioneer
     cd "$REPO_ROOT"

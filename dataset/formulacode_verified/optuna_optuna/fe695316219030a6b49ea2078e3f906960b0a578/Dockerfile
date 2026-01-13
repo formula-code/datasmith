@@ -4,13 +4,10 @@ ARG BASE_IMAGE=buildpack-deps:jammy
 ARG PY_VERSION=""                     # passed at build time, used inside stages
 
 FROM ${BASE_IMAGE} AS base
-# Re-declare any ARGs you need in this stage
 ARG PY_VERSION=""
 
-# Install Rust using rustup
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
-# Configure the PATH for Rust tools
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN apt-get update && \
@@ -50,21 +47,16 @@ RUN chmod +x /workspace/docker_build_base.sh && \
 
 RUN micromamba clean --all --yes
 
-# ---------- ENV STAGE ----------
-FROM base AS env
+FROM base AS repo
 ARG PY_VERSION=""
-
 ARG REPO_URL
-ARG COMMIT_SHA
-ARG ENV_PAYLOAD="{}"
-
-# Entrypoint is inherited by pkg
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
-
 RUN git clone "$REPO_URL" /workspace/repo
 WORKDIR /workspace/repo
+
+FROM repo as env
+ARG COMMIT_SHA
+ARG ENV_PAYLOAD="{}"
+ENTRYPOINT ["/bin/bash"]
 RUN git checkout "$COMMIT_SHA"
 LABEL vcs.url="$REPO_URL" vcs.ref="$COMMIT_SHA"
 
@@ -74,23 +66,17 @@ RUN chmod +x /workspace/repo/docker_build_env.sh && \
     echo "${ENV_PAYLOAD}" > /tmp/env_payload.json && \
     /workspace/repo/docker_build_env.sh --env-payload /tmp/env_payload.json
 
-# ---------- PKG STAGE ----------
 FROM env AS pkg
 ARG PY_VERSION=""
 
-# ---- PKG STAGE: build+test the package for each ASV Python ----
 COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh
 RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
     /workspace/repo/docker_build_pkg.sh
-# If you want to restrict to one version at build time, replace with:
-# RUN PY_VERSION=3.10 /workspace/repo/docker_build_pkg.sh
 
-# Copy these files after to avoid rerunning pkg stage
-COPY profile.sh /profile.sh
+    COPY profile.sh /profile.sh
 COPY run_tests.sh /run_tests.sh
 RUN chmod +x /profile.sh /run_tests.sh
 
-# run micromamba clean in all
 RUN micromamba clean --all --yes
 
 from pkg AS run
@@ -99,7 +85,6 @@ COPY docker_build_run.sh /docker_build_run.sh
 RUN chmod +x /docker_build_run.sh \
     && /docker_build_run.sh
 
-# ---------- FINAL STAGE ----------
 FROM run AS final
 ARG BENCHMARKS=""
 

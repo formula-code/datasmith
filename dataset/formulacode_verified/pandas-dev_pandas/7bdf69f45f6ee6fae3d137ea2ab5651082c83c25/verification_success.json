@@ -1,0 +1,4 @@
+{
+  "local_image": "pandas-dev-pandas-7bdf69f45f6ee6fae3d137ea2ab5651082c83c25:final",
+  "dockerhub_image": "docker.io/formulacode/all:pandas-dev-pandas-7bdf69f45f6ee6fae3d137ea2ab5651082c83c25--final"
+}

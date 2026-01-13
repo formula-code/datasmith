@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import os
-import sys
 from pathlib import Path
 
 import asv
@@ -17,22 +16,8 @@ from datasmith.docker.validation import DockerValidator, ValidationConfig
 from datasmith.logging_config import configure_logging
 from datasmith.notebooks.utils import update_cr
 
-"""
-Usage:
-    python dataset/verify.py --task dataset/formulacode_verified/<repo>/<sha>
-
-This module separates loading from verification:
-  - `load(task_dir)` returns (Task, DockerContext) from a user-editable directory.
-  - `verify_task_with_context(...)` takes a Task + DockerContext and performs:
-      * Docker build
-      * profile.sh validation
-      * run_tests.sh validation
-      * context registry update
-      * ECR publish of the final image
-"""
-
 encoder = tiktoken.get_encoding("cl100k_base")
-logger = configure_logging(stream=open(Path(__file__).with_suffix(".log"), "a", encoding="utf-8"))  # noqa: SIM115
+logger = configure_logging(level=20, stream=open(Path(__file__).with_suffix(".log"), "a", encoding="utf-8"))  # noqa: SIM115
 
 
 def load(task_dir: Path) -> tuple[Task, DockerContext]:
@@ -91,6 +76,33 @@ def _format_failure(stage: str, stdout: str | None, stderr: str | None, rc: int 
     return "\n".join(parts)
 
 
+def _write_failure_json(
+    task_dir: Path,
+    task: Task,
+    stage: str,
+    stdout: str | None,
+    stderr: str | None,
+    rc: int | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Write structured failure information to nfailure.json in the task directory."""
+    failure_info = {
+        "task": {
+            "owner": task.owner,
+            "repo": task.repo,
+            "sha": task.sha,
+            "tag": task.tag,
+        },
+        "stage": stage,
+        "return_code": rc,
+        "error_message": error_message or _format_failure(stage, stdout, stderr, rc),
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    failure_path = task_dir / "failure.json"
+    failure_path.write_text(json.dumps(failure_info, indent=2))
+
+
 def verify_task_with_context(
     task_dir: Path,
     task: Task,
@@ -101,9 +113,9 @@ def verify_task_with_context(
     registry_path: Path,
     logger: logging.Logger | None = None,
 ) -> str:
-    """Verify a Task + DockerContext and publish the final image to ECR.
+    """Verify a Task + DockerContext and publish the final image to DockerHub.
 
-    Returns the ECR image reference on success.
+    Returns the DockerHub image reference on success.
     Raises RuntimeError with a detailed message on failure.
     """
     docker_client = get_docker_client()
@@ -129,6 +141,7 @@ def verify_task_with_context(
     if not build_res.ok:
         msg = _format_failure("build", build_res.stdout_tail, build_res.stderr_tail, build_res.rc)
         log.error("%s", msg)
+        _write_failure_json(task_dir, task, "build", build_res.stdout_tail, build_res.stderr_tail, build_res.rc)
         raise RuntimeError(msg)
 
     # Prepare DockerValidator for profile + test validation.
@@ -160,6 +173,7 @@ def verify_task_with_context(
     if not profile_res.ok:
         msg = _format_failure("profile", profile_res.stdout, profile_res.stderr)
         log.error("%s", msg)
+        _write_failure_json(task_dir, task, "profile", profile_res.stdout, profile_res.stderr)
         raise RuntimeError(msg)
 
     # 2) Test validation (pytest)
@@ -172,7 +186,7 @@ def verify_task_with_context(
     if not tests_res.ok:
         msg = _format_failure("tests", tests_res.stdout, tests_res.stderr)
         log.error("%s", msg)
-        (Path(task_dir) / "test_failure.log").write_text(msg)
+        _write_failure_json(task_dir, task, "tests", tests_res.stdout, tests_res.stderr)
         raise RuntimeError(msg)
 
     log.info("Profile and tests both passed for %s", run_task.get_image_name())
@@ -183,44 +197,65 @@ def verify_task_with_context(
     context_registry.save_to_file(registry_path)
     log.info("Registered verified context for %s and saved registry to %s", task, registry_path)
 
-    # Build and publish the final image to ECR (force push).
-    ecr_repo = config.get("ecr_repo", "formulacode/all")
-    aws_region = (
-        config.get("aws_region") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+    # Build and publish the final image to DockerHub (force push).
+    dockerhub_repo = config.get("dockerhub_repo", "all")
+    dockerhub_namespace = (
+        config.get("dockerhub_namespace") or os.environ.get("DOCKERHUB_NAMESPACE")
     )
+    dockerhub_username = (
+        config.get("dockerhub_username") or os.environ.get("DOCKERHUB_USERNAME")
+    )
+    dockerhub_password = (
+        config.get("dockerhub_password") or os.environ.get("DOCKERHUB_TOKEN") or os.environ.get("DOCKERHUB_PASSWORD")
+    )
+
+    if not dockerhub_namespace:
+        msg = "DockerHub namespace not found in config or environment (DOCKERHUB_NAMESPACE)"
+        log.error(msg)
+        raise RuntimeError(msg)
 
     final_task = task.with_tag("final").with_benchmarks(profile_res.benchmarks)
     log.info(
-        "Building and publishing final image %s to ECR repo %s in region %s",
+        "Building and publishing final image %s to DockerHub namespace %s, repo %s",
         final_task.get_image_name(),
-        ecr_repo,
-        aws_region,
+        dockerhub_namespace,
+        dockerhub_repo,
     )
 
-    publish_build_res, push_results = context.build_and_publish_to_ecr(
+    publish_build_res, push_results = context.build_and_publish_to_dockerhub(
         client=docker_client,
         task=final_task,
-        region=aws_region,
-        single_repo=ecr_repo,
+        namespace=dockerhub_namespace,
+        single_repo=dockerhub_repo,
         skip_existing=False,
         force=True,
         timeout_s=3600,
+        username=dockerhub_username,
+        password=dockerhub_password,
     )
 
     local_ref = final_task.get_image_name()
     if not publish_build_res.ok or local_ref not in push_results:
         msg = _format_failure(
-            "ecr_push",
+            "dockerhub_push",
             publish_build_res.stdout_tail,
             publish_build_res.stderr_tail,
             publish_build_res.rc,
         )
         log.error("%s", msg)
+        _write_failure_json(
+            task_dir,
+            task,
+            "dockerhub_push",
+            publish_build_res.stdout_tail,
+            publish_build_res.stderr_tail,
+            publish_build_res.rc,
+        )
         raise RuntimeError(msg)
 
-    ecr_ref = push_results[local_ref]
-    log.info("Verification succeeded. Published %s to ECR as %s", local_ref, ecr_ref)
-    return ecr_ref
+    dockerhub_ref = push_results[local_ref]
+    log.info("Verification succeeded. Published %s to DockerHub as %s", local_ref, dockerhub_ref)
+    return dockerhub_ref
 
 
 def main() -> None:
@@ -240,41 +275,68 @@ def main() -> None:
 
     if args.task.name == "formulacode_verified" or (args.task.parent.name == "formulacode_verified"):
         globbed = args.task.rglob("*/*") if args.task.name == "formulacode_verified" else args.task.glob("*")
-        tasks = [d for d in globbed if d.is_dir() and ((d / "verification_success.json").exists())]
+        tasks = [d for d in globbed if d.is_dir() and (not d.name.startswith(".")) and ('cache' not in str(d))]
         all_successes = []
         success_pth = args.task / "all_verification_successes.jsonl"
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = []
+        # Pre-load all tasks to track them in exception handling
+        task_map = {}
+        futures_list = []
+
+        with ThreadPoolExecutor(max_workers=64) as executor:
             for task_dir in tasks:
                 task, context = load(task_dir)
-                futures.append(
-                    executor.submit(
-                        verify_task_with_context,
-                        task_dir=task_dir,
-                        task=task,
-                        context=context,
-                        config=config,
-                        context_registry=context_registry,
-                        registry_path=registry_path,
-                        logger=logger,
-                    )
+                task_map[task_dir] = task
+                future = executor.submit(
+                    verify_task_with_context,
+                    task_dir=task_dir,
+                    task=task,
+                    context=context,
+                    config=config,
+                    context_registry=context_registry,
+                    registry_path=registry_path,
+                    logger=logger,
                 )
-            for future in futures:
+                futures_list.append((future, task_dir, task))
+
+            for future, task_dir, task in futures_list:
                 try:
-                    ecr_ref = future.result()
-                    logger.info(f"SUCCESS: {ecr_ref}")
+                    dockerhub_ref = future.result()
+                    logger.info(f"SUCCESS: {dockerhub_ref}")
                     # write success info to a file in the task dir
+
+                    final_task = task.with_tag("final")
+                    local_ref = final_task.get_image_name()
+
+                    # write success info to a file in the task dir
+                    task_success_info = {
+                        "local_image": local_ref,
+                        "dockerhub_image": dockerhub_ref,
+                    }
+                    success_path = task_dir / "verification_success.json"
+                    success_path.write_text(json.dumps(task_success_info, indent=2))
+
                     success_info = {
-                        "ecr_image": ecr_ref,
+                        "dockerhub_image": dockerhub_ref,
                     }
                     all_successes.append(success_info)
                     with success_pth.open("a", encoding="utf-8") as f:
                         f.write(json.dumps(success_info) + "\n")
 
-                except Exception:
-                    logger.exception(f"Verification failed for task in {args.task}")
+                except Exception as exc:
+                    logger.exception(f"Verification failed for task in {task_dir}")
+                    # Write failure.json if it doesn't already exist (RuntimeError already wrote it)
+                    failure_path = task_dir / "failure.json"
+                    if not failure_path.exists():
+                        _write_failure_json(
+                            task_dir,
+                            task,
+                            "unknown",
+                            None,
+                            None,
+                            error_message=str(exc),
+                        )
 
         return
 
@@ -282,7 +344,7 @@ def main() -> None:
     logger.info("Loaded task %s from %s", task, args.task)
 
     try:
-        ecr_ref = verify_task_with_context(
+        dockerhub_ref = verify_task_with_context(
             task_dir=args.task,
             task=task,
             context=context,
@@ -292,17 +354,17 @@ def main() -> None:
             logger=logger,
         )
     except RuntimeError as exc:
-        logger.info(str(exc), file=sys.stderr)
+        logger.info(str(exc))
         raise SystemExit(1) from exc
 
     final_task = task.with_tag("final")
     local_ref = final_task.get_image_name()
-    logger.info(f"SUCCESS: {local_ref} -> {ecr_ref}")
+    logger.info(f"SUCCESS: {local_ref} -> {dockerhub_ref}")
 
     # write success info to a file in the task dir
     success_info = {
         "local_image": local_ref,
-        "ecr_image": ecr_ref,
+        "dockerhub_image": dockerhub_ref,
     }
     success_path = args.task / "verification_success.json"
     success_path.write_text(json.dumps(success_info, indent=2))

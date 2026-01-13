@@ -30,16 +30,20 @@ for version in $TARGET_VERSIONS; do
     IMP="${IMPORT_NAME:-pandas}"
     log "Using import name: $IMP"
 
-    # Install runtime and build dependencies via conda-forge
+    # Install build dependencies via conda-forge
+    # Note: This pandas version (Jan 2023) requires numpy <2.0 for binary compatibility
+    # We override the env_payload versions which may be too new
+
+    # Remove scipy first if it exists (it may be built for numpy 2.x)
+    micromamba remove -y -n "$ENV_NAME" scipy 2>/dev/null || true
+
+    # Install numpy and cython
     micromamba install -y -n "$ENV_NAME" -c conda-forge \
-        "python=${version}" \
-        pip git \
-        "numpy>=1.21.6,<1.24" \
-        "python-dateutil>=2.8.2" \
-        "pytz>=2020.1" \
-        "cython>=0.29.33,<3" \
-        setuptools wheel \
-        compilers pkg-config
+        "numpy>=1.21.6,<2.0" \
+        "cython>=0.29.33,<3"
+
+    # Install scipy compatible with numpy 1.x
+    micromamba install -y -n "$ENV_NAME" -c conda-forge "scipy>=1.7,<1.12"
 
     # Initialize git repo for versioneer
     cd "$REPO_ROOT"

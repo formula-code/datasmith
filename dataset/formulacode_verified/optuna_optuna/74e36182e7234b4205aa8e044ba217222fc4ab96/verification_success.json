@@ -1,7 +1,4 @@
 {
-  "ok": true,
-  "stdout": "(timeout after 30s; treated as success)",
-  "stderr": "+ cd /workspace/repo\n+ set +ux\n+ '[' 0 -gt 0 ']'\n+ '[' -n 74\n... [truncated] ...\n\n - pytest==8.3.3\n + pytest==9.0.1\n+ python formulacode_testrunner.py --all --base 74e36182e7234b4205aa8e044ba217222fc4ab96 --extra-args '-p jinja_patch_plugin_pandas'\n",
-  "duration_s": 61.495250940322876,
-  "suite_name": "NOT USED"
+  "local_image": "optuna-optuna-74e36182e7234b4205aa8e044ba217222fc4ab96:final",
+  "dockerhub_image": "docker.io/formulacode/all:optuna-optuna-74e36182e7234b4205aa8e044ba217222fc4ab96--final"
 }

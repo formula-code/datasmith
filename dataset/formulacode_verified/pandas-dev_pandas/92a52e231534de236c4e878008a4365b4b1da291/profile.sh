@@ -43,6 +43,12 @@ BASE_SHA_FILE="${LOG_DIR}/sha.txt"
 BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD)"
 
 source /etc/profile.d/asv_build_vars.sh || true
+if [[ -z "${ENV_NAME:-}" && -n "${ASV_PY_VERSIONS:-}" ]]; then
+  ENV_NAME="asv_${ASV_PY_VERSIONS%% *}"
+fi
+if [[ -n "${ENV_NAME:-}" ]]; then
+  export LD_LIBRARY_PATH="/opt/conda/envs/${ENV_NAME}/lib:${LD_LIBRARY_PATH:-}"
+fi
 
 CURR_DIR="$(pwd)"
 cd /workspace/repo

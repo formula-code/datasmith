@@ -13,6 +13,10 @@ source /etc/profile.d/asv_build_vars.sh || true
 version=$(echo $ASV_PY_VERSIONS | awk '{print $1}')
 ENV_NAME="asv_${version}"
 
+# Ensure conda environment's libstdc++ is used instead of system's
+# This fixes CXXABI_1.3.15 not found errors
+export LD_LIBRARY_PATH="/opt/conda/envs/${ENV_NAME}/lib:${LD_LIBRARY_PATH:-}"
+
 eval "$(micromamba shell hook --shell=bash)"
 micromamba activate "$ENV_NAME" || true
 set -ux
