@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from datasmith.github.models import PR, Issue
+from datasmith.github.models import PR, Issue, IssueExpanded
 from datasmith.utils import TokenPool, get_logger
 
 logger = get_logger("github.client")
@@ -25,6 +25,10 @@ class GitHubClient:
                 base_url="https://api.github.com",
                 timeout=30.0,
                 headers={"Accept": "application/vnd.github.v3+json"},
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=40,
+                ),
             )
         return self._http
 
@@ -84,6 +88,42 @@ class GitHubClient:
             body=data.get("body", "") or "",
             created_at=data.get("created_at"),
             closed_at=data.get("closed_at"),
+        )
+
+    async def get_issue_expanded(self, owner: str, repo: str, number: int) -> IssueExpanded | None:
+        """Fetch an issue with timeline comments and cross-references.
+
+        Combines ``get_issue`` + ``get_timeline`` into a single
+        ``IssueExpanded`` suitable for ``scrape_links`` and rendering.
+        """
+        issue = await self.get_issue(owner, repo, number)
+        if issue is None:
+            return None
+
+        timeline = await self.get_timeline(owner, repo, number)
+
+        comments: list[str] = []
+        cross_references: list[str] = []
+        for event in timeline:
+            evt_type = event.get("event", "")
+            if evt_type == "commented":
+                body = event.get("body", "")
+                if body:
+                    comments.append(body)
+            elif evt_type == "cross-referenced":
+                source_body = event.get("source", {}).get("issue", {}).get("body", "")
+                if source_body:
+                    cross_references.append(source_body)
+
+        return IssueExpanded(
+            number=issue.issue_number,
+            title=issue.title,
+            url=f"https://github.com/{owner}/{repo}/issues/{number}",
+            description=issue.body,
+            comments=comments,
+            created_at=issue.created_at,
+            closed_at=issue.closed_at,
+            cross_references=cross_references,
         )
 
     async def get_timeline(self, owner: str, repo: str, number: int) -> list[dict[str, Any]]:

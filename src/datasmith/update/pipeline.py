@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 from datasmith.utils import get_client, get_logger
 
 logger = get_logger("update.pipeline")
@@ -10,8 +12,9 @@ STAGES = ["scrape_repos", "scrape_commits", "classify_prs", "synthesize_images",
 class Pipeline:
     """Orchestrate the full FormulaCode update pipeline."""
 
-    def __init__(self, dry_run: bool = False) -> None:
+    def __init__(self, dry_run: bool = False, n_concurrent: int | None = None) -> None:
         self._dry_run = dry_run
+        self._n_concurrent = n_concurrent
         self._completed_stages: list[str] = []
 
     async def run(
@@ -82,7 +85,7 @@ class Pipeline:
 
         pool = TokenPool()
         gh = GitHubClient(pool)
-        runner = ScrapeReposRunner(gh)
+        runner = ScrapeReposRunner(gh, **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}))
 
         # Get repos from repositories table
         client = get_client()
@@ -98,7 +101,7 @@ class Pipeline:
 
         pool = TokenPool()
         gh = GitHubClient(pool)
-        runner = ScrapeCommitsRunner(gh)
+        runner = ScrapeCommitsRunner(gh, **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}))
 
         client = get_client()
         resp = client.table("repositories").select("owner, repo").execute()
@@ -108,11 +111,18 @@ class Pipeline:
 
     async def _classify_prs(self) -> None:
         from datasmith.agents.classifiers import ClassifyJudge, PerfClassifier
+        from datasmith.agents.config import AgentConfig, configure_dspy
         from datasmith.runners.classify_prs import ClassifyPRsRunner
+
+        configure_dspy(AgentConfig.from_env())
 
         classifier = PerfClassifier()
         judge = ClassifyJudge()
-        runner = ClassifyPRsRunner(classifier, judge)
+        runner = ClassifyPRsRunner(
+            classifier,
+            judge,
+            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
+        )
 
         client = get_client()
         resp = (
@@ -136,30 +146,58 @@ class Pipeline:
     async def _synthesize_images(self) -> None:
         from datasmith.agents.synthesizer import Synthesizer
         from datasmith.docker.verifiers import MultiObjVerifier, SmokeVerifier
+        from datasmith.github.client import GitHubClient
         from datasmith.runners.synthesize_images import SynthesizeImagesRunner
+        from datasmith.utils.tokens import TokenPool
+
+        pool = TokenPool()
+        gh = GitHubClient(pool)
 
         synth = Synthesizer()
         verifier = MultiObjVerifier(verifiers=[SmokeVerifier("test")])
-        runner = SynthesizeImagesRunner(synth, verifier)
+        runner = SynthesizeImagesRunner(
+            synth,
+            verifier,
+            gh=gh,
+            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
+        )
 
         client = get_client()
         resp = (
             client.table("pull_requests")
-            .select("owner, repo, issue_number, body")
+            .select("owner, repo, issue_number, title, body, created_at")
             .eq("is_performance_commit", True)
             .is_("container_name", "null")
             .execute()
         )
+        rows = cast(list[dict[str, Any]], resp.data)
+
+        # Batch-fetch repo descriptions for rendering
+        repo_keys = {(r["owner"], r["repo"]) for r in rows}
+        repo_descriptions: dict[tuple[str, str], str] = {}
+        if repo_keys:
+            desc_resp = client.table("repositories").select("owner, repo, description").execute()
+            for rd in cast(list[dict[str, Any]], desc_resp.data):
+                key = (rd["owner"], rd["repo"])
+                if key in repo_keys:
+                    repo_descriptions[key] = rd.get("description") or ""
+
         items = [
             {
                 "owner": r["owner"],
                 "repo": r["repo"],
                 "issue_number": r["issue_number"],
+                "title": r.get("title", ""),
+                "body": r.get("body", ""),
+                "created_at": r.get("created_at"),
                 "pr_context": r.get("body", ""),
+                "repo_description": repo_descriptions.get((r["owner"], r["repo"]), ""),
             }
-            for r in resp.data
+            for r in rows
         ]
+        logger.info("Synthesizing images for %d PRs", len(items))
         await runner.run(items)
+        await gh.close()
 
     async def _publish(self, start_date: str, end_date: str) -> None:
         from datasmith.publish.pipeline import publish_pipeline

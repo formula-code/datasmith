@@ -26,7 +26,7 @@ class Synthesizer:
         models: list[str] | None = None,
     ) -> None:
         self._max_attempts = max_attempts
-        self._models = models or ["o4-mini"]
+        self._models = models or ["gpt-oss-120b"]
         self._trace: list[SynthesisState] = []
 
     @property

@@ -70,6 +70,9 @@ class ProblemExtractor:
 
     def extract_problem(self, pr_title: str, pr_body: str, pr_comments: str = "") -> ProblemExtraction:
         try:
+            from datasmith.agents.config import ensure_configured
+
+            ensure_configured()
             import dspy
 
             class ProblemExtractorSignature(dspy.Signature):

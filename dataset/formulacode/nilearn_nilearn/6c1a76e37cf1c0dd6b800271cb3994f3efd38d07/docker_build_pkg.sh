@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Purpose: Build/install the repo (editable) in one or more ASV micromamba envs, then run health checks.
+set -euo pipefail
+
+# Define log helper
+log() {
+  echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*" >&2
+}
+
+###### SETUP CODE (NOT TO BE MODIFIED) ######
+# Loads micromamba, common helpers, and persisted variables from the env stage.
+source /etc/profile.d/asv_utils.sh || true
+source /etc/profile.d/asv_build_vars.sh || true
+
+ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
+REPO_ROOT="$ROOT_PATH"
+TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
+EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
+if [[ -z "${TARGET_VERSIONS}" ]]; then
+  echo "Error: No PY_VERSION set and ASV_PY_VERSIONS not found." >&2
+  exit 1
+fi
+###### END SETUP CODE ######
+
+# -----------------------------
+# Build & test across envs
+# -----------------------------
+for version in $TARGET_VERSIONS; do
+  ENV_NAME="asv_${version}"
+  log "==> Building in env: $ENV_NAME (python=$version)"
+
+  IMP="${IMPORT_NAME:-nilearn}"
+  log "Using import name: $IMP"
+
+  # Install build dependencies and runtime dependencies
+  micromamba install -y -n "$ENV_NAME" -c conda-forge \
+    pip git conda mamba "libmambapy<=1.9.9" \
+    "python=${version}" \
+    numpy>=1.22.4 scipy>=1.8.0 joblib>=1.2.0 pandas>=2.2.0 \
+    requests>=2.25.0 scikit-learn>=1.4.0 nibabel>=5.2.0 \
+    lxml packaging matplotlib plotly \
+    hatchling hatch-vcs setuptools-scm \
+    compilers meson-python cmake ninja pkg-config tomli
+
+  # Editable install with no build isolation since we manage deps
+  log "Editable install with --no-build-isolation"
+  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT[plotting]"
+
+  # Health checks
+  log "Running smoke checks"
+  micromamba run -n "$ENV_NAME" asv_smokecheck.py --import-name "$IMP" --repo-root "$REPO_ROOT" ${RUN_PYTEST_SMOKE:+--pytest-smoke}
+
+  echo "::import_name=${IMP}::env=${ENV_NAME}"
+done
+
+log "All builds complete ✅"

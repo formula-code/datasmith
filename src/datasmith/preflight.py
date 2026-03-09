@@ -18,7 +18,7 @@ def _check(name: str, condition: bool, detail: str = "") -> bool:
     return condition
 
 
-def run_preflight() -> bool:
+def run_preflight() -> bool:  # noqa: C901
     """Verify all prerequisites for the DataSmith pipeline."""
     print("DataSmith Preflight Check")
     print("=" * 40)
@@ -43,7 +43,52 @@ def run_preflight() -> bool:
     hf_exists = Path(hf_token_path).exists()
     all_ok &= _check("HF_TOKEN", hf_exists, hf_token_path)
 
-    # 2. Supabase connection
+    # 2. LLM Backend
+    print("\n== LLM Backend ==")
+    dspy_model = os.environ.get("DSPY_MODEL", "openai/gpt-oss-120b")
+    dspy_api_base = os.environ.get("DSPY_API_BASE", "http://localhost:30001/v1")
+    all_ok &= _check("DSPY_MODEL", bool(dspy_model), dspy_model)
+    all_ok &= _check("DSPY_API_BASE", bool(dspy_api_base), dspy_api_base)
+
+    if dspy_model and dspy_api_base:
+        try:
+            import httpx
+
+            # Strip "openai/" prefix for model matching
+            model_id = dspy_model.removeprefix("openai/")
+            models_url = f"{dspy_api_base}/models"
+            resp = httpx.get(models_url, timeout=10)
+            resp.raise_for_status()
+            models_data = resp.json().get("data", [])
+            model_ids = [m.get("id", "") for m in models_data]
+            found = model_id in model_ids
+            all_ok &= _check("Model available", found, f"{model_id} in {len(model_ids)} model(s)")
+
+            if found:
+                # Test completion
+                chat_url = f"{dspy_api_base}/chat/completions"
+                payload = {
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "Say OK"}],
+                    "max_tokens": 64,
+                }
+                comp_resp = httpx.post(chat_url, json=payload, timeout=60)
+                comp_resp.raise_for_status()
+                choices = comp_resp.json().get("choices", [])
+                content = ""
+                if choices:
+                    msg = choices[0].get("message") or {}
+                    if isinstance(msg, dict):
+                        content = msg.get("content") or msg.get("reasoning") or ""
+                    finish = choices[0].get("finish_reason", "")
+                else:
+                    finish = ""
+                detail = repr(content[:40]) if content else f"finish_reason={finish}"
+                all_ok &= _check("Test completion", True, detail)
+        except Exception as e:
+            all_ok &= _check("LLM server", False, str(e)[:80])
+
+    # 3. Supabase connection
     print("\n== Supabase ==")
     try:
         import datasmith.utils.db as db_mod
@@ -58,7 +103,7 @@ def run_preflight() -> bool:
     except Exception as e:
         all_ok &= _check("Connection", False, str(e)[:80])
 
-    # 3. Docker
+    # 4. Docker
     print("\n== Docker ==")
     try:
         from python_on_whales import DockerClient
@@ -69,23 +114,31 @@ def run_preflight() -> bool:
     except Exception as e:
         all_ok &= _check("Docker daemon", False, str(e)[:80])
 
-    # 4. GitHub tokens
+    # 5. GitHub tokens
     print("\n== GitHub ==")
     if token_count > 0:
         try:
             import httpx
 
-            token = gh_tokens.split(",")[0].strip()
-            resp = httpx.get(
-                "https://api.github.com/rate_limit",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                remaining = resp.json()["rate"]["remaining"]
-                all_ok &= _check("API access", True, f"remaining={remaining}")
+            total_remaining = 0
+            failed_tokens = 0
+            tokens = [t.strip() for t in gh_tokens.split(",") if t.strip()]
+            for token in tokens:
+                resp = httpx.get(
+                    "https://api.github.com/rate_limit",
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    total_remaining += resp.json()["rate"]["remaining"]
+                else:
+                    failed_tokens += 1
+
+            if failed_tokens == len(tokens):
+                all_ok &= _check("API access", False, "all tokens failed")
             else:
-                all_ok &= _check("API access", False, f"status={resp.status_code}")
+                detail = f"remaining={total_remaining} across {len(tokens) - failed_tokens}/{len(tokens)} token(s)"
+                all_ok &= _check("API access", True, detail)
         except Exception as e:
             all_ok &= _check("API access", False, str(e)[:80])
     else:

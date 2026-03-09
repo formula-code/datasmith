@@ -1,0 +1,1 @@
+Task(owner='HIPS', repo='autograd', sha='809e1b2ba5d7b9d76a7e1a5b67a10089a9c9052a', commit_date=1508597468.0, env_payload='{"dependencies": ["future==1.0.0", "numpy==1.24.4"]}', python_version='3.8', tag='pkg', benchmarks='')

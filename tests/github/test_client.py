@@ -9,7 +9,7 @@ import pytest
 import respx
 
 from datasmith.github.client import GitHubClient
-from datasmith.github.models import PR, Issue
+from datasmith.github.models import PR, Issue, IssueExpanded
 from datasmith.utils import TokenPool
 
 
@@ -265,6 +265,84 @@ class TestGraphQL:
         )
 
         assert result["data"]["repository"]["name"] == "pandas"
+
+        await client.close()
+
+
+class TestGetIssueExpanded:
+    @respx.mock
+    async def test_returns_expanded_with_comments_and_xrefs(self, client: GitHubClient) -> None:
+        """get_issue_expanded combines get_issue + get_timeline into IssueExpanded."""
+        respx.get("https://api.github.com/repos/org/repo/issues/10").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "title": "Slow groupby",
+                    "body": "Groupby is too slow on large datasets",
+                    "created_at": "2024-03-01T00:00:00Z",
+                    "closed_at": "2024-03-10T00:00:00Z",
+                },
+            )
+        )
+        respx.get("https://api.github.com/repos/org/repo/issues/10/timeline").mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"event": "commented", "body": "I see the same issue"},
+                    {"event": "commented", "body": "Confirmed on v2.0"},
+                    {"event": "cross-referenced", "source": {"issue": {"body": "Related: see #10"}}},
+                    {"event": "closed"},
+                    {"event": "commented", "body": ""},  # empty body — should be skipped
+                ],
+            )
+        )
+
+        expanded = await client.get_issue_expanded("org", "repo", 10)
+        assert expanded is not None
+        assert isinstance(expanded, IssueExpanded)
+        assert expanded.number == 10
+        assert expanded.title == "Slow groupby"
+        assert expanded.description == "Groupby is too slow on large datasets"
+        assert expanded.url == "https://github.com/org/repo/issues/10"
+        assert expanded.comments == ["I see the same issue", "Confirmed on v2.0"]
+        assert expanded.cross_references == ["Related: see #10"]
+        assert expanded.created_at is not None
+        assert expanded.closed_at is not None
+
+        await client.close()
+
+    @respx.mock
+    async def test_returns_none_for_missing_issue(self, client: GitHubClient) -> None:
+        respx.get("https://api.github.com/repos/org/repo/issues/999").mock(return_value=httpx.Response(404))
+
+        expanded = await client.get_issue_expanded("org", "repo", 999)
+        assert expanded is None
+
+        await client.close()
+
+    @respx.mock
+    async def test_empty_timeline(self, client: GitHubClient) -> None:
+        """Issue with no timeline events still returns valid IssueExpanded."""
+        respx.get("https://api.github.com/repos/org/repo/issues/5").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "title": "Bug report",
+                    "body": "Something is broken",
+                    "created_at": "2024-06-01T00:00:00Z",
+                    "closed_at": None,
+                },
+            )
+        )
+        respx.get("https://api.github.com/repos/org/repo/issues/5/timeline").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        expanded = await client.get_issue_expanded("org", "repo", 5)
+        assert expanded is not None
+        assert expanded.comments == []
+        assert expanded.cross_references == []
+        assert expanded.description == "Something is broken"
 
         await client.close()
 

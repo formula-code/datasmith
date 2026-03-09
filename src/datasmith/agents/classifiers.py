@@ -61,6 +61,9 @@ class PerfClassifier:
 
     def classify(self, problem_description: str, github_patch: str = "") -> tuple[bool, str]:
         try:
+            from datasmith.agents.config import ensure_configured
+
+            ensure_configured()
             import dspy
 
             class JudgeSignature(dspy.Signature):
@@ -103,6 +106,9 @@ class ClassifyJudge:
     def classify(self, problem_description: str, github_patch: str = "") -> ClassificationDecision:
         github_patch = self.truncate_patch(github_patch)
         try:
+            from datasmith.agents.config import ensure_configured
+
+            ensure_configured()
             import dspy
 
             valid_types = ", ".join(t.value for t in OptimizationType)

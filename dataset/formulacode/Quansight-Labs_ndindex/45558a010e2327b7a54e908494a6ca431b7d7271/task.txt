@@ -1,0 +1,1 @@
+Task(owner='Quansight-Labs', repo='ndindex', sha='45558a010e2327b7a54e908494a6ca431b7d7271', commit_date=1726866182.0, env_payload='{"dependencies": ["numpy==2.1.1"]}', python_version='3.12', tag='pkg', benchmarks='')

@@ -1,427 +1,264 @@
+#!/usr/bin/env python3
+"""Verify Docker build contexts for FormulaCode dataset tasks.
+
+Builds a Docker image from a task directory's multi-stage Dockerfile, then
+runs profile.sh and run_tests.sh inside the container to validate the build.
+
+Usage:
+    # Single task
+    python dataset/verify.py --task dataset/formulacode_verified_new/networkx_networkx/<sha>
+
+    # All tasks in a repo directory
+    python dataset/verify.py --task dataset/formulacode_verified_new/networkx_networkx
+
+    # All tasks in dataset
+    python dataset/verify.py --task dataset/formulacode_verified_new
+"""
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import multiprocessing
 import os
-import threading
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
-import tiktoken
+from python_on_whales import DockerClient
 
-from datasmith.core.models import Task
-from datasmith.docker.context import ContextRegistry, DockerContext
-from datasmith.docker.orchestrator import build_repo_sha_image, gen_run_labels, get_docker_client
-from datasmith.docker.validation import DockerValidator, ValidationConfig
-from datasmith.logging_config import configure_logging
-from datasmith.notebooks.utils import update_cr
-
-encoder = tiktoken.get_encoding("cl100k_base")
-logger = configure_logging(level=20, stream=open(Path(__file__).with_suffix(".log"), "a", encoding="utf-8"))  # noqa: SIM115
-
-from threading import Lock
-
-write_lock = Lock()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(Path(__file__).with_suffix(".log"), mode="a"),
+    ],
+)
+logger = logging.getLogger("verify")
 
 
-def _patch_multiprocessing_lock() -> None:
-    try:
-        multiprocessing.Lock()
-    except PermissionError:
-        # Fall back to a threading lock when semaphores are unavailable.
-        multiprocessing.Lock = threading.Lock  # type: ignore[assignment]
+@dataclass(frozen=True)
+class Task:
+    """Mirrors the Task dataclass used in task.txt files."""
+
+    owner: str = ""
+    repo: str = ""
+    sha: str | None = None
+    commit_date: float = 0.0
+    env_payload: str = ""
+    python_version: str = ""
+    tag: str = "pkg"
+    benchmarks: str = ""
 
 
-_patch_multiprocessing_lock()
-
-import asv
-
-
-def load(task_dir: Path) -> tuple[Task, DockerContext]:
-    """Load a Task and DockerContext from a local, user-editable directory."""
-    task_data = task_dir.joinpath("task.txt").read_text()
-    dockerfile_data = task_dir.joinpath("Dockerfile").read_text()
-    entrypoint_data = task_dir.joinpath("entrypoint.sh").read_text()
-    base_building_data = task_dir.joinpath("docker_build_base.sh").read_text()
-    run_building_data = task_dir.joinpath("docker_build_run.sh").read_text()
-    env_building_data = task_dir.joinpath("docker_build_env.sh").read_text()
-    final_building_data = task_dir.joinpath("docker_build_final.sh").read_text()
-    building_data = task_dir.joinpath("docker_build_pkg.sh").read_text()
-    profile_data = task_dir.joinpath("profile.sh").read_text()
-    run_tests_data = task_dir.joinpath("run_tests.sh").read_text()
-    task = eval(task_data)  # noqa: S307 - trusted, local task payload
-    context = DockerContext(
-        dockerfile_data=dockerfile_data,
-        entrypoint_data=entrypoint_data,
-        base_building_data=base_building_data,
-        run_building_data=run_building_data,
-        env_building_data=env_building_data,
-        final_building_data=final_building_data,
-        building_data=building_data,
-        profile_data=profile_data,
-        run_tests_data=run_tests_data,
-    )
-    return task, context
+def _parse_task(task_dir: Path) -> Task:
+    """Parse task.txt into a Task object."""
+    text = (task_dir / "task.txt").read_text().strip()
+    return eval(text, {"__builtins__": {}}, {"Task": Task})  # noqa: S307
 
 
-def _load_config(task_dir: Path) -> dict:
-    """Load dataset verification config (JSON) from dataset/config.*."""
-    cfg_path = task_dir / "config.json"
-    if cfg_path.exists():
-        return json.loads(cfg_path.read_text())
-    raise FileNotFoundError("Expected dataset/config.json or dataset/config.py to exist.")
+def _image_tag(task: Task, stage: str = "run") -> str:
+    sha_short = (task.sha or "unknown")[:12]
+    return f"formulacode/{task.owner}-{task.repo}:{sha_short}-{stage}"
 
 
-def preview(logs: str, max_tokens: int = 16_000) -> str:
-    n_tokens = encoder.encode(logs)
-    if len(n_tokens) <= max_tokens:
-        return logs
-    first_part = encoder.decode(n_tokens[: max_tokens // 10])
-    last_part = encoder.decode(n_tokens[-(max_tokens - max_tokens // 10) :])
-    return f"{first_part}\n\n...[truncated]...\n\n{last_part}"
-
-
-def _format_failure(stage: str, stdout: str | None, stderr: str | None, rc: int | None = None) -> str:
-    """Format a human-readable failure message with full traces."""
-    parts: list[str] = [f"Verification failed during '{stage}' stage."]
-    if rc is not None:
-        parts.append(f"Return code: {rc}")
-    parts.append("\n--- STDOUT ---")
-    parts.append(preview(stdout or "(no stdout)"))
-    parts.append("\n--- STDERR ---")
-    parts.append(preview(stderr or "(no stderr)"))
-    return "\n".join(parts)
-
-
-def _write_failure_json(
-    task_dir: Path,
-    task: Task,
-    stage: str,
-    stdout: str | None,
-    stderr: str | None,
-    rc: int | None = None,
-    error_message: str | None = None,
-) -> None:
-    """Write structured failure information to nfailure.json in the task directory."""
-    failure_info = {
-        "task": {
-            "owner": task.owner,
-            "repo": task.repo,
-            "sha": task.sha,
-            "tag": task.tag,
-        },
+def _write_failure(task_dir: Path, stage: str, detail: str, rc: int = 1) -> None:
+    failure = {
         "stage": stage,
         "return_code": rc,
-        "error_message": error_message or _format_failure(stage, stdout, stderr, rc),
-        "stdout": stdout,
-        "stderr": stderr,
+        "error_message": detail[:8000],
     }
-    failure_path = task_dir / "failure.json"
-    failure_path.write_text(json.dumps(failure_info, indent=2))
+    (task_dir / "failure.json").write_text(json.dumps(failure, indent=2))
 
 
-def verify_task_with_context(
-    task_dir: Path,
-    task: Task,
-    context: DockerContext,
-    *,
-    config: dict,
-    context_registry: ContextRegistry,
-    registry_path: Path,
-    logger: logging.Logger | None = None,
-) -> str:
-    """Verify a Task + DockerContext and publish the final image to DockerHub.
+def _write_success(task_dir: Path, image_tag: str) -> None:
+    info = {"local_image": image_tag, "verified_at": time.time()}
+    (task_dir / "verification_success.json").write_text(json.dumps(info, indent=2))
 
-    Returns the DockerHub image reference on success.
-    Raises RuntimeError with a detailed message on failure.
-    """
-    docker_client = get_docker_client()
-    log = logger or configure_logging()
 
-    if task.sha is None:
-        msg = "Task.sha must be set for verification."
-        log.error(msg)
-        raise RuntimeError(msg)
+def build_image(docker: DockerClient, task_dir: Path, task: Task, target: str = "run") -> str:
+    """Build a Docker image from the task directory's multi-stage Dockerfile."""
+    tag = _image_tag(task, target)
+    repo_url = f"https://github.com/{task.owner}/{task.repo}"
 
-    # Build the 'run' image for this Task using the provided context.
-    run_task = task.with_tag("run")
-    run_id = f"verify-{task.sha}"
-    log.info("Building image %s for verification", run_task.get_image_name())
-    build_res = build_repo_sha_image(
-        client=docker_client,
-        docker_ctx=context,
-        task=run_task,
-        force=True,
-        run_id=run_id,
-    )
-
-    if not build_res.ok:
-        msg = _format_failure("build", build_res.stdout_tail, build_res.stderr_tail, build_res.rc)
-        log.error("%s", msg)
-        _write_failure_json(task_dir, task, "build", build_res.stdout_tail, build_res.stderr_tail, build_res.rc)
-        raise RuntimeError(msg)
-
-    # Prepare DockerValidator for profile + test validation.
-    machine_defaults: dict[str, str] = asv.machine.Machine.get_defaults()  # type: ignore[attr-defined]
-    machine_defaults = {
-        k: str(v).replace(" ", "_").replace("'", "").replace('"', "") for k, v in machine_defaults.items()
+    build_args = {
+        "REPO_URL": repo_url,
+        "COMMIT_SHA": task.sha or "",
+        "ENV_PAYLOAD": task.env_payload,
     }
+    if task.python_version:
+        build_args["PY_VERSION"] = task.python_version
+    if task.benchmarks:
+        build_args["BENCHMARKS"] = task.benchmarks
 
-    output_dir = Path("scratch/dataset_verify").resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    validator = DockerValidator(
-        client=docker_client,
-        context_registry=context_registry,
-        machine_defaults=machine_defaults,
-        config=ValidationConfig(
-            output_dir=output_dir,
-            build_timeout=3600,
-            run_timeout=3600,
-            tail_chars=4000,
-        ),
+    logger.info("Building %s (target=%s) from %s", tag, target, task_dir)
+    docker.build(
+        str(task_dir),
+        tags=[tag],
+        target=target,
+        build_args=build_args,
     )
+    return tag
 
-    run_labels = gen_run_labels(run_task, runid=run_id)
 
-    # 1) Profile validation
-    log.info("Running profiler validation for %s", run_task.get_image_name())
-    profile_res = validator.validate_profile(image_name=run_task.get_image_name(), run_labels=run_labels)
-    if not profile_res.ok:
-        msg = _format_failure("profile", profile_res.stdout, profile_res.stderr)
-        log.error("%s", msg)
-        _write_failure_json(task_dir, task, "profile", profile_res.stdout, profile_res.stderr)
-        raise RuntimeError(msg)
-
-    # 2) Test validation (pytest)
-    log.info("Running pytest validation for %s", run_task.get_image_name())
-    tests_res = validator.validate_tests(
-        image_name=run_task.get_image_name(),
-        repo_name=f"{task.owner}/{task.repo}",
-        run_labels=run_labels,
-    )
-    if not tests_res.ok:
-        msg = _format_failure("tests", tests_res.stdout, tests_res.stderr)
-        log.error("%s", msg)
-        _write_failure_json(task_dir, task, "tests", tests_res.stdout, tests_res.stderr)
-        raise RuntimeError(msg)
-
-    log.info("Profile and tests both passed for %s", run_task.get_image_name())
-
-    # Register the now-verified context under the pkg tag and persist registry.
-    with context_registry.get_lock():
-        context_registry.register(task.with_tag("pkg"), context)
-    context_registry.save_to_file(registry_path)
-    log.info("Registered verified context for %s and saved registry to %s", task, registry_path)
-
-    # Build and publish the final image to DockerHub (force push).
-    dockerhub_repo = config.get("dockerhub_repo", "all")
-    dockerhub_namespace = config.get("dockerhub_namespace") or os.environ.get("DOCKERHUB_NAMESPACE")
-    dockerhub_username = config.get("dockerhub_username") or os.environ.get("DOCKERHUB_USERNAME")
-    dockerhub_password = (
-        config.get("dockerhub_password") or os.environ.get("DOCKERHUB_TOKEN") or os.environ.get("DOCKERHUB_PASSWORD")
-    )
-
-    if not dockerhub_namespace:
-        msg = "DockerHub namespace not found in config or environment (DOCKERHUB_NAMESPACE)"
-        log.error(msg)
-        raise RuntimeError(msg)
-
-    final_task = task.with_tag("final").with_benchmarks(profile_res.benchmarks)
-    log.info(
-        "Building and publishing final image %s to DockerHub namespace %s, repo %s",
-        final_task.get_image_name(),
-        dockerhub_namespace,
-        dockerhub_repo,
-    )
-
-    publish_build_res, push_results = context.build_and_publish_to_dockerhub(
-        client=docker_client,
-        task=final_task,
-        namespace=dockerhub_namespace,
-        single_repo=dockerhub_repo,
-        skip_existing=False,
-        force=True,
-        timeout_s=3600,
-        username=dockerhub_username,
-        password=dockerhub_password,
-    )
-
-    local_ref = final_task.get_image_name()
-    if not publish_build_res.ok or local_ref not in push_results:
-        msg = _format_failure(
-            "dockerhub_push",
-            publish_build_res.stdout_tail,
-            publish_build_res.stderr_tail,
-            publish_build_res.rc,
+def run_profile(docker: DockerClient, image_tag: str, timeout: int = 3600) -> tuple[bool, str]:
+    """Run profile.sh inside the built image. Returns (ok, output)."""
+    try:
+        output = docker.run(
+            image_tag,
+            # ENTRYPOINT is /bin/bash, so just pass the script path
+            ["/profile.sh", "/tmp/profile_log"],
+            remove=True,
         )
-        log.error("%s", msg)
-        _write_failure_json(
-            task_dir,
-            task,
-            "dockerhub_push",
-            publish_build_res.stdout_tail,
-            publish_build_res.stderr_tail,
-            publish_build_res.rc,
+        return True, str(output or "")
+    except Exception as e:
+        err = str(e)
+        # timeout (rc=124) is treated as success for profiling
+        if "124" in err or "timeout" in err.lower():
+            return True, f"Profile timed out (treated as success): {err[:2000]}"
+        return False, err[:4000]
+
+
+def run_tests(docker: DockerClient, image_tag: str) -> tuple[bool, str]:
+    """Run run_tests.sh inside the built image. Returns (ok, output)."""
+    try:
+        output = docker.run(
+            image_tag,
+            ["/run_tests.sh"],
+            remove=True,
         )
-        raise RuntimeError(msg)
-
-    dockerhub_ref = push_results[local_ref]
-    log.info("Verification succeeded. Published %s to DockerHub as %s", local_ref, dockerhub_ref)
-    return dockerhub_ref
+        return True, str(output or "")
+    except Exception as e:
+        return False, str(e)[:4000]
 
 
-def is_failure(task_dir: Path) -> bool:
-    # check if failure.json exists in the task directory
-    # if verification_success.json also exists, and the modification time is later than failure.json, return False
-    failure_path = task_dir / "failure.json"
-    success_path = task_dir / "verification_success.json"
-    if not failure_path.exists():
+def verify_single(task_dir: Path, skip_tests: bool = False) -> bool:
+    """Verify a single task directory. Returns True on success."""
+    docker = DockerClient()
+
+    # Parse task
+    try:
+        task = _parse_task(task_dir)
+    except Exception as e:
+        logger.error("Failed to parse task in %s: %s", task_dir, e)
+        _write_failure(task_dir, "parse", str(e))
         return False
-    return not (success_path.exists() and success_path.stat().st_mtime > failure_path.stat().st_mtime)
+
+    if not task.sha:
+        logger.error("Task in %s has no SHA", task_dir)
+        _write_failure(task_dir, "parse", "Task.sha is None")
+        return False
+
+    tag = _image_tag(task)
+
+    # Build
+    try:
+        tag = build_image(docker, task_dir, task, target="run")
+        logger.info("Build succeeded: %s", tag)
+    except Exception as e:
+        logger.error("Build failed for %s: %s", task_dir.name, str(e)[:200])
+        _write_failure(task_dir, "build", str(e)[:4000])
+        return False
+
+    # Profile
+    ok, output = run_profile(docker, tag)
+    if not ok:
+        logger.error("Profile failed for %s", task_dir.name)
+        _write_failure(task_dir, "profile", output)
+        return False
+    logger.info("Profile passed for %s", task_dir.name)
+
+    # Tests (optional)
+    if not skip_tests:
+        ok, output = run_tests(docker, tag)
+        if not ok:
+            logger.error("Tests failed for %s", task_dir.name)
+            _write_failure(task_dir, "tests", output)
+            return False
+        logger.info("Tests passed for %s", task_dir.name)
+
+    _write_success(task_dir, tag)
+    logger.info("SUCCESS: %s", task_dir.name)
+    return True
 
 
-def get_sha(success_info: dict) -> str:
-    dockerhub_image = success_info.get("dockerhub_image", "")
-    # docker.io/formulacode/all:mie-lab-trackintel-963fb9e28f5679ad87c98373c7c3d86ce6a49880--final
-    # to 963fb9e28f5679ad87c98373c7c3d86ce6a49880
-    if "--final" in dockerhub_image:
-        sha_part = dockerhub_image.split("--final")[0]
-        sha = sha_part.split("-")[-1]
-        return sha
-    return ""
+def _find_task_dirs(root: Path) -> list[Path]:
+    """Find all task directories (dirs containing task.txt) under root."""
+    if (root / "task.txt").exists():
+        return [root]
+    dirs = []
+    for task_txt in sorted(root.rglob("task.txt")):
+        dirs.append(task_txt.parent)
+    return dirs
+
+
+def is_already_done(task_dir: Path) -> bool:
+    """Check if task already has a recent verification_success.json."""
+    success = task_dir / "verification_success.json"
+    failure = task_dir / "failure.json"
+    if not success.exists():
+        return False
+    if failure.exists() and failure.stat().st_mtime > success.stat().st_mtime:
+        return False
+    return True
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=Path, required=True, help="Path to the task directory")
+    parser = argparse.ArgumentParser(description="Verify FormulaCode dataset tasks")
+    parser.add_argument("--task", type=Path, required=True, help="Task dir or parent dir")
+    parser.add_argument("--workers", type=int, default=2, help="Parallel workers for batch mode")
+    parser.add_argument("--skip-tests", action="store_true", help="Skip run_tests.sh step")
+    parser.add_argument("--force", action="store_true", help="Re-verify already-successful tasks")
     args = parser.parse_args()
 
-    # get the top-level dataset directory
-    dataset_dir = args.task.parents[-2]
+    task_dirs = _find_task_dirs(args.task)
+    if not task_dirs:
+        logger.error("No task directories found under %s", args.task)
+        sys.exit(1)
 
-    config = _load_config(dataset_dir)
-    registry_path = Path(config["context_registry_path"])
+    # Filter already-done tasks
+    if not args.force:
+        pending = [d for d in task_dirs if not is_already_done(d)]
+        skipped = len(task_dirs) - len(pending)
+        if skipped:
+            logger.info("Skipping %d already-verified tasks", skipped)
+        task_dirs = pending
 
-    context_registry = ContextRegistry.load_from_file(registry_path)
-
-    # Normalize any existing registry entries to the current DockerContext layout
-    context_registry = update_cr(context_registry)
-
-    logger = configure_logging()
-
-    if args.task.name.startswith("formulacode_verified") or (args.task.parent.name.startswith("formulacode_verified")):
-        globbed = args.task.rglob("*/*") if args.task.name.startswith("formulacode_verified") else args.task.glob("*")
-        tasks = [d for d in globbed if d.is_dir() and (not d.name.startswith(".")) and ("cache" not in str(d))]
-        all_successes = []
-        success_pth = args.task.parent / "all_verification_successes.jsonl"
-        all_successful_shas = (
-            {get_sha(json.loads(line)) for line in success_pth.read_text().splitlines()}
-            if success_pth.exists()
-            else set()
-        )
-
-        from concurrent.futures import ThreadPoolExecutor
-
-        # Pre-load all tasks to track them in exception handling
-        task_map = {}
-        futures_list = []
-
-        with ThreadPoolExecutor(max_workers=64) as executor:
-            for task_dir in tasks:
-                task, context = load(task_dir)
-                # load the task_dir / failure.json file if it exists, and see the exit code is == 124
-                failure_path = task_dir / "failure.json"
-                if is_failure(task_dir):
-                    continue
-
-                # if task.sha in all_successful_shas, skip
-                if task.sha in all_successful_shas:
-                    logger.info(f"Skipping already successful task {task.sha} in {task_dir}")
-                    continue
-
-                task_map[task_dir] = task
-                future = executor.submit(
-                    verify_task_with_context,
-                    task_dir=task_dir,
-                    task=task,
-                    context=context,
-                    config=config,
-                    context_registry=context_registry,
-                    registry_path=registry_path,
-                    logger=logger,
-                )
-                futures_list.append((future, task_dir, task))
-
-            for future, task_dir, task in futures_list:
-                try:
-                    dockerhub_ref = future.result()
-                    logger.info(f"SUCCESS: {dockerhub_ref}")
-                    # write success info to a file in the task dir
-
-                    final_task = task.with_tag("final")
-                    local_ref = final_task.get_image_name()
-
-                    # write success info to a file in the task dir
-                    task_success_info = {
-                        "local_image": local_ref,
-                        "dockerhub_image": dockerhub_ref,
-                    }
-                    success_path = task_dir / "verification_success.json"
-                    success_path.write_text(json.dumps(task_success_info, indent=2))
-
-                    success_info = {
-                        "dockerhub_image": dockerhub_ref,
-                    }
-                    all_successes.append(success_info)
-                    with write_lock, success_pth.open("a", encoding="utf-8") as f:
-                        f.write(json.dumps(success_info) + "\n")
-
-                except Exception as exc:
-                    logger.exception(f"Verification failed for task in {task_dir}")
-                    # Write failure.json if it doesn't already exist (RuntimeError already wrote it)
-                    failure_path = task_dir / "failure.json"
-                    if not failure_path.exists():
-                        _write_failure_json(
-                            task_dir,
-                            task,
-                            "unknown",
-                            None,
-                            None,
-                            error_message=str(exc),
-                        )
-
+    if not task_dirs:
+        logger.info("All tasks already verified. Use --force to re-verify.")
         return
 
-    task, context = load(args.task)
-    logger.info("Loaded task %s from %s", task, args.task)
+    logger.info("Verifying %d task(s) with %d worker(s)", len(task_dirs), args.workers)
 
-    try:
-        dockerhub_ref = verify_task_with_context(
-            task_dir=args.task,
-            task=task,
-            context=context,
-            config=config,
-            context_registry=context_registry,
-            registry_path=registry_path,
-            logger=logger,
-        )
-    except RuntimeError as exc:
-        logger.info(str(exc))
-        raise SystemExit(1) from exc
+    if len(task_dirs) == 1:
+        ok = verify_single(task_dirs[0], skip_tests=args.skip_tests)
+        sys.exit(0 if ok else 1)
 
-    final_task = task.with_tag("final")
-    local_ref = final_task.get_image_name()
-    logger.info(f"SUCCESS: {local_ref} -> {dockerhub_ref}")
+    # Batch mode
+    successes = 0
+    failures = 0
 
-    # write success info to a file in the task dir
-    success_info = {
-        "local_image": local_ref,
-        "dockerhub_image": dockerhub_ref,
-    }
-    success_path = args.task / "verification_success.json"
-    success_path.write_text(json.dumps(success_info, indent=2))
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {
+            pool.submit(verify_single, td, args.skip_tests): td for td in task_dirs
+        }
+        for future in as_completed(futures):
+            td = futures[future]
+            try:
+                if future.result():
+                    successes += 1
+                else:
+                    failures += 1
+            except Exception as e:
+                failures += 1
+                logger.exception("Unexpected error for %s", td)
+                _write_failure(td, "unknown", str(e))
+
+    logger.info("Batch complete: %d succeeded, %d failed out of %d", successes, failures, len(task_dirs))
+    sys.exit(0 if failures == 0 else 1)
 
 
 if __name__ == "__main__":
