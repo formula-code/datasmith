@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import os
 import shutil
 import subprocess
@@ -13,8 +12,10 @@ import tempfile
 import urllib.error
 import urllib.parse
 import zipfile
+from dataclasses import dataclass
 
 from github_utils import github_request
+
 DEFAULT_REF = "main"
 
 
@@ -143,19 +144,17 @@ def _git_sparse_checkout(repo_url: str, ref: str, paths: list[str], dest_dir: st
     try:
         _run_git(clone_cmd)
     except InstallError:
-        _run_git(
-            [
-                "git",
-                "clone",
-                "--filter=blob:none",
-                "--depth",
-                "1",
-                "--sparse",
-                "--single-branch",
-                repo_url,
-                repo_dir,
-            ]
-        )
+        _run_git([
+            "git",
+            "clone",
+            "--filter=blob:none",
+            "--depth",
+            "1",
+            "--sparse",
+            "--single-branch",
+            repo_url,
+            repo_dir,
+        ])
     _run_git(["git", "-C", repo_dir, "sparse-checkout", "set", *paths])
     _run_git(["git", "-C", repo_dir, "checkout", ref])
     return repo_dir
@@ -222,9 +221,7 @@ def _resolve_source(args: Args) -> Source:
     if not args.repo:
         raise InstallError("Provide --repo or --url.")
     if "://" in args.repo:
-        return _resolve_source(
-            Args(url=args.repo, repo=None, path=args.path, ref=args.ref)
-        )
+        return _resolve_source(Args(url=args.repo, repo=None, path=args.path, ref=args.ref))
 
     repo_parts = [p for p in args.repo.split("/") if p]
     if len(repo_parts) != 2:
@@ -255,9 +252,7 @@ def _parse_args(argv: list[str]) -> Args:
     )
     parser.add_argument("--ref", default=DEFAULT_REF)
     parser.add_argument("--dest", help="Destination skills directory")
-    parser.add_argument(
-        "--name", help="Destination skill name (defaults to basename of path)"
-    )
+    parser.add_argument("--name", help="Destination skill name (defaults to basename of path)")
     parser.add_argument(
         "--method",
         choices=["auto", "download", "git"],
