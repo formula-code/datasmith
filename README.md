@@ -1,410 +1,402 @@
-# FormulaCode - DataSmith 🔨
+# FormulaCode - DataSmith
 
-[![Release](https://img.shields.io/github/v/release/formula-code/datasmith)](https://img.shields.io/github/v/release/formula-code/datasmith)
 [![Build status](https://img.shields.io/github/actions/workflow/status/formula-code/datasmith/main.yml?branch=main)](https://github.com/formula-code/datasmith/actions/workflows/main.yml?query=branch%3Amain)
-[![codecov](https://codecov.io/gh/formula-code/datasmith/branch/main/graph/badge.svg)](https://codecov.io/gh/formula-code/datasmith)
-[![Commit activity](https://img.shields.io/github/commit-activity/m/formula-code/datasmith)](https://img.shields.io/github/commit-activity/m/formula-code/datasmith)
 [![License](https://img.shields.io/github/license/formula-code/datasmith)](https://img.shields.io/github/license/formula-code/datasmith)
 
-This is a Python codebase for preparing and analyzing the Hugging Face dataset for **FormulaCode** (67 repositories; 964+ performance‑improving commits) and **FormulaCode-V** (?? Repositories; 200 performance-improving commits with manually verified pytest benchmarks).
+## Abstract
 
-![FormulaCode](static/Fig1.png)
+Datasmith is a package for automatically building and maintaining FormulaCode tasks. The package is engineered to support any repository-level, verification-by-execution based coding benchmark that heavily uses Docker and GitHub.
 
-FormulaCode is designed to benchmark the capabilities of large language models (LLMs) to optimize the performance of real‑world codebases. It is designed to *complement* existing benchmarks (e.g. SWE‑Bench) by using the same API and methodology as SWE‑Bench.
+FormulaCode is a benchmark of 67+ repositories with 964+ performance-improving commits, designed to evaluate LLMs' ability to optimize real-world codebases. It scores optimizers relative to the human-authored speedup using ASV (Airspeed Velocity) benchmarks — providing a dense performance signal instead of binary pass/fail.
 
-## Key improvements
+## High level overview
 
-1. **Human‑relative metric** – FormulaCode scores an optimizer relative to the speed‑up achieved by the human author of the original commit, preventing “memorize‑and‑saturate” tactics.
-2. **Finer‑grained feedback** – Performance measurements provide a dense reward signal that helps RL or evolutionary algorithms iterate more effectively than binary pass/fail unit tests.
-3. **Performance benchmarks vs. unit tests** – Unit tests protect against functional regressions but can be over‑fit; realistic workload benchmarks capture the critical performance hot‑paths developers actually care about.
+```mermaid
+graph LR
+    A --->|scrape| B
+    A2 <-->|sync| B
+    B -->|publish| C
+    B -->|publish| D
 
-4. **Real‑world impact** – FormulaCode uses a library's _pre-defined_ performance categorization workloads. As such, if an LLM statistically outperforms the human baseline on a FormulaCode task, the resulting patch is often state‑of‑the‑art and can be upstreamed to the library. However, this is contingent on the patch being thoroughly validated after manual verification, of course.
+    A[Github]
+    A2[Supabase]
+    B["`Datasmith
+    (This repository)`"]
+    C[DockerHub]
+    D[HuggingFace]
+```
+
+## Use cases
+
+`datasmith` helps you manage your github-centric benchmark. Each benchmark contains a task which revolves around a GitHub Issue (or Pull request; which is just an issue with extra details). We include some helpful properties to start off:
+
+```python
+from datasmith.github import PR, GitHubClient
+from datasmith.utils import TokenPool
+
+# Every task starts with a PR.
+pr = PR(repository="astropy/astropy", issue_number=16222)
+
+# PRs are frozen Pydantic v2 models — immutable after creation.
+pr.merge_commit_sha   # the merge commit sha
+pr.base_sha           # base branch commit
+pr.cache_key          # "astropy/astropy:16222" — used for Supabase caching
+```
+
+You can fetch live data from GitHub using the async client:
+```python
+pool = TokenPool()   # reads GH_TOKENS env var, rotates tokens on rate-limit
+gh = GitHubClient(pool)
+
+# Fetch a PR from the GitHub API.
+pr = await gh.get_pr("pandas-dev", "pandas", 16222)
+
+# Fetch the diff as a string.
+diff = await gh.get_diff("pandas-dev", "pandas", 16222)
+
+# Fetch the timeline of events.
+events = await gh.get_timeline("pandas-dev", "pandas", 16222)
+```
+
+Want to make a problem statement? A pull request can be rendered into one:
+```python
+from datasmith.github import render_problem_statement, scrape_links
+
+# Render a problem statement from the PR and its linked issues.
+statement = render_problem_statement(pr, anonymize=True)
+
+# Don't want to expose the users? anonymize=True maps @alice -> @user_1, strips emails.
+
+# You can also scrape for linked issues via BFS.
+issues = await scrape_links(pr, gh.get_issue, depth=2, only_issues=True, limit=6)
+
+# Then pass them into the renderer for richer context.
+statement = render_problem_statement(pr, issues=issues, repo_description="pandas is a data analysis library")
+```
+
+
+Don't like the current set of operations? Define your own!
+
+```python
+# You can register custom hooks for dataset-specific operations.
+from datasmith.github import HookRegistry
+
+from dspy import ChainOfThought
+summarizer = ChainOfThought("document -> summary")
+
+def summarize(pr):
+    doc = render_problem_statement(pr, anonymize=True)
+    return summarizer(doc).summary
+
+HookRegistry.register("summarize", summarize)   # auto-wrapped with @supabase_cached
+
+# Now use it:
+pr = PR(repository="astropy/astropy", issue_number=16222)
+HookRegistry.call("summarize", pr)   # first call: hits LLM
+HookRegistry.call("summarize", pr)   # second call: reads from Supabase cache. No cost!
+```
+
+Almost all our supported operations can be run asynchronously. Here's how to run some FormulaCode-specific operations at scale:
+```python
+from datasmith.runners import ClassifyPRsRunner
+from datasmith.agents import PerfClassifier, ClassifyJudge
+
+runner = ClassifyPRsRunner(PerfClassifier(), ClassifyJudge(), n_concurrent=64)
+await runner.run(pr_items)
+# Progress tracked in Supabase runner_progress table.
+# Per-item failures logged in runner_failures — the runner never aborts.
+```
+
+By default, each operation is cached in Supabase so you don't keep hitting expensive hooks.
+
+A pull request is useless if you cannot build a reproducible environment for it. Datasmith supports building docker images for any pull request using a three-tier hierarchy:
+
+```python
+from datasmith.docker import ImageManager, MultiObjVerifier, SmokeVerifier, ProfileVerifier
+
+mgr = ImageManager()
+mgr.build_base_image("./context")                                # formulacode/base:latest
+mgr.build_repo_image("pandas-dev", "pandas", "./context")        # formulacode/pandas-dev-pandas:latest
+mgr.build_pr_image("pandas-dev", "pandas", 16222, "./context")    # formulacode/pandas-dev-pandas:16222
+
+# Verify an image with a chain of verifiers — short-circuits on first failure.
+verifier = MultiObjVerifier(verifiers=[
+    SmokeVerifier("pandas"),      # can we import the package?
+    ProfileVerifier(timeout=300), # can we discover and run ASV benchmarks?
+])
+result = verifier.verify("formulacode/pandas-dev-pandas:16222")
+# result.ok, result.rc, result.stdout, result.stderr, result.duration_s
+```
+
+One of the main features of `datasmith` is the ability to automatically synthesize docker containers for a pull request. The synthesizer is a state machine:
+
+```python
+from datasmith.agents import Synthesizer
+
+synth = Synthesizer(max_attempts=3, models=["o4-mini", "claude-sonnet-4-20250514"])
+ctx = synth.run("pandas-dev", "pandas", 16222, pr_context="...", verifier=verifier)
+# Checking cache for astropy/astropy:16222...                    [MISS]
+# Found 4 similar scripts from astropy/astropy
+# Attempt 1/4 with similar script...                              [FAIL]
+# Attempt 2/4 with similar script...                              [FAIL]
+# Attempt 3/4 with similar script...                              [FAIL]
+# Attempt 4/4 with similar script...                              [FAIL]
+# Generating with Codex (model=o4-mini)...                        [FAIL]
+# Generating with Codex (model=claude-sonnet-4-20250514)...                  [PASS]
+# [DONE] Build script synthesized for astropy/astropy#16222
+```
+
+If ALL attempts fail, `synthesize` logs every attempt (stderr, stdout, model, script used) to Supabase's `build_attempts` table and returns `None`. Failed PRs can be retried later — the logged attempts provide context for debugging or a future synthesis run.
+
+This can be run asynchronously as well for multiple tasks (WARNING: Might be expensive!):
+```python
+from datasmith.runners import SynthesizeImagesRunner
+
+runner = SynthesizeImagesRunner(synth, verifier, n_concurrent=8)
+await runner.run(pr_items)
+# Returns None entries for PRs where synthesis failed.
+```
+
+How do we make a dataset out of this? Query Supabase directly and publish:
+```python
+from datasmith.utils.db import get_client
+from datasmith.publish import records_from_supabase, HuggingFacePublisher
+
+# Query all verified, unpublished perf PRs from the last month.
+records = records_from_supabase(start_date="2026-02-01", end_date="2026-03-01")
+
+# Or query Supabase directly for more control.
+sb = get_client()
+rows = sb.table("pull_requests") \
+    .select("*") \
+    .eq("is_performance_commit", True) \
+    .not_.is_("container_name", "null") \
+    .execute()
+
+# Publish to HuggingFace as a versioned Parquet dataset.
+hf = HuggingFacePublisher()
+hf.publish(records, version="formulacode@2026-03")
+```
+
+We define tasks using `terminal-bench`'s formulacode adapter for evaluation:
+```python
+from terminal_bench.adapters.formulacode import FormulaCodeAdapter
+from terminal_bench.harness.harness import Harness
+
+adapter = FormulaCodeAdapter(task_dir="fctasks/", force=True)
+adapter.generate_task(pr.to_record())
+
+run = Harness(
+    output_path="fcevals/",
+    dataset_path="dataset_path",
+    task_ids=[pr.to_record().task_id],
+    agent_configs=[
+        {"agent_name": "nop", "model_name": "nop"},
+        {"agent_name": "oracle", "model_name": "oracle"},
+    ],
+)
+
+print(run.results[0].is_resolved)  # Did the oracle get a speedup > 1.00 over baseline?
+```
+
+
+## Architecture
+
+Datasmith contains seven high-level modules. FormulaCode-specific logic lives directly in the appropriate `ds.*` module (no separate examples folder) since FormulaCode is the primary consumer.
+
+* `ds.utils`: Shared utilities.
+	* `ds.utils.db`: Supabase client initialization, common query helpers, and the `@supabase_cached` decorator. Cache keys are deterministic (SHA-256 of canonical JSON).
+	* `ds.utils.tokens`: GitHub token pool with round-robin selection per request. Blocks on rate limits using GitHub's `X-RateLimit-Reset` header. Thread-safe via `threading.Lock`.
+	* `ds.utils.core`: `Settings` (pydantic-settings from `tokens.env`), structured logging via `get_logger()`, `@with_backoff` retry decorator.
+* `ds.github`: Pydantic v2 models for GitHub issues and PRs. All expensive methods use the `@supabase_cached` decorator (from `ds.utils.db`). GitHub API access via `httpx` + `ds.utils.tokens`.
+	* `ds.github.models`: Frozen `Issue`, `PR` (extends Issue), `FormulaCodeRecord`, `IssueExpanded`, `PRFileChange`, `PRChangeSummary`.
+	* `ds.github.client`: Async `GitHubClient` wrapping `httpx.AsyncClient` with `TokenPool`. Methods: `get_pr()`, `get_issue()`, `get_timeline()`, `get_diff()`, `get_files()`, `graphql()`. Handles 429/403 with automatic token rotation.
+	* `ds.github.hooks`: `HookRegistry` — class-level registry for custom hooks. `register()` auto-wraps with `@supabase_cached`.
+	* `ds.github.links`: `extract_references()` parses `#N`, `owner/repo#N`, and full GitHub URLs. `scrape_links()` does BFS traversal with depth, limit, and `only_issues` controls.
+	* `ds.github.render`: Jinja2-based `render_problem_statement()` with `Anonymizer` (`@username` -> `@user_N`, email stripping).
+* `ds.docker`: Dependencies for constructing and maintaining docker tasks.
+	* `ds.docker.images`: `ImageManager` wrapping `python-on-whales` (not `docker-py`) — subprocess-based, thread-safe by design, scales to 40-50+ concurrent threads without connection pool issues. Three-tier hierarchy: base -> repo -> PR.
+	* `ds.docker.context`: `DockerContext` Pydantic model holding Dockerfile + shell scripts. `to_tar_bytes()` produces reproducible tarballs (zero mtimes, deterministic order). `from_directory()` loads from a task directory.
+	* `ds.docker.verifiers`: Abstract `Verifier` base class. Concrete: `SmokeVerifier` (`import {package}`), `ProfileVerifier` (runs `profile.sh`, timeout exit code 124 treated as success), `PytestVerifier` (runs `run_tests.sh`), `MultiObjVerifier` (chains verifiers, short-circuits on failure).
+	* `ds.docker.publish`: `DockerHubPublisher` with lazy login, `@with_backoff` retry, version tagging (`@YYYY-MM`), remote tag listing, and delta publish.
+* `ds.agents`: Agents for dynamic filtering and automatic build script generation. Simple agents use `dspy`; complex agents use an installed agent (like `codex`).
+	* `ds.agents.extractors`: `ProblemExtractor` — DSPy module that extracts structured `ProblemExtraction` (initial_observations, triage_attempts, solution_overview, solution_observations) from PR text.
+	* `ds.agents.classifiers`: `PerfClassifier` — binary YES/NO on whether a PR is performance-improving. `ClassifyJudge` — classifies by `OptimizationType` (14 categories with descriptions) + difficulty (easy/medium/hard) + confidence. Patch truncation via tiktoken.
+	* `ds.agents.codex`: `codex_exec()` wraps `codex exec --full-auto --json -m {model}` via subprocess. Parses JSON stream for output and files_changed. Handles timeout, missing CLI, and errors.
+	* `ds.agents.synthesizer`: State machine: `CHECK_CACHE` -> `FIND_SIMILAR` -> `TRY_SIMILAR` -> `LLM_GENERATE` -> `FAIL`. All attempts logged to `build_attempts` table.
+* `ds.runners`: Scalable async runners that store inputs/outputs in Supabase. Each runner takes `n_concurrent` and manages its own progress tracking.
+	* `ds.runners.base`: `BaseRunner` ABC — `asyncio.Semaphore` for concurrency, upserts to `runner_progress` every 10 items or 30s, per-item failures to `runner_failures`. Single item errors never abort the runner.
+	* `ds.runners.scrape_repos`: Finds compliant GitHub repositories using the REST API. Skips existing repos.
+	* `ds.runners.scrape_commits`: For a given repository, scrapes merged PRs and stores metadata in `pull_requests`.
+	* `ds.runners.synthesize_images`: Runs `ds.agents.synthesizer` for each PR. Docker operations via `asyncio.to_thread()`.
+	* `ds.runners.classify_prs`: Runs `PerfClassifier` + `ClassifyJudge` across PRs concurrently. Updates `pull_requests` table in-place.
+* `ds.publish`: Publishes verified tasks to DockerHub and HuggingFace.
+	* `ds.publish.records`: `records_to_parquet()` / `records_from_parquet()` via pyarrow. `records_from_supabase()` queries unpublished perf PRs.
+	* `ds.publish.huggingface`: `HuggingFacePublisher` — reads token from file path, uploads Parquet via `huggingface_hub`, generates dataset cards. Append-only: never overwrites prior versions.
+	* `ds.publish.pipeline`: `publish_pipeline()` orchestrates: query DB -> push DockerHub -> upload HuggingFace -> mark `published_at`.
+	* Dataset versioning follows `@YYYY-MM` (e.g. `formulacode@2026-03`). The dataset is updated monthly.
+* `ds.update`: Pipeline orchestrator. Updates datasmith to find compliant tasks within a given date range.
+	1. `ds.runners.scrape_repos`
+	2. `ds.runners.scrape_commits`
+	3. `ds.runners.classify_prs`
+	4. `ds.runners.synthesize_images`
+	5. `ds.publish`
+
+	Supports `--resume` (skip completed stages), `--stage N` (run only one stage), and `--dry-run`.
+
+### FormulaCodeRecord
+
+The bridge between datasmith's PR model and `terminal-bench`'s evaluation harness:
+
+```python
+class FormulaCodeRecord(BaseModel):
+    owner: str
+    repo: str
+    issue_number: int
+    task_id: str          # "{owner}__{repo}-{issue_number}"
+    gt_hash: str          # pr.merge_commit_sha
+    base_commit: str      # pr.base_sha
+    date: datetime | None # pr.merged_at
+    instructions: str     # rendered problem statement (from ds.github.render)
+    classification: str   # from ds.agents.classifiers (14 categories)
+    difficulty: str       # easy / medium / hard
+    container_name: str   # Docker container reference
+    patch: str            # ground truth diff
+    image_name: str       # full Docker image reference
+```
+
+`PR.to_record()` constructs this from the PR model. Returns `None` if the merge commit SHA is missing.
+
+
+### Database schema
+
+Six tables in Supabase (Postgres), defined in `supabase/migrations/00001_initial_schema.sql`:
+
+| Table | Primary key | Purpose |
+|-------|-------------|---------|
+| `repositories` | `(owner, repo)` | Scraped GitHub repos (language, stars, topics, description) |
+| `pull_requests` | `(owner, repo, issue_number)` | PR metadata, classification, rendered problems, publish status |
+| `hook_cache` | `(entity_key, hook_name, args_hash)` | Deterministic cache for `@supabase_cached` |
+| `build_attempts` | `id` (serial) | Every Docker build attempt (model, script, ok, stderr/stdout tails) |
+| `runner_progress` | `runner_id` | Per-runner progress (total, completed, failed) |
+| `runner_failures` | `id` (serial) | Per-item failure details (error message, traceback) |
 
 
 ## Installation
-Make a `tokens.env` file with your GitHub and Codecov credentials.
+
+Install [uv](https://astral.sh/uv/) and [Node.js](https://nodejs.org/) (for Supabase CLI), then set up the development environment:
+
 ```bash
-# Cache and backup locations
-CACHE_LOCATION=/home/???/formulacode/datasmith/scratch/artifacts/cache.db
-BACKUP_DIR=/home/???/formulacode/backup/
-
-# Scraping tokens
-GH_TOKENs=github_pat_???,github_pat_???
-CODECOV_TOKEN=54c6???
-
-# LLM configuration for context synthesis
-DSPY_MODEL_NAME=openai/meta-llama/Llama-3.3-70B-Instruct
-DSPY_URL=http://localhost:30000/v1
-DSPY_API_KEY=local
-DSPY_TEMPERATURE=0.7
-
-# Pipeline artifact DB (SQLite, replaces per-step parquet files)
-PIPELINE_DB=scratch/artifacts/pipeflush.db
-
-# For DockerHub publishing (dataset verification)
-DOCKERHUB_NAMESPACE=formulacode          # Required for dataset verification
-DOCKERHUB_USERNAME=myuser                # Required for dataset verification
-DOCKERHUB_TOKEN=dckr_pat_xxxxx          # Required for dataset verification
-
-# Depends on the system.
-#DOCKER_USE_BUILDX=0
-DOCKER_NETWORK_MODE=host
-```
-
-Then, install [uv](https://astral.sh/uv/) and set up the development environment:
-```bash
+# Install uv
 $ curl -LsSf https://astral.sh/uv/install.sh | sh
-# Installs pre-commit hooks and dev dependencies.
-$ make install
-# Resolve initial formatting issues.
-$ uv run pre-commit run -a
-$ make check
-# Run tests to verify installation.
-$ make test
-```
-
-Ensure your machine can run CRON tasks. This will be necessary for updating FormulaCode every month.
-
-```bash
-$ crontab -l
-# Edit this file to introduce tasks to be run by cron.
-#
-# Each task to run has to be defined through a single line
-# indicating with different fields when the task will be run
-# and what command to run for the task
-#
-# To define the time you can provide concrete values for
-# minute (m), hour (h), day of month (dom), month (mon),
-# and day of week (dow) or use '*' in these fields (for 'any').
-#
-# Notice that tasks will be started based on the cron's system
-# daemon's notion of time and timezones.
-#
-# Output of the crontab jobs (including errors) is sent through
-# email to the user the crontab file belongs to (unless redirected).
-#
-# For example, you can run a backup of all your user accounts
-# at 5 a.m every week with:
-# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
-#
-# For more information see the manual pages of crontab(5) and cron(8)
-#
-# m h  dom mon dow   command
-
-# Clean up Docker containers every day at midnight
-0 * * * * /usr/bin/docker container prune -f
-
-# Clean up dangling Docker images every week
-0 0 * * 0 /usr/bin/docker image prune -f
-
-# Run FormulaCode update script on the 25th day of every month at 2am
-0 2 25 * * cd /home/???/formulacode/datasmith && ./.venv/bin/python scratch/scripts/update_formulacode.py >> scratch/logs/update_formulacode_{date +\%Y\%m\%d}.log 2>&1
-$ crontab -e
-# <Make the necessary edits>
-```
-
-
-## Data layout
-The general layout of the artifacts is as follows:
-```bash
-scratch/artifacts
-├── cache.db                    # See `CACHE_LOCATION` env var
-├── pipeflush.db                    # Pipeline DB, see `PIPELINE_DB` env var
-├── raw/                        # Raw downloads & lists produced by scripts
-│   ├── downloads/              # Per‑repo dashboard archives
-│   ├── online_dashboards.jsonl # Updated config for dashboard scraper
-│   ├── repos_discovered.csv      # Candidates from GitHub search
-│   ├── repos_valid.csv
-└── processed/.                 # Outputs of various processing scripts
-```
-
-
-## Dataset building
-
-### Installation
-
-You will need to download and install uv to set up Datasmith. The rest of the process is automated using `make` commands.
-
-```bash
-$ curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install npm (for Supabase CLI)
+$ curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+$ nvm install --lts
+$ nvm use --lts
 # Install dev environment and pre-commit hooks
 $ make install
-# Resolve initial formatting issues.
-$ uv run pre-commit run -a
-$ make check
 ```
 
-For querying github and codecov, we need to set up a few environment variables. You can do this by creating a `tokens.env` file in the root of the repository with the following content.
+Create a `tokens.env` file in the repo root:
+```bash
+# Supabase (required)
+SUPABASE_URL=http://127.0.0.1:54321
+SUPABASE_KEY=your-service-role-key
+
+# GitHub (required — comma-separated for multiple tokens)
+GH_TOKENS=github_pat_xxx,github_pat_yyy
+
+# LLM backends (for classification and synthesis)
+DSPY_MODEL=openai/meta-llama/Llama-3.3-70B-Instruct
+DSPY_API_BASE=http://localhost:30000/v1
+DSPY_API_KEY=local
+DSPY_MAX_TOKENS=16000
+
+# DockerHub (for publishing)
+DOCKERHUB_USERNAME=formulacode
+DOCKERHUB_PASSWORD=dckr_pat_xxxxx
+
+# HuggingFace (for dataset publishing)
+HF_TOKEN_PATH=/path/to/huggingface/token
+```
+
+Start local Supabase and apply the schema:
+```bash
+$ npx supabase start
+$ npx supabase db push
+```
+
+
+## Verification
+
+We have a simple test to ensure that all the variables we need are properly defined:
+```bash
+$ python -m datasmith.preflight
+DataSmith Preflight Check
+========================================
+
+== Environment ==
+  [OK] SUPABASE_URL — http://127.0.0.1:54...
+  [OK] SUPABASE_KEY — ***
+  [OK] GH_TOKENS — 3 token(s)
+  [OK] HF_TOKEN — /path/to/huggingface/token
+
+== Supabase ==
+  [OK] Connection
+
+== Docker ==
+  [OK] Docker daemon
+
+== GitHub ==
+  [OK] API access — remaining=4998
+
+========================================
+All checks passed!
+```
+
+After that works, run the tests locally. Each new functionality MUST have a test:
+```bash
+$ make check    # ruff lint + mypy type check
+$ make test     # pytest — 224 tests
+```
+
+
+## Updating FormulaCode
+
+The monthly update is a single command:
+```bash
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01
+```
+
+This runs five stages in order: scrape repos, scrape commits, classify PRs, synthesize Docker images, and publish to DockerHub + HuggingFace. Options:
 
 ```bash
-$ cat tokens.env
-GH_TOKEN=github_pat_???
-COVERALLS_TOKEN=XdK???
-CODECOV_TOKEN=54c6???
-CACHE_LOCATION=/home/???/formulacode/datasmith/scratch/artifacts/cache.db
-BACKUP_DIR=/home/???/formulacode/backup/
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --resume    # skip completed stages
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 3   # run only classification
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --dry-run   # log without executing
 ```
 
 
-## FormulaCode
+## Dataset verification
 
-
-FormulaCode is a dataset of 101 repositories with 4M+ PRs with an automated pipeline to scrape, filter, benchmark, and analyze performance-improving commits in open-source repositories that use Airspeed Velocity (asv) for benchmarking. To update formulacode simply run:
-
-```
-$ python scratch/scripts/update_formulacode.py --start-date 2025-10-01 --end-date 2025-11-01
-```
-
-The next sections describe each step of the pipeline in detail.
-
-### FormulaCode update pipeline (bird's-eye view)
-
-The diagram below summarizes how `scratch/scripts/update_formulacode.py` orchestrates the monthly update pipeline and how each downstream script delegates to internal modules and services.
-
-```mermaid
-sequenceDiagram
-    participant U as update_formulacode.py
-    participant ENV as env setup
-    participant C1 as collect_commits.py
-    participant C2 as collect_and_filter_commits.py
-    participant C3 as prepare_commits_for_building_reports.py
-    participant C4 as collect_perf_commits.py
-    participant C5 as synthesize_contexts.py
-    participant C6 as build_and_publish_to_dockerhub.py
-    participant CSV as repos_valid.csv
-    participant GH as github or offline store
-    participant TMP as temp repo dir
-    participant MI as merge info
-    participant FS as file system
-    participant LLM as llm backends
-    participant SQL as sqlite cache
-    participant CR as context registry
-    participant DOCK as docker build
-    participant DH as docker hub
-
-    %% Orchestrator setup (grey)
-    rect rgb(230,230,230)
-        U->>ENV: step 0 setup environment and logging
-        ENV->>U: environment ready
-    end
-
-    %% Step 1 collect_commits.py (blue)
-    rect rgb(210,225,255)
-        U->>C1: step 1 collect commits
-        C1->>CSV: read repos_valid.csv
-        C1->>GH: find perf commits for each repo
-        C1->>GH: find tagged releases
-        C1->>FS: write commits jsonl
-    end
-
-    %% Step 2 collect_and_filter_commits.py (green)
-    rect rgb(210,245,220)
-        U->>C2: step 2 collect and filter commits
-        C2->>CSV: read repos_valid.csv
-        C2->>TMP: clone repo into temp dir
-        C2->>MI: collect merge shas and commit info
-        C2->>FS: write merge_commits_filtered parquet
-    end
-
-    %% Step 3 prepare_commits_for_building_reports.py (yellow)
-    rect rgb(255,250,210)
-        U->>C3: step 3 prepare commits for reports
-        C3->>FS: read merge_commits_filtered parquet
-        C3->>C3: tokenize patches and crude perf filter
-        C3->>C3: analyze commits in threads
-        C3->>DOCK: make tasks with container names
-        C3->>FS: optional get patch from diff url
-        C3->>FS: write parquet with patch
-    end
-
-    %% Step 4 collect_perf_commits.py (red-ish)
-    rect rgb(255,225,220)
-        U->>C4: step 4 classify performance commits
-        C4->>FS: read prepared parquet
-        C4->>C4: report builder per row
-        C4->>SQL: cache completion in sqlite
-        C4->>LLM: call llm backends
-        LLM->>C4: performance classification
-        C4->>FS: write raw parquet
-        C4->>FS: write perf only parquet
-    end
-
-    %% Step 5 synthesize_contexts.py (purple)
-    rect rgb(235,220,255)
-        U->>C5: step 5 synthesize contexts
-        C5->>C5: configure agent backends
-        C5->>FS: load perf only parquet
-        C5->>CR: load context registry and update
-        CR->>C5: context registry ready
-        C5->>DOCK: build base image
-        DOCK->>C5: base image built
-        C5->>C5: prepare task list per repo and commit
-        C5->>C5: agent build and validate in threads
-        C5->>FS: write results jsonl and all files by image json
-        C5->>CR: update context_registry json
-    end
-
-    %% Step 6 build_and_publish_to_dockerhub.py (teal)
-    rect rgb(210,245,245)
-        U->>C6: step 6 build and publish
-        C6->>FS: read perf only parquet
-        C6->>CR: load context registry and update
-        C6->>DOCK: build base image
-        DOCK->>C6: base image built
-        C6->>C6: prepare task list for recent package images
-        C6->>DH: optional filter tasks not on dockerhub
-        DH->>C6: list of existing images
-        C6->>DOCK: build using docker validator
-        DOCK->>C6: built images
-        C6->>DH: publish images to docker hub
-    end
-```
-
-### 1. Scrape Github for asv-compatible repositories
-
-We start by collecting all repositories that use Airspeed Velocity (asv) for benchmarking. This can be done in one of two ways:
-
-1. Google BigQuery: Google maintains a public dataset of GitHub repositories that can be queried using SQL.
-
-2. Github Search API: We use the GitHub Search API to find all repositories that have a `asv.conf.json` file in their root directory. This is a more comprehensive search that can find repositories that are not indexed by Google BigQuery. _This version is implemented here._
-
-To run the script, you need to have a GitHub token with `repo` and `read:org` permissions. You can create a token by following the instructions [here](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token).
-
-Run:
-```bash
-$ python scratch/scripts/collect_commits.py \
-       --dashboards scratch/artifacts/pipeflush/repos_valid.csv \
-       --outfile    scratch/artifacts/pipeflush/commits_all.jsonl \
-       --max-pages  50
-# Writes scratch/artifacts/processed/repos_discovered.csv and scratch/artifacts/processed/repos_valid.csv
-```
-
-The `scratch/artifacts/processed/repos_valid.csv` file contains a subset of the repositories that aren't forks / reuploads / has atleast {min-stars} stars / pass other sanity checks. We found ~700 filtered repositories for this dataset.
-
-
-### 2. Collect relevant commits for all repositories
-
-Given the list of repositories, we find the subset of commits that have already been closed and merged into the main branch and then filters out those commits that primarily modified the benchmarking files (e.g. `asv.conf.json`) or were not relevant to the benchmarks (e.g. documentation changes) or could not be installed (e.g. runnning `uv pip install -e .` causes issues).
+Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a multi-stage Dockerfile and shell build scripts. The verification loop:
 
 ```bash
-$ python scratch/scripts/collect_and_filter_commits.py \
-       --filtered-benchmarks-pth scratch/artifacts/pipeflush/repos_valid.csv \
-       --output-pth scratch/artifacts/pipeflush/merge_commits_filtered.parquet \
-       --threads   8 \
-       --procs     32
-
-$ python scratch/scripts/prepare_commits_for_building_reports.py \
-       --input scratch/artifacts/pipeflush/merge_commits_filtered.parquet \
-       --output scratch/artifacts/pipeflush/merge_commits_filtered_with_patch.parquet \
-       --max-workers 200 \
-       --filter-repos \
-       --fetch-patches
-
-$ python scratch/scripts/collect_perf_commits.py \
-       --commits  scratch/artifacts/processed/merge_commits_filtered_with_patch.parquet \
-       --outfile    scratch/artifacts/processed/perfonly_commits_with_patch.parquet \
-       --max-workers -1
+$ python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha>
+# Check failure.json for errors -> edit docker_build_pkg.sh / docker_build_run.sh -> rerun
+# Done when verification_success.json appears
 ```
 
-### 3. Build contexts for all commits
+Only modify `docker_build_pkg.sh` and `docker_build_run.sh` during verification fixes.
 
-Each context is a (repo, commit) pair with an associated build_env.sh script to install dependencies. Some reasons a context might fail to build (and get filtered out):
 
-1. Commit couldn't be checked out
-2. Commit didn't have an asv.conf.json file
-3. We could not build the asv environment for the commit.
-4. We could not run a quick asv run to ensure that the benchmarks run.
+## Migration from SQLite
 
+For existing installations using the old SQLite + pickle backend:
 ```bash
-$ python scratch/scripts/synthesize_contexts.py \
-       --commits scratch/artifacts/pipeflush/commits_perfonly.parquet \
-       --output-dir scratch/artifacts/pipeflush/results_synthesis/ \
-       --context-registry scratch/artifacts/pipeflush/context_registry.json \
-       --max-workers 32 \
-       --max-attempts 3 \
-       --max-steps 10 \
-       --max-similar-candidates 5 \
-       --ignore-exhausted \
-       --push-to-dockerhub
+$ python scripts/migrate_sqlite_to_supabase.py --pipeline-db pipeflush.db --cache-db cache.db
+# Use --dry-run to preview row counts before migrating.
 ```
-
-### 4. Upload to DockerHub
-
-We rebuild the Docker images from scratch and then upload them to DockerHub for later use and distribution.
-
-#### Setup
-
-First, generate a DockerHub access token:
-1. Visit https://hub.docker.com/settings/security
-2. Click "New Access Token"
-3. Give it a descriptive name (e.g., "datasmith-publisher")
-4. Copy the token
-
-Then configure your environment:
-
-```bash
-# Add to your tokens.env file
-export DOCKERHUB_NAMESPACE=formulacode     # Your DockerHub username or organization
-export DOCKERHUB_USERNAME=myusername       # Your DockerHub username
-export DOCKERHUB_TOKEN=dckr_pat_xxxxx      # Access token from above
-```
-
-Or use Docker login:
-```bash
-$ docker login docker.io
-# Enter your username and token when prompted
-```
-
-#### Usage
-
-```bash
-$ python scratch/scripts/build_and_publish_to_dockerhub.py \
-       --commits scratch/artifacts/processed/perfonly_commits_with_patch_final.parquet \
-       --context-registry scratch/artifacts/pipeflush/context_registry.json \
-       --namespace formulacode \
-       --max-workers 5 \
-       --skip-existing
-```
-
-#### Options
-
-- `--namespace`: **Required.** DockerHub namespace (your username or organization)
-- `--username`: DockerHub username (or use `DOCKERHUB_USERNAME` env var)
-- `--password`: DockerHub token (or use `DOCKERHUB_TOKEN` env var)
-- `--repository-mode`: `single` (default) or `mirror`
-  - `single`: All images in one repository with encoded tags (e.g., `formulacode/all:owner-repo-sha--final`)
-  - `mirror`: Each project gets its own repository (e.g., `formulacode/owner-repo:sha-final`)
-- `--single-repo`: Repository name for single mode (default: `all`)
-- `--skip-existing`: Skip images that already exist on DockerHub
-- `--max-workers`: Number of parallel build/push operations (default: 8)
-
-#### Important Notes
-
-- **Public Visibility**: New DockerHub repositories default to PUBLIC. Change to private manually on DockerHub if needed.
-- **Rate Limits**: DockerHub free tier has rate limits. The script handles this with exponential backoff, but consider a paid plan for high-volume publishing.
-- **Organization Repositories**: For organization namespaces, repositories may need to be manually created on DockerHub before first push.
-- **Push Concurrency**: Default push concurrency is conservative to avoid rate limiting.
-
-#### Environment Variables
-
-```bash
-# DockerHub-specific (add to tokens.env)
-DOCKERHUB_NAMESPACE=formulacode          # Required
-DOCKERHUB_USERNAME=myuser                # Required
-DOCKERHUB_TOKEN=dckr_pat_xxxxx          # Required
-DOCKERHUB_RATE_LIMIT_WAIT=60            # Optional: seconds to wait on rate limit (default: 60)
-DOCKERHUB_SINGLE_REPO=all               # Optional: repo name for single mode (default: all)
-
-# Build settings
-BUILD_CONCURRENCY=24                     # Max parallel builds
-PUSH_CONCURRENCY=8                      # Max parallel pushes (lower for DockerHub)
-DOCKER_USE_BUILDX=0                     # Use Docker BuildKit
-DOCKER_NETWORK_MODE=host                # Build network mode
-```
-
-### 5. Evaluate all commits
-
-This is done in FormulaCode's fork of the terminal-bench evaluation framework.
 
 
 ## License

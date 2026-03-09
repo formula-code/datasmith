@@ -196,3 +196,7 @@ cython_debug/
 tokens.env
 scratch/artifacts/
 *.db
+
+# Supabase
+supabase/.temp/
+supabase/.branches/

@@ -1,19 +1,24 @@
+"""DataSmith — toolchain for building the FormulaCode benchmark dataset."""
+
+from __future__ import annotations
+
 import os
 
 import dotenv
 
-from datasmith.logging_config import configure_logging
-
-# Configure logging with the centralized configuration
-logger = configure_logging()
+__version__ = "0.1.0"
 
 
 def setup_environment() -> None:
-    # Load environment variables from .env file if it exists
+    """Load environment variables from tokens.env if present."""
     if os.path.exists("tokens.env"):
         dotenv.load_dotenv("tokens.env")
-    else:
-        logger.warning("No tokens.env file found. Skipping environment variable setup.")
 
 
 setup_environment()
+
+# Public API — lazy imports to avoid circular dependencies
+__all__ = [
+    "__version__",
+    "setup_environment",
+]
