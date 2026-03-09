@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import multiprocessing
+import os
 import threading
 from pathlib import Path
 
@@ -36,6 +36,7 @@ def _patch_multiprocessing_lock() -> None:
 _patch_multiprocessing_lock()
 
 import asv
+
 
 def load(task_dir: Path) -> tuple[Task, DockerContext]:
     """Load a Task and DockerContext from a local, user-editable directory."""
@@ -291,6 +292,7 @@ def get_sha(success_info: dict) -> str:
         return sha
     return ""
 
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=Path, required=True, help="Path to the task directory")
@@ -314,7 +316,11 @@ def main() -> None:
         tasks = [d for d in globbed if d.is_dir() and (not d.name.startswith(".")) and ("cache" not in str(d))]
         all_successes = []
         success_pth = args.task.parent / "all_verification_successes.jsonl"
-        all_successful_shas = {get_sha(json.loads(line)) for line in success_pth.read_text().splitlines()} if success_pth.exists() else set()
+        all_successful_shas = (
+            {get_sha(json.loads(line)) for line in success_pth.read_text().splitlines()}
+            if success_pth.exists()
+            else set()
+        )
 
         from concurrent.futures import ThreadPoolExecutor
 

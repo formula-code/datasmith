@@ -1,1 +1,14 @@
-{"('pandas-dev\/pandas', '1e9ccccb068f3c75058e8280570a8def3141a1c3')":1.5668104934,"('pandas-dev\/pandas', '2244402942dbd30bdf367ceae49937c179e42bcb')":2.1292666626,"('pandas-dev\/pandas', '23a17670059ef8d6eb8d3bab40bd4de7b96d5055')":1.6158754613,"('pandas-dev\/pandas', '24219311ec72eae247125e09411fd536a4551a44')":3.4275932482,"('pandas-dev\/pandas', '2b568ce82618c5e6dd2fc6f6f1d22e84c4883546')":2.3068406653,"('pandas-dev\/pandas', '2b82b8635d17c3a020e6e40ba72b9cc6a76f3149')":2.3344189009,"('pandas-dev\/pandas', '32ebcfc8185511d82080af9a095b12d3d176b0d4')":1.8999764839,"('pandas-dev\/pandas', '3a90faa99186ae3b349d480f289f0341154c35b6')":9.6576743059,"('pandas-dev\/pandas', '44c56135688e84de154625d09a199276c141ef3a')":1.6642471952,"('pandas-dev\/pandas', '53ae1d2c0c0bd75318d0981b849127f5e069c145')":1.3715602933,"('pandas-dev\/pandas', '56c80f89cafadcd7050eff2c9bf34bf890ee93fc')":1.7050799506,"('pandas-dev\/pandas', '58e63ec12830160c29fde490e7836254068b855e')":1.6161857783}
+{
+  "('pandas-dev/pandas', '1e9ccccb068f3c75058e8280570a8def3141a1c3')": 1.5668104934,
+  "('pandas-dev/pandas', '2244402942dbd30bdf367ceae49937c179e42bcb')": 2.1292666626,
+  "('pandas-dev/pandas', '23a17670059ef8d6eb8d3bab40bd4de7b96d5055')": 1.6158754613,
+  "('pandas-dev/pandas', '24219311ec72eae247125e09411fd536a4551a44')": 3.4275932482,
+  "('pandas-dev/pandas', '2b568ce82618c5e6dd2fc6f6f1d22e84c4883546')": 2.3068406653,
+  "('pandas-dev/pandas', '2b82b8635d17c3a020e6e40ba72b9cc6a76f3149')": 2.3344189009,
+  "('pandas-dev/pandas', '32ebcfc8185511d82080af9a095b12d3d176b0d4')": 1.8999764839,
+  "('pandas-dev/pandas', '3a90faa99186ae3b349d480f289f0341154c35b6')": 9.6576743059,
+  "('pandas-dev/pandas', '44c56135688e84de154625d09a199276c141ef3a')": 1.6642471952,
+  "('pandas-dev/pandas', '53ae1d2c0c0bd75318d0981b849127f5e069c145')": 1.3715602933,
+  "('pandas-dev/pandas', '56c80f89cafadcd7050eff2c9bf34bf890ee93fc')": 1.7050799506,
+  "('pandas-dev/pandas', '58e63ec12830160c29fde490e7836254068b855e')": 1.6161857783
+}
