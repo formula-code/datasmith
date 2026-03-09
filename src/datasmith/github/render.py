@@ -19,7 +19,7 @@ def _get_env() -> Environment:
     """Return a Jinja2 environment pointing at the templates directory."""
     return Environment(
         loader=FileSystemLoader(_TEMPLATES_DIR),
-        autoescape=False,  # noqa: S701 — Markdown templates, not HTML
+        autoescape=False,
         trim_blocks=True,
         lstrip_blocks=True,
     )

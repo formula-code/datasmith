@@ -51,7 +51,7 @@ def extract_references(text: str, owner: str, repo: str) -> list[tuple[str, str,
 
 async def scrape_links(
     pr: Any,  # PR model with .owner, .repo, .title, .body
-    get_issue_fn: Callable[..., Awaitable[IssueExpanded | None]],
+    get_issue_fn: Callable[..., Awaitable[Any]],
     depth: int = 2,
     only_issues: bool = False,
     limit: int = 60,
@@ -99,7 +99,9 @@ async def scrape_links(
         result.append(issue)
 
         if d < depth:
-            ref_text = f"{issue.title}\n{issue.description}\n" + "\n".join(issue.comments)
+            body = getattr(issue, "description", None) or getattr(issue, "body", "") or ""
+            comments = getattr(issue, "comments", []) or []
+            ref_text = f"{issue.title}\n{body}\n" + "\n".join(comments)
             for ro, rr, rn in extract_references(ref_text, o, r):
                 if (ro, rr, rn) not in visited and len(result) + len(queue) < limit:
                     queue.append((ro, rr, rn, d + 1))
