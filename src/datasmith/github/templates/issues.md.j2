@@ -1,7 +1,3 @@
-{#
- Renders the Referenced Issues section from a list of IssueExpanded.
- Expects `issues` as list[IssueExpanded].
-#}
 {% for it in issues %}
 # Issue #{{ it.number }}: {{ it.title }}
 {% if it.description %}
