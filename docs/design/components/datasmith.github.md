@@ -238,14 +238,16 @@ There are no Pydantic v2 `Issue` / `PR` models. Data is represented as:
 - PR data throughout the pipeline is passed as **pandas DataFrame rows** or **plain dicts** (`pr_dict`), not as structured model instances.
 
 ### Comment scraping
-COMMENTS: A lot of this code was kinda buggy and clunky. I would not be sad to see this code go away.
+**Assessment: Rewrite.** The comment scraping code is fragile — single-page timeline fetches miss paginated results, the comment deduplication via `dict.fromkeys` is a hack, and the bot filtering hardcodes ~40 usernames instead of using a proper heuristic (e.g., `[bot]` suffix, app installations). The time-filtering logic works conceptually but the implementation mixes concerns (fetching, filtering, formatting) in ways that make bugs hard to isolate. Rebuild with cleaner separation: fetch raw timeline (with pagination), filter, then transform.
+
 - `src/datasmith/scrape/report_utils.py:issue_timeline()` — calls `GET /repos/{owner}/{repo}/issues/{num}/timeline` via `get_github_metadata()`. Single-page fetch (no pagination).
 - `src/datasmith/scrape/issue_extractor.py:_build_issue_payload()` — filters timeline events where `event == "commented"` and `created_at < pr_created_at`. Deduplicates with `list(dict.fromkeys(comments))`.
 - `src/datasmith/scrape/report_builder.py:_collect_pr_discussions()` — collects PR timeline events, filters `created_at < pr_merged_at`, converts to `HintComment` objects.
 - Bot usernames are filtered via a `BOT_USERNAMES` set (~40 known bots) in `report_utils.py`.
 
 ### Linked issue extraction
-COMMENTS: A lot of this code was kinda buggy and clunky. I would not be sad to see this code go away.
+**Assessment: Rewrite.** The linked issue extraction is one-level deep only (no BFS, no cycle detection, no `depth`/`limit` parameters) — significantly less capable than the design spec. The regex extraction itself works for common patterns but misses edge cases. The design doc's BFS traversal with `visited` set and configurable depth is the right approach. Rebuild from scratch following the design spec.
+
 - `src/datasmith/scrape/issue_extractor.py:_extract_issue_refs()` — regex extraction of issue references from text:
   - Full URLs: `https://github.com/owner/repo/issues|pull/123`
   - Cross-repo: `owner/repo#123`

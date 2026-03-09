@@ -129,7 +129,7 @@ Not implemented. No codex wrapper exists. All synthesis uses DSPy with configura
 ### ds.agents.synthesizer
 
 Implemented in `src/datasmith/agents/build.py` as `BuildScriptProgram` (DSPy module).
-COMMENTS: This did not work well at all at making scripts that worked for pytest. I'm hoping the codex agent is better than our spaghetti implementation.
+**Assessment: Replace.** The DSPy-based ReACT loop produced unreliable build scripts, particularly for pytest collection. The multi-step agent with `probe_repo`/`list_tree`/`read_file`/`exec_arbitrary` actions was too brittle — the DSPy signature had too many output fields and the 4-step limit was insufficient for complex repos. A coding agent (Codex) that can freely explore, edit, and retry should be a significant improvement over this structured-but-rigid approach.
 
 **DSPy Signature (`BuildScriptAgentStep`):**
 - Inputs: `owner_repo`, `sha`, `commit_date`, `stderr_logs`, `stdout_logs`, `failure_more`, `last_docker_build_script`, `repo_facts_json`, `toolbelt`, `messages_log`.
@@ -148,7 +148,8 @@ COMMENTS: This did not work well at all at making scripts that worked for pytest
 ### ds.agents.decompose_pr
 
 Implemented as `ProblemExtractor` in `src/datasmith/agents/problem_extractor.py`.
-COMMENTS: We can use the same prompt for this signature. it was pretty decent performance-wise.
+**Assessment: Keep.** The prompt and signature work well. The 4-field extraction (initial_observations, triage_attempts, solution_overview, solution_observations) produces good problem/solution separation. Reuse the same prompt in any rewrite.
+
 **DSPy Signature (`ProblemExtractorSignature`):**
 - Inputs: `pr_title`, `pr_body`, `pr_comments`.
 - Outputs: `initial_observations` (symptoms only), `triage_attempts` (investigative steps), `solution_overview` (changes made), `solution_observations` (post-change measurements).
@@ -160,7 +161,8 @@ Validation: each field must be 20+ characters with at least one letter; short fi
 ### ds.agents.perf_classifier
 
 Implemented as `PerfClassifier` in `src/datasmith/agents/summ_judge.py`.
-COMMENTS: This has served us well as well. Feel free to use the same prompt.
+**Assessment: Keep.** Reliable performance classifier. The YES/NO label output with rejection heuristics (tests-only, CI, docs, refactors) works well. Reuse the same prompt.
+
 **DSPy Signature (`JudgeSignature`):**
 - Inputs: `problem_description`, `github_patch`, `file_change_summary`.
 - Outputs: `reasoning` (str), `label` ("YES"/"NO").
@@ -172,7 +174,8 @@ Decision logic rejects: tests/ASV/harness-only changes, CI/workflows/build/packa
 ### ds.agents.optimization_classifier
 
 Implemented as `ClassifyJudge` in `src/datasmith/agents/summ_judge.py`.
-COMMENTS: This has served us well as well. I would have liked it better if we DESCRIBE what each category actually means in the prompt; but it serves us well as-is.
+**Assessment: Keep with improvement.** Classification accuracy is good. The 14-value `OptimizationType` enum and 3-level difficulty work well. One improvement: the prompt should include descriptions of what each category actually means, not just the enum names — this would reduce misclassification on edge cases.
+
 **DSPy Signature (`ClassifySignature`):**
 - Inputs: `problem_description`, `github_patch`.
 - Outputs: `category` (`OptimizationType` enum — 14 values), `difficulty` (`DifficultyLevel` enum — easy/medium/hard), `reasoning`.
@@ -188,5 +191,4 @@ Returns `ClassificationDecision` dataclass with `reason`, `category`, `difficult
 ### ds.agents.cmd_classifier
 
 Not implemented. The tool dispatch in `ContainerToolExecutor.choose_action()` handles action routing but does not classify bash commands.
-COMMENTS: The implementation is here `/mnt/sdd1/atharvas/formulacode/eval_frameworks/terminal-bench/analysis/tag_analyzer/cmd_classifier.py`
-Read that file and add comments.
+**Assessment: External.** The actual implementation lives outside datasmith at `/mnt/sdd1/atharvas/formulacode/eval_frameworks/terminal-bench/analysis/tag_analyzer/cmd_classifier.py`. Not part of the datasmith package — used only in terminal-bench's analysis pipeline.

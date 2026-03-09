@@ -7,7 +7,7 @@ This directory contains design documents for the core modules in DataSmith. Each
 Design docs serve several key goals:
 
 1. **Capture trade-offs** — Document the reasoning behind design decisions
-2. **Enable onboarding** — Help new contributors understand the system quickly  
+2. **Enable onboarding** — Help new contributors understand the system quickly
 3. **Preserve institutional knowledge** — Record why things work the way they do
 4. **Facilitate review** — Allow stakeholders to evaluate designs before implementation
 

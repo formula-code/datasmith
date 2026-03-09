@@ -208,7 +208,7 @@ The final DataFrame is written as Parquet with these columns:
 
 **Considered**: GraphQL allows fetching PRs + commits + files in a single query.
 
-**Rejected**: 
+**Rejected**:
 - GraphQL rate limits are more restrictive for unauthenticated/low-tier tokens
 - Response parsing complexity higher for nested data
 - Existing REST caching layer (`@cache_completion`) works well

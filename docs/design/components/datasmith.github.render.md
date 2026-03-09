@@ -72,11 +72,13 @@ When `anonymize=True`:
 ## Current implementation details
 
 ### Entry point
-COMMENTS: A lot of this code was kinda buggy and clunky. I would not be sad to see this code go away.
+**Assessment: Rewrite.** The `ReportBuilder` entry point takes an untyped `pr_dict` with ~10 expected keys — no validation, no type safety, easy to pass wrong data silently. Should accept a typed `PR` model instead. The method is also too long (~200 lines) with deeply nested control flow.
+
 `ReportBuilder.build(pr_dict: dict) -> ReportResult` in `src/datasmith/scrape/report_builder.py` (line 284). Takes a dict with keys `pr_url`, `pr_title`, `pr_body`, `pr_labels`, `pr_created_at`, `pr_merged_at`, `patch`, `file_change_summary`, `pr_base` (GitHub API repo object). Returns `ReportResult` with `final_md`, `final_md_no_hints`, `problem_statement`, `all_data`, etc.
 
 ### Rendering flow
-COMMENTS: A lot of this code was kinda buggy and clunky. I would not be sad to see this code go away.
+**Assessment: Rewrite.** The rendering pipeline has correct structure (parse URL, fetch issues, collect discussions, extract problem, classify, render) but the implementation is buggy. Key issues: `_parse_pr_url()` is brittle regex, issue extraction is one-level only, `_collect_pr_discussions()` doesn't paginate, and `hints.md.j2` is never actually rendered because `build()` doesn't pass the `h` variable. The pipeline skeleton is sound — rebuild each step with better error handling and the typed PR model.
+
 1. Parse PR URL → `(owner, repo, pr_number)` via `_parse_pr_url()`.
 2. Render `repo.md.j2` → repository description (name, language, description, topics from `pr_dict["pr_base"]["repo"]`).
 3. Render `pr_header.md.j2` → PR header text (title, number, labels, body). Used for extraction, NOT in final report.
@@ -113,7 +115,8 @@ Validation in `_build_extraction()`: each field must be 20+ characters with at l
 - Time conversion: `to_datetime(ts)` and `iso(ts)` in `report_utils.py`.
 
 ### Anonymization
-COMMENTS: A lot of this code was kinda buggy and clunky. I would not be sad to see this code go away.
+**Assessment: Rewrite.** The anonymization replaces all `@mentions` with a single `[USER]` token, losing the ability to track which comments come from the same person. The design spec's numbered placeholders (`@user_1`, `@user_2`) with consistent mapping are strictly better. The commit SHA regex also has false positive risk (any 7+ hex string). Rebuild with a mapping dict that persists across the render call.
+
 `anonymize_github_issue(text)` in `src/datasmith/scrape/report_utils.py` applies these replacements in order:
 1. Emails → `[EMAIL]`
 2. GitHub HTTPS URLs → `[GITHUB_URL]`
@@ -125,7 +128,8 @@ COMMENTS: A lot of this code was kinda buggy and clunky. I would not be sad to s
 Activated via `ReportBuilder(anonymize_output=True)`. No consistent username→placeholder mapping (each `@mention` → `[USER]`, not `@user_1`, `@user_2`).
 
 ### Template structure
-COMMENTS: I liked having jinja templates defined for each of the things we wanted to add. However, a lot of them were never used or not properly used. Feel free to use jinja templates if you think it helps organize.
+**Assessment: Keep pattern, fix usage.** Jinja2 templates are a good organizational pattern for separating rendering logic from data processing. The problem is execution: `hints.md.j2` is defined but never rendered (missing variable), and `pr_header.md.j2` is used for extraction but not documented as such. In a rewrite, keep templates but ensure every template is actually used and tested. Consider fewer, simpler templates over many unused ones.
+
 Templates in `src/datasmith/scrape/templates/`:
 
 | Template | Purpose | Variables |
@@ -167,4 +171,4 @@ ReportBuilder(
     model_name="local/meta-llama/Llama-3.3-70B-Instruct",
 )
 ```
-COMMENTS: We ended up using gpt oss 120b for this instead of llama.
+**Assessment: Update default.** The default `model_name` shown here (`local/meta-llama/Llama-3.3-70B-Instruct`) was replaced in practice with `gpt-oss-120b`, which produced better results. The default in code/docs should reflect the model actually used in production.

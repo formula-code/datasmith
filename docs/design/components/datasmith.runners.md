@@ -79,9 +79,10 @@ Runners process thousands of items. Progress tracking requirements:
 ## Current implementation details
 
 There are no `ds.runners.*` module abstractions. Each pipeline stage is a standalone script in `scratch/scripts/` using ad-hoc concurrency.
-COMMENTS: I'd be more than happy seeing our current scripts go away. None of them worked very well to be honest.
+**Assessment: Replace all scripts.** The 6 standalone scripts in `scratch/scripts/` each reinvent concurrency (mixed ThreadPool/ProcessPool patterns, ad-hoc semaphores, inconsistent worker defaults from 1 to 84), error handling, and progress tracking. None share a common runner abstraction. The design doc's `ds.runners.*` module pattern with `asyncio.Semaphore(n_concurrent)` and structured progress tracking is the right approach — a single concurrency model instead of six different ones.
+
 ### Pipeline orchestrator
-COMMENTS: I like the idea of having an update script that I can run as a CRON job every month. But the implementation of this was garbage.
+**Assessment: Keep concept, rewrite implementation.** A monthly `update_formulacode.py` script runnable as a cron job is the right UX — one command to refresh the dataset. The current implementation chains 6 scripts via `subprocess.run()` with no error recovery, no partial resumption across stages, and no shared state. Rebuild as a proper orchestrator that tracks stage completion, supports resume-from-failure, and shares a single DB connection and concurrency config.
 `scratch/scripts/update_formulacode.py` — runs 6 stages sequentially via `subprocess.run()`:
 1. `collect_commits.py` → find perf commits via GitHub API
 2. `collect_and_filter_commits.py` → clone repos, filter irrelevant commits

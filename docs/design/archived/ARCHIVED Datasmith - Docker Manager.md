@@ -14,7 +14,7 @@ graph LR
     A --->|scrape| B
 	A2 <-->|sync| B
     B --->|build&push| C
-    
+
     A[Docker Script]
     A2[Database]
     B["`DockerScriptManager
@@ -28,7 +28,7 @@ graph LR
 For every PR `pandas-dev/pandas/issues/1234` , there are three docker images needed:
 1. `formulacode/x86-py3_11:latest` -- The base image with dependencies preinstalled for python 3.XX. This is specified in the PR metadata.
 2. `formulacode/x86-py3_11-pandas-dev-pandas:latest` -- The repository level image with the base package pulled to `/workspace/repo` along with the full history. This will make it much easier for us to checkout a specific commit later.
-3. `formulacode/x86-py3_11-pandas-dev-pandas-1234:{broken|latest}` -- This is the `base_commit` of pull request `1234` on `pandas-dev`. 
+3. `formulacode/x86-py3_11-pandas-dev-pandas-1234:{broken|latest}` -- This is the `base_commit` of pull request `1234` on `pandas-dev`.
 	1. When the tag is `broken` it means that we've pulled the specific commit and added base utilities. However, the script is failing the verification check right now. These packages should only be kept locally and should not be committed.
 	2. When the tag is `latest` it means that we've been able to synthesize the build script and pass the verification check.
 
@@ -47,4 +47,4 @@ For every PR `pandas-dev/pandas/issues/1234` , there are three docker images nee
 * Unit tests: The unit tests may be split apart even further but we wish to answer these statements through the unit tests:
 	* We must be able to build multiple images in parallel without docker client being a bottleneck.
 	* If we query multiple images with the same repository, we should block all of them until the repository image is created.
-	* We 
+	* We

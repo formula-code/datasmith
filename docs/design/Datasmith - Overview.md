@@ -16,7 +16,7 @@ graph LR
 	A2 <-->|sync| B
     B -->|publish| C
     B -->|publish| D
-    
+
     A[Github]
     A2[Database]
     B["`Datasmith
@@ -38,13 +38,13 @@ pr = ds.PR(repository="pandas-dev/pandas", issue_number=1234)
 You can run basic operations to get relevant data:
 ```python
 # You can get the merge commit sha of the pull request
-pr.merge_commit 
+pr.merge_commit
 
 # This returns all the comments on the pull request.
 pr.scrape_comments()
 
 # Want to make a problem statement? A pull request can be rendered into a problem statement as well.
-pr.render() 
+pr.render()
 
 # Don't want to expose the users? We support anonymizing the data as well.
 pr.render(anonymize=True)

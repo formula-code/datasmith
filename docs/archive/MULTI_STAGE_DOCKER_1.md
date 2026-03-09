@@ -51,4 +51,3 @@ flowchart LR
 - One Dockerfile can become large and harder to maintain.
 - Changes to shared sections can invalidate many downstream layers.
 - Less explicit ownership than split Dockerfiles.
-

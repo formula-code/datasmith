@@ -1,4 +1,4 @@
-Right now, we have a multi-stage dockerfile that builds the image in multiple stages. We should move towards a system where we have a base image for each toolchain, and then we can build the image for each repository, and each commit-sha on top of that. 
+Right now, we have a multi-stage dockerfile that builds the image in multiple stages. We should move towards a system where we have a base image for each toolchain, and then we can build the image for each repository, and each commit-sha on top of that.
 
 Presently, each dockerfile is:
 ```

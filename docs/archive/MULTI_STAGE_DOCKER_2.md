@@ -56,4 +56,3 @@ flowchart TB
 - Higher operational complexity (registry retention, digest pinning, bake config).
 - More moving parts than a single Dockerfile.
 - Requires stricter versioning discipline for cross-image compatibility.
-

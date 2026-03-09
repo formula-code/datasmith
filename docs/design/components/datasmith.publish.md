@@ -105,7 +105,7 @@ Implemented in `src/datasmith/docker/dockerhub.py:publish_images_to_dockerhub()`
 Also callable per-task via `DockerContext.build_and_publish_to_dockerhub()` in `src/datasmith/docker/context.py:796-909`, which builds the image and then pushes.
 
 ### Task model (current equivalent of FormulaCodeRecord)
-COMMENTS: I'd like to see the role of Task being absorbed by the PR / Issue dataclass instead. Maybe we end up keeping some of the information / interface if its useful.
+**Assessment: Merge into PR model.** `Task` duplicates identity information (owner, repo, sha) that already lives on the PR. The build-specific fields (`env_payload`, `python_version`, `tag`, `benchmarks`) should become attributes of the PR/Issue model or a lightweight build config attached to it. `get_image_name()` and `with_tag()` are useful interfaces worth preserving, but `Task` as a standalone entity creates a parallel identity system that drifts from the PR data.
 
 `Task` frozen dataclass in `src/datasmith/core/models/task.py`:
 ```python

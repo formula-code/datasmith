@@ -56,4 +56,3 @@ flowchart LR
 - Harder to debug than static Dockerfiles unless rendered Dockerfiles are persisted.
 - Requires strict template/version management to stay reproducible.
 - Additional testing needed around renderer output and cache key stability.
-

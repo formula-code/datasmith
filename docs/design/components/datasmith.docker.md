@@ -94,7 +94,8 @@ At ~20k PRs across many repositories, disk usage from Docker images will be sign
 ## Current implementation details
 
 ### Docker client library
-COMMENTS: This was super buggy for us. I'm happy if we get rid of this implementation.
+**Assessment: Replace.** docker-py was unreliable under concurrent load — connection pool corruption, silent failures, and thread-safety issues despite per-thread client workarounds. The design doc's recommendation to switch to `python-on-whales` (subprocess-based, thread-safe by construction) is the right call.
+
 Uses **`docker-py`** (Python Docker SDK), not python-on-whales.
 - `docker.from_env(timeout=1800, max_pool_size=max_concurrency)` in `src/datasmith/docker/orchestrator.py`.
 - To mitigate thread-safety issues, each build creates a **fresh low-level `docker.APIClient`** via `_new_api_client()` in `src/datasmith/docker/context.py:31-58`.
@@ -102,7 +103,7 @@ Uses **`docker-py`** (Python Docker SDK), not python-on-whales.
 ### Image hierarchy
 
 5 tiers (not 3), defined by the `tag` field on `Task` (`src/datasmith/core/models/task.py`):
-COMMENTS: So, I already have 1400+ images on docker for this and I was hoping, even if we abandon this version, if its possible to make a `migrate to new hierarchy` script. Also, a Multi-stage dockerfile here was not a great idea because each image gets too big.
+**Assessment: Redesign.** The 5-tier hierarchy is over-engineered, and the multi-stage Dockerfile causes images to balloon in size (each stage carries forward all prior layers). The design doc's proposed 3-tier hierarchy (base / repo / PR) is cleaner. A migration script is needed for the ~1400 existing images on DockerHub. Separate Dockerfiles per tier (not multi-stage) would keep image sizes manageable.
 
 | Tier | Tag | Purpose |
 |------|-----|---------|
@@ -117,7 +118,8 @@ Multi-stage Dockerfile in `src/datasmith/docker/Dockerfile` implements all 6 sta
 ### Image naming
 
 `Task.get_image_name()` → `{owner}-{repo}-{sha}:{tag}` (e.g., `pandas-dev-pandas-0021d2:pkg`). Components sanitized to `[a-z0-9._-]`.
-COMMENTS: This was a slightly more efficient design overall because mulitple PRs can often have the same base commit sha. Might be better to have a separate container for each issue though tbh.
+**Assessment: Acceptable trade-off.** SHA-based naming enables layer reuse when multiple PRs share a base commit, which saves build time and storage. However, it makes the DockerHub namespace harder to navigate. The design doc's proposed `{owner}-{repo}-{issue_number}` naming is more intuitive and aligns with task identity. Consider whether the layer-reuse benefit justifies the complexity.
+
 ### Build pipeline
 
 `DockerContext.build_container_streaming()` in `src/datasmith/docker/context.py:528-800`:
@@ -129,9 +131,10 @@ COMMENTS: This was a slightly more efficient design overall because mulitple PRs
 - Labels: `datasmith.run`, `datasmith.task`, `datasmith.sha` for cleanup tracking.
 - Returns `BuildResult` dataclass: `ok`, `image_name`, `image_id`, `rc`, `duration_s`, `stderr_tail`, `stdout_tail`, `failure_stage`, `benchmarks`.
 
-COMMENTS: The build pipeline was slow, clunky and buggy. It blocked a lot of times and I had to restart it a lot because it would deadlock.
+**Assessment: Replace.** The build pipeline suffered from frequent deadlocks and required manual restarts. Root causes: docker-py's thread-unsafe connection pool, shared `deque` tail buffers, and streaming output parsing that could hang indefinitely. Switching to `python-on-whales` subprocess calls should eliminate the deadlock class entirely.
+
 ### Verification (verifiers)
-COMMENTS: These served us fine but I'd prefer if we just wait out the --quick and the asv and pytest collection because a lot of containers got marked as false positives because the pytest collection would take 2-3 minutes (and error out at minute 2) but get marked as success because it ran for 45 seconds. 
+**Assessment: Fix timeouts.** The verifiers themselves are functionally correct, but the 30-45 second default timeouts cause false positives. Pytest collection alone can take 2-3 minutes on large repos — a container that times out during collection gets rc=124, which is treated as success. Fix: increase timeouts substantially (at least 5 minutes for collection), or distinguish between "timed out during collection" vs "timed out during execution." The `--quick` flag for ASV should also be waited out rather than killed early.
 
 `DockerValidator` in `src/datasmith/docker/validation.py:159-566`. Two verifiers chained via `validate_acceptance()`:
 
@@ -154,7 +157,8 @@ No separate "smoke" verifier (import check). The `try_import` tool exists in the
 Writes `verification_success.json` or `failure.json` to `dataset/formulacode_verified/{owner}_{repo}/{sha}/`.
 
 ### DockerHub publishing
-COMMENTS: WE SHOULD NOT USE SINGLE REPO MODE. It works file but my god it looks bad.
+**Assessment: Drop single-repo mode.** It works functionally but produces unreadable tag names (`owner-repo-sha--final`) in a single monolithic repository. Mirror mode (one DockerHub repo per source repo) is cleaner and should be the only supported mode going forward.
+
 `publish_images_to_dockerhub()` in `src/datasmith/docker/dockerhub.py`:
 - **Single mode** (default): all images tagged as `{namespace}/{single_repo}:{encoded_tag}` where tag encodes `/` → `__`, `:` → `--`. Tags over 128 chars are truncated with SHA256 suffix.
 - **Mirror mode**: each repo gets its own DockerHub repository.
@@ -164,14 +168,16 @@ COMMENTS: WE SHOULD NOT USE SINGLE REPO MODE. It works file but my god it looks 
 - Credentials from: function params → env vars (`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) → `~/.docker/config.json`.
 
 ### Cleanup
-COMMENTS: WE SHOULD NOT USE THIS. THIS NEVER WORKED AND IT ACTUALLY DELETED SOME IMPORTANT FILES ONCE. PURGE IT.
+**Assessment: Delete.** This module never worked correctly and once deleted important non-Docker files. The label-based cleanup (`datasmith.run` labels) and `soft_prune()` logic are too aggressive and insufficiently tested. Remove entirely. If cleanup is needed in the future, implement it as a simple, explicit CLI command with dry-run support — not as an automatic background process.
+
 `src/datasmith/docker/cleanup.py`:
 - `remove_containers_by_label(run_id)` — prunes containers with `datasmith.run={run_id}`.
 - `soft_prune()` — prunes stopped containers (>1h), dangling images, BuildKit cache.
 - `fast_cleanup_run_artifacts()` — resolves image refs to IDs, removes by ID, prunes networks/volumes/build cache.
 
 ### Disk space management
-COMMENTS: WE SHOULD NOT USE THIS. THIS NEVER WORKED AND IT ACTUALLY DELETED SOME IMPORTANT FILES ONCE. PURGE IT.
+**Assessment: Delete.** Same issues as cleanup.py — the background `guard_loop()` that automatically prunes when disk is low is dangerous and has caused data loss. `free_gb()` is harmless but insufficient justification to keep the module. Remove entirely. Disk monitoring should be an external concern (system-level alerts), not embedded in the build pipeline.
+
 `src/datasmith/docker/disk_management.py`:
 - `free_gb()` — returns free disk space via `shutil.disk_usage()`.
 - `guard_and_prune(min_free_gb)` — checks free space, runs `soft_prune()` if low, `SystemExit` if still insufficient and `hard_fail=True`.
