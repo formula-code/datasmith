@@ -11,6 +11,7 @@ import pandas as pd
 
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.core.models import Task
+from datasmith.core.storage import read_table, resolve_table_name
 from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client
 from datasmith.docker.validation import DockerValidator, ValidationConfig
@@ -130,6 +131,7 @@ def parse_args() -> argparse.Namespace:
         help="Tag to apply to built images. One of base,env,pkg,run",
         choices=["base", "env", "pkg", "run"],
     )
+    parser.add_argument("--db", type=str, default=None, help="Pipeline SQLite DB path.")
     return parser.parse_args()
 
 
@@ -147,9 +149,10 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             else:
                 all_states[(owner, repo)].add((sha, 0.0, env_payload))
     elif args.commits:
-        commits = (
-            pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
-        )
+        if args.commits.suffix == ".jsonl":
+            commits = pd.read_json(args.commits, lines=True)
+        else:
+            commits = read_table(resolve_table_name(str(args.commits)), db_path=args.db)
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]

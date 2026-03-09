@@ -57,7 +57,11 @@ for version in $TARGET_VERSIONS; do
 
     # Build and install
     log "Building pandas"
-    micromamba run -n "$ENV_NAME" python -m pip install --no-deps -v -e .
+    micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation --no-deps -v -e .
+      # Ensure NumPy/SciPy ABI consistency for downstream test imports.
+      micromamba remove -y -n "$ENV_NAME" numpy scipy || true
+      micromamba install -y -n "$ENV_NAME" -c conda-forge "numpy<2" "scipy<1.12"
+
 
     # Health checks
     log "Running smoke checks"

@@ -62,6 +62,8 @@ for version in $TARGET_VERSIONS; do
   # -----------------------------
   # MODEL EDIT AREA: repo-specific tweaks (optional)
   # -----------------------------
+  log "Installing test dependencies"
+  micromamba run -n "$ENV_NAME" python -m pip install pytest-cov boto3 s3fs numpydoc
   # Examples (uncomment if needed for this repo):
   # log "Updating submodules"
   # git -C "$REPO_ROOT" submodule update --init --recursive

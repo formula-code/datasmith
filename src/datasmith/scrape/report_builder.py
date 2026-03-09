@@ -368,6 +368,8 @@ class ReportBuilder:
             issues_rendered = anonymize_github_issue(issues_rendered)
 
         # Reject PRs with no referenced issues and no body content
+        # AND = less strict: only reject if both are missing
+        # OR. = more strict: reject if either is missing
         if (not issues_sorted) or (not (pr_body or "").strip()):
             return ReportResult(
                 final_md="NOT_A_VALID_PR",

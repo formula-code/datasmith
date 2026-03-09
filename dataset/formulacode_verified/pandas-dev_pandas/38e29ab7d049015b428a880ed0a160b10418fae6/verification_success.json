@@ -1,7 +1,0 @@
-{
-  "ok": true,
-  "stdout": "(timeout after 30s; treated as success)",
-  "stderr": "+ cd /workspace/repo\n+ set +ux\n+ '[' 0 -gt 0 ']'\n+ '[' -n 38\n... [truncated] ...\n\n - pytest==8.4.2\n + pytest==9.0.1\n+ python formulacode_testrunner.py --all --base 38e29ab7d049015b428a880ed0a160b10418fae6 --extra-args '-p jinja_patch_plugin_pandas'\n",
-  "duration_s": 35.46453404426575,
-  "suite_name": "NOT USED"
-}

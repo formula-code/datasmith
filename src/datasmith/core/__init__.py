@@ -6,5 +6,6 @@ __all__ = [
     "file_utils",
     "git",
     "models",
+    "storage",
     "text_utils",
 ]

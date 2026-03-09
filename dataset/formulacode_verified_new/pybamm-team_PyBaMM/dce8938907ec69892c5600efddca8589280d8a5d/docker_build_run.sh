@@ -107,6 +107,19 @@ lock_repo_to_current_commit
 # install some band-aid packages
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade jinja2 || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade pytest || true
+if ! micromamba run -n "$ENV_NAME" python - <<'PY'
+import importlib.metadata as m
+m.version("pytest-subtests")
+PY
+then
+  micromamba run -n "$ENV_NAME" python -m pip install "pytest-subtests==0.14.1"
+fi
+
+if [ ! -f tox.ini ]; then
+  cat > tox.ini <<'EOF'
+[pytest]
+EOF
+fi
 
 
 # Persist env variables for future shells and auto-activate

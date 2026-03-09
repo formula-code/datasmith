@@ -10,7 +10,34 @@ ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
 version=$(echo $ASV_PY_VERSIONS | awk '{print $1}')
 ENV_NAME="asv_${version}"
+
+# Avoid incompatible optional deps from env_payload; let tests skip if missing.
+micromamba remove -n "$ENV_NAME" -y scipy pyarrow || true
+
+# Ensure tox.ini exists because run_tests passes "-c tox.ini".
+if [[ ! -f "$REPO_ROOT/tox.ini" ]]; then
+  printf "[pytest]\n" > "$REPO_ROOT/tox.ini"
+fi
+
 CONF_NAME=$(find . -type f -name "asv.*.json" | head -n 1)
+
+# Ensure conda-provided libstdc++ is preferred to avoid ABI mismatches at runtime.
+ENV_PREFIX="/opt/conda/envs/${ENV_NAME}"
+if [[ -d "${ENV_PREFIX}/lib" ]]; then
+  cat >>/etc/profile.d/asv_build_vars.sh <<EOF
+export LD_LIBRARY_PATH="${ENV_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+EOF
+
+# Avoid nounset failures in conda deactivate scripts.
+cat >>/etc/profile.d/asv_build_vars.sh <<'EOF'
+export CONDA_BACKUP_CXX="${CONDA_BACKUP_CXX-}"
+export CONDA_BACKUP_CXX_FOR_BUILD="${CONDA_BACKUP_CXX_FOR_BUILD-}"
+export CONDA_BACKUP_GXX="${CONDA_BACKUP_GXX-}"
+export CONDA_BACKUP_CXXFLAGS="${CONDA_BACKUP_CXXFLAGS-}"
+export CONDA_BACKUP_DEBUG_CXXFLAGS="${CONDA_BACKUP_DEBUG_CXXFLAGS-}"
+EOF
+fi
+
 
 
 [ -f docker_build_pkg.sh ] && rm docker_build_pkg.sh

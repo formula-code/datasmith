@@ -40,6 +40,8 @@ for version in $TARGET_VERSIONS; do
         "ninja" \
         "cython>=0.29.33,<3" \
         "numpy>=1.21.6" \
+        libstdcxx-ng \
+        libgcc-ng \
         "python-dateutil>=2.8.2" \
         "pytz>=2020.1" \
         "versioneer[toml]" \

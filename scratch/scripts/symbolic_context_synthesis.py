@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from datasmith.core.models import Task
+from datasmith.core.storage import read_table, resolve_table_name
 from datasmith.docker.context import ContextRegistry
 from datasmith.docker.orchestrator import get_docker_client
 from datasmith.execution.resolution import analyze_commit
@@ -78,12 +79,13 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the context registry JSON file.",
     )
+    parser.add_argument("--db", type=str, default=None, help="Pipeline SQLite DB path.")
     return parser.parse_args()
 
 
 def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], list[tuple[str, float, str]]]:
-    """Load commits from parquet file."""
-    commits = pd.read_parquet(args.commits)
+    """Load commits from DB table (or parquet file)."""
+    commits = read_table(resolve_table_name(str(args.commits)), db_path=args.db)
     all_states = {}
 
     for _, row in commits.iterrows():

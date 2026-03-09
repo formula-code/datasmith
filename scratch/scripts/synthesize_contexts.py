@@ -11,6 +11,7 @@ import asv
 import pandas as pd
 
 from datasmith.agents.config import configure_agent_backends
+from datasmith.core.storage import read_table, resolve_table_name
 from datasmith.agents.context_synthesis import agent_build_and_validate
 from datasmith.benchmark.collection import BenchmarkCollection
 from datasmith.core.models import Task
@@ -90,11 +91,6 @@ def parse_args() -> argparse.Namespace:
         help="Path to the context registry JSON file.",
     )
     parser.add_argument(
-        "--push-to-ecr",
-        action="store_true",
-        help="Whether to push built images to AWS ECR.",
-    )
-    parser.add_argument(
         "--push-to-dockerhub",
         action="store_true",
         help="Whether to push built images to Docker Hub.",
@@ -114,6 +110,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only run the final validation step (no intermediate builds).",
     )
+    parser.add_argument("--db", type=str, default=None, help="Pipeline SQLite DB path.")
     return parser.parse_args()
 
 
@@ -132,9 +129,10 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
             else:
                 all_states[(owner, repo)].add((sha, date_unit, env_payload))
     elif args.commits:
-        commits = (
-            pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
-        )
+        if args.commits.suffix == ".jsonl":
+            commits = pd.read_json(args.commits, lines=True)
+        else:
+            commits = read_table(resolve_table_name(str(args.commits)), db_path=args.db)
         all_states = {}
         for _, row in commits.iterrows():
             repo_name = row["repo_name"]

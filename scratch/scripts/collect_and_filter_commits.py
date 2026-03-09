@@ -11,6 +11,7 @@ import pandas as pd
 from git import Repo
 from tqdm.auto import tqdm
 
+from datasmith.core.storage import resolve_table_name, write_table
 from datasmith.execution.collect_commits import collect_merge_shas
 from datasmith.execution.utils import _get_commit_info_offline, clone_repo, find_file_in_tree, has_core_file
 from datasmith.logging_config import configure_logging
@@ -49,6 +50,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Only include PRs merged before this date (ISO format, e.g. 2025-02-01).",
     )
+    p.add_argument("--db", type=str, default=None, help="Pipeline SQLite DB path.")
     return p.parse_args()
 
 
@@ -144,12 +146,10 @@ def main() -> None:
     commits_merged = pd.concat([commits_merged, pr_expanded.add_prefix("pr_")], axis=1)
 
     out_path = Path(args.output_pth)
-    if not out_path.parent.exists():
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-    # save as a parquet file
-    commits_merged.to_parquet(out_path, index=False)
+    table_name = resolve_table_name(str(out_path))
+    write_table(commits_merged, table_name, db_path=args.db)
 
-    logger.info("[DONE] Wrote %s rows -> %s", len(commits_merged), out_path)
+    logger.info("[DONE] Wrote %s rows -> table %s", len(commits_merged), table_name)
 
 
 if __name__ == "__main__":

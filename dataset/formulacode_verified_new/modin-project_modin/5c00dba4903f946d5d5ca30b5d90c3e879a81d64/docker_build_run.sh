@@ -104,6 +104,20 @@ HEAD_SHA="$(git rev-parse --verify HEAD)"
 
 lock_repo_to_current_commit
 
+# Persist pytest defaults after resetting the repo state.
+if [ -f setup.cfg ]; then
+  if ! grep -q -- "--import-mode=importlib" setup.cfg; then
+    sed -i 's/^addopts = \(.*\)$/addopts = \1 --import-mode=importlib/' setup.cfg
+  fi
+  if ! grep -q -- "--ignore=asv_bench/test" setup.cfg; then
+    sed -i 's/^addopts = \(.*\)$/addopts = \1 --ignore=asv_bench\/test/' setup.cfg
+  fi
+  addopts=$(sed -n 's/^addopts = //p' setup.cfg | head -n 1)
+  if [ -n "$addopts" ]; then
+    printf "[pytest]\naddopts = %s\n" "$addopts" > tox.ini
+  fi
+fi
+
 # install some band-aid packages
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade jinja2 || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade pytest || true

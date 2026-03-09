@@ -21,7 +21,6 @@ from docker.errors import APIError, DockerException, ImageNotFound
 from datasmith.core.models.build import BuildResult
 from datasmith.core.models.task import Task
 from datasmith.docker.dockerhub import publish_images_to_dockerhub
-from datasmith.docker.ecr import publish_images_to_ecr
 from datasmith.docker.s3_cache_manager import S3DockerCacheManager
 from datasmith.execution.utils import _get_commit_info
 from datasmith.logging_config import get_logger
@@ -793,98 +792,6 @@ class DockerContext:
                     logger.exception("Failed to delete image '%s' after build.", image_name)
                 except Exception:
                     logger.exception("Unexpected error deleting image '%s' after build.", image_name)
-
-    def build_and_publish_to_ecr(
-        self,
-        client: docker.DockerClient,
-        task: Task,
-        region: str,
-        *,
-        repository_mode: str = "single",  # "single" or "mirror"
-        single_repo: str = "formulacode/all",
-        ecr_repo_prefix: str | None = None,
-        skip_existing: bool = True,
-        parallelism: int = 1,
-        force: bool = False,
-        run_labels: dict[str, str] | None = None,
-        timeout_s: float = 15 * 60,
-        tail_chars: int = 10_000,
-        pull: bool = False,
-        use_buildx: bool | None = None,
-        boto3_session: Any = None,
-    ) -> tuple[BuildResult, dict[str, str]]:
-        """
-        Build the Docker image for ``task`` and publish it to AWS ECR.
-
-        Returns (BuildResult, {local_ref: ecr_ref}). If the build fails, the push step
-        is skipped and the mapping is empty.
-        """
-        if task.sha is None and task.tag in {"pkg", "run"}:
-            raise ValueError("Task.sha must be set for building package/run images")
-
-        image_name = task.get_image_name()
-        repo_url = f"https://www.github.com/{task.owner}/{task.repo}"
-        build_args: dict[str, str] = {"REPO_URL": repo_url}
-        if task.sha is not None:
-            build_args["COMMIT_SHA"] = task.sha
-        if getattr(task, "env_payload", ""):
-            build_args["ENV_PAYLOAD"] = task.env_payload
-        if getattr(task, "python_version", ""):
-            build_args["PY_VERSION"] = task.python_version
-        if getattr(task, "benchmarks", ""):
-            build_args["BENCHMARKS"] = task.benchmarks
-
-        if run_labels is None:
-            run_labels = {
-                "datasmith.task": f"{task.owner}/{task.repo}",
-                "datasmith.sha": task.sha or "unknown",
-                "datasmith.run": "publish",
-            }
-
-        logger.info("Building image %s for ECR publish", image_name)
-        build_res = self.build_container_streaming(
-            client=client,
-            image_name=image_name,
-            build_args=build_args,
-            run_labels=run_labels,
-            probe=False,
-            force=force,
-            delete_img=False,
-            timeout_s=timeout_s,
-            tail_chars=tail_chars,
-            pull=pull,
-            s3_cache_config=None,
-            use_buildx=use_buildx,
-        )
-
-        if not build_res.ok:
-            logger.error(
-                "Build failed for %s (rc=%s); skipping ECR publish.",
-                image_name,
-                build_res.rc,
-            )
-            return build_res, {}
-
-        logger.info("Build succeeded for %s; publishing to ECR (region=%s)", image_name, region)
-        push_results = publish_images_to_ecr(
-            local_refs=[image_name],
-            region=region,
-            repository_mode=repository_mode,
-            single_repo=single_repo,
-            ecr_repo_prefix=ecr_repo_prefix,
-            skip_existing=skip_existing,
-            verbose=True,
-            parallelism=parallelism,
-            boto3_session=boto3_session,
-            docker_client=client,
-        )
-
-        if image_name in push_results:
-            logger.info("Published %s to %s", image_name, push_results[image_name])
-        else:
-            logger.warning("ECR publish did not return mapping for %s", image_name)
-
-        return build_res, push_results
 
     def build_and_publish_to_dockerhub(
         self,

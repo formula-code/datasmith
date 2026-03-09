@@ -38,13 +38,13 @@ DSPY_URL=http://localhost:30000/v1
 DSPY_API_KEY=local
 DSPY_TEMPERATURE=0.7
 
+# Pipeline artifact DB (SQLite, replaces per-step parquet files)
+PIPELINE_DB=scratch/artifacts/pipeflush.db
+
 # For DockerHub publishing (dataset verification)
 DOCKERHUB_NAMESPACE=formulacode          # Required for dataset verification
 DOCKERHUB_USERNAME=myuser                # Required for dataset verification
 DOCKERHUB_TOKEN=dckr_pat_xxxxx          # Required for dataset verification
-
-# For ECR access (legacy/optional)
-AWS_REGION=us-east-1
 
 # Depends on the system.
 #DOCKER_USE_BUILDX=0
@@ -109,6 +109,7 @@ The general layout of the artifacts is as follows:
 ```bash
 scratch/artifacts
 ├── cache.db                    # See `CACHE_LOCATION` env var
+├── pipeflush.db                    # Pipeline DB, see `PIPELINE_DB` env var
 ├── raw/                        # Raw downloads & lists produced by scripts
 │   ├── downloads/              # Per‑repo dashboard archives
 │   ├── online_dashboards.jsonl # Updated config for dashboard scraper
@@ -169,7 +170,7 @@ sequenceDiagram
     participant C3 as prepare_commits_for_building_reports.py
     participant C4 as collect_perf_commits.py
     participant C5 as synthesize_contexts.py
-    participant C6 as build_and_publish_to_ecr.py
+    participant C6 as build_and_publish_to_dockerhub.py
     participant CSV as repos_valid.csv
     participant GH as github or offline store
     participant TMP as temp repo dir
@@ -179,7 +180,7 @@ sequenceDiagram
     participant SQL as sqlite cache
     participant CR as context registry
     participant DOCK as docker build
-    participant ECR as aws ecr
+    participant DH as docker hub
 
     %% Orchestrator setup (grey)
     rect rgb(230,230,230)
@@ -243,7 +244,7 @@ sequenceDiagram
         C5->>CR: update context_registry json
     end
 
-    %% Step 6 build_and_publish_to_ecr.py (teal)
+    %% Step 6 build_and_publish_to_dockerhub.py (teal)
     rect rgb(210,245,245)
         U->>C6: step 6 build and publish
         C6->>FS: read perf only parquet
@@ -251,11 +252,11 @@ sequenceDiagram
         C6->>DOCK: build base image
         DOCK->>C6: base image built
         C6->>C6: prepare task list for recent package images
-        C6->>ECR: optional filter tasks not on ecr
-        ECR->>C6: list of existing images
+        C6->>DH: optional filter tasks not on dockerhub
+        DH->>C6: list of existing images
         C6->>DOCK: build using docker validator
         DOCK->>C6: built images
-        C6->>ECR: publish images to aws ecr
+        C6->>DH: publish images to docker hub
     end
 ```
 
@@ -327,21 +328,9 @@ $ python scratch/scripts/synthesize_contexts.py \
        --push-to-dockerhub
 ```
 
-### 4. Upload to AWS ECR
+### 4. Upload to DockerHub
 
-We rebuild the Docker images from scratch and then upload them to AWS ECR for later use.
-
-```bash
-$ python scratch/scripts/build_and_publish_to_ecr.py \
-       --commits scratch/artifacts/processed/perfonly_commits_with_patch_final.parquet \
-       --context-registry scratch/artifacts/pipeflush/context_registry.json \
-       --max-workers 5 \
-       --skip-existing
-```
-
-### 4b. Alternative: Upload to DockerHub
-
-As an alternative to AWS ECR, you can publish Docker images to DockerHub for easier public sharing and distribution.
+We rebuild the Docker images from scratch and then upload them to DockerHub for later use and distribution.
 
 #### Setup
 
@@ -394,7 +383,7 @@ $ python scratch/scripts/build_and_publish_to_dockerhub.py \
 - **Public Visibility**: New DockerHub repositories default to PUBLIC. Change to private manually on DockerHub if needed.
 - **Rate Limits**: DockerHub free tier has rate limits. The script handles this with exponential backoff, but consider a paid plan for high-volume publishing.
 - **Organization Repositories**: For organization namespaces, repositories may need to be manually created on DockerHub before first push.
-- **Push Concurrency**: Default push concurrency is lower for DockerHub (8) vs ECR (12) to avoid rate limiting.
+- **Push Concurrency**: Default push concurrency is conservative to avoid rate limiting.
 
 #### Environment Variables
 
@@ -406,7 +395,7 @@ DOCKERHUB_TOKEN=dckr_pat_xxxxx          # Required
 DOCKERHUB_RATE_LIMIT_WAIT=60            # Optional: seconds to wait on rate limit (default: 60)
 DOCKERHUB_SINGLE_REPO=all               # Optional: repo name for single mode (default: all)
 
-# Build settings (shared with ECR)
+# Build settings
 BUILD_CONCURRENCY=24                     # Max parallel builds
 PUSH_CONCURRENCY=8                      # Max parallel pushes (lower for DockerHub)
 DOCKER_USE_BUILDX=0                     # Use Docker BuildKit

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from datasmith.core.storage import read_table, resolve_table_name, table_exists, write_table
 from datasmith.logging_config import configure_logging
 
 logger = configure_logging()
@@ -40,6 +41,7 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Log merge details without writing the master parquet file.",
     )
+    p.add_argument("--db", type=str, default=None, help="Pipeline SQLite DB path.")
     return p.parse_args()
 
 
@@ -56,21 +58,25 @@ def _parse_dedupe_columns(raw: str) -> list[str]:
 
 
 def main(args: argparse.Namespace) -> int:
-    new_path = args.new_perfonly
-    if not new_path.exists():
-        logger.error("Perfonly parquet not found: %s", new_path)
-        return 1
-
-    master_path = args.master or new_path.parent / "perfonly_commits_master.parquet"
+    new_table = resolve_table_name(str(args.new_perfonly))
+    master_table = (
+        resolve_table_name(str(args.master))
+        if args.master
+        else "perfonly_commits_master"
+    )
     dedupe_columns = _parse_dedupe_columns(args.dedupe_columns)
     if not dedupe_columns:
         logger.error("No de-duplication columns provided.")
         return 1
 
-    new_df = pd.read_parquet(new_path)
+    if not table_exists(new_table, db_path=args.db):
+        logger.error("Perfonly table not found: %s", new_table)
+        return 1
 
-    if master_path.exists():
-        master_df = pd.read_parquet(master_path)
+    new_df = read_table(new_table, db_path=args.db)
+
+    if table_exists(master_table, db_path=args.db):
+        master_df = read_table(master_table, db_path=args.db)
         columns = _merge_columns(list(master_df.columns), list(new_df.columns))
         # Align column sets before concatenation.
         master_df = master_df.reindex(columns=columns)
@@ -90,8 +96,8 @@ def main(args: argparse.Namespace) -> int:
     combined = combined.drop_duplicates(subset=dedupe_columns, keep="last").reset_index(drop=True)
     after = len(combined)
 
-    logger.info("New perfonly file: %s", new_path)
-    logger.info("Master parquet: %s", master_path)
+    logger.info("New perfonly table: %s", new_table)
+    logger.info("Master table: %s", master_table)
     logger.info("Existing master rows: %d", existing_rows)
     logger.info("Combined rows before de-duplication: %d", before)
     logger.info("Combined rows after de-duplication: %d", after)
@@ -100,10 +106,8 @@ def main(args: argparse.Namespace) -> int:
         logger.info("Dry run enabled: skipping write.")
         return 0
 
-    tmp_path = master_path.with_suffix(".tmp.parquet")
-    combined.to_parquet(tmp_path, index=False)
-    tmp_path.replace(master_path)
-    logger.info("Wrote master parquet to %s", master_path)
+    write_table(combined, master_table, db_path=args.db, if_exists="replace")
+    logger.info("Wrote master table %s", master_table)
     return 0
 
 

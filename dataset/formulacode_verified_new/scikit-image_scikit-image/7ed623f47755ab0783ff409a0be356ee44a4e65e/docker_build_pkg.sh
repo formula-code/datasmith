@@ -52,13 +52,31 @@ for version in $TARGET_VERSIONS; do
         gast beniget
 
   # Regular (non‑editable) install using the pinned build environment.
-  log "Installing scikit-image (non‑editable) with --no-build-isolation"
+  log "Installing scikit-image (non-editable) with --no-build-isolation"
   if ! PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" \
         python -m pip install --no-build-isolation -v "$REPO_ROOT"$EXTRAS; then
       warn "Installation with extras failed; retrying without extras"
       PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" \
         python -m pip install --no-build-isolation -v "$REPO_ROOT"
   fi
+
+  log "Syncing compiled extensions into the source tree for in-repo imports"
+  micromamba run -n "$ENV_NAME" python - <<'PY'
+import pathlib
+import shutil
+import sysconfig
+
+site = pathlib.Path(sysconfig.get_paths()["purelib"])
+pkg = site / "skimage"
+repo = pathlib.Path("skimage")
+
+if pkg.is_dir():
+    for so_path in pkg.rglob("*.so"):
+        rel = so_path.relative_to(pkg)
+        dest = repo / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(so_path, dest)
+PY
 
   # Run smoke checks (import and optional pytest discovery)
   log "Running smoke checks"

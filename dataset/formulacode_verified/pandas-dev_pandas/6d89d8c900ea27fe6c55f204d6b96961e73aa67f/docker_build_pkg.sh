@@ -70,7 +70,11 @@ for version in $TARGET_VERSIONS; do
 
   # Editable install with proper build isolation
   log "Editable install"
-  micromamba run -n "$ENV_NAME" python -m pip install -v -e "$REPO_ROOT"$EXTRAS
+  micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS
+    # Ensure NumPy/SciPy ABI consistency for downstream test imports.
+    micromamba remove -y -n "$ENV_NAME" numpy scipy || true
+    micromamba install -y -n "$ENV_NAME" -c conda-forge "numpy<2" "scipy<1.12"
+
 
   # Health checks
   log "Running smoke checks"

@@ -1,0 +1,12 @@
+# Codex CLI config for local vLLM gpt-oss-20b on port 30002.
+[model_providers.vllm]
+name = "vllm"
+base_url = "http://0.0.0.0:30002/v1"
+env_key = "none"
+stream_idle_timeout_ms = 10000000
+
+[profiles.oss20b]
+model_provider = "vllm"
+model = "gpt-oss-20b"
+model_context_window = 32000
+web_search = "disabled"

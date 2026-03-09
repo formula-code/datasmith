@@ -17,6 +17,10 @@ eval "$(micromamba shell hook --shell=bash)"
 micromamba activate "$ENV_NAME" || true
 set -ux
 
+# Avoid incompatible optional deps from env_payload; let tests skip if missing.
+micromamba remove -n "$ENV_NAME" -y scipy pyarrow || true
+
+
 
 
 # if argument is given, set FORMULACODE_BASE_COMMIT to that argument
@@ -761,7 +765,9 @@ if __name__ == "__main__":
 
     if _no_tests_collected(output["results"]):
         base_plugins = _extract_plugin_tokens(args.extra_args)
-        numpy_flags = ["--import-mode=importlib", "--ignore=build", "--ignore=tools/ci", "-c", "tox.ini"]
+        numpy_flags = ["--import-mode=importlib", "--ignore=build", "--ignore=tools/ci"]
+        if os.path.exists(os.path.join(repo_root, "tox.ini")):
+            numpy_flags += ["-c", "tox.ini"]
         args.extra_args = " ".join(base_plugins + numpy_flags)
         output = main(args)
 

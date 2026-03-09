@@ -33,6 +33,8 @@ for version in $TARGET_VERSIONS; do
   # Clean environment and install Python
   micromamba install -y -n "$ENV_NAME" -c conda-forge \
     python="${version}" \
+    libstdcxx-ng \
+    libgcc-ng \
     pip git
 
   # Install numpy first to ensure proper version

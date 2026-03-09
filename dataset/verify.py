@@ -4,9 +4,10 @@ import argparse
 import json
 import logging
 import os
+import multiprocessing
+import threading
 from pathlib import Path
 
-import asv
 import tiktoken
 
 from datasmith.core.models import Task
@@ -19,6 +20,22 @@ from datasmith.notebooks.utils import update_cr
 encoder = tiktoken.get_encoding("cl100k_base")
 logger = configure_logging(level=20, stream=open(Path(__file__).with_suffix(".log"), "a", encoding="utf-8"))  # noqa: SIM115
 
+from threading import Lock
+
+write_lock = Lock()
+
+
+def _patch_multiprocessing_lock() -> None:
+    try:
+        multiprocessing.Lock()
+    except PermissionError:
+        # Fall back to a threading lock when semaphores are unavailable.
+        multiprocessing.Lock = threading.Lock  # type: ignore[assignment]
+
+
+_patch_multiprocessing_lock()
+
+import asv
 
 def load(task_dir: Path) -> tuple[Task, DockerContext]:
     """Load a Task and DockerContext from a local, user-editable directory."""
@@ -254,6 +271,26 @@ def verify_task_with_context(
     return dockerhub_ref
 
 
+def is_failure(task_dir: Path) -> bool:
+    # check if failure.json exists in the task directory
+    # if verification_success.json also exists, and the modification time is later than failure.json, return False
+    failure_path = task_dir / "failure.json"
+    success_path = task_dir / "verification_success.json"
+    if not failure_path.exists():
+        return False
+    return not (success_path.exists() and success_path.stat().st_mtime > failure_path.stat().st_mtime)
+
+
+def get_sha(success_info: dict) -> str:
+    dockerhub_image = success_info.get("dockerhub_image", "")
+    # docker.io/formulacode/all:mie-lab-trackintel-963fb9e28f5679ad87c98373c7c3d86ce6a49880--final
+    # to 963fb9e28f5679ad87c98373c7c3d86ce6a49880
+    if "--final" in dockerhub_image:
+        sha_part = dockerhub_image.split("--final")[0]
+        sha = sha_part.split("-")[-1]
+        return sha
+    return ""
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=Path, required=True, help="Path to the task directory")
@@ -272,11 +309,13 @@ def main() -> None:
 
     logger = configure_logging()
 
-    if args.task.name == "formulacode_verified" or (args.task.parent.name == "formulacode_verified"):
-        globbed = args.task.rglob("*/*") if args.task.name == "formulacode_verified" else args.task.glob("*")
+    if args.task.name.startswith("formulacode_verified") or (args.task.parent.name.startswith("formulacode_verified")):
+        globbed = args.task.rglob("*/*") if args.task.name.startswith("formulacode_verified") else args.task.glob("*")
         tasks = [d for d in globbed if d.is_dir() and (not d.name.startswith(".")) and ("cache" not in str(d))]
         all_successes = []
         success_pth = args.task.parent / "all_verification_successes.jsonl"
+        all_successful_shas = {get_sha(json.loads(line)) for line in success_pth.read_text().splitlines()} if success_pth.exists() else set()
+
         from concurrent.futures import ThreadPoolExecutor
 
         # Pre-load all tasks to track them in exception handling
@@ -288,12 +327,13 @@ def main() -> None:
                 task, context = load(task_dir)
                 # load the task_dir / failure.json file if it exists, and see the exit code is == 124
                 failure_path = task_dir / "failure.json"
-                if not failure_path.exists():
+                if is_failure(task_dir):
                     continue
-                else:
-                    failure_info = json.loads(failure_path.read_text())
-                    if failure_info.get("return_code") != 124:
-                        continue
+
+                # if task.sha in all_successful_shas, skip
+                if task.sha in all_successful_shas:
+                    logger.info(f"Skipping already successful task {task.sha} in {task_dir}")
+                    continue
 
                 task_map[task_dir] = task
                 future = executor.submit(
@@ -329,7 +369,7 @@ def main() -> None:
                         "dockerhub_image": dockerhub_ref,
                     }
                     all_successes.append(success_info)
-                    with success_pth.open("a", encoding="utf-8") as f:
+                    with write_lock, success_pth.open("a", encoding="utf-8") as f:
                         f.write(json.dumps(success_info) + "\n")
 
                 except Exception as exc:

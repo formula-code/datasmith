@@ -17,6 +17,12 @@ if [[ -z "${TARGET_VERSIONS}" ]]; then
 fi
 ###### END SETUP CODE ######
 
+cat > tox.ini <<'EOF'
+[pytest]
+addopts =
+testpaths = xarray tests
+EOF
+
 # -----------------------------
 # Agent guidance (read-first)
 # -----------------------------

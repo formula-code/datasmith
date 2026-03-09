@@ -39,6 +39,8 @@ for version in $TARGET_VERSIONS; do
     python="${version}" \
     pip \
     git \
+    "libstdcxx-ng>=12" \
+    "libgcc-ng>=12" \
     "meson==1.2.1" \
     "meson-python==0.13.1" \
     "Cython==3.0.5" \
@@ -52,6 +54,9 @@ for version in $TARGET_VERSIONS; do
     compilers \
     pytest \
     "versioneer[toml]"
+
+  log "Pinning pyarrow to 14.0.2 for pandas compatibility"
+  micromamba run -n "$ENV_NAME" python -m pip install --upgrade --force-reinstall --no-deps "pyarrow==14.0.2"
 
   # Install test dependencies
   log "Installing test dependencies"

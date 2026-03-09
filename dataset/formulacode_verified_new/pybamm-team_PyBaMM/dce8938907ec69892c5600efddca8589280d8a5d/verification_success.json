@@ -1,0 +1,4 @@
+{
+  "local_image": "pybamm-team-pybamm-dce8938907ec69892c5600efddca8589280d8a5d:final",
+  "dockerhub_image": "docker.io/formulacode/all:pybamm-team-pybamm-dce8938907ec69892c5600efddca8589280d8a5d--final"
+}

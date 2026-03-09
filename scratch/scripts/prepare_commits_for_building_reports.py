@@ -11,6 +11,7 @@ import tiktoken
 from tqdm.auto import tqdm
 
 from datasmith import setup_environment
+from datasmith.core.storage import read_table, resolve_table_name, write_table
 from datasmith.execution.filter_commits import crude_perf_filter
 from datasmith.execution.resolution import analyze_commit
 from datasmith.logging_config import configure_logging
@@ -108,13 +109,14 @@ def main():
         default=False,
         help="Only perform the filtering step and save the filtered parquet; skip analysis and patch fetching.",
     )
+    parser.add_argument("--db", type=str, default=None, help="Pipeline SQLite DB path.")
     args = parser.parse_args()
 
     # Initialize project env (matches the notebook's setup_environment() call)
     setup_environment()
 
     # Load commits
-    commit_df = pd.read_parquet(args.input)
+    commit_df = read_table(resolve_table_name(str(args.input)), db_path=args.db)
 
     # Drop commits with missing patch before further work
     commit_df = commit_df.dropna(subset=["patch"])  # downstream assumes patch exists
@@ -131,10 +133,9 @@ def main():
     logger.info(f"[filter] pre-filter shape: {commit_df.shape}")
     filtered_df = crude_perf_filter(commit_df, filter_repos=args.filter_repos)
     logger.info(f"[filter] post-filter shape: {filtered_df.shape}")
-    filtered_df_path = args.input.parent / f"{args.input.stem}_2.parquet"
-    filtered_df_path.parent.mkdir(parents=True, exist_ok=True)
-    filtered_df.to_parquet(filtered_df_path, index=False)
-    logger.info(f"[save] Saved filtered DataFrame to {filtered_df_path}")
+    filtered_table = resolve_table_name(str(args.input)) + "_2"
+    write_table(filtered_df, filtered_table, db_path=args.db)
+    logger.info(f"[save] Saved filtered DataFrame to table {filtered_table}")
 
     if args.only_filter:
         logger.info("Exiting after filtering step as --only-filter was specified.")
@@ -208,10 +209,10 @@ def main():
     ]
     filtered_extended_df = filtered_extended_df.drop(columns=to_drop, errors="ignore")
 
-    # Save parquet
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    filtered_extended_df.to_parquet(args.output, index=False)
-    logger.info(f"[save] Saved to {args.output} | final shape: {filtered_extended_df.shape}")
+    # Save to DB table
+    out_table = resolve_table_name(str(args.output))
+    write_table(filtered_extended_df, out_table, db_path=args.db)
+    logger.info(f"[save] Saved to table {out_table} | final shape: {filtered_extended_df.shape}")
 
 
 if __name__ == "__main__":

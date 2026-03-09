@@ -12,6 +12,41 @@ TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
 EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
 ###### END SETUP CODE ######
 
+# 3) Patch the module-level pytest.skip in tests/backends/test_mcbackend.py
+#    to include allow_module_level=True (so it skips instead of erroring at collection time)
+python - <<'PY'
+from pathlib import Path
+
+path = Path("tests/backends/test_mcbackend.py")
+txt = path.read_text(encoding="utf-8")
+
+needle = "pytest.skip("
+i = txt.find(needle)
+if i == -1:
+    raise SystemExit(f"ERROR: couldn't find {needle!r} in {path}")
+
+# find the matching closing paren for this call (simple paren counter)
+j = i + len(needle)
+depth = 1
+while j < len(txt) and depth:
+    c = txt[j]
+    if c == "(":
+        depth += 1
+    elif c == ")":
+        depth -= 1
+    j += 1
+
+call = txt[i:j]
+if "allow_module_level" not in call:
+    # insert ", allow_module_level=True" before the closing ')'
+    new_call = call[:-1] + ", allow_module_level=True" + call[-1:]
+    txt = txt[:i] + new_call + txt[j:]
+    path.write_text(txt, encoding="utf-8")
+    print(f"Patched: {path} (added allow_module_level=True)")
+else:
+    print(f"No change: {path} (allow_module_level already present)")
+PY
+
 # -----------------------------
 # Agent guidance (read-first)
 # -----------------------------

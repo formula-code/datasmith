@@ -38,6 +38,8 @@ for version in $TARGET_VERSIONS; do
         "setuptools>=61.0.0" \
         "cython>=0.29.32,<3" \
         "numpy>=1.21.0,<2.0.0" \
+        libstdcxx-ng \
+        libgcc-ng \
         "python-dateutil>=2.8.2" \
         "pytz>=2020.1" \
         "versioneer[toml]" \

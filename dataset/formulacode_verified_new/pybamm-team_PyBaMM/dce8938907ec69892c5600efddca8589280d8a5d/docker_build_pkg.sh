@@ -51,15 +51,20 @@ for version in $TARGET_VERSIONS; do
   # Install build/runtime dependencies, including the missing 'editables' package
   micromamba install -y -n "$ENV_NAME" -c conda-forge \
     pip git conda mamba "libmambapy<=1.9.9" \
-    numpy scipy cython joblib fakeredis threadpoolctl pytest \
+    cython joblib fakeredis threadpoolctl pytest \
     compilers meson-python cmake ninja pkg-config tomli \
     "hatchling>=1.13.0" "hatch-vcs>=0.3.0" editables \
     "casadi==3.6.7" "xarray>=2022.6.0" "anytree>=2.8.0" \
     "sympy>=1.12" "typing-extensions>=4.10.0" "pandas>=1.5.0" \
     "pooch>=1.8.1" pyyaml platformdirs
 
+  # Work around scipy 1.15.2 binary mismatch on py3.12 during smoke import.
+  micromamba run -n "$ENV_NAME" python -m pip install --force-reinstall --no-deps \
+    "numpy==1.26.4" "scipy==1.14.1"
+
   # Install pybammsolvers from pip since it's not in conda-forge
   micromamba run -n "$ENV_NAME" pip install pybammsolvers
+  micromamba run -n "$ENV_NAME" python -m pip install "pytest-subtests==0.14.1"
 
   # Editable install with no build isolation since we installed all dependencies
   log "Editable install with --no-build-isolation"

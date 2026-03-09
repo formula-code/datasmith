@@ -104,6 +104,12 @@ HEAD_SHA="$(git rev-parse --verify HEAD)"
 
 lock_repo_to_current_commit
 
+if [[ ! -f "$REPO_ROOT/tox.ini" ]]; then
+  cat > "$REPO_ROOT/tox.ini" <<'EOF'
+[pytest]
+EOF
+fi
+
 # install some band-aid packages
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade jinja2 || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade pytest || true

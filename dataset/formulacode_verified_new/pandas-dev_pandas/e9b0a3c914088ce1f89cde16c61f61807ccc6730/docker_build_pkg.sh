@@ -56,13 +56,13 @@ for version in $TARGET_VERSIONS; do
   # Build and install
   log "Building pandas with meson-python"
   cd "$REPO_ROOT"
-
+  
   # Clean any previous builds
   rm -rf build/ dist/
-
+  
   # Install build dependencies first
   micromamba run -n "$ENV_NAME" python -m pip install --no-deps "versioneer[toml]"
-
+  
   # Build and install using meson-python
   micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e .
 

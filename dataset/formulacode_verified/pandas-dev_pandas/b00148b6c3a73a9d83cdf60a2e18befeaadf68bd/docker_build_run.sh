@@ -10,6 +10,10 @@ ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
 version=$(echo $ASV_PY_VERSIONS | awk '{print $1}')
 ENV_NAME="asv_${version}"
+# Prefer env libstdc++ over host system libs to satisfy CXXABI requirements.
+export LD_LIBRARY_PATH="/opt/conda/envs/${ENV_NAME}/lib:${LD_LIBRARY_PATH:-}"
+micromamba install -y -n "$ENV_NAME" -c conda-forge libstdcxx-ng libgcc-ng
+
 CONF_NAME=$(find . -type f -name "asv.*.json" | head -n 1)
 
 
@@ -141,6 +145,7 @@ export ROOT_PATH=$ROOT_PATH
 export REPO_ROOT=$REPO_ROOT
 export ASV_PY_VERSIONS="$ASV_PY_VERSIONS"
 export HEAD_SHA=$HEAD_SHA
+export LD_LIBRARY_PATH="/opt/conda/envs/$ENV_NAME/lib:${LD_LIBRARY_PATH:-}"
 EOF
 
 

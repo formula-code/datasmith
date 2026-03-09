@@ -1,0 +1,4 @@
+{
+  "local_image": "modin-project-modin-ec01139bc0b8534ec89e6dcd27df9126905a9ada:final",
+  "dockerhub_image": "docker.io/formulacode/all:modin-project-modin-ec01139bc0b8534ec89e6dcd27df9126905a9ada--final"
+}

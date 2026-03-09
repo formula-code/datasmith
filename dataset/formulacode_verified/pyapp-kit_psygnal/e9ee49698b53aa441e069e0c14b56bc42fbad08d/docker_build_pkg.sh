@@ -47,7 +47,7 @@ for version in $TARGET_VERSIONS; do
 
     # Install the package in development mode
     log "Installing package in development mode..."
-    micromamba run -n "$ENV_NAME" pip install -e "$REPO_ROOT"$EXTRAS
+    micromamba run -n "$ENV_NAME" pip install --no-build-isolation -e "$REPO_ROOT"$EXTRAS
 
     # Run basic import test
     log "Testing import..."

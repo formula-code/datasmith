@@ -17,7 +17,7 @@ from datasmith.docker.dockerhub import (
 
 
 class TestDockerHubTagEncoding:
-    """Test tag encoding for DockerHub (same logic as ECR)."""
+    """Test tag encoding for DockerHub."""
 
     def test_simple_tag_encoding(self):
         """Test basic tag encoding without special characters."""

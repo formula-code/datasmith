@@ -14,6 +14,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from datasmith.core.cache.decorators import cache_completion
+from datasmith.core.storage import read_table, resolve_table_name, write_table
 from datasmith.logging_config import configure_logging
 from datasmith.scrape.report_builder import ReportBuilder
 
@@ -100,14 +101,15 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Disable SQLite-backed caching (forces fresh LLM classification).",
     )
+    p.add_argument("--db", type=str, default=None, help="Pipeline SQLite DB path.")
     return p.parse_args()
 
 
-def _load_input(path: Path) -> pd.DataFrame:
-    if path.suffix == ".parquet":
-        return pd.read_parquet(path)
-    # Backward-compatibility for older JSONL inputs
-    return pd.read_json(path, lines=True)
+def _load_input(path: Path, db_path: str | None = None) -> pd.DataFrame:
+    if path.suffix == ".jsonl":
+        return pd.read_json(path, lines=True)
+    # Try DB table first, fall back to parquet
+    return read_table(resolve_table_name(str(path)), db_path=db_path)
 
 
 def _compute_cache_key(pr_dict: dict[str, Any]) -> str:
@@ -239,7 +241,7 @@ def _build_single(rb: ReportBuilder, row: pd.Series, use_cache: bool = True) -> 
 
 
 def main(args: argparse.Namespace) -> None:  # noqa: C901
-    df = _load_input(args.commits)
+    df = _load_input(args.commits, db_path=args.db)
     if args.sample_size and args.sample_size > 0:
         # df = df.sample(n=args.sample_size, random_state=42).reset_index(drop=True)
         df = df.head(args.sample_size).reset_index(drop=True)
@@ -356,16 +358,14 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
         df_enriched = df_enriched.loc[:, ~df_enriched.columns.duplicated(keep="first")]
 
     # Save performance-related commits
-    raw_out = args.outfile.with_suffix(".raw.parquet")
-    perf_out = args.outfile.with_suffix(".parquet")
-
-    df_enriched.to_parquet(raw_out, index=False)
-    logger.info("Saved performance commits to %s", raw_out)
+    base_table = resolve_table_name(str(args.outfile))
+    write_table(df_enriched, base_table + "_raw", db_path=args.db)
+    logger.info("Saved performance commits to table %s_raw", base_table)
     perf_df = df_enriched[df_enriched["is_performance_commit"]].copy()
     logger.info("Detected %d performance commits (from %d total)", len(perf_df), len(df))
 
-    perf_df.to_parquet(perf_out, index=False)
-    logger.info("Saved filtered performance commits to %s", perf_out)
+    write_table(perf_df, base_table, db_path=args.db)
+    logger.info("Saved filtered performance commits to table %s", base_table)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,8 @@ for version in $TARGET_VERSIONS; do
     "meson-python==0.13.1" \
     "Cython~=3.0.5" \
     "numpy>=1.23.5,<=2.0.0.dev0" \
+    libstdcxx-ng \
+    libgcc-ng \
     python-dateutil \
     pytz \
     tzdata \

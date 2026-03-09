@@ -12,6 +12,15 @@ version=$(echo $ASV_PY_VERSIONS | awk '{print $1}')
 ENV_NAME="asv_${version}"
 CONF_NAME=$(find . -type f -name "asv.*.json" | head -n 1)
 
+# Ensure conda-provided libstdc++ is preferred to avoid ABI mismatches at runtime.
+ENV_PREFIX="/opt/conda/envs/${ENV_NAME}"
+if [[ -d "${ENV_PREFIX}/lib" ]]; then
+  cat >>/etc/profile.d/asv_build_vars.sh <<EOF
+export LD_LIBRARY_PATH="${ENV_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+EOF
+fi
+
+
 
 [ -f docker_build_pkg.sh ] && rm docker_build_pkg.sh
 [ -f docker_build_env.sh ] && rm docker_build_env.sh

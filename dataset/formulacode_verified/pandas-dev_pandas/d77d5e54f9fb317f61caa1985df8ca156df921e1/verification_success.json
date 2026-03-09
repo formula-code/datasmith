@@ -1,7 +1,4 @@
 {
-  "ok": true,
-  "stdout": "(timeout after 30s; treated as success)",
-  "stderr": "+ cd /workspace/repo\n+ set +ux\n+ '[' 0 -gt 0 ']'\n+ '[' -n d7\n... [truncated] ...\n\n - pytest==8.4.2\n + pytest==9.0.1\n+ python formulacode_testrunner.py --all --base d77d5e54f9fb317f61caa1985df8ca156df921e1 --extra-args '-p jinja_patch_plugin_pandas'\n",
-  "duration_s": 31.22948908805847,
-  "suite_name": "NOT USED"
+  "local_image": "pandas-dev-pandas-d77d5e54f9fb317f61caa1985df8ca156df921e1:final",
+  "dockerhub_image": "docker.io/formulacode/all:pandas-dev-pandas-d77d5e54f9fb317f61caa1985df8ca156df921e1--final"
 }

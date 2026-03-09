@@ -3,12 +3,12 @@
 Orchestration script for updating FormulaCode dataset.
 
 This script runs the full pipeline for a given date range:
-1. Collect commits from repositories
-2. Filter commits
-3. Prepare commits with patches
-4. Classify performance commits
-5. Synthesize Docker contexts
-6. Build and publish to DockerHub
+1. Collect and filter commits from repositories
+2. Prepare commits with patches
+3. Classify performance commits
+4. Synthesize Docker contexts
+5. Build and publish to DockerHub
+6. Merge perfonly commits into the master parquet
 
 Usage:
     python scratch/scripts/update_formulacode.py \
@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 from datasmith import setup_environment
+from datasmith.core.storage import get_pipeline_db
 from datasmith.logging_config import configure_logging
 
 # Set up environment (loads tokens.env)
@@ -102,6 +103,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("DOCKERHUB_NAMESPACE"),
         help="DockerHub namespace (username or org). Defaults to DOCKERHUB_NAMESPACE env var.",
     )
+    p.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="Pipeline SQLite DB path. Defaults to PIPELINE_DB env var or scratch/artifacts/pipeflush.db.",
+    )
     return p.parse_args()
 
 
@@ -153,12 +160,15 @@ def main(args: argparse.Namespace) -> int:
     # Ensure output directory exists
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Define output file paths with date suffix for this run
+    # Resolve DB path
+    db_path = args.db or get_pipeline_db()
+
+    # Define table names with date suffix for this run
     date_suffix = f"{args.start_date}_to_{args.end_date}".replace("-", "")
-    filtered_parquet = args.output_dir / f"merge_commits_filtered_{date_suffix}.parquet"
-    prepared_parquet = args.output_dir / f"merge_commits_filtered_with_patch_{date_suffix}.parquet"
-    perfonly_parquet = args.output_dir / f"perfonly_commits_{date_suffix}.parquet"
-    perfonly_master_parquet = args.output_dir / "perfonly_commits_master.parquet"
+    filtered_table = f"merge_commits_filtered_{date_suffix}"
+    prepared_table = f"merge_commits_filtered_with_patch_{date_suffix}"
+    perfonly_table = f"perfonly_commits_{date_suffix}"
+    perfonly_master_table = "perfonly_commits_master"
 
     python = sys.executable
     exit_code = 0
@@ -173,7 +183,7 @@ def main(args: argparse.Namespace) -> int:
         "--filtered-benchmarks-pth",
         str(args.repos),
         "--output-pth",
-        str(filtered_parquet),
+        filtered_table,
         "--threads",
         str(args.max_workers),
         "--procs",
@@ -182,6 +192,8 @@ def main(args: argparse.Namespace) -> int:
         args.start_date,
         "--until",
         args.end_date,
+        "--db",
+        db_path,
     ]
     exit_code = run_command(cmd, args.dry_run, "collect_and_filter_commits")
     if exit_code != 0:
@@ -195,12 +207,14 @@ def main(args: argparse.Namespace) -> int:
         python,
         str(SCRIPTS_DIR / "prepare_commits_for_building_reports.py"),
         "--input",
-        str(filtered_parquet),
+        filtered_table,
         "--output",
-        str(prepared_parquet),
+        prepared_table,
         "--max-workers",
         str(args.max_workers),
         "--fetch-patches",
+        "--db",
+        db_path,
     ]
     exit_code = run_command(cmd, args.dry_run, "prepare_commits_for_building_reports")
     if exit_code != 0:
@@ -214,11 +228,13 @@ def main(args: argparse.Namespace) -> int:
         python,
         str(SCRIPTS_DIR / "collect_perf_commits.py"),
         "--commits",
-        str(prepared_parquet),
+        prepared_table,
         "--outfile",
-        str(perfonly_parquet.with_suffix("")),  # Script adds suffix
+        perfonly_table,
         "--max-workers",
         str(args.max_workers),
+        "--db",
+        db_path,
     ]
     exit_code = run_command(cmd, args.dry_run, "collect_perf_commits")
     if exit_code != 0:
@@ -232,13 +248,15 @@ def main(args: argparse.Namespace) -> int:
         python,
         str(SCRIPTS_DIR / "synthesize_contexts.py"),
         "--commits",
-        str(perfonly_parquet),
+        perfonly_table,
         "--output-dir",
         str(args.output_dir / "results_synthesis"),
         "--context-registry",
         str(args.context_registry),
         "--max-workers",
         str(args.max_workers),
+        "--db",
+        db_path,
     ]
     if args.skip_existing:
         cmd.append("--ignore-exhausted")
@@ -246,38 +264,43 @@ def main(args: argparse.Namespace) -> int:
     if exit_code != 0:
         return exit_code
 
-    # Step 5: Build and publish to ECR
+    # Step 5: Build and publish to DockerHub
     logger.info("=" * 60)
-    logger.info("Step 5: Building and publishing to ECR")
+    logger.info("Step 5: Building and publishing to DockerHub")
     logger.info("=" * 60)
     cmd = [
         python,
-        str(SCRIPTS_DIR / "build_and_publish_to_ecr.py"),
+        str(SCRIPTS_DIR / "build_and_publish_to_dockerhub.py"),
         "--commits",
-        str(perfonly_parquet),
+        perfonly_table,
         "--context-registry",
         str(args.context_registry),
         "--max-workers",
-        "5",  # ECR has rate limits, keep this low
-        "--skip-existing"
+        str(args.max_workers),
+        "--namespace",
+        args.dockerhub_namespace,
+        "--db",
+        db_path,
     ]
     if args.skip_existing:
         cmd.append("--skip-existing")
-    exit_code = run_command(cmd, args.dry_run, "build_and_publish_to_ecr")
+    exit_code = run_command(cmd, args.dry_run, "build_and_publish_to_dockerhub")
     if exit_code != 0:
         return exit_code
 
-    # Step 6: Merge perfonly commits into master parquet
+    # Step 6: Merge perfonly commits into master table
     logger.info("=" * 60)
-    logger.info("Step 6: Merging perfonly commits into master parquet")
+    logger.info("Step 6: Merging perfonly commits into master table")
     logger.info("=" * 60)
     cmd = [
         python,
         str(SCRIPTS_DIR / "merge_perfonly_commits_master.py"),
         "--new-perfonly",
-        str(perfonly_parquet),
+        perfonly_table,
         "--master",
-        str(perfonly_master_parquet),
+        perfonly_master_table,
+        "--db",
+        db_path,
     ]
     exit_code = run_command(cmd, args.dry_run, "merge_perfonly_commits_master")
     if exit_code != 0:

@@ -1,7 +1,7 @@
 """DockerHub publishing module for Docker images.
 
 This module provides functionality to publish Docker images to DockerHub,
-parallel to the ECR publishing module. It supports:
+including:
 - Single repository mode (all images in one repo with encoded tags)
 - Mirror mode (each local repo maps to a DockerHub repo)
 - Skip existing images via Registry API v2
@@ -46,7 +46,7 @@ def publish_images_to_dockerhub(  # noqa: C901
     """
     Publish local Docker images to DockerHub and return {local_ref: dockerhub_ref}.
 
-    This function mirrors the ECR publishing functionality but uses DockerHub:
+    This function:
       - Authenticates via username/password (no token refresh needed)
       - Uses Docker Registry HTTP API v2 for tag listing
       - Handles rate limiting with exponential backoff
@@ -60,7 +60,7 @@ def publish_images_to_dockerhub(  # noqa: C901
         dockerhub_repo_prefix: Prefix for mirror mode repos
         skip_existing: Skip pushing images that already exist on DockerHub
         verbose: Enable detailed logging
-        parallelism: Number of concurrent push operations (default: 4, lower than ECR due to rate limits)
+        parallelism: Number of concurrent push operations (default: 4)
         docker_client: Optional Docker client (creates one if None)
         username: DockerHub username (or from DOCKERHUB_USERNAME env)
         password: DockerHub token/password (or from DOCKERHUB_TOKEN env)
@@ -483,7 +483,7 @@ def _encode_dockerhub_tag_from_local(local_ref: str) -> str:
     """
     Encode a local image reference into the tag used for single-repo DockerHub publishing.
 
-    Mirrors the ECR encoding logic:
+    Uses the same encoding scheme as the single-repo publishing flow:
       - local_ref like "repo[:tag]" becomes "repo--tag" (slashes in either side become "__").
       - If the result exceeds 128 chars, add an 8-char hash suffix.
 

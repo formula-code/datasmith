@@ -1,6 +1,4 @@
 """Build ASV Docker images for commits and publish to DockerHub.
-
-This script mirrors build_and_publish_to_ecr.py but publishes to DockerHub instead of AWS ECR.
 """
 
 from __future__ import annotations
@@ -18,6 +16,7 @@ import asv
 import pandas as pd
 
 from datasmith.agents.build import _do_build
+from datasmith.core.storage import read_table, resolve_table_name
 from datasmith.core.models import Task
 from datasmith.docker.context import ContextRegistry, DockerContext, build_base_image
 from datasmith.docker.dockerhub import filter_tasks_not_on_dockerhub
@@ -30,12 +29,12 @@ from datasmith.notebooks.utils import update_cr
 # Concurrency settings
 # Note: Lower push concurrency for DockerHub to avoid rate limiting
 _BUILD_CONCURRENCY = int(os.getenv("BUILD_CONCURRENCY", "24"))
-_PUSH_CONCURRENCY = int(os.getenv("PUSH_CONCURRENCY", "8"))  # Lower than ECR (12)
+_PUSH_CONCURRENCY = int(os.getenv("PUSH_CONCURRENCY", "8"))
 _build_sem = threading.Semaphore(_BUILD_CONCURRENCY)
 _push_sem = threading.Semaphore(_PUSH_CONCURRENCY)
 _cr_lock = threading.Lock()  # protect ContextRegistry mutations
 
-logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "w"))  # noqa: SIM115
+logger = configure_logging(level=10, stream=open(Path(__file__).with_suffix(".log"), "a"))  # noqa: SIM115
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +101,7 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help="Repository name for single mode (default: 'all').",
     )
+    parser.add_argument("--db", type=str, default=None, help="Pipeline SQLite DB path.")
     return parser.parse_args()
 
 
@@ -112,9 +112,10 @@ def process_inputs(args: argparse.Namespace) -> dict[tuple[str, str], set[tuple[
     Returns:
         Dictionary mapping (owner, repo) -> list of (sha, commit_date, env_payload) tuples
     """
-    commits = (
-        pd.read_json(args.commits, lines=True) if args.commits.suffix == ".jsonl" else pd.read_parquet(args.commits)
-    )
+    if args.commits.suffix == ".jsonl":
+        commits = pd.read_json(args.commits, lines=True)
+    else:
+        commits = read_table(resolve_table_name(str(args.commits)), db_path=args.db)
     all_states = {}
     for _, row in commits.iterrows():
         repo_name = row["repo_name"]

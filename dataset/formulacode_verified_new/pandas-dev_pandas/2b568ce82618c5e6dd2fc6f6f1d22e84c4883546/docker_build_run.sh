@@ -108,6 +108,7 @@ lock_repo_to_current_commit
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade jinja2 || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade pytest || true
 
+MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-/opt/conda}"
 
 # Persist env variables for future shells and auto-activate
 cat >>/etc/profile.d/asv_build_vars.sh <<EOF
@@ -117,6 +118,8 @@ export ROOT_PATH=$ROOT_PATH
 export REPO_ROOT=$REPO_ROOT
 export ASV_PY_VERSIONS="$ASV_PY_VERSIONS"
 export HEAD_SHA=$HEAD_SHA
+export MAMBA_ROOT_PREFIX=$MAMBA_ROOT_PREFIX
+export LD_LIBRARY_PATH=$MAMBA_ROOT_PREFIX/envs/$ENV_NAME/lib:\${LD_LIBRARY_PATH:-}
 EOF
 
 
