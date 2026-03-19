@@ -1,7 +1,7 @@
 """DockerHub publishing module for Docker images.
 
-This module provides functionality to publish Docker images to DockerHub,
-parallel to the ECR publishing module. It supports:
+This module provides functionality to publish Docker images to DockerHub.
+It supports:
 - Single repository mode (all images in one repo with encoded tags)
 - Mirror mode (each local repo maps to a DockerHub repo)
 - Skip existing images via Registry API v2
@@ -46,7 +46,7 @@ def publish_images_to_dockerhub(  # noqa: C901
     """
     Publish local Docker images to DockerHub and return {local_ref: dockerhub_ref}.
 
-    This function mirrors the ECR publishing functionality but uses DockerHub:
+    This function:
       - Authenticates via username/password (no token refresh needed)
       - Uses Docker Registry HTTP API v2 for tag listing
       - Handles rate limiting with exponential backoff
@@ -60,7 +60,7 @@ def publish_images_to_dockerhub(  # noqa: C901
         dockerhub_repo_prefix: Prefix for mirror mode repos
         skip_existing: Skip pushing images that already exist on DockerHub
         verbose: Enable detailed logging
-        parallelism: Number of concurrent push operations (default: 4, lower than ECR due to rate limits)
+        parallelism: Number of concurrent push operations (default: 4)
         docker_client: Optional Docker client (creates one if None)
         username: DockerHub username (or from DOCKERHUB_USERNAME env)
         password: DockerHub token/password (or from DOCKERHUB_TOKEN env)
@@ -299,8 +299,7 @@ def publish_images_to_dockerhub(  # noqa: C901
                     with lock:
                         if verbose:
                             logger.warning(
-                                f"⚠ HTTP 429 (rate limit) pushing {dockerhub_ref}; "
-                                f"waiting {wait_time}s before retry..."
+                                f"⚠ HTTP 429 (rate limit) pushing {dockerhub_ref}; waiting {wait_time}s before retry..."
                             )
                     time.sleep(wait_time)
                 else:
@@ -339,9 +338,7 @@ def publish_images_to_dockerhub(  # noqa: C901
     return results
 
 
-def _get_dockerhub_credentials(
-    username: str | None = None, password: str | None = None
-) -> tuple[str, str]:
+def _get_dockerhub_credentials(username: str | None = None, password: str | None = None) -> tuple[str, str]:
     """
     Get DockerHub credentials from multiple sources.
 
@@ -440,9 +437,7 @@ def _list_existing_tags(namespace: str, repo_name: str, username: str, password:
         if token_resp.status_code == 404:
             return set()
         if token_resp.status_code != 200:
-            logger.warning(
-                f"Failed to get auth token for {namespace}/{repo_name}: HTTP {token_resp.status_code}"
-            )
+            logger.warning(f"Failed to get auth token for {namespace}/{repo_name}: HTTP {token_resp.status_code}")
             return set()
 
         token_data = token_resp.json()
@@ -462,9 +457,7 @@ def _list_existing_tags(namespace: str, repo_name: str, username: str, password:
             return set()
 
         if tags_resp.status_code != 200:
-            logger.warning(
-                f"Failed to list tags for {namespace}/{repo_name}: HTTP {tags_resp.status_code}"
-            )
+            logger.warning(f"Failed to list tags for {namespace}/{repo_name}: HTTP {tags_resp.status_code}")
             return set()
 
         tags_data = tags_resp.json()
@@ -483,7 +476,7 @@ def _encode_dockerhub_tag_from_local(local_ref: str) -> str:
     """
     Encode a local image reference into the tag used for single-repo DockerHub publishing.
 
-    Mirrors the ECR encoding logic:
+    Encoding logic:
       - local_ref like "repo[:tag]" becomes "repo--tag" (slashes in either side become "__").
       - If the result exceeds 128 chars, add an 8-char hash suffix.
 
@@ -568,9 +561,7 @@ def filter_tasks_not_on_dockerhub(
         enc_tag = _encode_dockerhub_tag_from_local(local_ref)  # e.g., owner-repo-sha--final
         if enc_tag in existing_tags:
             skipped += 1
-            logger.info(
-                "Skipping %s (already on DockerHub as %s/%s:%s)", local_ref, namespace, single_repo, enc_tag
-            )
+            logger.info("Skipping %s (already on DockerHub as %s/%s:%s)", local_ref, namespace, single_repo, enc_tag)
             continue
         filtered.append(t)
     if skipped:

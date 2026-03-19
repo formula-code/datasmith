@@ -1,19 +1,18 @@
-"""Registry configuration abstraction for multiple container registries.
+"""Registry configuration abstraction for container registries.
 
-This module provides shared abstractions for working with different container
-registries (ECR, DockerHub, GCR, GHCR) in a unified way.
+This module provides shared abstractions for working with DockerHub
+(and potentially other container registries in the future) in a unified way.
 """
 
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class RegistryType(Enum):
     """Supported container registry types."""
 
-    ECR = "ecr"
     DOCKERHUB = "dockerhub"
     GCR = "gcr"  # Google Container Registry (future)
     GHCR = "ghcr"  # GitHub Container Registry (future)
@@ -26,7 +25,7 @@ class RegistryConfig:
     This dataclass encapsulates all configuration needed to publish images
     to a specific registry type. It supports:
     - Common fields used by all registries
-    - Registry-specific fields (ECR region, DockerHub namespace, etc.)
+    - Registry-specific fields (DockerHub namespace, etc.)
     - Loading from environment variables
     - Validation of required fields per registry type
     """
@@ -39,10 +38,6 @@ class RegistryConfig:
     skip_existing: bool = True  # Skip images that already exist
     parallelism: int = 4  # Number of concurrent push operations
     verbose: bool = True  # Enable detailed logging
-
-    # ECR-specific fields
-    region: str | None = None  # AWS region (e.g., "us-east-1")
-    ecr_repo_prefix: str | None = None  # Prefix for mirror mode
 
     # DockerHub-specific fields
     namespace: str | None = None  # DockerHub namespace (user or org)
@@ -67,12 +62,6 @@ class RegistryConfig:
         Create registry configuration from environment variables.
 
         Environment variables by registry type:
-
-        ECR:
-          - AWS_REGION (default: "us-east-1")
-          - ECR_REPO_PREFIX (optional)
-          - ECR_REPOSITORY_MODE (default: "single")
-          - ECR_SINGLE_REPO (default: "all")
 
         DockerHub:
           - DOCKERHUB_NAMESPACE (required)
@@ -101,27 +90,13 @@ class RegistryConfig:
         parallelism = int(os.environ.get("REGISTRY_PARALLELISM", "4"))
         verbose = os.environ.get("REGISTRY_VERBOSE", "true").lower() in ("true", "1", "yes")
 
-        if registry_type == RegistryType.ECR:
-            return cls(
-                registry_type=registry_type,
-                region=os.environ.get("AWS_REGION", "us-east-1"),
-                ecr_repo_prefix=os.environ.get("ECR_REPO_PREFIX"),
-                repository_mode=os.environ.get("ECR_REPOSITORY_MODE", "single"),
-                single_repo=os.environ.get("ECR_SINGLE_REPO", "all"),
-                skip_existing=skip_existing,
-                parallelism=parallelism,
-                verbose=verbose,
-            )
-
-        elif registry_type == RegistryType.DOCKERHUB:
+        if registry_type == RegistryType.DOCKERHUB:
             namespace = os.environ.get("DOCKERHUB_NAMESPACE")
             username = os.environ.get("DOCKERHUB_USERNAME")
             password = os.environ.get("DOCKERHUB_TOKEN") or os.environ.get("DOCKERHUB_PASSWORD")
 
             if not namespace:
-                raise ValueError(
-                    "DOCKERHUB_NAMESPACE environment variable is required for DockerHub registry"
-                )
+                raise ValueError("DOCKERHUB_NAMESPACE environment variable is required for DockerHub registry")
 
             return cls(
                 registry_type=registry_type,
@@ -154,11 +129,7 @@ class RegistryConfig:
         Raises:
             ValueError: If required fields are missing
         """
-        if self.registry_type == RegistryType.ECR:
-            if not self.region:
-                raise ValueError("region is required for ECR registry")
-
-        elif self.registry_type == RegistryType.DOCKERHUB:
+        if self.registry_type == RegistryType.DOCKERHUB:
             if not self.namespace:
                 raise ValueError("namespace is required for DockerHub registry")
             # Note: username/password validation happens in dockerhub.py
@@ -184,16 +155,12 @@ class RegistryConfig:
         Get the registry URL for this configuration.
 
         Returns:
-            Registry URL (e.g., "docker.io", "{account}.dkr.ecr.{region}.amazonaws.com")
+            Registry URL (e.g., "docker.io")
 
         Raises:
             NotImplementedError: For registry types that need account-specific URLs
         """
-        if self.registry_type == RegistryType.ECR:
-            # ECR URL requires account ID, which is fetched at runtime
-            raise NotImplementedError("ECR registry URL requires account ID from AWS STS")
-
-        elif self.registry_type == RegistryType.DOCKERHUB:
+        if self.registry_type == RegistryType.DOCKERHUB:
             return "docker.io"
 
         elif self.registry_type == RegistryType.GCR:
@@ -219,8 +186,6 @@ class RegistryConfig:
             "skip_existing": self.skip_existing,
             "parallelism": self.parallelism,
             "verbose": self.verbose,
-            "region": self.region,
-            "ecr_repo_prefix": self.ecr_repo_prefix,
             "namespace": self.namespace,
             "username": self.username,
             "password": "***" if self.password else None,  # Redact password
