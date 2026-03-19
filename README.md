@@ -1,4 +1,4 @@
-![banner](static/formula-code-datasmith.svg)
+![banner](static/formula-code-datasmith.png)
 
 
 <p align="center">
