@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
 import os
 import sys
 import tarfile
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import docker
-from docker.errors import DockerException
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.models.containers import Container
+from requests.exceptions import ReadTimeout
 
-from datasmith.docker.context import BuildResult, DockerContext, Task
+from datasmith.docker.context import BuildResult, DockerContext, Task, _new_api_client
 from datasmith.docker.disk_management import docker_data_root, guard_loop
 from datasmith.logging_config import get_logger
 
@@ -92,7 +95,6 @@ def build_repo_sha_image(
         run_labels=gen_run_labels(task, runid="unknown" if run_id is None else run_id),
     )
     return build_res
-
 
 def log_container_output(container: Container, archive: str = "/output") -> dict[str, str]:
     stream, _stat = container.get_archive(archive)
@@ -246,22 +248,30 @@ async def batch_orchestrate(
     output_dir: Path,
     client: docker.DockerClient | None,
     *,
+    use_aws_batch: bool = False,
+    aws_batch_config: dict[str, Any] | None = None,
     guard_min_free_gb: float = float(os.getenv("DATASMITH_MIN_FREE_GB", "1200")),
     guard_interval_s: int = int(os.getenv("DATASMITH_GUARD_INTERVAL_S", "120")),
     guard_hard_fail: bool = bool(int(os.getenv("DATASMITH_GUARD_HARD_FAIL", "0"))),
     guard_data_root: str | None = None,
 ) -> dict[Task, dict[str, str]]:
     """
-    Orchestrate benchmark execution locally.
+    Orchestrate benchmark execution with optional AWS batch processing.
+
+    This function provides a unified interface that can either:
+    1. Run benchmarks locally using the existing orchestrate function
+    2. Run benchmarks on AWS EC2 instances in batches for scalability
 
     Args:
         contexts: List of (Task, DockerContext) pairs to execute
         asv_args: ASV command line arguments
         machine_args: ASV machine configuration
-        max_concurrency: Maximum number of concurrent local tasks
+        max_concurrency: Maximum number of concurrent local tasks (ignored for AWS)
         n_cores: Number of CPU cores per task
         output_dir: Directory to store results
-        client: Docker client
+        client: Docker client (ignored for AWS)
+        use_aws_batch: If True, use AWS batch execution instead of local
+        aws_batch_config: Configuration for AWS batch execution
         guard_min_free_gb: Minimum free disk space for local execution
         guard_interval_s: Disk space check interval for local execution
         guard_hard_fail: Whether to fail hard on low disk space
@@ -270,18 +280,99 @@ async def batch_orchestrate(
     Returns:
         Dictionary mapping Task to benchmark result files
     """
-    if client is None:
-        client = get_docker_client(max_concurrency)
-    return await orchestrate(
-        contexts=contexts,
+    if not use_aws_batch:
+        # Use existing local orchestration
+        if client is None:
+            client = get_docker_client(max_concurrency)
+        return await orchestrate(
+            contexts=contexts,
+            asv_args=asv_args,
+            machine_args=machine_args,
+            max_concurrency=max_concurrency,
+            n_cores=n_cores,
+            output_dir=output_dir,
+            client=client,
+            guard_min_free_gb=guard_min_free_gb,
+            guard_interval_s=guard_interval_s,
+            guard_hard_fail=guard_hard_fail,
+            guard_data_root=guard_data_root,
+        )
+
+    # AWS batch execution
+    if not aws_batch_config:
+        raise ValueError("aws_batch_config is required when use_aws_batch=True")
+
+    from datasmith.docker.aws_batch_executor import AwsBatchConfig, AWSBatchExecutor
+
+    # Create AWS batch config
+    aws_cfg = AwsBatchConfig(
+        region=aws_batch_config["region"],
+        s3_bucket=aws_batch_config["s3_bucket"],
+        s3_prefix=aws_batch_config.get("s3_prefix", "datasmith-batch-execution"),
+        subnet_id=aws_batch_config["subnet_id"],
+        security_group_ids=aws_batch_config["security_group_ids"],
+        iam_instance_profile_name=aws_batch_config["iam_instance_profile_name"],
+        ami_id=aws_batch_config["ami_id"],
+        instance_type=aws_batch_config.get("instance_type", "c6i.xlarge"),
+        key_name=aws_batch_config.get("key_name"),
+        spot_max_price=aws_batch_config.get("spot_max_price"),
+        tags=aws_batch_config.get("tags", {}),
+        stream_logs=aws_batch_config.get("stream_logs", True),
+        log_output_dir=aws_batch_config.get("log_output_dir", "output/batch_logs"),
+        max_tasks_per_instance=aws_batch_config.get("max_tasks_per_instance", 100),
+        batch_timeout_s=aws_batch_config.get("batch_timeout_s", 2 * 60 * 60),
+        poll_interval_s=aws_batch_config.get("poll_interval_s", 30),
+        max_batch_retries=aws_batch_config.get("max_batch_retries", 1),
+        num_cores_per_task=n_cores,
         asv_args=asv_args,
-        machine_args=machine_args,
-        max_concurrency=max_concurrency,
-        n_cores=n_cores,
-        output_dir=output_dir,
-        client=client,
-        guard_min_free_gb=guard_min_free_gb,
-        guard_interval_s=guard_interval_s,
-        guard_hard_fail=guard_hard_fail,
-        guard_data_root=guard_data_root,
     )
+
+    # Create batch executor
+    batch_executor = AWSBatchExecutor(aws_cfg)
+
+    # Execute batch
+    run_id = os.environ.get("DATASMITH_RUN_ID") or _compute_deterministic_run_id(
+        contexts, asv_args=asv_args, machine_args=machine_args, n_cores=n_cores
+    )
+    batch_results = batch_executor.execute_batch(
+        tasks=contexts,
+        machine_args=machine_args,
+        asv_args=asv_args,
+        run_id=run_id,
+    )
+
+    # Convert batch results to the expected format
+    files_by_image = {}
+    for batch_result in batch_results:
+        # Find the corresponding task
+        task = None
+        for t, _ in contexts:
+            assert t.sha is not None  # noqa: S101
+            if f"{run_id}-task-" in batch_result.task_id and t.sha in batch_result.task_id:
+                task = t
+                break
+
+        if task is None:
+            logger.warning("Could not find task for batch result %s", batch_result.task_id)
+            continue
+
+        # Store benchmark files
+        files_by_image[task] = batch_result.benchmark_files
+
+        # Save individual result to output directory
+        result_dir = output_dir / "results" / task.get_container_name()
+        result_dir.mkdir(parents=True, exist_ok=True)
+
+        for filename, content in batch_result.benchmark_files.items():
+            file_path = result_dir / filename
+            file_path.write_text(content)
+
+        # Save logs
+        log_file = output_dir / "logs" / f"{task.get_container_name()}.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.write_text(batch_result.benchmark_logs)
+
+        logger.info("Saved results for %s: %d files", task.get_container_name(), len(batch_result.benchmark_files))
+
+    logger.info("AWS batch execution completed: %d successful results", len(files_by_image))
+    return files_by_image

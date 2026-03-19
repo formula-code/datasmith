@@ -16,6 +16,8 @@ classifiers = [
 ]
 dependencies = [
     "asv",
+    "boto3>=1.7.84",
+    "botocore>=1.10.84",
     "docker",
     "dspy>=2.6.27",
     "gitpython",
@@ -156,3 +158,14 @@ disable_error_code = ["no-any-unimported", "import-untyped"]
 [[tool.mypy.overrides]]
 module = "datasmith.execution.utils"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "boto3.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "botocore.*"
+ignore_missing_imports = true
+
+[tool.poetry.dev-dependencies]
+types-boto3 = "*"

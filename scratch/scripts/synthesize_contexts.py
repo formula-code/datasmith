@@ -90,6 +90,11 @@ def parse_args() -> argparse.Namespace:
         help="Path to the context registry JSON file.",
     )
     parser.add_argument(
+        "--push-to-ecr",
+        action="store_true",
+        help="Whether to push built images to AWS ECR.",
+    )
+    parser.add_argument(
         "--push-to-dockerhub",
         action="store_true",
         help="Whether to push built images to Docker Hub.",
