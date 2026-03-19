@@ -155,7 +155,7 @@ def _handle_success(
     client: docker.DockerClient,
     build_result: BuildResult,
 ) -> Path:
-    """Register context, optionally publish to ECR, and write final pickle.
+    """Register context, optionally publish to DockerHub, and write final pickle.
 
     Returns the path to the final pickle.
     """
@@ -165,18 +165,8 @@ def _handle_success(
     with contextlib.suppress(Exception):
         context_registry.save_to_file(path=args.context_registry)
 
-    # Optionally publish to ECR
-    if getattr(args, "push_to_ecr", False):
-        logger.info("agent_build_and_validate: pushed %s to ECR", task.with_tag("final").get_image_name())
-        ctx.build_and_publish_to_ecr(
-            client=client,
-            task=task.with_tag("final").with_benchmarks(build_result.benchmarks),
-            region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-            force=True,
-            skip_existing=False,
-            timeout_s=args.build_timeout,
-        )
-    elif getattr(args, "push_to_dockerhub", False):
+    # Optionally publish to DockerHub
+    if getattr(args, "push_to_dockerhub", False):
         logger.info("agent_build_and_validate: pushed %s to Docker Hub", task.with_tag("final").get_image_name())
         ctx.build_and_publish_to_dockerhub(
             client=client,
