@@ -229,3 +229,6 @@ scratch/pr_runs/qiskit_10651.md
 scratch/pr_runs/qiskit_12869_final.md
 scratch/pr_runs/qiskit_12869.md
 .aider*
+
+# Dataset artifacts (kept locally, not tracked)
+dataset/

@@ -1,4 +1,0 @@
-{
-  "local_image": "networkx-networkx-f32dd409623285e0b67d0c07033b533414eb2bba:final",
-  "dockerhub_image": "docker.io/formulacode/all:networkx-networkx-f32dd409623285e0b67d0c07033b533414eb2bba--final"
-}

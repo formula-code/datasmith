@@ -1,4 +1,0 @@
-{
-  "local_image": "pydata-bottleneck-8b587c5ce7bedd1be65fc821f99158aaea92212a:final",
-  "dockerhub_image": "docker.io/formulacode/all:pydata-bottleneck-8b587c5ce7bedd1be65fc821f99158aaea92212a--final"
-}

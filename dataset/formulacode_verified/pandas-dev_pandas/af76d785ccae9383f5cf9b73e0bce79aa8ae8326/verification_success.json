@@ -1,7 +1,0 @@
-{
-  "ok": true,
-  "stdout": "(timeout after 30s; treated as success)",
-  "stderr": "+ cd /workspace/repo\n+ set +ux\n+ '[' 0 -gt 0 ']'\n+ '[' -n af\n... [truncated] ...\ndas\n    ???\nE   UserWarning: pyarrow requires pandas 1.0.0 or above, pandas 0+untagged.32884.gaf76d78 is installed. Therefore, pandas-specific integration is not used.\n",
-  "duration_s": 31.384503602981567,
-  "suite_name": "NOT USED"
-}

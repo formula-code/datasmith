@@ -1,1 +1,0 @@
-Task(owner='numpy', repo='numpy-financial', sha='68960080799bad56c7c563497048051f97717f30', commit_date=1711010201.0, env_payload='{"dependencies": ["numpy==1.26.4"]}', python_version='3.12', tag='pkg', benchmarks='')
