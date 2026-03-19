@@ -162,7 +162,7 @@ class ProblemExtractor(dspy.Module):
         )
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.problem_predictor = dspy.Predict(ProblemExtractorSignature)
 

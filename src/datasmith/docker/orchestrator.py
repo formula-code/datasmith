@@ -172,7 +172,7 @@ async def orchestrate(
         logger.info("▶︎ cores=%s image=%s", cpuset_str, task.get_image_name())
         try:
             try:
-                rc, files = await run_container(  # noqa: F821
+                rc, files = await run_container(  # type: ignore[name-defined]  # noqa: F821
                     client=client,
                     task=task,
                     ctx=context,

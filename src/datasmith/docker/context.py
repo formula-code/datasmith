@@ -862,7 +862,6 @@ class DockerContext:
             timeout_s=timeout_s,
             tail_chars=tail_chars,
             pull=pull,
-            s3_cache_config=None,
             use_buildx=use_buildx,
         )
 
