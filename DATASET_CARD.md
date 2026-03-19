@@ -17,6 +17,8 @@
 
 This dataset contains **{total_rows}** enriched performance optimization tasks derived from real open-source Python projects, spanning {num_months} months of merged PRs.
 
+The dataset is continuously updated with new tasks every month (available under `YYYY-MM` configs, and `default` for all tasks), and a subset of tasks are human-validated and labeled as `verified`.
+
 ## Quick Start
 
 ```python
