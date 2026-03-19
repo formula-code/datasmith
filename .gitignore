@@ -232,3 +232,8 @@ scratch/pr_runs/qiskit_12869.md
 
 # Dataset artifacts (kept locally, not tracked)
 dataset/
+
+# Scratch artifacts (kept locally, not tracked)
+scratch/example-repo/
+scratch/merged_context_registry_*.json
+scratch/artifacts/raw/online_dashboards.jsonl
