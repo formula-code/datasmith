@@ -371,7 +371,6 @@ def regenerate_task_ids(df: pd.DataFrame) -> pd.DataFrame:
 
 _DATASMITH_ROOT = Path(__file__).resolve().parents[2]
 _DATASET_CARD_TEMPLATE = _DATASMITH_ROOT / "DATASET_CARD.md"
-_BANNER_SVG = _DATASMITH_ROOT / "static" / "formula-code-datasmith.svg"
 
 # Columns to include when uploading to Hugging Face.
 _HF_COLUMNS: list[str] = [
@@ -439,7 +438,7 @@ def _build_dataset_card(
     return "\n".join(lines)
 
 
-def upload_to_huggingface(  # noqa: C901
+def upload_to_huggingface(
     df: pd.DataFrame,
     repo_id: str,
     *,
@@ -566,15 +565,6 @@ def upload_to_huggingface(  # noqa: C901
                 path_or_fileobj=str(readme_path),
             )
         )
-
-        # Banner SVG (referenced by DATASET_CARD.md)
-        if _BANNER_SVG.exists():
-            operations.append(
-                CommitOperationAdd(
-                    path_in_repo="static/formula-code-datasmith.svg",
-                    path_or_fileobj=str(_BANNER_SVG),
-                )
-            )
 
         info = api.create_commit(
             repo_id=repo_id,

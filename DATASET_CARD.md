@@ -1,4 +1,4 @@
-![banner](static/formula-code-datasmith.svg)
+![banner](https://raw.githubusercontent.com/formula-code/datasmith/main/static/formula-code-datasmith.svg)
 
 
 <p align="center">
