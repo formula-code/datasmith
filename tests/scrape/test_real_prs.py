@@ -122,7 +122,6 @@ def test_qiskit_10651_problem_solution_segmentation_extractive():
         pr_title=title,
         pr_body=body,
         pr_comments="",
-        pr_patch="",
     )
 
     # Verify extraction returned valid data

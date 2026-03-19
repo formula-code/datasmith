@@ -118,6 +118,7 @@ class TestProblemExtraction:
         extractor.problem_predictor = mock_predict.return_value
 
         result = extractor.extract_problem(
+            pr_title="Test PR title",
             pr_body="test message body with sufficient length",
             pr_comments="test comments with sufficient length",
         )
@@ -137,6 +138,7 @@ class TestProblemExtraction:
         extractor.problem_predictor = mock_predict.return_value
 
         extracted = extractor.extract_problem(
+            pr_title="Test PR title",
             pr_body="issue body text that is long enough",
             pr_comments="related comments text that is long enough",
         )
@@ -153,13 +155,11 @@ class TestProblemExtraction:
         mock_predict.return_value = Mock(side_effect=Exception("Test error"))
         extractor.problem_predictor = mock_predict.return_value
 
-        extracted = extractor.extract_problem(pr_body="message body", pr_comments="issues text")
+        extracted = extractor.extract_problem(pr_title="Test PR", pr_body="message body", pr_comments="issues text")
 
         assert isinstance(extracted, ProblemExtraction)
         assert extracted.initial_observations is not None
         assert "[extraction failed:" in extracted.initial_observations
-
-
 
 
 class TestCodeBlockPreservation:
@@ -233,6 +233,7 @@ class TestEndToEnd:
         with patch.object(extractor_no_validation, "problem_predictor", problem_mock):
             # Extract problem using both issue and comment text
             problem = extractor_no_validation.extract_problem(
+                pr_title="Fix point size scaling",
                 pr_body=SAMPLE_ISSUE_SOURCE,
                 pr_comments=SAMPLE_COMMENT_THREAD,
             )
@@ -241,5 +242,3 @@ class TestEndToEnd:
             assert isinstance(problem, ProblemExtraction)
             assert problem.initial_observations is not None
             assert problem.to_markdown()
-
-

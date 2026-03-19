@@ -83,25 +83,18 @@ class ProblemExtraction:
             sections.append(initial_obs)
 
         # Triage attempts
-        triage = self._normalise_section(
-            self.triage_attempts,
-            ["## triage attempts", "**triage attempts**"]
-        )
+        triage = self._normalise_section(self.triage_attempts, ["## triage attempts", "**triage attempts**"])
         if triage:
             sections.append(f"## Triage Attempts\n\n{triage}")
 
         # Solution overview
-        solution = self._normalise_section(
-            self.solution_overview,
-            ["## solution overview", "**solution overview**"]
-        )
+        solution = self._normalise_section(self.solution_overview, ["## solution overview", "**solution overview**"])
         if solution:
             sections.append(f"## Solution Overview\n\n{solution}")
 
         # Solution observations
         solution_obs = self._normalise_section(
-            self.solution_observations,
-            ["## solution observations", "**solution observations**"]
+            self.solution_observations, ["## solution observations", "**solution observations**"]
         )
         if solution_obs:
             sections.append(f"## Solution Observations\n\n{solution_obs}")
@@ -150,7 +143,6 @@ class ProblemExtractorSignature(dspy.Signature):
     )
 
 
-
 class ProblemExtractor(dspy.Module):
     """
     Extractive problem/solution bucketizer and discussion extractor with LCS validation.
@@ -170,7 +162,7 @@ class ProblemExtractor(dspy.Module):
         )
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.problem_predictor = dspy.Predict(ProblemExtractorSignature)
 
@@ -211,7 +203,7 @@ class ProblemExtractor(dspy.Module):
                 initial_observations=f"[extraction failed: {e}]",
                 triage_attempts=None,
                 solution_overview=None,
-                solution_observations=None
+                solution_observations=None,
             )
             return fallback
 
@@ -240,7 +232,7 @@ class ProblemExtractor(dspy.Module):
             return None
         return stripped or None
 
-    def _build_extraction(self, prediction: Any) -> ProblemExtraction:
+    def _build_extraction(self, prediction: Any) -> ProblemExtraction:  # noqa: C901
         """
         Normalize the raw DSPy prediction into a ProblemExtraction object.
 

@@ -36,7 +36,6 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Stop after this many pages (API caps at 1 000 results)",
     )
-    p.add_argument
     p.add_argument(
         "--since",
         type=str,

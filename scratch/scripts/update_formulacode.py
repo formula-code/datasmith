@@ -3,12 +3,13 @@
 Orchestration script for updating FormulaCode dataset.
 
 This script runs the full pipeline for a given date range:
-1. Collect commits from repositories
-2. Filter commits
-3. Prepare commits with patches
-4. Classify performance commits
-5. Synthesize Docker contexts
-6. Build and publish to DockerHub
+1. Collect and filter commits from repositories
+2. Prepare commits with patches
+3. Classify performance commits
+4. Synthesize Docker contexts
+5. Build and publish to DockerHub
+6. Merge perfonly commits into the master parquet
+7. Enrich dataset and upload to Hugging Face (optional)
 
 Usage:
     python scratch/scripts/update_formulacode.py \
@@ -17,6 +18,7 @@ Usage:
         [--dockerhub-namespace DOCKERHUB_NAMESPACE] \
         [--skip-existing] \
         [--max-workers 32] \
+        [--upload-to-hf] \
         [--dry-run]
 """
 
@@ -102,6 +104,24 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("DOCKERHUB_NAMESPACE"),
         help="DockerHub namespace (username or org). Defaults to DOCKERHUB_NAMESPACE env var.",
     )
+    p.add_argument(
+        "--upload-to-hf",
+        action="store_true",
+        default=False,
+        help="Enrich and upload dataset to Hugging Face after merging.",
+    )
+    p.add_argument(
+        "--hf-repo",
+        type=str,
+        default="formulacode/formulacode-all",
+        help="Hugging Face dataset repo ID.",
+    )
+    p.add_argument(
+        "--valid-tasks",
+        type=Path,
+        default=None,
+        help="Path to valid_tasks.json for the 'verified' HF config.",
+    )
     return p.parse_args()
 
 
@@ -136,7 +156,7 @@ def run_command(cmd: list[str], dry_run: bool = False, step_name: str = "") -> i
         return result.returncode
 
 
-def main(args: argparse.Namespace) -> int:
+def main(args: argparse.Namespace) -> int:  # noqa: C901
     """Run the FormulaCode update pipeline."""
     # Validate inputs
     validate_date(args.start_date, "start")
@@ -246,24 +266,25 @@ def main(args: argparse.Namespace) -> int:
     if exit_code != 0:
         return exit_code
 
-    # Step 5: Build and publish to ECR
+    # Step 5: Build and publish to DockerHub
     logger.info("=" * 60)
-    logger.info("Step 5: Building and publishing to ECR")
+    logger.info("Step 5: Building and publishing to DockerHub")
     logger.info("=" * 60)
     cmd = [
         python,
-        str(SCRIPTS_DIR / "build_and_publish_to_ecr.py"),
+        str(SCRIPTS_DIR / "build_and_publish_to_dockerhub.py"),
         "--commits",
         str(perfonly_parquet),
         "--context-registry",
         str(args.context_registry),
         "--max-workers",
-        "5",  # ECR has rate limits, keep this low
-        "--skip-existing"
+        str(args.max_workers),
+        "--namespace",
+        args.dockerhub_namespace,
     ]
     if args.skip_existing:
         cmd.append("--skip-existing")
-    exit_code = run_command(cmd, args.dry_run, "build_and_publish_to_ecr")
+    exit_code = run_command(cmd, args.dry_run, "build_and_publish_to_dockerhub")
     if exit_code != 0:
         return exit_code
 
@@ -282,6 +303,33 @@ def main(args: argparse.Namespace) -> int:
     exit_code = run_command(cmd, args.dry_run, "merge_perfonly_commits_master")
     if exit_code != 0:
         return exit_code
+
+    # Step 7: Enrich dataset and upload to Hugging Face (optional)
+    if args.upload_to_hf:
+        logger.info("=" * 60)
+        logger.info("Step 7: Enriching dataset and uploading to Hugging Face")
+        logger.info("=" * 60)
+
+        enriched_parquet = args.output_dir / "perfonly_enriched.parquet"
+        dockerhub_repo = f"{args.dockerhub_namespace}/all"
+
+        cmd = [
+            python,
+            str(SCRIPTS_DIR / "prepare_formulacode_dataset.py"),
+            "--input",
+            str(perfonly_master_parquet),
+            "--output",
+            str(enriched_parquet),
+            "--dockerhub-repository",
+            dockerhub_repo,
+            "--upload-to-hf",
+            args.hf_repo,
+        ]
+        if args.valid_tasks and args.valid_tasks.exists():
+            cmd.extend(["--hf-verified-filter", str(args.valid_tasks)])
+        exit_code = run_command(cmd, args.dry_run, "prepare_formulacode_dataset")
+        if exit_code != 0:
+            return exit_code
 
     logger.info("=" * 60)
     logger.info("FormulaCode update completed successfully!")
