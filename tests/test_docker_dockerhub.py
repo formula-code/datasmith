@@ -1,7 +1,7 @@
 """Tests for DockerHub publishing module."""
 
 import os
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 
 import pytest
 
@@ -17,7 +17,7 @@ from datasmith.docker.dockerhub import (
 
 
 class TestDockerHubTagEncoding:
-    """Test tag encoding for DockerHub."""
+    """Test tag encoding for DockerHub (same logic as ECR)."""
 
     def test_simple_tag_encoding(self):
         """Test basic tag encoding without special characters."""
@@ -85,7 +85,9 @@ class TestDockerHubAuthentication:
 
     def test_credentials_dockerhub_password_fallback(self):
         """Test fallback to DOCKERHUB_PASSWORD env var."""
-        with patch.dict(os.environ, {"DOCKERHUB_USERNAME": "user", "DOCKERHUB_PASSWORD": "pass"}, clear=True):
+        with patch.dict(
+            os.environ, {"DOCKERHUB_USERNAME": "user", "DOCKERHUB_PASSWORD": "pass"}, clear=True
+        ):
             username, password = _get_dockerhub_credentials()
             assert username == "user"
             assert password == "pass"
@@ -255,7 +257,9 @@ class TestFilterTasksNotOnDockerHub:
             "owner2-repo2-def456--final",
         }
 
-        filtered = filter_tasks_not_on_dockerhub(tasks, namespace="testns", username="user", password="pass")
+        filtered = filter_tasks_not_on_dockerhub(
+            tasks, namespace="testns", username="user", password="pass"
+        )
 
         assert len(filtered) == 0
 
@@ -270,7 +274,9 @@ class TestFilterTasksNotOnDockerHub:
         # Mock empty tag list
         mock_list_tags.return_value = set()
 
-        filtered = filter_tasks_not_on_dockerhub(tasks, namespace="testns", username="user", password="pass")
+        filtered = filter_tasks_not_on_dockerhub(
+            tasks, namespace="testns", username="user", password="pass"
+        )
 
         assert len(filtered) == 2
 
@@ -286,7 +292,9 @@ class TestFilterTasksNotOnDockerHub:
         # Mock that only first task exists
         mock_list_tags.return_value = {"owner1-repo1-abc123--final"}
 
-        filtered = filter_tasks_not_on_dockerhub(tasks, namespace="testns", username="user", password="pass")
+        filtered = filter_tasks_not_on_dockerhub(
+            tasks, namespace="testns", username="user", password="pass"
+        )
 
         assert len(filtered) == 2
         assert filtered[0].owner == "owner2"
