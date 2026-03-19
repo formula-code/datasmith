@@ -195,7 +195,10 @@ class ReportBuilder:
         return items, comment_links
 
     def _extract_problem_statement(
-        self, pr_body: str, pr_comments: str, pr_title: str
+        self,
+        pr_body: str,
+        pr_comments: str,
+        pr_title: str,
         # pr_patch: str | None = None
     ) -> ProblemExtraction:
         """Extract (not summarize) problem statement from issue.
@@ -219,7 +222,7 @@ class ReportBuilder:
                 initial_observations="",
                 triage_attempts=None,
                 solution_overview=pr_body + "\n\n" + pr_comments + "\n\n",
-                solution_observations=None
+                solution_observations=None,
             )
 
         try:
@@ -236,7 +239,7 @@ class ReportBuilder:
                 initial_observations="",
                 triage_attempts=None,
                 solution_overview=pr_body + "\n\n" + pr_comments + "\n\n",
-                solution_observations=None
+                solution_observations=None,
             )
         else:
             return extraction

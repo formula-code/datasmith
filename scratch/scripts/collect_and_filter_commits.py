@@ -85,7 +85,7 @@ def main() -> None:
 
     all_repo_names = list(set(benchmarks["repo_name"]))
 
-# download all repos to a temp dir
+    # download all repos to a temp dir
     with tempfile.TemporaryDirectory(prefix="gh-repos-") as td:
         commit2kind = {}
         commit2repo = {}

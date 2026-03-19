@@ -316,7 +316,9 @@ class DockerValidator:
                     benchmarks="",
                 )
 
-            cmd2 = [f'FORMULACODE_SKIP_ASV_COVERAGE=1 timeout -k 5 {quick_s * 4}s /profile.sh /output/profile "--bench just-discover"']
+            cmd2 = [
+                f'FORMULACODE_SKIP_ASV_COVERAGE=1 timeout -k 5 {quick_s * 4}s /profile.sh /output/profile "--bench just-discover"'
+            ]
             container2 = self.client.containers.run(
                 image=image_name,
                 command=cmd2,

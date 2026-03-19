@@ -139,9 +139,8 @@ class RegistryConfig:
             if not self.project_id:
                 raise ValueError("project_id is required for GCR registry")
 
-        elif self.registry_type == RegistryType.GHCR:
-            if not self.github_owner:
-                raise ValueError("github_owner is required for GHCR registry")
+        elif self.registry_type == RegistryType.GHCR and not self.github_owner:
+            raise ValueError("github_owner is required for GHCR registry")
 
         # Validate common fields
         if self.repository_mode not in ("single", "mirror"):
@@ -223,9 +222,10 @@ def get_default_config(registry_type: RegistryType) -> RegistryConfig:
     try:
         config = RegistryConfig.from_env(registry_type)
         config.validate()
-        return config
     except ValueError as e:
         raise ValueError(
             f"Failed to create default config for {registry_type.value}: {e}\n"
             f"Ensure required environment variables are set."
         ) from e
+    else:
+        return config

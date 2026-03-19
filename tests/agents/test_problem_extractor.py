@@ -160,8 +160,6 @@ class TestProblemExtraction:
         assert "[extraction failed:" in extracted.initial_observations
 
 
-
-
 class TestCodeBlockPreservation:
     """Test that code blocks are preserved verbatim."""
 
@@ -241,5 +239,3 @@ class TestEndToEnd:
             assert isinstance(problem, ProblemExtraction)
             assert problem.initial_observations is not None
             assert problem.to_markdown()
-
-

@@ -127,7 +127,7 @@ def publish_images_to_dockerhub(  # noqa: C901
             if verbose:
                 logger.debug(f"Logged in to DockerHub as {username}")
         except Exception as e:
-            raise RuntimeError(f"Failed to login to DockerHub: {e}")
+            raise RuntimeError(f"Failed to login to DockerHub: {e}") from e
 
     _login_to_dockerhub()
 
@@ -426,12 +426,12 @@ def _list_existing_tags(namespace: str, repo_name: str, username: str, password:
     """
     try:
         # Step 1: Get bearer token from auth server
-        token_url = "https://auth.docker.io/token"
+        auth_endpoint = "https://auth.docker.io/token"
         token_params = {
             "service": "registry.docker.io",
             "scope": f"repository:{namespace}/{repo_name}:pull",
         }
-        token_resp = requests.get(token_url, params=token_params, auth=(username, password), timeout=30)
+        token_resp = requests.get(auth_endpoint, params=token_params, auth=(username, password), timeout=30)
 
         # If 404 or auth fails, repo might not exist
         if token_resp.status_code == 404:

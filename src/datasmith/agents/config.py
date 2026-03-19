@@ -46,10 +46,10 @@ def configure_agent_backends(local: bool = False, PORTKEY_MODEL_NAME: str | None
         logger.warning("NO API KEY SET")
         return
 
-    if model and ('gpt-5' in model):
+    if model and ("gpt-5" in model):
         # ValueError: OpenAI's reasoning models require passing temperature=1.0 and max_tokens >= 16000 to `dspy.LM(...)`, e.g., dspy.LM('openai/gpt-5', temperature=1.0, max_tokens=16000)
-        kwargs['max_tokens'] = 16000
-        kwargs['temperature'] = 1.0
+        kwargs["max_tokens"] = 16000
+        kwargs["temperature"] = 1.0
 
     if not model or not api_key:
         logger.warning("Environment variables for DSPY model or API key are not set.")

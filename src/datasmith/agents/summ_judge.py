@@ -1,11 +1,11 @@
 import json
 import os
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 import dspy
 import tiktoken
-from enum import Enum
 
 OPTIMIZATION_CATEGORIES = {
     1: "Use a better algorithm",
@@ -37,6 +37,7 @@ OPTIMIZATION_CATEGORIES = {
 # - Higher-level systems: using optimized libraries/frameworks -> Category 13
 # - Uncategorized: performance-related but does not fit above categories -> Category 14
 
+
 class DifficultyLevel(str, Enum):
     EASY = "easy"
     MEDIUM = "medium"
@@ -46,7 +47,6 @@ class DifficultyLevel(str, Enum):
 class PerformanceBool(str, Enum):
     YES = "yes"
     NO = "no"
-
 
 
 @dataclass
@@ -89,9 +89,6 @@ class ClassificationDecision:
             confidence=confidence,
             raw=prediction,
         )
-
-
-
 
 
 class OptimizationType(str, Enum):
@@ -137,7 +134,6 @@ class ClassifySignature(dspy.Signature):
 
     problem_description: str = dspy.InputField(desc="Problem statement and technical context from PR/issue")
     github_patch: str = dspy.InputField(desc="Git patch showing code changes")
-
 
     category: OptimizationType = dspy.OutputField(desc="The classified optimization category")
     difficulty: DifficultyLevel = dspy.OutputField(desc="The difficulty level of the optimization")

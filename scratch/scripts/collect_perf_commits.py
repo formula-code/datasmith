@@ -164,7 +164,7 @@ def _prepare_pr_dict(row: pd.Series) -> dict[str, Any]:  # noqa: C901
         try:
             if pd.isna(v):  # type: ignore[arg-type]
                 return None
-        except Exception:
+        except Exception:  # noqa: S110
             pass
         # Convert numpy arrays to lists (avoid ambiguous truthiness)
         if isinstance(v, np.ndarray):
@@ -268,7 +268,6 @@ def main(args: argparse.Namespace) -> None:  # noqa: C901
         anonymize_output=args.anonymize_output,
         max_links_to_follow=args.max_links_to_follow,
         model_name=args.model_name,
-
     )
 
     # Run builder across rows
