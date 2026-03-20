@@ -13,7 +13,7 @@
   </a>
 </p>
 
-[FormulaCode](https://formula-code.github.io/) is a *live*  benchmark for evaluating  the holistic ability of LLM agents to optimize codebases. FormulaCode consists of two parts: a pipeline to construct performance optimization tasks, and an [execution harness](https://github.com/formula-code/terminal-bench) that connects a language model to our terminal sandbox. _This repository contains the task generation pipeline._
+[FormulaCode](https://formula-code.github.io/) is a *live*  benchmark for evaluating  the holistic ability of LLM agents to optimize codebases. FormulaCode consists of two parts: a [pipeline](https://github.com/formula-code/datasmith) to construct performance optimization tasks, and an [execution harness](https://github.com/formula-code/terminal-bench) that connects a language model to our terminal sandbox. _This repository contains the task generation pipeline._
 
 `datasmith` is a python package for automatically curating and managing [FormulaCode](https://formula-code.github.io/) tasks. After installation, `datasmith` is designed to run as a monthly CRON job that updates the FormulaCode dataset with new commits and repositories.
 
