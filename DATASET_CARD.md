@@ -46,7 +46,7 @@ ds = load_dataset("formulacode/formulacode-all", "2024-07")
 
 | Column | Description |
 |--------|-------------|
-| `task_id` | Unique task identifier (e.g. `pandas-dev_pandas_1`) |
+| `task_id` | Unique task identifier (e.g. `pandas_dev-pandas_50643`) |
 | `repo_name` | Source repository (e.g. `pandas-dev/pandas`) |
 | `container_name` | Docker container reference (`<owner>-<repo>-<sha>:final`) |
 | `image_name` | Full Docker Hub image reference |
@@ -57,3 +57,4 @@ ds = load_dataset("formulacode/formulacode-all", "2024-07")
 | `pr_merged_at` | Date the PR was merged |
 | `pr_merge_commit_sha` | Merge commit SHA |
 | `pr_base_sha` | Base commit SHA |
+| `pr_number` | GitHub PR number |

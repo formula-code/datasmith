@@ -352,16 +352,13 @@ def limit_per_repo(df: pd.DataFrame, limit: int) -> pd.DataFrame:
 
 def regenerate_task_ids(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    counts: dict[str, int] = {}
     for i, row in df.iterrows():
         splits = row["container_name"].replace(":pkg", "").replace(":final", "").split("-")
         ow_splits = splits[:-1]
         owner = "-".join(ow_splits[: len(ow_splits) // 2])
         repo = "-".join(ow_splits[len(ow_splits) // 2 :])
-        base_id = f"{owner}_{repo}"
-        cnt = counts.get(base_id, 0) + 1
-        counts[base_id] = cnt
-        df.at[i, "task_id"] = f"{base_id}_{cnt}"
+        pr_num = int(row["pr_number"])
+        df.at[i, "task_id"] = f"{owner}_{repo}_{pr_num}"
     return df
 
 
@@ -385,6 +382,7 @@ _HF_COLUMNS: list[str] = [
     "pr_merged_at",
     "pr_merge_commit_sha",
     "pr_base_sha",
+    "pr_number",
 ]
 
 
