@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -36,21 +38,52 @@ class GitHubClient:
         token = self._pool.get_token()
         return {"Authorization": f"Bearer {token}"}
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response | None:
+    async def _request(self, method: str, path: str, *, _retries: int = 3, **kwargs: Any) -> httpx.Response | None:
         client = await self._client()
         extra_headers = kwargs.pop("headers", {})
         headers = {**self._auth_headers(), **extra_headers}
-        resp = await client.request(method, path, headers=headers, **kwargs)
-        if resp.status_code in (404, 410, 451):
-            return None
-        if resp.status_code in (429, 403):
-            reset = resp.headers.get("X-RateLimit-Reset")
-            if reset:
-                token = headers["Authorization"].replace("Bearer ", "")
-                self._pool.report_rate_limit(token, remaining=0, reset_at=float(reset))
-            # Retry once with a different token
-            headers = {**self._auth_headers(), **extra_headers}
-            resp = await client.request(method, path, headers=headers, **kwargs)
+
+        last_exc: Exception | None = None
+        for attempt in range(_retries):
+            try:
+                resp = await client.request(method, path, headers=headers, **kwargs)
+            except (
+                httpx.ConnectTimeout,
+                httpx.ReadTimeout,
+                httpx.ConnectError,
+                httpx.RemoteProtocolError,
+            ) as exc:
+                last_exc = exc
+                logger.warning(
+                    "Transient error on %s %s (attempt %d/%d): %s",
+                    method,
+                    path,
+                    attempt + 1,
+                    _retries,
+                    exc,
+                )
+                await asyncio.sleep(2**attempt)
+                headers = {**self._auth_headers(), **extra_headers}
+                continue
+
+            if resp.status_code in (404, 406, 410, 451):
+                return None
+            if resp.status_code in (429, 403):
+                reset = resp.headers.get("X-RateLimit-Reset")
+                if reset:
+                    token = headers["Authorization"].replace("Bearer ", "")
+                    self._pool.report_rate_limit(token, remaining=0, reset_at=float(reset))
+                # Retry with a different token
+                headers = {**self._auth_headers(), **extra_headers}
+                await asyncio.sleep(2**attempt)
+                continue
+            resp.raise_for_status()
+            return resp
+
+        # All retries exhausted
+        if last_exc is not None:
+            raise last_exc
+        # Last response was a rate-limit — raise it
         resp.raise_for_status()
         return resp
 
@@ -154,6 +187,29 @@ class GitHubClient:
         if resp is None:
             return []
         return resp.json()  # type: ignore[no-any-return]
+
+    async def paginate(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        per_page: int = 100,
+        max_pages: int = 250,
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Yield pages from a GitHub list endpoint."""
+        base_params = dict(params or {})
+        base_params["per_page"] = per_page
+        for page_num in range(1, max_pages + 1):
+            resp = await self._request(method, path, params={**base_params, "page": page_num})
+            if resp is None:
+                return
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                return
+            yield data
+            if len(data) < per_page:
+                return
 
     async def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         """Execute a GraphQL query against the GitHub API."""
