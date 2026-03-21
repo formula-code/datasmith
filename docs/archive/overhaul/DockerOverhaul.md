@@ -84,7 +84,7 @@ During iterative synthesis, only `instance` rebuilds. `base` and `env` are treat
 
 ### 3) `InstanceLayerContext`
 
-- Inputs: `Dockerfile.instance`, `docker_build_pkg.sh`, `docker_build_run.sh`, `docker_build_final.sh`, `profile.sh`, `run_tests.sh`, `entrypoint.sh`.
+- Inputs: `Dockerfile.instance`, `docker_build_pkg.sh`, `docker_build_run.sh`, `docker_build_final.sh`, `profile.sh`, `run-tests.sh`, `entrypoint.sh`.
 - Image name: `dsm.inst.{owner}-{repo}-{sha}:v1` (or attempt-tagged during loop, then retagged on success).
 - API:
   - `build(client, env_image_name: str) -> BuildResult`

@@ -2,7 +2,7 @@
 """Verify Docker build contexts for FormulaCode dataset tasks.
 
 Builds a Docker image from a task directory's multi-stage Dockerfile, then
-runs profile.sh and run_tests.sh inside the container to validate the build.
+runs profile.sh and run-tests.sh inside the container to validate the build.
 
 Usage:
     # Single task
@@ -123,11 +123,11 @@ def run_profile(docker: DockerClient, image_tag: str, timeout: int = 3600) -> tu
 
 
 def run_tests(docker: DockerClient, image_tag: str) -> tuple[bool, str]:
-    """Run run_tests.sh inside the built image. Returns (ok, output)."""
+    """Run run-tests.sh inside the built image. Returns (ok, output)."""
     try:
         output = docker.run(
             image_tag,
-            ["/run_tests.sh"],
+            ["/run-tests.sh"],
             remove=True,
         )
         return True, str(output or "")
@@ -210,7 +210,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Verify FormulaCode dataset tasks")
     parser.add_argument("--task", type=Path, required=True, help="Task dir or parent dir")
     parser.add_argument("--workers", type=int, default=2, help="Parallel workers for batch mode")
-    parser.add_argument("--skip-tests", action="store_true", help="Skip run_tests.sh step")
+    parser.add_argument("--skip-tests", action="store_true", help="Skip run-tests.sh step")
     parser.add_argument("--force", action="store_true", help="Re-verify already-successful tasks")
     args = parser.parse_args()
 

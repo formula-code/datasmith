@@ -140,7 +140,7 @@ Provide a mutable filesystem workspace per `(owner, repo, sha)` containing:
 - `docker_build_run.sh`
 - `docker_build_final.sh`
 - `profile.sh`
-- `run_tests.sh`
+- `run-tests.sh`
 - `task.txt`
 - `sandbox_manifest.json` (new)
 - `attempts/` (new: logs, verifier results, diffs)
@@ -158,7 +158,7 @@ Introduce a versioned manifest:
   "base_context_hash": "sha256:...",
   "files": {
     "docker_build_pkg.sh": "sha256:...",
-    "run_tests.sh": "sha256:..."
+    "run-tests.sh": "sha256:..."
   },
   "created_at": "2026-02-28T00:00:00Z"
 }
@@ -208,7 +208,7 @@ The agent receives:
 1. Sandbox path
 2. `task.txt` contents
 3. Previous verifier result (stage + condensed logs)
-4. Editable file allowlist (`docker_build_*.sh`, optionally `run_tests.sh`, `profile.sh`)
+4. Editable file allowlist (`docker_build_*.sh`, optionally `run-tests.sh`, `profile.sh`)
 5. Exit conditions and budget
 
 The agent can:

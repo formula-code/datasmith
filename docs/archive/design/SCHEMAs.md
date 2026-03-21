@@ -379,7 +379,7 @@ Each key in `"contexts"` is a string representation of a `Task` object. Each val
 | `run_building_data` | str | `docker_build_run.sh` -- run-stage build |
 | `final_building_data` | str | `docker_build_final.sh` -- final image build |
 | `profile_data` | str | `profile.sh` -- ASV benchmark profiling script |
-| `run_tests_data` | str | `run_tests.sh` -- pytest/test runner script |
+| `run_tests_data` | str | `run-tests.sh` -- pytest/test runner script |
 | `created_unix` | float | Unix timestamp when context was registered |
 
 The `Task` key encodes:
