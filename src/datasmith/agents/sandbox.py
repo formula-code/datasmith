@@ -68,6 +68,7 @@ class SandboxRunner:
         env_payload: str,
         python_version: str,
         pr_context: str,
+        prior_attempts: str = "",
         dry_run: bool = False,
     ) -> SandboxResult:
         """Prepare workspace, launch agent, extract results.
@@ -90,6 +91,7 @@ class SandboxRunner:
                 env_payload=env_payload,
                 python_version=python_version,
                 pr_context=pr_context,
+                prior_attempts=prior_attempts,
             )
 
             # 2. Init git repo (Codex requirement)
@@ -128,6 +130,7 @@ class SandboxRunner:
         env_payload: str,
         python_version: str,
         pr_context: str,
+        prior_attempts: str = "",
     ) -> None:
         """Create the workspace directory structure."""
         task_dir = workspace / "task"
@@ -164,22 +167,26 @@ class SandboxRunner:
         src_verify = _TEMPLATES_DIR / "sandbox_verify.py"
         shutil.copy2(str(src_verify), str(workspace / "sandbox_verify.py"))
 
+        # Write prior attempts context (from failed TRY_SIMILAR stage)
+        if prior_attempts:
+            (workspace / "prior_attempts.md").write_text(prior_attempts)
+
     def _init_git(self, workspace: Path) -> None:
         """Initialize a git repo in the workspace (required by Codex)."""
         subprocess.run(
-            ["git", "init"],  # noqa: S607
+            ["git", "init"],
             cwd=str(workspace),
             capture_output=True,
             check=True,
         )
         subprocess.run(
-            ["git", "add", "-A"],  # noqa: S607
+            ["git", "add", "-A"],
             cwd=str(workspace),
             capture_output=True,
             check=True,
         )
         subprocess.run(
-            [  # noqa: S607
+            [
                 "git",
                 "-c",
                 "user.name=sandbox",

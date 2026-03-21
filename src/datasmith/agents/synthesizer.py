@@ -61,6 +61,7 @@ class Synthesizer:
         similar_scripts = self._find_similar(owner, repo)
 
         # State: TRY_SIMILAR
+        failed_attempts: list[tuple[str, VerifyResult]] = []
         if similar_scripts:
             self._trace.append(SynthesisState.TRY_SIMILAR)
             for script in similar_scripts:
@@ -72,9 +73,11 @@ class Synthesizer:
                     self._save_attempt(owner, repo, issue_number, sha, 0, script, result)
                     self._save_context(owner, repo, sha, issue_number, ctx)
                     return ctx
+                failed_attempts.append((script, result))
 
         # State: LLM_GENERATE (sandbox-based)
         self._trace.append(SynthesisState.LLM_GENERATE)
+        prior_attempts = _format_prior_attempts(failed_attempts) if failed_attempts else ""
         for attempt_idx in range(self._max_attempts):
             ctx = self._sandbox_generate(
                 owner=owner,
@@ -84,6 +87,7 @@ class Synthesizer:
                 base_context=base_context or DockerContext(),
                 env_payload=env_payload,
                 python_version=python_version,
+                prior_attempts=prior_attempts,
             )
             if ctx is not None:
                 logger.info(
@@ -160,6 +164,7 @@ class Synthesizer:
         base_context: DockerContext,
         env_payload: str,
         python_version: str,
+        prior_attempts: str = "",
     ) -> DockerContext | None:
         from datasmith.agents.sandbox import SandboxRunner
 
@@ -172,6 +177,7 @@ class Synthesizer:
             env_payload=env_payload,
             python_version=python_version,
             pr_context=pr_context,
+            prior_attempts=prior_attempts,
             dry_run=self._dry_run,
         )
         return result.docker_context if result.success else None
@@ -208,8 +214,8 @@ class Synthesizer:
         except Exception:
             logger.warning("Failed to save context for %s/%s@%s", owner, repo, sha[:12])
 
+    @staticmethod
     def _save_attempt(
-        self,
         owner: str,
         repo: str,
         issue_number: int,
@@ -237,3 +243,45 @@ class Synthesizer:
             client.table("build_attempts").insert(row).execute()
         except Exception:
             logger.warning("Failed to save build attempt")
+
+
+def _format_prior_attempts(attempts: list[tuple[str, VerifyResult]]) -> str:
+    """Format failed TRY_SIMILAR attempts into context for the LLM agent."""
+    lines = [
+        "# Prior Attempts",
+        "",
+        "The following build scripts were tried and failed.",
+        "Use these failures to inform your approach — avoid repeating the same mistakes.",
+        "",
+    ]
+    for i, (script, result) in enumerate(attempts, 1):
+        lines.append(f"## Attempt {i}")
+        lines.append("")
+        lines.append(f"**Stage**: {result.stage}")
+        lines.append(f"**Return code**: {result.rc}")
+        lines.append("")
+        lines.append("### Script used")
+        lines.append("```bash")
+        # Truncate very long scripts
+        if len(script) > 3000:
+            lines.append(script[:3000])
+            lines.append("# ... (truncated)")
+        else:
+            lines.append(script)
+        lines.append("```")
+        lines.append("")
+        if result.stderr:
+            stderr_tail = result.stderr[-3000:]
+            lines.append("### Error output (last 3000 chars)")
+            lines.append("```")
+            lines.append(stderr_tail)
+            lines.append("```")
+            lines.append("")
+        if result.stdout:
+            stdout_tail = result.stdout[-3000:]
+            lines.append("### Stdout (last 3000 chars)")
+            lines.append("```")
+            lines.append(stdout_tail)
+            lines.append("```")
+            lines.append("")
+    return "\n".join(lines)

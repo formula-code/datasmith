@@ -99,12 +99,10 @@ class TestConfigureDspy:
         )
         mock_dspy.configure.assert_called_once_with(lm=mock_lm)
 
-    def test_portkey_takes_priority(self) -> None:
+    def test_direct_takes_priority_over_portkey(self) -> None:
         mock_lm = MagicMock()
         mock_dspy = MagicMock()
         mock_dspy.LM.return_value = mock_lm
-        mock_portkey = MagicMock()
-        mock_portkey.PORTKEY_GATEWAY_URL = "https://api.portkey.ai/v1"
 
         config = AgentConfig(
             primary_model="openai/gpt-4o",
@@ -114,13 +112,14 @@ class TestConfigureDspy:
             portkey_model_name="@openai/gpt-4o",
         )
 
-        with patch.dict("sys.modules", {"dspy": mock_dspy, "portkey_ai": mock_portkey}):
+        with patch.dict("sys.modules", {"dspy": mock_dspy}):
             configure_dspy(config)
 
-        # Should use portkey, not direct
+        # Should use direct provider, not portkey
         call_kwargs = mock_dspy.LM.call_args
-        assert call_kwargs[1]["api_base"] == "https://api.portkey.ai/v1"
-        assert "x-portkey-api-key" in call_kwargs[1]["headers"]
+        assert call_kwargs[1]["model"] == "openai/gpt-4o"
+        assert call_kwargs[1]["api_base"] == "http://localhost:8000/v1"
+        assert call_kwargs[1]["api_key"] == "sk-direct"
 
     def test_portkey_default_model(self) -> None:
         mock_lm = MagicMock()
