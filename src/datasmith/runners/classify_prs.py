@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import functools
 from typing import Any
 
 from datasmith.runners.base import BaseRunner
@@ -25,12 +27,16 @@ class ClassifyPRsRunner(BaseRunner):
         patch = item.get("patch", "")
         file_change_summary = item.get("file_change_summary", "")
 
-        is_perf, _reason = self._classifier.classify(description, patch, file_change_summary)
+        loop = asyncio.get_running_loop()
+
+        is_perf, _reason = await loop.run_in_executor(
+            None, functools.partial(self._classifier.classify, description, patch, file_change_summary)
+        )
 
         update: dict[str, Any] = {"is_performance_commit": is_perf}
 
         if is_perf:
-            decision = self._judge.classify(description, patch)
+            decision = await loop.run_in_executor(None, functools.partial(self._judge.classify, description, patch))
             update["classification"] = decision.category
             update["difficulty"] = decision.difficulty
 
