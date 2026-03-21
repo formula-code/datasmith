@@ -68,8 +68,8 @@ RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
 
 # Copy these files after to avoid rerunning pkg stage
 COPY profile.sh /profile.sh
-COPY run_tests.sh /run_tests.sh
-RUN chmod +x /profile.sh /run_tests.sh
+COPY run-tests.sh /run-tests.sh
+RUN chmod +x /profile.sh /run-tests.sh
 
 # run micromamba clean in all
 RUN micromamba clean --all --yes

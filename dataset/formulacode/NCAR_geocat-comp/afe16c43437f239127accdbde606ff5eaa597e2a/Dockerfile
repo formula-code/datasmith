@@ -74,8 +74,8 @@ RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
     /workspace/repo/docker_build_pkg.sh
 
     COPY profile.sh /profile.sh
-COPY run_tests.sh /run_tests.sh
-RUN chmod +x /profile.sh /run_tests.sh
+COPY run-tests.sh /run-tests.sh
+RUN chmod +x /profile.sh /run-tests.sh
 
 RUN micromamba clean --all --yes
 
