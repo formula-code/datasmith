@@ -68,9 +68,11 @@ class TestPipeline:
         async def mock_run_stage(name, start, end):
             calls.append(name)
 
-        pipeline._run_stage = mock_run_stage  # type: ignore[assignment]
-        await pipeline.run("2024-01-01", "2024-12-31")
+        with patch.object(pipeline, "_mark_stage_completed"):
+            pipeline._run_stage = mock_run_stage  # type: ignore[assignment]
+            await pipeline.run("2024-01-01", "2024-12-31")
 
+        # All stages are skipped in dry_run mode.
         assert calls == []
 
     async def test_single_stage_execution(self):
@@ -82,9 +84,9 @@ class TestPipeline:
 
         with patch.object(pipeline, "_mark_stage_completed"):
             pipeline._run_stage = mock_run_stage  # type: ignore[assignment]
-            await pipeline.run("2024-01-01", "2024-12-31", stage=3)
+            await pipeline.run("2024-01-01", "2024-12-31", stage=4)
 
-        assert calls == ["classify_prs"]
+        assert calls == ["synthesize_images"]
 
     async def test_invalid_stage_raises(self):
         pipeline = Pipeline()

@@ -23,8 +23,9 @@ class ClassifyPRsRunner(BaseRunner):
         issue_number = item["issue_number"]
         description = item.get("description", "")
         patch = item.get("patch", "")
+        file_change_summary = item.get("file_change_summary", "")
 
-        is_perf, _reason = self._classifier.classify(description, patch)
+        is_perf, _reason = self._classifier.classify(description, patch, file_change_summary)
 
         update: dict[str, Any] = {"is_performance_commit": is_perf}
 

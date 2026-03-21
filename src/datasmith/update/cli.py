@@ -12,17 +12,49 @@ logger = get_logger("update.cli")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+_STAGE_DESCRIPTIONS = {
+    1: "scrape_repos     — Fetch repository metadata from GitHub for all tracked repos",
+    2: "scrape_commits   — Scrape merged PR commits and patches from each repository",
+    3: "classify_prs     — Use LLM agents to classify PRs as performance-related",
+    4: "synthesize_images — Generate Docker build contexts for confirmed performance commits",
+    5: "publish          — Build, verify, and publish Docker images to DockerHub",
+}
+
+
+def _stages_epilog() -> str:
+    lines = ["pipeline stages (run in order by default):"]
+    for num, desc in _STAGE_DESCRIPTIONS.items():
+        lines.append(f"  {num}. {desc}")
+    return "\n".join(lines)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ds-update",
-        description="Run the FormulaCode update pipeline",
+        description="Run the FormulaCode update pipeline — discovers performance-improving "
+        "commits from GitHub, classifies them with LLM agents, and builds Docker images "
+        "for benchmark evaluation.",
+        epilog=_stages_epilog(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--start-date", required=True, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end-date", required=True, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--resume", action="store_true", help="Resume from last completed stage")
-    parser.add_argument("--stage", type=int, default=None, help="Run only this stage (1-5)")
-    parser.add_argument("--dry-run", action="store_true", help="Log what would happen without executing")
-    parser.add_argument("--n-concurrent", type=int, default=None, help="Max concurrent items per runner")
+    parser.add_argument("--start-date", required=True, help="Start of the date range to scan for commits (YYYY-MM-DD)")
+    parser.add_argument("--end-date", required=True, help="End of the date range to scan for commits (YYYY-MM-DD)")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip stages already marked complete and resume from the next pending stage",
+    )
+    parser.add_argument(
+        "--stage",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Run only stage N (1-5); see stage list below",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Log what each stage would do without executing")
+    parser.add_argument(
+        "--n-concurrent", type=int, default=None, metavar="N", help="Max concurrent items per runner stage"
+    )
     return parser.parse_args(argv)
 
 

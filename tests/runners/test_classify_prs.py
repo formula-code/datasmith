@@ -52,8 +52,8 @@ class TestClassifyPerf:
             runner = ClassifyPRsRunner(classifier=classifier, judge=judge, n_concurrent=1)
             await runner.run([_make_item()])
 
-        # Verify classifier was called
-        classifier.classify.assert_called_once_with("Optimize array slicing", "diff --git a/numpy/core.py ...")
+        # Verify classifier was called (3rd arg is file_change_summary, defaults to "")
+        classifier.classify.assert_called_once_with("Optimize array slicing", "diff --git a/numpy/core.py ...", "")
         # Judge should also be called for perf commits
         judge.classify.assert_called_once()
 

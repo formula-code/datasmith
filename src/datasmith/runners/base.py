@@ -57,7 +57,7 @@ class BaseRunner(ABC):
 
     def _item_id(self, item: Any) -> str:
         if hasattr(item, "cache_key"):
-            return item.cache_key
+            return str(item.cache_key)
         return str(item)
 
     def _init_progress(self) -> None:
