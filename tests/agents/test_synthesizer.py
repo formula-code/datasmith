@@ -28,15 +28,13 @@ class TestSynthesizerCacheHit:
         """Mock cache hit returns DockerContext immediately."""
         mock_client = MagicMock()
         mock_resp = MagicMock()
-        mock_resp.data = [{"result_json": {"build_pkg_sh": "#!/bin/bash\necho cached"}}]
-        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = (
-            mock_resp
-        )
+        mock_resp.data = [{"build_pkg_sh": "#!/bin/bash\necho cached"}]
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = mock_resp
         mock_get_client.return_value = mock_client
 
         verifier = _make_verifier()
         synth = Synthesizer()
-        result = synth.run("owner", "repo", 42, "pr context", verifier)
+        result = synth.run("owner", "repo", 42, "pr context", verifier, sha="abc123")
 
         assert result is not None
         assert result.build_pkg_sh == "#!/bin/bash\necho cached"
@@ -65,8 +63,11 @@ class TestSynthesizerSimilarScript:
 
         def table_side_effect(name: str) -> MagicMock:
             table_mock = MagicMock()
-            if name == "hook_cache":
-                table_mock.select.return_value.eq.return_value.eq.return_value.execute.return_value = cache_resp
+            if name == "docker_contexts":
+                table_mock.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = (
+                    cache_resp
+                )
+                table_mock.upsert.return_value.execute.return_value = MagicMock()
             elif name == "build_attempts":
                 # For select (find_similar)
                 table_mock.select.return_value.eq.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = similar_resp
@@ -102,8 +103,11 @@ class TestSynthesizerSimilarScript:
 
         def table_side_effect(name: str) -> MagicMock:
             table_mock = MagicMock()
-            if name == "hook_cache":
-                table_mock.select.return_value.eq.return_value.eq.return_value.execute.return_value = cache_resp
+            if name == "docker_contexts":
+                table_mock.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = (
+                    cache_resp
+                )
+                table_mock.upsert.return_value.execute.return_value = MagicMock()
             elif name == "build_attempts":
                 table_mock.select.return_value.eq.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = similar_resp
                 table_mock.insert.return_value.execute.return_value = MagicMock()
@@ -115,7 +119,7 @@ class TestSynthesizerSimilarScript:
         # Similar fails, LLM also fails
         fail_verifier = _make_verifier(ok=False)
 
-        with patch("datasmith.agents.synthesizer.Synthesizer._llm_generate", return_value=None):
+        with patch("datasmith.agents.synthesizer.Synthesizer._sandbox_generate", return_value=None):
             synth = Synthesizer()
             result = synth.run("owner", "repo", 42, "pr context", fail_verifier)
 
@@ -141,8 +145,11 @@ class TestSynthesizerAllFail:
 
         def table_side_effect(name: str) -> MagicMock:
             table_mock = MagicMock()
-            if name == "hook_cache":
-                table_mock.select.return_value.eq.return_value.eq.return_value.execute.return_value = cache_resp
+            if name == "docker_contexts":
+                table_mock.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = (
+                    cache_resp
+                )
+                table_mock.upsert.return_value.execute.return_value = MagicMock()
             elif name == "build_attempts":
                 table_mock.select.return_value.eq.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = similar_resp
                 table_mock.insert.return_value.execute.return_value = MagicMock()
@@ -151,7 +158,7 @@ class TestSynthesizerAllFail:
         mock_client.table.side_effect = table_side_effect
         mock_get_client.return_value = mock_client
 
-        with patch("datasmith.agents.synthesizer.Synthesizer._llm_generate", return_value=None):
+        with patch("datasmith.agents.synthesizer.Synthesizer._sandbox_generate", return_value=None):
             synth = Synthesizer()
             result = synth.run("owner", "repo", 42, "pr context", _make_verifier(ok=False))
 
@@ -175,8 +182,11 @@ class TestSynthesizerStateTransitions:
 
         def table_side_effect(name: str) -> MagicMock:
             table_mock = MagicMock()
-            if name == "hook_cache":
-                table_mock.select.return_value.eq.return_value.eq.return_value.execute.return_value = cache_resp
+            if name == "docker_contexts":
+                table_mock.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = (
+                    cache_resp
+                )
+                table_mock.upsert.return_value.execute.return_value = MagicMock()
             elif name == "build_attempts":
                 table_mock.select.return_value.eq.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = similar_resp
                 table_mock.insert.return_value.execute.return_value = MagicMock()
@@ -185,7 +195,7 @@ class TestSynthesizerStateTransitions:
         mock_client.table.side_effect = table_side_effect
         mock_get_client.return_value = mock_client
 
-        with patch("datasmith.agents.synthesizer.Synthesizer._llm_generate", return_value=None):
+        with patch("datasmith.agents.synthesizer.Synthesizer._sandbox_generate", return_value=None):
             synth = Synthesizer()
             synth.run("owner", "repo", 42, "pr context", _make_verifier(ok=False))
 
@@ -202,14 +212,12 @@ class TestSynthesizerStateTransitions:
         """Verify that trace property returns a copy, not the internal list."""
         mock_client = MagicMock()
         cache_resp = MagicMock()
-        cache_resp.data = [{"result_json": {"build_pkg_sh": "cached"}}]
-        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = (
-            cache_resp
-        )
+        cache_resp.data = [{"build_pkg_sh": "cached"}]
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = cache_resp
         mock_get_client.return_value = mock_client
 
         synth = Synthesizer()
-        synth.run("owner", "repo", 1, "ctx", _make_verifier())
+        synth.run("owner", "repo", 1, "ctx", _make_verifier(), sha="abc")
 
         trace1 = synth.trace
         trace2 = synth.trace

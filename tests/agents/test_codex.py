@@ -34,7 +34,7 @@ class TestCodexResult:
 
 
 class TestCodexExec:
-    @patch("datasmith.agents.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.subprocess.run")
     def test_codex_exec_success(self, mock_run: MagicMock) -> None:
         """Mock subprocess returncode 0 produces CodexResult(success=True)."""
         mock_run.return_value = MagicMock(
@@ -47,7 +47,7 @@ class TestCodexExec:
         assert "build complete" in result.output
         assert result.error == ""
 
-    @patch("datasmith.agents.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.subprocess.run")
     def test_codex_exec_timeout(self, mock_run: MagicMock) -> None:
         """Mock TimeoutExpired produces appropriate error."""
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=900)
@@ -55,7 +55,7 @@ class TestCodexExec:
         assert result.success is False
         assert "timed out" in result.error
 
-    @patch("datasmith.agents.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.subprocess.run")
     def test_codex_exec_captures_output(self, mock_run: MagicMock) -> None:
         """Verify stdout is captured and parsed."""
         lines = [
@@ -74,7 +74,7 @@ class TestCodexExec:
         assert "line2" in result.output
         assert "test.py" in result.files_changed
 
-    @patch("datasmith.agents.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.subprocess.run")
     def test_codex_exec_not_found(self, mock_run: MagicMock) -> None:
         """Mock FileNotFoundError when codex CLI is missing."""
         mock_run.side_effect = FileNotFoundError("codex not found")
@@ -82,7 +82,7 @@ class TestCodexExec:
         assert result.success is False
         assert "not found" in result.error
 
-    @patch("datasmith.agents.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.subprocess.run")
     def test_codex_exec_working_directory(self, mock_run: MagicMock) -> None:
         """Verify cwd is passed to subprocess."""
         mock_run.return_value = MagicMock(
@@ -90,12 +90,12 @@ class TestCodexExec:
             stdout="plain text output\n",
             stderr="",
         )
-        test_dir = "/tmp/mydir"  # noqa: S108
+        test_dir = "/tmp/mydir"
         codex_exec("prompt", workdir=test_dir)
         call_kwargs = mock_run.call_args
         assert call_kwargs.kwargs["cwd"] == test_dir
 
-    @patch("datasmith.agents.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.subprocess.run")
     def test_codex_exec_nonzero_returncode(self, mock_run: MagicMock) -> None:
         """Non-zero returncode means success=False and error captured."""
         mock_run.return_value = MagicMock(
@@ -107,7 +107,7 @@ class TestCodexExec:
         assert result.success is False
         assert result.error == "something went wrong"
 
-    @patch("datasmith.agents.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.subprocess.run")
     def test_codex_exec_generic_exception(self, mock_run: MagicMock) -> None:
         """Generic exception is caught and reported."""
         mock_run.side_effect = OSError("disk full")
@@ -115,7 +115,7 @@ class TestCodexExec:
         assert result.success is False
         assert "disk full" in result.error
 
-    @patch("datasmith.agents.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.subprocess.run")
     def test_codex_exec_non_json_stdout(self, mock_run: MagicMock) -> None:
         """Non-JSON stdout lines are preserved as output."""
         mock_run.return_value = MagicMock(
@@ -127,3 +127,43 @@ class TestCodexExec:
         assert result.success is True
         assert "plain text line" in result.output
         assert "another line" in result.output
+
+    @patch("datasmith.agents.installed.codex.subprocess.run")
+    def test_codex_exec_full_auto_sandbox(self, mock_run: MagicMock) -> None:
+        """full_auto + sandbox uses --full-auto --sandbox flags."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"output": "ok"}\n',
+            stderr="",
+        )
+        codex_exec("prompt", full_auto=True, sandbox="danger-full-access")
+        cmd = mock_run.call_args[0][0]
+        assert "--full-auto" in cmd
+        assert "--sandbox" in cmd
+        assert "danger-full-access" in cmd
+        assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+    @patch("datasmith.agents.installed.codex.subprocess.run")
+    def test_codex_exec_legacy_flag_when_no_sandbox(self, mock_run: MagicMock) -> None:
+        """Without full_auto/sandbox, uses legacy flag."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"output": "ok"}\n',
+            stderr="",
+        )
+        codex_exec("prompt")
+        cmd = mock_run.call_args[0][0]
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert "--full-auto" not in cmd
+
+    @patch("datasmith.agents.installed.codex.subprocess.run")
+    def test_codex_exec_full_auto_without_sandbox_uses_legacy(self, mock_run: MagicMock) -> None:
+        """full_auto without sandbox still uses legacy flag."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"output": "ok"}\n',
+            stderr="",
+        )
+        codex_exec("prompt", full_auto=True, sandbox="")
+        cmd = mock_run.call_args[0][0]
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
