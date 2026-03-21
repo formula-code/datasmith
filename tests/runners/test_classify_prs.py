@@ -21,14 +21,16 @@ def _mock_supabase() -> MagicMock:
     return client
 
 
-def _make_item(owner: str = "numpy", repo: str = "numpy", issue: int = 42) -> dict[str, Any]:
-    return {
+def _make_item(owner: str = "numpy", repo: str = "numpy", issue: int = 42, **kwargs: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {
         "owner": owner,
         "repo": repo,
         "issue_number": issue,
         "description": "Optimize array slicing",
         "patch": "diff --git a/numpy/core.py ...",
     }
+    item.update(kwargs)
+    return item
 
 
 class TestClassifyPerf:
@@ -83,3 +85,25 @@ class TestClassifyPerf:
         # pull_requests table should still be updated with is_performance_commit=False
         pr_calls = [call for call in mock_client.table.call_args_list if call.args[0] == "pull_requests"]
         assert len(pr_calls) >= 1
+
+    async def test_file_change_summary_forwarded(self) -> None:
+        """file_change_summary from item dict is passed to classifier.classify()."""
+        mock_client = _mock_supabase()
+
+        classifier = MagicMock()
+        classifier.classify.return_value = (False, "Not perf")
+        judge = MagicMock()
+
+        summary = (
+            "| File | Lines Added | Lines Removed |\n|------|-------------|----------------|\n| core.py | 10 | 5 |"
+        )
+        item = _make_item(file_change_summary=summary)
+
+        with (
+            patch("datasmith.runners.classify_prs.get_client", return_value=mock_client),
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+        ):
+            runner = ClassifyPRsRunner(classifier=classifier, judge=judge, n_concurrent=1)
+            await runner.run([item])
+
+        classifier.classify.assert_called_once_with("Optimize array slicing", "diff --git a/numpy/core.py ...", summary)

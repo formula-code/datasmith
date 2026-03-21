@@ -9,6 +9,23 @@ logger = get_logger("update.pipeline")
 STAGES = ["scrape_repos", "scrape_commits", "classify_prs", "synthesize_images", "publish"]
 
 
+def _build_file_change_summary(file_changes: list[dict[str, Any]] | None) -> str:
+    if not file_changes:
+        return ""
+    lines = [
+        "| File | Lines Added | Lines Removed |",
+        "|------|-------------|----------------|",
+    ]
+    for f in file_changes:
+        lines.append(f"| {f.get('filename', '')} | {f.get('additions', 0)} | {f.get('deletions', 0)} |")
+    return "\n".join(lines)
+
+
+def _format_description(title: str, body: str) -> str:
+    parts = [p for p in (title.strip(), body.strip()) if p]
+    return "\n\n".join(parts)
+
+
 class Pipeline:
     """Orchestrate the full FormulaCode update pipeline."""
 
@@ -130,19 +147,22 @@ class Pipeline:
         client = get_client()
         resp = (
             client.table("pull_requests")
-            .select("owner, repo, issue_number, body, patch")
+            .select("owner, repo, issue_number, title, body, patch, file_changes")
+            .eq("is_performance_commit_symbolic", True)
             .is_("is_performance_commit", "null")
             .execute()
         )
+        rows = cast(list[dict[str, Any]], resp.data)
         items = [
             {
                 "owner": r["owner"],
                 "repo": r["repo"],
                 "issue_number": r["issue_number"],
-                "description": r.get("body", ""),
+                "description": _format_description(r.get("title", ""), r.get("body", "")),
                 "patch": r.get("patch", ""),
+                "file_change_summary": _build_file_change_summary(r.get("file_changes")),
             }
-            for r in resp.data
+            for r in rows
         ]
         await runner.run(items)
 
