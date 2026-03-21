@@ -15,7 +15,6 @@ This guide helps contributors work effectively in the datasmith repository.
 - `make build` — build wheel into `dist/`.
 - `uv run <cmd>` — run tools inside the env (e.g., `uv run pytest`).
 - `uvx tox -q` — run the tox matrix (py39–py312) if tox is installed.
-- Optional: `make backup` uses `tokens.env` for `BACKUP_DIR` rsync.
 - To run commands using the same environment variables as the user, use `uv run <command>`.
 
 ## Coding Style & Naming Conventions
@@ -36,7 +35,7 @@ This guide helps contributors work effectively in the datasmith repository.
 - Ensure `make check` and `make test` pass; CI should be green.
 
 ## Security & Configuration Tips
-- Create `tokens.env` (ignored) for `GH_TOKEN`, `CODECOV_TOKEN`, `CACHE_LOCATION`, `BACKUP_DIR`. Never commit secrets.
+- Create `tokens.env` (ignored) for `GH_TOKEN`, `CODECOV_TOKEN`, `CACHE_LOCATION`. Never commit secrets.
 - Docker tooling exists in `src/datasmith/docker/`; validate locally before pushing remote runs.
 
 ## Agent‑Specific Instructions

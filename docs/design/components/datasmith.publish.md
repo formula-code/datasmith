@@ -130,7 +130,7 @@ No `FormulaCodeRecord` dataclass exists. No `PR.to_record()` method. The bridge 
 
 ### Pipeline storage
 
-Pipeline data stored in SQLite (`PIPELINE_DB` env var, default: `scratch/artifacts/pipeflush.db`), not Supabase. Tables are pandas DataFrames written via `write_table()` in `src/datasmith/core/storage.py`. Complex columns JSON-serialized.
+Pipeline data stored in Supabase. See `src/datasmith/utils/db.py` for the client and query helpers.
 
 ### Versioning
 
@@ -148,9 +148,8 @@ Not implemented. No `push_to_hub()`, no HuggingFace token handling, no dataset c
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `DOCKERHUB_NAMESPACE` | Required | DockerHub namespace |
-| `DOCKERHUB_USERNAME` | Required | DockerHub user |
-| `DOCKERHUB_TOKEN` / `DOCKERHUB_PASSWORD` | Required | Auth token |
+| `DOCKERHUB_USERNAME` | Required | DockerHub user (also used as namespace) |
+| `DOCKERHUB_TOKEN` | Required | Auth token |
 | `DOCKERHUB_RATE_LIMIT_WAIT` | 60 | Seconds to wait on rate limit |
 | `DOCKERHUB_SINGLE_REPO` | `all` | Repo name in single mode |
 | `BUILD_CONCURRENCY` | 24 | Max parallel builds |

@@ -32,7 +32,12 @@ graph LR
 ```python
 # Datasmith helps you manage your github-centric benchmark.
 import datasmith as ds
-pr = ds.PR(repository="pandas-dev/pandas", issue_number=1234)
+
+# Construct a bare PR (fields empty — useful when you already have the data):
+pr = ds.PR(repository="pandas-dev/pandas", issue_number=1234, title="Speed up groupby", ...)
+
+# Or fetch a fully-hydrated PR (tries Supabase cache first, then GitHub API):
+pr = await ds.PR.fetch("pandas-dev/pandas", 1234)
 ```
 
 You can run basic operations to get relevant data:

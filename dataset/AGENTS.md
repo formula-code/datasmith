@@ -94,7 +94,7 @@ Multi-stage Docker build file with the following stages:
 4. **pkg**:
 
    * Runs `docker_build_pkg.sh` to install the package
-   * Copies `profile.sh` and `run_tests.sh`
+   * Copies `profile.sh` and `run-tests.sh`
 
 5. **run**:
 
@@ -231,7 +231,7 @@ sed -i 's/old_code/new_code/' path/to/file.py
 
 **When to modify**: Do not modify; make fixes in `docker_build_run.sh` and/or `docker_build_pkg.sh`
 
-#### run_tests.sh
+#### run-tests.sh
 
 **Purpose**: Execute pytest tests to validate the package
 
@@ -307,7 +307,7 @@ The `verify.py` script runs through these stages in order:
 
 ### 3. Tests Stage
 
-* Runs `run_tests.sh` inside the container
+* Runs `run-tests.sh` inside the container
 * Executes pytest test suite
 * Validates that tests pass
 * Timeout: 3600 seconds (1 hour)
@@ -474,8 +474,8 @@ docker build -t test-image \
 # Run profile.sh manually
 docker run --rm test-image /profile.sh /tmp/profile
 
-# Run run_tests.sh manually
-docker run --rm test-image /run_tests.sh <base_commit>
+# Run run-tests.sh manually
+docker run --rm test-image /run-tests.sh <base_commit>
 ```
 
 ## Configuration
@@ -487,18 +487,16 @@ Required configuration:
 ```json
 {
   "context_registry_path": "path/to/registry.json",
-  "dockerhub_namespace": "your-namespace",
   "dockerhub_repo": "all",
   "dockerhub_username": "your-username",
-  "dockerhub_password": "your-token"
+  "dockerhub_token": "your-token"
 }
 ```
 
 Or use environment variables:
 
-* `DOCKERHUB_NAMESPACE`
 * `DOCKERHUB_USERNAME`
-* `DOCKERHUB_TOKEN` or `DOCKERHUB_PASSWORD`
+* `DOCKERHUB_TOKEN`
 
 ## Advanced Usage
 

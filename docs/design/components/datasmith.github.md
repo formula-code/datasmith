@@ -139,6 +139,22 @@ class Issue(BaseModel):
 
 
 class PR(Issue):
+    @classmethod
+    async def fetch(
+        cls,
+        repository: str,
+        issue_number: int,
+        *,
+        client: "GitHubClient | None" = None,
+    ) -> "PR":
+        """Hydrate a PR from Supabase cache, falling back to the GitHub API.
+
+        Tries the ``pull_requests`` Supabase table first (cheap, sync).
+        If not found, queries the GitHub API via *client* (or creates one
+        from ``GH_TOKENS``).  Raises ``LookupError`` on miss.
+        """
+        ...
+
     @property
     def merge_commit(self) -> str:
         """SHA of the merge commit."""

@@ -41,9 +41,13 @@ pr = PR(repository="astropy/astropy", issue_number=16222)
 pr.merge_commit_sha   # the merge commit sha
 pr.base_sha           # base branch commit
 pr.cache_key          # "astropy/astropy:16222" — used for Supabase caching
+
+# Or fetch a fully-hydrated PR (tries Supabase first, then GitHub API):
+pr = await PR.fetch("astropy/astropy", 16222)
+pr.merge_commit_sha   # now populated from the database or API
 ```
 
-You can fetch live data from GitHub using the async client:
+You can also fetch live data from GitHub using the async client directly:
 ```python
 pool = TokenPool()   # reads GH_TOKENS env var, rotates tokens on rate-limit
 gh = GitHubClient(pool)
@@ -115,9 +119,17 @@ A pull request is useless if you cannot build a reproducible environment for it.
 from datasmith.docker import ImageManager, MultiObjVerifier, SmokeVerifier, ProfileVerifier
 
 mgr = ImageManager()
-mgr.build_base_image("./context")                                # formulacode/base:latest
-mgr.build_repo_image("pandas-dev", "pandas", "./context")        # formulacode/pandas-dev-pandas:latest
-mgr.build_pr_image("pandas-dev", "pandas", 16222, "./context")    # formulacode/pandas-dev-pandas:16222
+mgr.build_base_image()                                # formulacode/base:latest (uses the default Dockerfile.base)
+mgr.build_repo_image("pandas-dev", "pandas",)        # formulacode/pandas-dev-pandas:latest (Look up Dockerfile.repo for pandas-dev/pandas that should be stored in supabase or fallback to the default Dockerfile.repo)
+mgr.build_pr_image("pandas-dev", "pandas", 16222,)    # formulacode/pandas-dev-pandas:16222 (Look up Dockerfile.pr for pandas-dev/pandas:16222 that should be stored in supabase or fallback to the default Dockerfile.pr)
+
+
+# Alternatively, if the user wants to use a custom Dockerfile, they can do so by:
+
+mgr.build_base_image(context="path/to/custom/context")
+mgr.build_repo_image("pandas-dev", "pandas", context="path/to/custom/context")
+mgr.build_pr_image("pandas-dev", "pandas", 16222, context="path/to/custom/context")
+
 
 # Verify an image with a chain of verifiers — short-circuits on first failure.
 verifier = MultiObjVerifier(verifiers=[
@@ -128,22 +140,43 @@ result = verifier.verify("formulacode/pandas-dev-pandas:16222")
 # result.ok, result.rc, result.stdout, result.stderr, result.duration_s
 ```
 
-One of the main features of `datasmith` is the ability to automatically synthesize docker containers for a pull request. The synthesizer is a state machine:
+One of the main features of `datasmith` is the ability to automatically synthesize docker containers for a pull request. The synthesizer is a state machine that checks Supabase for cached contexts, tries similar build scripts, then falls back to an installed CLI agent (Claude Code, Codex, or Gemini — auto-detected):
 
 ```python
 from datasmith.agents import Synthesizer
+from datasmith.docker import MultiObjVerifier, SmokeVerifier, ProfileVerifier
+from datasmith.docker.context import DockerContext
 
-synth = Synthesizer(max_attempts=3, models=["o4-mini", "claude-sonnet-4-20250514"])
-ctx = synth.run("pandas-dev", "pandas", 16222, pr_context="...", verifier=verifier)
-# Checking cache for astropy/astropy:16222...                    [MISS]
-# Found 4 similar scripts from astropy/astropy
+# The verifier chain validates each synthesis attempt.
+verifier = MultiObjVerifier(verifiers=[
+    SmokeVerifier("pandas"),      # can we import the package?
+    ProfileVerifier(timeout=300), # can we discover and run ASV benchmarks?
+])
+
+# Load a base Docker build context (Dockerfile + shell scripts) to iterate on.
+base_context = DockerContext.from_directory("dataset/formulacode_verified/pandas-dev_pandas/abc123")
+
+synth = Synthesizer(max_attempts=3)
+ctx = synth.run(
+    owner="pandas-dev",
+    repo="pandas",
+    issue_number=16222,
+    pr_context="This PR optimizes groupby performance by ...",
+    verifier=verifier,
+    sha="abc123def456",
+    base_context=base_context,
+    env_payload='{"dependencies": ["numpy==1.26.0", "cython==3.0.0"]}',
+    python_version="3.10",
+)
+# Checking cache for pandas-dev/pandas@abc123def456...             [MISS]
+# Found 4 similar scripts from pandas-dev/pandas
 # Attempt 1/4 with similar script...                              [FAIL]
-# Attempt 2/4 with similar script...                              [FAIL]
-# Attempt 3/4 with similar script...                              [FAIL]
-# Attempt 4/4 with similar script...                              [FAIL]
-# Generating with Codex (model=o4-mini)...                        [FAIL]
-# Generating with Codex (model=claude-sonnet-4-20250514)...                  [PASS]
-# [DONE] Build script synthesized for astropy/astropy#16222
+# Launching claude agent sandbox in /tmp/synthesis-xxx...
+# Sandbox synthesis succeeded                                     [PASS]
+# Saved context for pandas-dev/pandas@abc123def456
+#
+# On success, the DockerContext is persisted to Supabase's docker_contexts table.
+# ctx is a DockerContext with the working build scripts, or None if all attempts failed.
 ```
 
 If ALL attempts fail, `synthesize` logs every attempt (stderr, stdout, model, script used) to Supabase's `build_attempts` table and returns `None`. Failed PRs can be retried later — the logged attempts provide context for debugging or a future synthesis run.
@@ -217,7 +250,7 @@ Datasmith contains seven high-level modules. FormulaCode-specific logic lives di
 * `ds.docker`: Dependencies for constructing and maintaining docker tasks.
 	* `ds.docker.images`: `ImageManager` wrapping `python-on-whales` (not `docker-py`) — subprocess-based, thread-safe by design, scales to 40-50+ concurrent threads without connection pool issues. Three-tier hierarchy: base -> repo -> PR.
 	* `ds.docker.context`: `DockerContext` Pydantic model holding Dockerfile + shell scripts. `to_tar_bytes()` produces reproducible tarballs (zero mtimes, deterministic order). `from_directory()` loads from a task directory.
-	* `ds.docker.verifiers`: Abstract `Verifier` base class. Concrete: `SmokeVerifier` (`import {package}`), `ProfileVerifier` (runs `profile.sh`, timeout exit code 124 treated as success), `PytestVerifier` (runs `run_tests.sh`), `MultiObjVerifier` (chains verifiers, short-circuits on failure).
+	* `ds.docker.verifiers`: Abstract `Verifier` base class. Concrete: `SmokeVerifier` (`import {package}`), `ProfileVerifier` (runs `profile.sh`, timeout exit code 124 treated as success), `PytestVerifier` (runs `run-tests.sh`), `MultiObjVerifier` (chains verifiers, short-circuits on failure).
 	* `ds.docker.publish`: `DockerHubPublisher` with lazy login, `@with_backoff` retry, version tagging (`@YYYY-MM`), remote tag listing, and delta publish.
 * `ds.agents`: Agents for dynamic filtering and automatic build script generation. Simple agents use `dspy`; complex agents use an installed agent (like `codex`).
 	* `ds.agents.extractors`: `ProblemExtractor` — DSPy module that extracts structured `ProblemExtraction` (initial_observations, triage_attempts, solution_overview, solution_observations) from PR text.
@@ -307,23 +340,42 @@ SUPABASE_KEY=your-service-role-key
 GH_TOKENS=github_pat_xxx,github_pat_yyy
 
 # LLM backends (for classification and synthesis)
-DSPY_MODEL=openai/meta-llama/Llama-3.3-70B-Instruct
+DSPY_MODEL=openai/gpt-oss-120b
 DSPY_API_BASE=http://localhost:30000/v1
 DSPY_API_KEY=local
 DSPY_MAX_TOKENS=16000
 
 # DockerHub (for publishing)
 DOCKERHUB_USERNAME=formulacode
-DOCKERHUB_PASSWORD=dckr_pat_xxxxx
+DOCKERHUB_TOKEN=dckr_pat_xxxxx
 
 # HuggingFace (for dataset publishing)
 HF_TOKEN_PATH=/path/to/huggingface/token
 ```
 
-Start local Supabase and apply the schema:
+### Supabase
+
+Start the local Supabase instance and apply all migrations:
 ```bash
-$ npx supabase start
-$ npx supabase db push
+$ npx supabase start              # starts Postgres, Auth, Storage, Studio, etc.
+$ npx supabase migration up --local   # apply migrations in supabase/migrations/
+```
+
+Common commands:
+```bash
+$ npx supabase status             # show URLs, ports, and service health
+$ npx supabase migration list --local # list applied / pending migrations
+$ npx supabase db reset           # wipe and recreate from migrations (destructive)
+$ npx supabase stop               # stop all containers
+```
+
+Studio is available at the URL printed by `supabase status` (default `http://127.0.0.1:54323`) — use it to browse tables, run SQL, and inspect data.
+
+To seed the `build_attempts` table with proven-good build scripts from the legacy registry:
+```bash
+$ python scratch/scripts/prefill/transform_registry.py   # legacy JSON -> contexts_by_sha.json
+$ python scratch/scripts/prefill/prefill_build_attempts.py  # insert 73 rows into build_attempts
+# Both scripts support --dry-run to preview without writing.
 ```
 
 
@@ -388,15 +440,6 @@ $ python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha
 ```
 
 Only modify `docker_build_pkg.sh` and `docker_build_run.sh` during verification fixes.
-
-
-## Migration from SQLite
-
-For existing installations using the old SQLite + pickle backend:
-```bash
-$ python scripts/migrate_sqlite_to_supabase.py --pipeline-db pipeflush.db --cache-db cache.db
-# Use --dry-run to preview row counts before migrating.
-```
 
 
 ## License

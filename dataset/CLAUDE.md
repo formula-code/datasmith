@@ -84,7 +84,7 @@ Multi-stage Docker build file with the following stages:
 
 4. **pkg**:
    - Runs `docker_build_pkg.sh` to install the package
-   - Copies `profile.sh` and `run_tests.sh`
+   - Copies `profile.sh` and `run-tests.sh`
 
 5. **run**:
    - Runs `docker_build_run.sh`
@@ -200,7 +200,7 @@ sed -i 's/old_code/new_code/' path/to/file.py
 - Check for benchmark syntax errors
 - Ensure dependencies needed by benchmarks are installed
 
-#### run_tests.sh
+#### run-tests.sh
 **Purpose**: Execute pytest tests to validate the package
 
 **What it does**:
@@ -262,7 +262,7 @@ The `verify.py` script runs through these stages in order:
 - Benchmark execution failures → check benchmark code compatibility
 
 ### 3. Tests Stage
-- Runs `run_tests.sh` inside the container
+- Runs `run-tests.sh` inside the container
 - Executes pytest test suite
 - Validates that tests pass
 - Timeout: 3600 seconds (1 hour)
@@ -327,7 +327,7 @@ micromamba install -y -n "$ENV_NAME" -c conda-forge cython numpy
 vim dataset/formulacode_verified/<repo>/<sha>/profile.sh
 ```
 
-**Test failures** → Edit `docker_build_pkg.sh` or `run_tests.sh`:
+**Test failures** → Edit `docker_build_pkg.sh` or `run-tests.sh`:
 ```bash
 # Add test dependency
 vim dataset/formulacode_verified/<repo>/<sha>/docker_build_pkg.sh
@@ -414,8 +414,8 @@ docker build -t test-image \
 # Run profile.sh manually
 docker run --rm test-image /profile.sh /tmp/profile
 
-# Run run_tests.sh manually
-docker run --rm test-image /run_tests.sh <base_commit>
+# Run run-tests.sh manually
+docker run --rm test-image /run-tests.sh <base_commit>
 ```
 
 ## Configuration
@@ -426,17 +426,15 @@ Required configuration:
 ```json
 {
   "context_registry_path": "path/to/registry.json",
-  "dockerhub_namespace": "your-namespace",
   "dockerhub_repo": "all",
   "dockerhub_username": "your-username",
-  "dockerhub_password": "your-token"
+  "dockerhub_token": "your-token"
 }
 ```
 
 Or use environment variables:
-- `DOCKERHUB_NAMESPACE`
 - `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN` or `DOCKERHUB_PASSWORD`
+- `DOCKERHUB_TOKEN`
 
 ## Advanced Usage
 

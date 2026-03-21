@@ -100,7 +100,7 @@ Uses **`docker-py`** (Python Docker SDK), not python-on-whales.
 - `docker.from_env(timeout=1800, max_pool_size=max_concurrency)` in `src/datasmith/docker/orchestrator.py`.
 - To mitigate thread-safety issues, each build creates a **fresh low-level `docker.APIClient`** via `_new_api_client()` in `src/datasmith/docker/context.py:31-58`.
 
-### Image hierarchy
+### Image hierarchy (Old)
 
 5 tiers (not 3), defined by the `tag` field on `Task` (`src/datasmith/core/models/task.py`):
 **Assessment: Redesign.** The 5-tier hierarchy is over-engineered, and the multi-stage Dockerfile causes images to balloon in size (each stage carries forward all prior layers). The design doc's proposed 3-tier hierarchy (base / repo / PR) is cleaner. A migration script is needed for the ~1400 existing images on DockerHub. Separate Dockerfiles per tier (not multi-stage) would keep image sizes manageable.
@@ -110,10 +110,18 @@ Uses **`docker-py`** (Python Docker SDK), not python-on-whales.
 | 1 | `base` | System environment: Rust, cmake, micromamba, Python, UV |
 | 2 | `env` | Repository clone + Python environments with pinned dependencies |
 | 3 | `pkg` | Package installed in editable mode (`pip install -e .`) |
-| 4 | `run` | Prepared for benchmarking/testing (repo locked, ASV configured) |
-| 5 | `final` | Production image with benchmark list and runtime deps |
+| 4 | `run` | Prepared for benchmarking/testing (repo locked, ASV configured). Shouldn't change across PRs. |
+| 5 | `final` | Production image with benchmark list and runtime deps. These are final touches, and can be combined with `run`. Shouldn't change across PRs. |
 
 Multi-stage Dockerfile in `src/datasmith/docker/Dockerfile` implements all 6 stages (base, repo, env, pkg, run, final). Each stage runs a corresponding `docker_build_*.sh` script.
+
+### Image hierarchy (New)
+
+1. **Base image** (`formulacode/base:latest`): Common dependencies shared across all repositories. This maps to the `base` tag in the old hierarchy.
+2. **Repository image** (`formulacode/{owner}-{repo}:latest`): Repository-level dependencies (e.g. `formulacode/pandas-dev-pandas:latest`). This maps to the `env` tag in the old hierarchy. The package installation is kept as a PR-specific step as it can differ depending on when the PR was made (e.g., old PRs may use a different package installation method than new PRs).
+3. **PR image** (`formulacode/{owner}-{repo}-{issue_number}:latest`): PR-specific build script applied on top of the repository image. This maps to the `pkg` + `run` + `final` stages in the old hierarchy, but combined into a single PR-specific layer since they are all tightly coupled to the PR's code changes.
+
+`build_image` checks each tier top-down — if the base and repo images exist, it only builds the PR layer.
 
 ### Image naming
 
@@ -140,7 +148,7 @@ Multi-stage Dockerfile in `src/datasmith/docker/Dockerfile` implements all 6 sta
 
 1. **Profile verifier** (`validate_profile()`) — runs `/profile.sh` inside container with configurable timeout (default 30s). Extracts ASV benchmark list from tarballs. Timeout (rc=124) treated as success. Returns `ProfileValidationResult`.
 
-2. **Tests verifier** (`validate_tests()`) — runs `/run_tests.sh` with configurable timeout (default 30s). Parses structured JSON results from `/logs/test_results.json` if available. Summarizes pytest output (first errors + last 40 lines). Timeout (rc=124) treated as success. Returns `TestValidationResult`.
+2. **Tests verifier** (`validate_tests()`) — runs `/run-tests.sh` with configurable timeout (default 30s). Parses structured JSON results from `/logs/test_results.json` if available. Summarizes pytest output (first errors + last 40 lines). Timeout (rc=124) treated as success. Returns `TestValidationResult`.
 
 3. **Combined acceptance** (`validate_acceptance()`) — runs profile first; if it passes, runs tests. Returns `AcceptanceResult`.
 
@@ -151,7 +159,7 @@ No separate "smoke" verifier (import check). The `try_import` tool exists in the
 `dataset/verify.py` runs 4 stages in sequence:
 1. **Build** — Docker build (timeout: 3600s)
 2. **Profile** — run `profile.sh` (timeout: 3600s)
-3. **Tests** — run `run_tests.sh` (timeout: 3600s)
+3. **Tests** — run `run-tests.sh` (timeout: 3600s)
 4. **DockerHub push** — build final image and push
 
 Writes `verification_success.json` or `failure.json` to `dataset/formulacode_verified/{owner}_{repo}/{sha}/`.

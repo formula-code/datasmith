@@ -69,4 +69,4 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 
 ## Environment setup
 
-Requires a `tokens.env` file in the repo root with `GH_TOKEN`, `CACHE_LOCATION`, `PIPELINE_DB`, and optionally `DSPY_*` vars for LLM backends and `DOCKERHUB_*` vars for publishing. See README.md for the full template.
+Requires a `tokens.env` file in the repo root with `GH_TOKEN`, `CACHE_LOCATION`, and optionally `DSPY_*` vars for LLM backends and `DOCKERHUB_*` vars for publishing. See README.md for the full template.

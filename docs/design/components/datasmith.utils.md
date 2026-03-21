@@ -103,22 +103,11 @@ class TokenPool:
 
 ### Database layer
 
-**SQLite** (not Supabase) in two databases:
+**Supabase** for all persistent storage. See `src/datasmith/utils/db.py` for the client and query helpers.
 
-1. **Pipeline DB** (`src/datasmith/core/storage.py`):
-   - Path: `PIPELINE_DB` env var (default: `scratch/artifacts/pipeflush.db`).
-   - WAL journal mode, `busy_timeout=30000` (30s).
-   - Thread-safe writes via module-level `threading.Lock`.
-   - `write_table(df, table_name, db_path, if_exists)` — JSON-serializes complex columns (`_KNOWN_COMPLEX_COLUMNS`: pr_user, pr_base, pr_head, pr_labels, pr_assignees, etc.) with numpy type fallback. Auto-detects other columns needing serialization.
-   - `read_table(table_name, db_path)` — reads with JSON deserialization.
-   - `table_exists()`, `list_tables()`, `read_parquet_or_table()` (fallback compatibility).
-   - No schema definition — tables created on-demand by pandas `.to_sql()`.
-
-2. **Cache DB** (`src/datasmith/core/cache/config.py`):
-   - Path: `CACHE_LOCATION` env var (default: `cache.db`).
-   - Used by `@cache_completion` decorator for GitHub API responses and LLM classification results.
-
-No Supabase client, no Supabase tables, no `acreate_client`, no `@supabase_cached` decorator.
+**Cache DB** (`CACHE_LOCATION` env var, default: `cache.db`):
+   - Local SQLite cache for GitHub API responses.
+   - Used by `@cache_completion` decorator.
 
 ### Caching decorator
 
