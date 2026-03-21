@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from datasmith.agents.extractors import ProblemExtraction, ProblemExtractor, _clean_section, _is_null
+from datasmith.agents.extractors import ProblemExtraction, ProblemExtractor
 
 
 class TestProblemExtraction:
@@ -22,22 +22,25 @@ class TestProblemExtraction:
         assert ext.solution_observations == "sol_obs"
 
     def test_to_problem_markdown_format(self) -> None:
-        """Verify markdown headers present for problem sections only."""
+        """Returns only initial_observations without headers."""
         ext = ProblemExtraction(
             initial_observations="The system is slow",
             triage_attempts="Profiled the hotloop",
         )
         md = ext.to_problem_markdown()
-        assert "## Initial Observations" in md
-        assert "## Triage Attempts" in md
         assert "The system is slow" in md
-        assert "Profiled the hotloop" in md
-        # Solution sections should NOT be present
-        assert "## Solution Overview" not in md
-        assert "## Solution Observations" not in md
+        # No headers or triage in problem markdown
+        assert "## Initial Observations" not in md
+        assert "## Triage Attempts" not in md
+        assert "Profiled the hotloop" not in md
 
-    def test_to_full_markdown_includes_solution(self) -> None:
-        """Verify all 4 sections appear in full markdown."""
+    def test_to_problem_markdown_strips_json_fences(self) -> None:
+        ext = ProblemExtraction(initial_observations="```json\nsome text")
+        md = ext.to_problem_markdown()
+        assert "```json" not in md
+        assert "some text" in md
+
+    def test_to_full_markdown_includes_all_sections(self) -> None:
         ext = ProblemExtraction(
             initial_observations="obs text here",
             triage_attempts="triage text here",
@@ -45,10 +48,19 @@ class TestProblemExtraction:
             solution_observations="sol obs text here",
         )
         md = ext.to_full_markdown()
-        assert "## Initial Observations" in md
+        assert "obs text here" in md
         assert "## Triage Attempts" in md
         assert "## Solution Overview" in md
         assert "## Solution Observations" in md
+
+    def test_to_full_markdown_normalises_redundant_headers(self) -> None:
+        ext = ProblemExtraction(
+            initial_observations="obs",
+            triage_attempts="## Triage Attempts\nactual content",
+        )
+        md = ext.to_full_markdown()
+        # Should have exactly one Triage Attempts header, not two
+        assert md.count("## Triage Attempts") == 1
 
     def test_to_dict(self) -> None:
         ext = ProblemExtraction(initial_observations="a", triage_attempts="b")
@@ -62,38 +74,6 @@ class TestProblemExtraction:
         ext = ProblemExtraction()
         assert ext.to_problem_markdown() == ""
         assert ext.to_full_markdown() == ""
-
-
-class TestCleanSection:
-    def test_clean_section_removes_headers(self) -> None:
-        """Verify header cleanup removes known section headers."""
-        text = "## Initial Observations\nThis is a long enough observation string to pass."
-        cleaned = _clean_section(text)
-        assert not cleaned.startswith("## Initial Observations")
-        assert "long enough" in cleaned
-
-    def test_clean_section_rejects_short(self) -> None:
-        """Text <20 chars returns empty string."""
-        assert _clean_section("short") == ""
-        assert _clean_section("12345678901234567") == ""
-
-    def test_clean_section_empty(self) -> None:
-        assert _clean_section("") == ""
-
-    def test_clean_section_no_alpha(self) -> None:
-        """Strings with no alphabetic chars return empty."""
-        assert _clean_section("1234567890123456789012345") == ""
-
-
-class TestIsNull:
-    def test_is_null_values(self) -> None:
-        """'null', 'none', 'n/a' and '' are detected as null."""
-        assert _is_null("null") is True
-        assert _is_null("None") is True
-        assert _is_null("N/A") is True
-        assert _is_null("") is True
-        assert _is_null("  null  ") is True
-        assert _is_null("actual content") is False
 
 
 class TestProblemExtractor:
@@ -135,3 +115,29 @@ class TestProblemExtractor:
             result = extractor.extract_problem(pr_title="test", pr_body=body, pr_comments="")
         assert isinstance(result, ProblemExtraction)
         assert len(result.initial_observations) <= 500
+
+    def test_clean_text_handles_lists(self) -> None:
+        extractor = ProblemExtractor()
+        assert extractor._clean_text(["line one", "line two"]) == "line one\nline two"
+
+    def test_clean_text_handles_null_strings(self) -> None:
+        extractor = ProblemExtractor()
+        assert extractor._clean_text("null") is None
+        assert extractor._clean_text("None") is None
+        assert extractor._clean_text("undefined") is None
+        assert extractor._clean_text("N/A") is None
+
+    def test_clean_text_handles_none(self) -> None:
+        extractor = ProblemExtractor()
+        assert extractor._clean_text(None) is None
+
+    def test_build_extraction_rejects_short_fields(self) -> None:
+        extractor = ProblemExtractor()
+        prediction = MagicMock()
+        prediction.initial_observations = "short"  # <20 chars
+        prediction.triage_attempts = "tiny"  # <10 chars
+        prediction.solution_overview = "x"  # <10 chars
+        prediction.solution_observations = "y"  # <10 chars
+        result = extractor._build_extraction(prediction)
+        assert result.initial_observations == ""
+        assert result.triage_attempts == ""
