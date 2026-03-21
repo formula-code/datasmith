@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     dspy_api_base: str = ""
     dspy_max_tokens: int = 16000
     dockerhub_username: str = ""
-    dockerhub_password: str = ""
+    dockerhub_token: str = ""
     hf_token_path: str = ""
 
     model_config = {"env_file": "tokens.env", "env_file_encoding": "utf-8", "extra": "ignore"}

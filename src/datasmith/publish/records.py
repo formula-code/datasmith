@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
+from typing import Any, cast
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+import pyarrow as pa  # type: ignore[import-untyped]
+import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
 from datasmith.github.models import FormulaCodeRecord
 from datasmith.utils import get_client, get_logger
@@ -54,7 +55,7 @@ def records_from_supabase(
     resp = query.execute()
 
     records: list[FormulaCodeRecord] = []
-    for row in resp.data:
+    for row in cast(list[dict[str, Any]], resp.data):
         try:
             records.append(
                 FormulaCodeRecord(

@@ -6,7 +6,7 @@ import functools
 import hashlib
 import json
 import os
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, TypeVar, cast
 
 from supabase import Client, create_client
 
@@ -64,6 +64,37 @@ def batch_upsert(table: str, rows: list[dict[str, Any]], chunk_size: int = 100) 
     return total
 
 
+def fetch_all(
+    table: str,
+    select: str = "*",
+    filters: dict[str, Any] | None = None,
+    is_null: list[str] | None = None,
+    page_size: int = 1000,
+) -> list[dict[str, Any]]:
+    """Paginate through all rows matching the query.
+
+    Supabase/PostgREST caps responses at 1 000 rows by default.
+    This helper fetches successive pages using ``range()`` until
+    a page returns fewer than *page_size* rows.
+    """
+    client = get_client()
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        query = client.table(table).select(select)
+        for col, val in (filters or {}).items():
+            query = query.eq(col, val)
+        for col in is_null or []:
+            query = query.is_(col, "null")
+        resp = query.range(offset, offset + page_size - 1).execute()
+        page = cast(list[dict[str, Any]], resp.data or [])
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
 def supabase_cached(func: F) -> F:
     """Decorator that caches function results in the Supabase ``hook_cache`` table.
 
@@ -96,7 +127,8 @@ def supabase_cached(func: F) -> F:
                 .execute()
             )
             if resp.data:
-                return resp.data[0]["result_json"]
+                first = cast(dict[str, Any], resp.data[0])
+                return first["result_json"]
 
         result = func(*args, **kwargs)
 
