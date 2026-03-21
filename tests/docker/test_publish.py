@@ -19,12 +19,12 @@ def publisher() -> DockerHubPublisher:
 
 class TestPush:
     def test_push_new_tag(self, publisher: DockerHubPublisher) -> None:
-        with patch.dict("os.environ", {"DOCKERHUB_USERNAME": "user", "DOCKERHUB_PASSWORD": "pass"}):
+        with patch.dict("os.environ", {"DOCKERHUB_USERNAME": "user", "DOCKERHUB_TOKEN": "pass"}):
             publisher.push("formulacode/pandas:latest")
 
         publisher._mock_docker.login.assert_called_once_with(  # type: ignore[attr-defined]
             username="user",
-            password="pass",  # noqa: S106
+            password="pass",
         )
         publisher._mock_docker.push.assert_called_once_with(  # type: ignore[attr-defined]
             "formulacode/pandas:latest"
@@ -38,7 +38,7 @@ class TestPush:
         publisher._mock_docker.push.assert_called_once()  # type: ignore[attr-defined]
 
     def test_push_skips_login_without_credentials(self, publisher: DockerHubPublisher) -> None:
-        with patch.dict("os.environ", {"DOCKERHUB_USERNAME": "", "DOCKERHUB_PASSWORD": ""}, clear=False):
+        with patch.dict("os.environ", {"DOCKERHUB_USERNAME": "", "DOCKERHUB_TOKEN": ""}, clear=False):
             publisher.push("formulacode/pandas:latest")
 
         publisher._mock_docker.login.assert_not_called()  # type: ignore[attr-defined]

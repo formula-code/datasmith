@@ -23,9 +23,9 @@ class DockerHubPublisher:
         if self._logged_in:
             return
         username = os.environ.get("DOCKERHUB_USERNAME", "")
-        password = os.environ.get("DOCKERHUB_PASSWORD", "")
-        if username and password:
-            self._docker.login(username=username, password=password)
+        token = os.environ.get("DOCKERHUB_TOKEN", "")
+        if username and token:
+            self._docker.login(username=username, password=token)
             self._logged_in = True
 
     @with_backoff(max_retries=3, base_delay=2.0)
