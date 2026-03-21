@@ -38,7 +38,7 @@ class TestToTarBytes:
             "docker_build_run.sh",
             "docker_build_final.sh",
             "profile.sh",
-            "run_tests.sh",
+            "run-tests.sh",
             "entrypoint.sh",
         ])
         assert names == expected

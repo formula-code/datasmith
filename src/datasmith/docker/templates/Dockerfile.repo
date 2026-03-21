@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1.7
+
+ARG BASE_IMAGE=formulacode/base:latest
+ARG PY_VERSION=""
+
+FROM ${BASE_IMAGE} AS repo
+ARG PY_VERSION=""
+ARG REPO_URL
+RUN git clone "$REPO_URL" /workspace/repo
+WORKDIR /workspace/repo
+ENTRYPOINT ["/bin/bash"]

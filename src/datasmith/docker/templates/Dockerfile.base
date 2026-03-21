@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+
+ARG PY_VERSION=""
+FROM buildpack-deps:jammy AS base
+ARG PY_VERSION=""
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        jq cmake ninja-build libopenmpi-dev libgeos-dev pkg-config graphviz libgraphviz-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+      | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
+
+ENV MAMBA_ROOT_PREFIX=/opt/conda \
+    PATH=/opt/conda/bin:$PATH \
+    MAMBA_DOCKERFILE_ACTIVATE=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1
+
+RUN micromamba install -y -p $MAMBA_ROOT_PREFIX -c conda-forge \
+        python=3.10 \
+        git asv pyperf mamba conda libmambapy && \
+    micromamba clean --all --yes
+
+RUN mkdir -p /workspace /output
+WORKDIR /workspace
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+COPY docker_build_base.sh /workspace/docker_build_base.sh
+RUN chmod +x /workspace/docker_build_base.sh && \
+    if [ -n "${PY_VERSION}" ]; then \
+        /workspace/docker_build_base.sh --py-version "${PY_VERSION}"; \
+    else \
+        /workspace/docker_build_base.sh; \
+    fi
+
+RUN micromamba clean --all --yes

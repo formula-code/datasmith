@@ -70,6 +70,7 @@ packages = ["src/datasmith"]
 
 [tool.mypy]
 files = ["src"]
+exclude = ["src/datasmith/agents/templates/"]
 disallow_untyped_defs = true
 disallow_any_unimported = true
 no_implicit_optional = true
@@ -86,7 +87,7 @@ asyncio_mode = "auto"
 target-version = "py39"
 line-length = 120
 fix = true
-extend-exclude = ["dataset/", "scratch/"]
+extend-exclude = ["dataset/", "scratch/", "src/datasmith/docker/templates/", "src/datasmith/agents/templates/"]
 force-exclude = true
 
 [tool.ruff.lint]
@@ -131,6 +132,8 @@ ignore = [
     "TRY300",
     # subprocess call security (we control inputs)
     "S603",
+    # partial executable path (we use git, codex, etc.)
+    "S607",
     # jinja2 autoescape (we render markdown, not HTML)
     "S701",
     # mutable class attr without ClassVar (acceptable for registries)
@@ -141,6 +144,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106", "S108", "PGH003", "B017", "SIM117", "F841"]
+"src/datasmith/agents/templates/*" = ["S108", "S307"]
 "*.py" = ["TRY003"]
 "scratch/notebooks/*.ipynb" = ["S101"]
 

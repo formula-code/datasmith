@@ -75,7 +75,7 @@ class PytestVerifier(Verifier):
         try:
             output = self._docker.run(
                 image_name,
-                ["/bin/bash", "/run_tests.sh"],
+                ["/bin/bash", "/run-tests.sh"],
                 remove=True,
             )
             return VerifyResult(ok=True, rc=0, stdout=str(output), duration_s=time.time() - start, stage="pytest")

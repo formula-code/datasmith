@@ -31,7 +31,7 @@ class DockerContext(BaseModel):
         "docker_build_run.sh": "build_run_sh",
         "docker_build_final.sh": "build_final_sh",
         "profile.sh": "profile_sh",
-        "run_tests.sh": "run_tests_sh",
+        "run-tests.sh": "run_tests_sh",
         "entrypoint.sh": "entrypoint_sh",
     }
 
@@ -75,6 +75,11 @@ class DockerContext(BaseModel):
                 with open(os.path.join(path, filename), "w") as f:
                     f.write(content)
 
+    # Fallback filenames for backward compatibility (old name -> new name).
+    _COMPAT_MAP: ClassVar[dict[str, str]] = {
+        "run_tests.sh": "run-tests.sh",
+    }
+
     @classmethod
     def from_directory(cls, path: str) -> DockerContext:
         """Load a DockerContext from a task directory."""
@@ -84,6 +89,13 @@ class DockerContext(BaseModel):
             if os.path.exists(fp):
                 with open(fp) as f:
                     return f.read()
+            # Try legacy filename
+            legacy = {v: k for k, v in cls._COMPAT_MAP.items()}.get(name)
+            if legacy:
+                fp = os.path.join(path, legacy)
+                if os.path.exists(fp):
+                    with open(fp) as f:
+                        return f.read()
             return ""
 
         kwargs = {field: _read(filename) for filename, field in cls._FILE_MAP.items()}
