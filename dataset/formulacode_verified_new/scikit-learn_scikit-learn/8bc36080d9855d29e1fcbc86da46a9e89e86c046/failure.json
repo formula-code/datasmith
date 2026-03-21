@@ -1,0 +1,12 @@
+{
+  "task": {
+    "owner": "scikit-learn",
+    "repo": "scikit-learn",
+    "sha": "8bc36080d9855d29e1fcbc86da46a9e89e86c046",
+    "tag": "pkg"
+  },
+  "stage": "build",
+  "return_code": 1,
+  "stdout": "",
+  "stderr": "The command executed was `/usr/bin/docker buildx build --build-arg REPO_URL=https://github.com/scikit-learn/scikit-learn --build-arg COMMIT_SHA=8bc36080d9855d29e1fcbc86da46a9e89e86c046 --build-arg ENV_PAYLOAD= --load --target run --tag formulacode/scikit-learn-scikit-learn:8bc36080d9855d29e1fcbc86da46a9e89e86c046--run dataset/formulacode_verified_new/scikit-learn_scikit-learn/8bc36080d9855d29e1fcbc86da46a9e89e86c046`.\nIt returned with code 1\nThe content of stdout is ''\nThe content of stderr can be found above the stacktrace (it wasn't captured)."
+}

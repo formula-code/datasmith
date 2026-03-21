@@ -17,3 +17,32 @@
 {"dockerhub_image": "docker.io/formulacode/all:modin-project-modin-04f0d149e9c30e1ac5d041634071711860078250--final"}
 {"dockerhub_image": "docker.io/formulacode/all:modin-project-modin-43d0b941607e6fd9fac7aef491e4107ecabe2dd4--final"}
 {"image": "formulacode/kedro-org-kedro:76380d423f432b46aa1b1eaa378f085b997111e3--run", "owner": "kedro-org", "repo": "kedro", "sha": "76380d423f432b46aa1b1eaa378f085b997111e3"}
+{"image": "formulacode/networkx-networkx:0e948ee1efc1f912e068e93a90d22d00e75d53d1--run", "owner": "networkx", "repo": "networkx", "sha": "0e948ee1efc1f912e068e93a90d22d00e75d53d1"}
+{"image": "formulacode/networkx-networkx:1af2820e3710526248c64d981488f83c3c32e056--run", "owner": "networkx", "repo": "networkx", "sha": "1af2820e3710526248c64d981488f83c3c32e056"}
+{"image": "formulacode/networkx-networkx:36e8a1ee85ca0ab4195a486451ca7d72153e2e00--run", "owner": "networkx", "repo": "networkx", "sha": "36e8a1ee85ca0ab4195a486451ca7d72153e2e00"}
+{"image": "formulacode/networkx-networkx:37fd64ced70b896d92eb4940f2d6a78bfc3ad328--run", "owner": "networkx", "repo": "networkx", "sha": "37fd64ced70b896d92eb4940f2d6a78bfc3ad328"}
+{"image": "formulacode/networkx-networkx:44f5754e7482af189ac48155668a06e7031c0c17--run", "owner": "networkx", "repo": "networkx", "sha": "44f5754e7482af189ac48155668a06e7031c0c17"}
+{"image": "formulacode/networkx-networkx:679191810fc962e282b606622c90355f2e6f58ad--run", "owner": "networkx", "repo": "networkx", "sha": "679191810fc962e282b606622c90355f2e6f58ad"}
+{"image": "formulacode/networkx-networkx:7e8665b75fca2cfa4450d6231da67d49244d8003--run", "owner": "networkx", "repo": "networkx", "sha": "7e8665b75fca2cfa4450d6231da67d49244d8003"}
+{"image": "formulacode/networkx-networkx:850e6ccc242a601bd8fb4ec4970e72f5631d372a--run", "owner": "networkx", "repo": "networkx", "sha": "850e6ccc242a601bd8fb4ec4970e72f5631d372a"}
+{"image": "formulacode/networkx-networkx:8aefda8cd0f85cfcd369fad0c946d72c79a6d2ca--run", "owner": "networkx", "repo": "networkx", "sha": "8aefda8cd0f85cfcd369fad0c946d72c79a6d2ca"}
+{"image": "formulacode/networkx-networkx:a7bb0e103bc71fea972be55281ba1fef22758294--run", "owner": "networkx", "repo": "networkx", "sha": "a7bb0e103bc71fea972be55281ba1fef22758294"}
+{"image": "formulacode/networkx-networkx:cadcffa1af15e8e2242ef74ccd70c3473f109104--run", "owner": "networkx", "repo": "networkx", "sha": "cadcffa1af15e8e2242ef74ccd70c3473f109104"}
+{"image": "formulacode/optuna-optuna:100d86142969a46bd29b3d3a74aa183c1cbd06b4--run", "owner": "optuna", "repo": "optuna", "sha": "100d86142969a46bd29b3d3a74aa183c1cbd06b4"}
+{"image": "formulacode/optuna-optuna:1ab5c2e3fdc99b7eb3f4cae5c092cbf20b8985b7--run", "owner": "optuna", "repo": "optuna", "sha": "1ab5c2e3fdc99b7eb3f4cae5c092cbf20b8985b7"}
+{"image": "formulacode/optuna-optuna:40dc7f79017b0787c9a02a666a3a6136e2c07171--run", "owner": "optuna", "repo": "optuna", "sha": "40dc7f79017b0787c9a02a666a3a6136e2c07171"}
+{"image": "formulacode/optuna-optuna:43d714d7631bf25b135e91c7dbb61c80bf0f1976--run", "owner": "optuna", "repo": "optuna", "sha": "43d714d7631bf25b135e91c7dbb61c80bf0f1976"}
+{"image": "formulacode/optuna-optuna:4eeeef15a5cbc9233a9667ce3b6c916081f8947f--run", "owner": "optuna", "repo": "optuna", "sha": "4eeeef15a5cbc9233a9667ce3b6c916081f8947f"}
+{"image": "formulacode/optuna-optuna:57eacd151ef9d8f3772e50b96d468388a07916b4--run", "owner": "optuna", "repo": "optuna", "sha": "57eacd151ef9d8f3772e50b96d468388a07916b4"}
+{"image": "formulacode/optuna-optuna:586db9f37b4025508dc9ddac5c15ceed3ec2e1b0--run", "owner": "optuna", "repo": "optuna", "sha": "586db9f37b4025508dc9ddac5c15ceed3ec2e1b0"}
+{"image": "formulacode/optuna-optuna:66f64a8db68a7846f6149903e632e4715939bde4--run", "owner": "optuna", "repo": "optuna", "sha": "66f64a8db68a7846f6149903e632e4715939bde4"}
+{"image": "formulacode/optuna-optuna:b5d1139a92980acea7b6ec1cc2ca8a21614419e8--run", "owner": "optuna", "repo": "optuna", "sha": "b5d1139a92980acea7b6ec1cc2ca8a21614419e8"}
+{"image": "formulacode/optuna-optuna:d49e8b1fb752b98fd79d543724bb5b71f067c329--run", "owner": "optuna", "repo": "optuna", "sha": "d49e8b1fb752b98fd79d543724bb5b71f067c329"}
+{"image": "formulacode/optuna-optuna:e4961d8205dfac4fe0aa1ccae1ccbe6c0221e174--run", "owner": "optuna", "repo": "optuna", "sha": "e4961d8205dfac4fe0aa1ccae1ccbe6c0221e174"}
+{"image": "formulacode/pybamm-team-pybamm:dce8938907ec69892c5600efddca8589280d8a5d--run", "owner": "pybamm-team", "repo": "PyBaMM", "sha": "dce8938907ec69892c5600efddca8589280d8a5d"}
+{"image": "formulacode/pybop-team-pybop:9df5000b83e33034c9ee211e22a1242c39e29375--run", "owner": "pybop-team", "repo": "PyBOP", "sha": "9df5000b83e33034c9ee211e22a1242c39e29375"}
+{"image": "formulacode/pydata-bottleneck:db7bcfc2bf35df037220a774ba98a9e24011d29e--run", "owner": "pydata", "repo": "bottleneck", "sha": "db7bcfc2bf35df037220a774ba98a9e24011d29e"}
+{"image": "formulacode/pydata-xarray:ad92a166ee301302a02cc6f975d0899430806a86--run", "owner": "pydata", "repo": "xarray", "sha": "ad92a166ee301302a02cc6f975d0899430806a86"}
+{"image": "formulacode/xdslproject-xdsl:35f95f3785567c6fc2661745ce98de923ae5ddaa--run", "owner": "xdslproject", "repo": "xdsl", "sha": "35f95f3785567c6fc2661745ce98de923ae5ddaa"}
+{"image": "formulacode/xdslproject-xdsl:6d829408e371a9026b3fa22942e6df5ecfbd0ba6--run", "owner": "xdslproject", "repo": "xdsl", "sha": "6d829408e371a9026b3fa22942e6df5ecfbd0ba6"}
+{"image": "formulacode/scikit-learn-scikit-learn:a3a3b5ad15c7566746288ed32d9875cd8542db95--run", "owner": "scikit-learn", "repo": "scikit-learn", "sha": "a3a3b5ad15c7566746288ed32d9875cd8542db95"}

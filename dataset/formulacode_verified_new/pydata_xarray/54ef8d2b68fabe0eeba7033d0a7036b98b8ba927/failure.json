@@ -1,0 +1,12 @@
+{
+  "task": {
+    "owner": "pydata",
+    "repo": "xarray",
+    "sha": "54ef8d2b68fabe0eeba7033d0a7036b98b8ba927",
+    "tag": "pkg"
+  },
+  "stage": "tests",
+  "return_code": 1,
+  "stdout": "",
+  "stderr": "The command executed was `/usr/bin/docker container run --rm formulacode/pydata-xarray:54ef8d2b68fabe0eeba7033d0a7036b98b8ba927--run /run_tests.sh`.\nIt returned with code 1\nThe content of stdout is ''\nThe content of stderr can be found above the stacktrace (it wasn't captured)."
+}
