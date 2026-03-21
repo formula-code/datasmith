@@ -57,7 +57,17 @@ class TestDockerRunsInThread:
             await runner.run([_make_item()])
 
         # Verify synthesizer.run was called with correct args
-        synthesizer.run.assert_called_once_with("numpy", "numpy", 42, "Some PR context", verifier)
+        synthesizer.run.assert_called_once_with(
+            "numpy",
+            "numpy",
+            42,
+            "Some PR context",
+            verifier,
+            "",
+            base_context=None,
+            env_payload="",
+            python_version="",
+        )
 
 
 class TestHandlesFailure:

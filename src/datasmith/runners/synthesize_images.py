@@ -97,6 +97,8 @@ class SynthesizeImagesRunner(BaseRunner):
         # Render the problem statement before synthesis
         await self._render_problem(item)
 
+        sha = item.get("sha", "")
+
         # Run synthesizer in thread (Docker operations are blocking)
         ctx = await asyncio.to_thread(
             self._synthesizer.run,
@@ -105,6 +107,10 @@ class SynthesizeImagesRunner(BaseRunner):
             issue_number,
             pr_context,
             self._verifier,
+            sha,
+            base_context=item.get("base_context"),
+            env_payload=item.get("env_payload", ""),
+            python_version=item.get("python_version", ""),
         )
 
         if ctx is not None:

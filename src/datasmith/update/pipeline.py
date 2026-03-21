@@ -70,7 +70,7 @@ class Pipeline:
         if stage_name == "scrape_repos":
             await self._scrape_repos()
         elif stage_name == "scrape_commits":
-            await self._scrape_commits()
+            await self._scrape_commits(start_date, end_date)
         elif stage_name == "classify_prs":
             await self._classify_prs()
         elif stage_name == "synthesize_images":
@@ -94,14 +94,17 @@ class Pipeline:
         await runner.run(items)
         await gh.close()
 
-    async def _scrape_commits(self) -> None:
+    async def _scrape_commits(self, start_date: str, end_date: str) -> None:
         from datasmith.github.client import GitHubClient
         from datasmith.runners.scrape_commits import ScrapeCommitsRunner
         from datasmith.utils.tokens import TokenPool
 
         pool = TokenPool()
         gh = GitHubClient(pool)
-        runner = ScrapeCommitsRunner(gh, **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}))
+        kwargs: dict[str, Any] = {"since": start_date, "until": end_date}
+        if self._n_concurrent:
+            kwargs["n_concurrent"] = self._n_concurrent
+        runner = ScrapeCommitsRunner(gh, **kwargs)
 
         client = get_client()
         resp = client.table("repositories").select("owner, repo").execute()
@@ -165,7 +168,9 @@ class Pipeline:
         client = get_client()
         resp = (
             client.table("pull_requests")
-            .select("owner, repo, issue_number, title, body, created_at")
+            .select(
+                "owner, repo, issue_number, merge_commit_sha, title, body, created_at, rendered_problem, env_payload, python_version"
+            )
             .eq("is_performance_commit", True)
             .is_("container_name", "null")
             .execute()
@@ -187,11 +192,14 @@ class Pipeline:
                 "owner": r["owner"],
                 "repo": r["repo"],
                 "issue_number": r["issue_number"],
+                "sha": r.get("merge_commit_sha", ""),
                 "title": r.get("title", ""),
                 "body": r.get("body", ""),
                 "created_at": r.get("created_at"),
-                "pr_context": r.get("body", ""),
+                "pr_context": r.get("rendered_problem") or r.get("body", ""),
                 "repo_description": repo_descriptions.get((r["owner"], r["repo"]), ""),
+                "env_payload": r.get("env_payload", ""),
+                "python_version": r.get("python_version", ""),
             }
             for r in rows
         ]
