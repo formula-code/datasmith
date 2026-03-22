@@ -13,11 +13,12 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 _STAGE_DESCRIPTIONS = {
-    1: "scrape_repos     — Fetch repository metadata from GitHub for all tracked repos",
-    2: "scrape_commits   — Scrape merged PR commits and patches from each repository",
-    3: "classify_prs     — Use LLM agents to classify PRs as performance-related",
-    4: "synthesize_images — Generate Docker build contexts for confirmed performance commits",
-    5: "publish          — Build, verify, and publish Docker images to DockerHub",
+    1: "scrape_repos      — Fetch repository metadata from GitHub for all tracked repos",
+    2: "scrape_commits    — Scrape merged PR commits and patches from each repository",
+    3: "classify_prs      — Use LLM agents to classify PRs as performance-related",
+    4: "resolve_packages  — Resolve Python dependencies for performance commits via uv",
+    5: "synthesize_images — Generate Docker build contexts for confirmed performance commits",
+    6: "publish           — Build, verify, and publish Docker images to DockerHub",
 }
 
 
@@ -49,7 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         metavar="N",
-        help="Run only stage N (1-5); see stage list below",
+        help="Run only stage N (1-6); see stage list below",
     )
     parser.add_argument("--dry-run", action="store_true", help="Log what each stage would do without executing")
     parser.add_argument(

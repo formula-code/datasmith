@@ -84,7 +84,7 @@ class TestPipeline:
 
         with patch.object(pipeline, "_mark_stage_completed"):
             pipeline._run_stage = mock_run_stage  # type: ignore[assignment]
-            await pipeline.run("2024-01-01", "2024-12-31", stage=4)
+            await pipeline.run("2024-01-01", "2024-12-31", stage=5)
 
         assert calls == ["synthesize_images"]
 

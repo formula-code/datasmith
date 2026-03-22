@@ -6,7 +6,7 @@ from datasmith.utils import get_client, get_logger
 
 logger = get_logger("update.pipeline")
 
-STAGES = ["scrape_repos", "scrape_commits", "classify_prs", "synthesize_images", "publish"]
+STAGES = ["scrape_repos", "scrape_commits", "classify_prs", "resolve_packages", "synthesize_images", "publish"]
 
 
 def _build_file_change_summary(file_changes: list[dict[str, Any]] | None) -> str:
@@ -90,6 +90,8 @@ class Pipeline:
             await self._scrape_commits(start_date, end_date)
         elif stage_name == "classify_prs":
             await self._classify_prs()
+        elif stage_name == "resolve_packages":
+            await self._resolve_packages(start_date, end_date)
         elif stage_name == "synthesize_images":
             await self._synthesize_images()
         elif stage_name == "publish":
@@ -166,6 +168,47 @@ class Pipeline:
         ]
         await runner.run(items)
 
+    async def _resolve_packages(self, start_date: str, end_date: str) -> None:
+        from datasmith.runners.resolve_packages import ResolvePackagesRunner
+
+        runner = ResolvePackagesRunner(
+            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
+        )
+
+        client = get_client()
+        # Get performance-classified PRs within the date range
+        resp = (
+            client.table("pull_requests")
+            .select("owner, repo, merge_commit_sha")
+            .eq("is_performance_commit", True)
+            .gte("created_at", start_date)
+            .lte("created_at", end_date)
+            .execute()
+        )
+        rows = cast(list[dict[str, Any]], resp.data)
+
+        # Deduplicate by (owner, repo, sha) — multiple PRs may share the same commit
+        seen: set[tuple[str, str, str]] = set()
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            sha = r.get("merge_commit_sha", "")
+            if not sha:
+                continue
+            key = (r["owner"], r["repo"], sha)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"owner": r["owner"], "repo": r["repo"], "sha": sha})
+
+        # Skip items already in the packages table
+        if items:
+            existing_resp = client.table("packages").select("owner, repo, sha").execute()
+            existing_keys = {(e["owner"], e["repo"], e["sha"]) for e in existing_resp.data}
+            items = [it for it in items if (it["owner"], it["repo"], it["sha"]) not in existing_keys]
+
+        logger.info("Resolving packages for %d commits", len(items))
+        await runner.run(items)
+
     async def _synthesize_images(self) -> None:
         from datasmith.agents.synthesizer import Synthesizer
         from datasmith.docker.verifiers import MultiObjVerifier, SmokeVerifier
@@ -188,14 +231,23 @@ class Pipeline:
         client = get_client()
         resp = (
             client.table("pull_requests")
-            .select(
-                "owner, repo, issue_number, merge_commit_sha, title, body, created_at, rendered_problem, env_payload, python_version"
-            )
+            .select("owner, repo, issue_number, merge_commit_sha, title, body, created_at, rendered_problem")
             .eq("is_performance_commit", True)
             .is_("container_name", "null")
             .execute()
         )
         rows = cast(list[dict[str, Any]], resp.data)
+
+        # Join with packages table for env_payload and python_version
+        pkg_resp = (
+            client.table("packages")
+            .select("owner, repo, sha, env_payload, python_version")
+            .eq("can_install", True)
+            .execute()
+        )
+        pkg_lookup: dict[tuple[str, str, str], dict[str, Any]] = {
+            (p["owner"], p["repo"], p["sha"]): p for p in cast(list[dict[str, Any]], pkg_resp.data)
+        }
 
         # Batch-fetch repo descriptions for rendering
         repo_keys = {(r["owner"], r["repo"]) for r in rows}
@@ -207,22 +259,33 @@ class Pipeline:
                 if key in repo_keys:
                     repo_descriptions[key] = rd.get("description") or ""
 
-        items = [
-            {
+        items = []
+        for r in rows:
+            sha = r.get("merge_commit_sha", "")
+            pkg = pkg_lookup.get((r["owner"], r["repo"], sha), {})
+            # Skip PRs without resolved packages
+            if not pkg:
+                logger.debug(
+                    "Skipping %s/%s#%d: no resolved packages for sha %s",
+                    r["owner"],
+                    r["repo"],
+                    r["issue_number"],
+                    sha[:8] if sha else "?",
+                )
+                continue
+            items.append({
                 "owner": r["owner"],
                 "repo": r["repo"],
                 "issue_number": r["issue_number"],
-                "sha": r.get("merge_commit_sha", ""),
+                "sha": sha,
                 "title": r.get("title", ""),
                 "body": r.get("body", ""),
                 "created_at": r.get("created_at"),
                 "pr_context": r.get("rendered_problem") or r.get("body", ""),
                 "repo_description": repo_descriptions.get((r["owner"], r["repo"]), ""),
-                "env_payload": r.get("env_payload", ""),
-                "python_version": r.get("python_version", ""),
-            }
-            for r in rows
-        ]
+                "env_payload": pkg.get("env_payload", ""),
+                "python_version": pkg.get("python_version", ""),
+            })
         logger.info("Synthesizing images for %d PRs", len(items))
         await runner.run(items)
         await gh.close()
