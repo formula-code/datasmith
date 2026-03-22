@@ -56,6 +56,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--n-concurrent", type=int, default=None, metavar="N", help="Max concurrent items per runner stage"
     )
+    parser.add_argument(
+        "--tasks-per-repo",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max tasks per repo for stage 5 (synthesize_images). Ignored by other stages.",
+    )
     return parser.parse_args(argv)
 
 
@@ -73,7 +80,11 @@ def main(argv: list[str] | None = None) -> None:
 
     from datasmith.update.pipeline import Pipeline
 
-    pipeline = Pipeline(dry_run=args.dry_run, n_concurrent=args.n_concurrent)
+    pipeline = Pipeline(
+        dry_run=args.dry_run,
+        n_concurrent=args.n_concurrent,
+        tasks_per_repo=args.tasks_per_repo,
+    )
     asyncio.run(
         pipeline.run(
             start_date=args.start_date,

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from datasmith.utils import get_client, get_logger
+from datasmith.utils.db import fetch_all
 
 logger = get_logger("update.pipeline")
 
@@ -29,9 +30,15 @@ def _format_description(title: str, body: str) -> str:
 class Pipeline:
     """Orchestrate the full FormulaCode update pipeline."""
 
-    def __init__(self, dry_run: bool = False, n_concurrent: int | None = None) -> None:
+    def __init__(
+        self,
+        dry_run: bool = False,
+        n_concurrent: int | None = None,
+        tasks_per_repo: int | None = None,
+    ) -> None:
         self._dry_run = dry_run
         self._n_concurrent = n_concurrent
+        self._tasks_per_repo = tasks_per_repo
         self._completed_stages: list[str] = []
 
     async def run(
@@ -107,9 +114,8 @@ class Pipeline:
         runner = ScrapeReposRunner(gh, **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}))
 
         # Get repos from repositories table
-        client = get_client()
-        resp = client.table("repositories").select("owner, repo").execute()
-        items = [(r["owner"], r["repo"]) for r in resp.data]
+        rows = fetch_all("repositories", select="owner, repo")
+        items = [(r["owner"], r["repo"]) for r in rows]
         await runner.run(items)
         await gh.close()
 
@@ -125,9 +131,8 @@ class Pipeline:
             kwargs["n_concurrent"] = self._n_concurrent
         runner = ScrapeCommitsRunner(gh, **kwargs)
 
-        client = get_client()
-        resp = client.table("repositories").select("owner, repo").execute()
-        items = [(r["owner"], r["repo"]) for r in resp.data]
+        rows = fetch_all("repositories", select="owner, repo")
+        items = [(r["owner"], r["repo"]) for r in rows]
         await runner.run(items)
         await gh.close()
 
@@ -146,15 +151,12 @@ class Pipeline:
             **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
         )
 
-        client = get_client()
-        resp = (
-            client.table("pull_requests")
-            .select("owner, repo, issue_number, title, body, patch, file_changes")
-            .eq("is_performance_commit_symbolic", True)
-            .is_("is_performance_commit", "null")
-            .execute()
+        rows = fetch_all(
+            "pull_requests",
+            select="owner, repo, issue_number, title, body, patch, file_changes",
+            filters={"is_performance_commit_symbolic": True},
+            is_null=["is_performance_commit"],
         )
-        rows = cast(list[dict[str, Any]], resp.data)
         items = [
             {
                 "owner": r["owner"],
@@ -175,17 +177,14 @@ class Pipeline:
             **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
         )
 
-        client = get_client()
         # Get performance-classified PRs within the date range
-        resp = (
-            client.table("pull_requests")
-            .select("owner, repo, merge_commit_sha")
-            .eq("is_performance_commit", True)
-            .gte("created_at", start_date)
-            .lte("created_at", end_date)
-            .execute()
+        rows = fetch_all(
+            "pull_requests",
+            select="owner, repo, merge_commit_sha",
+            filters={"is_performance_commit": True},
+            gte_filters={"created_at": start_date},
+            lte_filters={"created_at": end_date},
         )
-        rows = cast(list[dict[str, Any]], resp.data)
 
         # Deduplicate by (owner, repo, sha) — multiple PRs may share the same commit
         seen: set[tuple[str, str, str]] = set()
@@ -202,8 +201,8 @@ class Pipeline:
 
         # Skip items already in the packages table
         if items:
-            existing_resp = client.table("packages").select("owner, repo, sha").execute()
-            existing_keys = {(e["owner"], e["repo"], e["sha"]) for e in existing_resp.data}
+            existing_rows = fetch_all("packages", select="owner, repo, sha")
+            existing_keys = {(e["owner"], e["repo"], e["sha"]) for e in existing_rows}
             items = [it for it in items if (it["owner"], it["repo"], it["sha"]) not in existing_keys]
 
         logger.info("Resolving packages for %d commits", len(items))
@@ -228,33 +227,30 @@ class Pipeline:
             **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
         )
 
-        client = get_client()
-        resp = (
-            client.table("pull_requests")
-            .select("owner, repo, issue_number, merge_commit_sha, title, body, created_at, rendered_problem")
-            .eq("is_performance_commit", True)
-            .is_("container_name", "null")
-            .execute()
+        rows = fetch_all(
+            "pull_requests",
+            select="owner, repo, issue_number, merge_commit_sha, title, body, created_at, rendered_problem",
+            filters={"is_performance_commit": True, "is_performance_commit_symbolic": True},
+            is_null=["container_name"],
+            neq_filters={"merge_commit_sha": ""},
         )
-        rows = cast(list[dict[str, Any]], resp.data)
 
         # Join with packages table for env_payload and python_version
-        pkg_resp = (
-            client.table("packages")
-            .select("owner, repo, sha, env_payload, python_version")
-            .eq("can_install", True)
-            .execute()
+        pkg_rows = fetch_all(
+            "packages",
+            select="owner, repo, sha, env_payload, python_version",
+            filters={"can_install": True},
         )
         pkg_lookup: dict[tuple[str, str, str], dict[str, Any]] = {
-            (p["owner"], p["repo"], p["sha"]): p for p in cast(list[dict[str, Any]], pkg_resp.data)
+            (p["owner"], p["repo"], p["sha"]): p for p in pkg_rows
         }
 
         # Batch-fetch repo descriptions for rendering
         repo_keys = {(r["owner"], r["repo"]) for r in rows}
         repo_descriptions: dict[tuple[str, str], str] = {}
         if repo_keys:
-            desc_resp = client.table("repositories").select("owner, repo, description").execute()
-            for rd in cast(list[dict[str, Any]], desc_resp.data):
+            desc_rows = fetch_all("repositories", select="owner, repo, description")
+            for rd in desc_rows:
                 key = (rd["owner"], rd["repo"])
                 if key in repo_keys:
                     repo_descriptions[key] = rd.get("description") or ""
@@ -286,6 +282,24 @@ class Pipeline:
                 "env_payload": pkg.get("env_payload", ""),
                 "python_version": pkg.get("python_version", ""),
             })
+        if self._tasks_per_repo is not None:
+            from collections import defaultdict
+
+            repo_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
+            capped: list[dict[str, Any]] = []
+            for it in items:
+                key = (it["owner"], it["repo"])
+                if repo_counts[key] < self._tasks_per_repo:
+                    capped.append(it)
+                    repo_counts[key] += 1
+            logger.info(
+                "Capped to %d tasks (%d per repo) from %d total",
+                len(capped),
+                self._tasks_per_repo,
+                len(items),
+            )
+            items = capped
+
         logger.info("Synthesizing images for %d PRs", len(items))
         await runner.run(items)
         await gh.close()
