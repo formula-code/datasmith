@@ -39,6 +39,7 @@ class SmokeVerifier(Verifier):
                 image_name,
                 ["python", "-c", f"import {self._package}"],
                 remove=True,
+                pull="never",
             )
             return VerifyResult(ok=True, rc=0, stdout=str(output), duration_s=time.time() - start, stage="smoke")
         except Exception as e:
@@ -57,6 +58,7 @@ class ProfileVerifier(Verifier):
                 image_name,
                 ["/bin/bash", "/profile.sh"],
                 remove=True,
+                pull="never",
             )
             return VerifyResult(ok=True, rc=0, stdout=str(output), duration_s=time.time() - start, stage="profile")
         except Exception as e:
@@ -77,6 +79,7 @@ class PytestVerifier(Verifier):
                 image_name,
                 ["/bin/bash", "/run-tests.sh"],
                 remove=True,
+                pull="never",
             )
             return VerifyResult(ok=True, rc=0, stdout=str(output), duration_s=time.time() - start, stage="pytest")
         except Exception as e:

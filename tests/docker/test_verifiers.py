@@ -35,6 +35,7 @@ class TestSmokeVerifier:
             "test-image:latest",
             ["python", "-c", "import numpy"],
             remove=True,
+            pull="never",
         )
 
     def test_smoke_fails_exit_1(self, mock_docker: MagicMock) -> None:
