@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from datasmith.runners.scrape_commits import ScrapeCommitsRunner
 
+# Shared patch for fetch_all that returns no existing PRs (clean state)
+_EMPTY_FETCH_ALL = patch("datasmith.runners.scrape_commits.fetch_all", return_value=[])
+
 _SAMPLE_DIFF = "--- a/src/core.py\n+++ b/src/core.py\n-old\n+new\n" + "\n".join(
     f"-line{i}\n+fast{i}" for i in range(20)
 )
@@ -26,31 +29,20 @@ def _mock_supabase() -> MagicMock:
     return client
 
 
-def _make_repo_response(default_branch: str = "main") -> MagicMock:
-    """Create a mock response for the /repos/{owner}/{repo} endpoint."""
-    resp = MagicMock()
-    resp.json.return_value = {"default_branch": default_branch}
-    return resp
-
-
 def _make_gh_client(
     pages: list[list[dict[str, Any]]],
     diff: str = _SAMPLE_DIFF,
     files: list[dict[str, Any]] | None = None,
-    default_branch: str = "main",
 ) -> MagicMock:
-    """Create a mock GitHub client with paginate, _request, get_diff, get_files."""
+    """Create a mock GitHub client with paginate_merged_prs, get_diff, get_files."""
     gh_client = MagicMock()
 
-    # Mock _request for the /repos/{owner}/{repo} call
-    gh_client._request = AsyncMock(return_value=_make_repo_response(default_branch))
-
-    # Mock paginate as an async generator
-    async def _paginate(*args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+    # Mock paginate_merged_prs as an async generator
+    async def _paginate_merged_prs(*args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
         for page in pages:
             yield page
 
-    gh_client.paginate = _paginate
+    gh_client.paginate_merged_prs = _paginate_merged_prs
 
     gh_client.get_diff = AsyncMock(return_value=diff)
     gh_client.get_files = AsyncMock(return_value=files if files is not None else _SAMPLE_FILES)
@@ -65,7 +57,7 @@ def _make_pr(
     merged_at: str | None = None,
     merge_commit_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Create a mock PR data dict."""
+    """Create a mock PR data dict (REST-shaped, as normalized by paginate_merged_prs)."""
     pr: dict[str, Any] = {
         "number": number,
         "title": title if title is not None else f"PR #{number}",
@@ -99,6 +91,7 @@ class TestStoresPRData:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("pandas-dev", "pandas")])
@@ -117,6 +110,7 @@ class TestStoresPRData:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("pandas-dev", "pandas")])
@@ -134,6 +128,7 @@ class TestStoresPRData:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("pandas-dev", "pandas")])
@@ -153,6 +148,7 @@ class TestSymbolicCompliance:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("pandas-dev", "pandas")])
@@ -169,6 +165,7 @@ class TestSymbolicCompliance:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("pandas-dev", "pandas")])
@@ -190,6 +187,7 @@ class TestSymbolicCompliance:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("pandas-dev", "pandas")])
@@ -214,6 +212,7 @@ class TestSkipsUnmerged:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("numpy", "numpy")])
@@ -233,6 +232,7 @@ class TestPagination:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("pandas-dev", "pandas")])
@@ -255,6 +255,7 @@ class TestDateFiltering:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(
                 github_client=gh_client, n_concurrent=1, since="2024-06-01", until="2024-07-01"
@@ -284,6 +285,7 @@ class TestDateFiltering:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(
                 github_client=gh_client, n_concurrent=1, since="2024-06-01", until="2024-07-01"
@@ -307,8 +309,35 @@ class TestDeduplication:
         with (
             patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
+            _EMPTY_FETCH_ALL,
         ):
             runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
             await runner.run([("pandas-dev", "pandas")])
 
         assert len(_pr_records(mock_client)) == 1
+
+
+class TestIdempotency:
+    async def test_skips_existing_prs(self) -> None:
+        """PRs already in Supabase should not trigger API calls."""
+        mock_client = _mock_supabase()
+        gh_client = _make_gh_client([
+            [_make_pr(1), _make_pr(2), _make_pr(3)],
+        ])
+
+        # Simulate PR #1 and #2 already existing in the database
+        with (
+            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+            patch(
+                "datasmith.runners.scrape_commits.fetch_all",
+                return_value=[{"issue_number": 1}, {"issue_number": 2}],
+            ),
+        ):
+            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
+            await runner.run([("pandas-dev", "pandas")])
+
+        # Only PR #3 should be scraped (1 API call for diff + 1 for files)
+        records = _pr_records(mock_client)
+        assert len(records) == 1
+        assert records[0]["issue_number"] == 3

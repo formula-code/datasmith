@@ -6,6 +6,7 @@ from typing import Any
 from datasmith.filters import symbolic_compliance
 from datasmith.runners.base import BaseRunner
 from datasmith.utils import get_client, get_logger
+from datasmith.utils.db import fetch_all
 
 logger = get_logger("runners.scrape_commits")
 
@@ -53,6 +54,11 @@ def _should_skip_pr(
     return False
 
 
+def _sanitize_text(value: str) -> str:
+    """Strip Postgres-illegal null bytes from text values."""
+    return value.replace("\u0000", "")
+
+
 async def _build_record(
     gh: Any,
     owner: str,
@@ -61,9 +67,11 @@ async def _build_record(
 ) -> dict[str, Any]:
     """Fetch diff/files and build the upsert record for a single PR."""
     issue_number = pr_data["number"]
-    title = pr_data.get("title", "")
+    title = _sanitize_text(pr_data.get("title", ""))
 
     diff = await gh.get_diff(owner, repo, issue_number)
+    if diff:
+        diff = _sanitize_text(diff)
     files = await gh.get_files(owner, repo, issue_number)
 
     file_changes: list[dict[str, Any]] | None = None
@@ -82,7 +90,7 @@ async def _build_record(
         "repo": repo,
         "issue_number": issue_number,
         "title": title,
-        "body": pr_data.get("body", "") or "",
+        "body": _sanitize_text(pr_data.get("body", "") or ""),
         "state": pr_data.get("state", ""),
         "created_at": pr_data.get("created_at"),
         "merged_at": pr_data.get("merged_at"),
@@ -120,28 +128,22 @@ class ScrapeCommitsRunner(BaseRunner):
         self._until = _parse_iso(until)
 
     async def _process_item(self, item: Any) -> None:
-        """Process a (owner, repo) tuple — scrape its merged PRs."""
+        """Process a (owner, repo) tuple — scrape its merged PRs via GraphQL."""
         owner, repo = item if isinstance(item, tuple) else item.split("/")
 
-        # Determine default branch for base filter
-        repo_resp = await self._gh._request("GET", f"/repos/{owner}/{repo}")
-        default_branch = "main"
-        if repo_resp is not None:
-            default_branch = repo_resp.json().get("default_branch", "main")
-
-        # Sort by "created" when date-filtering to enable early termination
-        sort = "created" if self._since else "updated"
-        params: dict[str, Any] = {
-            "state": "closed",
-            "sort": sort,
-            "direction": "desc",
-            "base": default_branch,
-        }
+        # Pre-fetch existing issue_numbers for this repo to avoid redundant API calls
+        existing_rows = fetch_all(
+            "pull_requests",
+            select="issue_number",
+            filters={"owner": owner, "repo": repo},
+        )
+        existing_issues: set[int] = {r["issue_number"] for r in existing_rows}
 
         seen_shas: set[str] = set()
         client = get_client()
+        count = 0
 
-        async for page in self._gh.paginate("GET", f"/repos/{owner}/{repo}/pulls", params=params):
+        async for page in self._gh.paginate_merged_prs(owner, repo):
             stop = False
             for pr_data in page:
                 verdict = _should_skip_pr(pr_data, self._since, self._until, seen_shas)
@@ -151,10 +153,14 @@ class ScrapeCommitsRunner(BaseRunner):
                 if verdict == "skip":
                     continue
 
+                if pr_data["number"] in existing_issues:
+                    continue
+
                 record = await _build_record(self._gh, owner, repo, pr_data)
                 client.table("pull_requests").upsert(record).execute()
+                count += 1
 
             if stop:
                 break
 
-        logger.info("Scraped PRs for %s/%s", owner, repo)
+        logger.info("Scraped %d merged PRs for %s/%s", count, owner, repo)
