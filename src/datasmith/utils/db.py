@@ -69,6 +69,9 @@ def fetch_all(
     select: str = "*",
     filters: dict[str, Any] | None = None,
     is_null: list[str] | None = None,
+    gte_filters: dict[str, Any] | None = None,
+    lte_filters: dict[str, Any] | None = None,
+    neq_filters: dict[str, Any] | None = None,
     page_size: int = 1000,
 ) -> list[dict[str, Any]]:
     """Paginate through all rows matching the query.
@@ -86,6 +89,12 @@ def fetch_all(
             query = query.eq(col, val)
         for col in is_null or []:
             query = query.is_(col, "null")
+        for col, val in (gte_filters or {}).items():
+            query = query.gte(col, val)
+        for col, val in (lte_filters or {}).items():
+            query = query.lte(col, val)
+        for col, val in (neq_filters or {}).items():
+            query = query.neq(col, val)
         resp = query.range(offset, offset + page_size - 1).execute()
         page = cast(list[dict[str, Any]], resp.data or [])
         rows.extend(page)
