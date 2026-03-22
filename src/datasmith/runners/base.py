@@ -52,8 +52,15 @@ class BaseRunner(ABC):
                     self._maybe_update_progress()
 
         tasks = [asyncio.create_task(_wrapped(item)) for item in items]
-        await asyncio.gather(*tasks)
-        self._update_progress(force=True)
+        try:
+            await asyncio.gather(*tasks)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            self._update_progress(force=True)
 
     def _item_id(self, item: Any) -> str:
         if hasattr(item, "cache_key"):
