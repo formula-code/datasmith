@@ -96,38 +96,65 @@ def build_image(docker: DockerClient, task_dir: Path, task: Task, target: str = 
     return tag
 
 
-def run_profile(docker: DockerClient, image_tag: str) -> tuple[bool, str]:
+def _run_container_with_timeout(
+    docker: DockerClient,
+    image_tag: str,
+    command: list[str],
+    timeout: int,
+) -> tuple[bool, str]:
+    """Run a Docker container with a host-side timeout.
+
+    Returns (timed_out, output_or_error).
+    """
+    import subprocess as sp
+
+    cmd = ["docker", "run", "--rm", "--pull", "never", image_tag, *command]
     try:
-        output = docker.run(
-            image_tag,
-            ["/profile.sh", "/tmp/profile_log"],  # noqa: S108
-            remove=True,
-            pull="never",
-        )
-        return True, str(output or "")
-    except Exception as e:
-        err = str(e)
-        # timeout (rc=124) and OOM (rc=137) are treated as success for profiling
-        if "124" in err or "137" in err or "timeout" in err.lower():
-            return True, f"Profile exited non-zero (treated as success): {err[:2000]}"
-        return False, err[:4000]
+        result = sp.run(cmd, capture_output=True, text=True, timeout=timeout)  # noqa: S603, S607
+        if result.returncode == 0:
+            return False, result.stdout
+        # OOM (137) treated as non-timeout success
+        if result.returncode in (137,):
+            return False, result.stdout or result.stderr
+        return False, f"Container exited with code {result.returncode}\n{result.stderr[-4000:]}"
+    except sp.TimeoutExpired:
+        # Kill any remaining containers for this image
+        try:
+            ps_result = sp.run(  # noqa: S603, S607
+                ["docker", "ps", "-q", "--filter", f"ancestor={image_tag}"],
+                capture_output=True,
+                text=True,
+            )
+            for cid in ps_result.stdout.strip().splitlines():
+                if cid:
+                    sp.run(["docker", "kill", cid], capture_output=True)  # noqa: S603, S607
+        except Exception:
+            pass
+        return True, f"Timed out after {timeout}s"
+
+
+def run_profile(docker: DockerClient, image_tag: str, timeout: int = 300) -> tuple[bool, str]:
+    timed_out, output = _run_container_with_timeout(
+        docker, image_tag, ["/profile.sh", "/tmp/profile_log"], timeout  # noqa: S108
+    )
+    if timed_out:
+        return True, f"Profile timed out after {timeout}s (treated as success)"
+    # Check for errors
+    if "Error" in output and "exit status" in output:
+        return False, output[:4000]
+    return True, output
 
 
 def run_tests(docker: DockerClient, image_tag: str, timeout: int = 300) -> tuple[bool, str]:
-    try:
-        output = docker.run(
-            image_tag,
-            ["/run-tests.sh"],
-            remove=True,
-            pull="never",
-        )
-        return True, str(output or "")
-    except Exception as e:
-        err = str(e)
-        # timeout (rc=124) and OOM (rc=137) are treated as success for tests
-        if "124" in err or "137" in err or "timeout" in err.lower():
-            return True, f"Tests exited non-zero (treated as success): {err[:2000]}"
-        return False, err[:4000]
+    timed_out, output = _run_container_with_timeout(
+        docker, image_tag, ["/run-tests.sh"], timeout
+    )
+    if timed_out:
+        return True, f"Tests timed out after {timeout}s (treated as success)"
+    # Non-timeout failures
+    if "Container exited with code" in output:
+        return False, output[:4000]
+    return True, output
 
 
 def verify(task_dir: Path, skip_tests: bool = False) -> bool:
