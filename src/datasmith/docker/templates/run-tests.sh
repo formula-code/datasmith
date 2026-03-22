@@ -18,6 +18,11 @@ eval "$(micromamba shell hook --shell=bash)"
 micromamba activate "$ENV_NAME" || true
 set -u
 
+# Defaults for terminal-bench evaluation variables (not set during synthesis/verification)
+T_BENCH_AGENT_MODEL_NAME="${T_BENCH_AGENT_MODEL_NAME:-agent}"
+T_BENCH_CONTAINER_LOGS_PATH="${T_BENCH_CONTAINER_LOGS_PATH:-/logs}"
+mkdir -p "$T_BENCH_CONTAINER_LOGS_PATH"
+
 reset_repo_state() {
     local COMMIT_SHA="$1"
 
