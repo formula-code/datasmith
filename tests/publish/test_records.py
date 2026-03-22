@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -56,30 +56,26 @@ class TestRecordsToParquet:
 
 class TestRecordsFromSupabase:
     def test_queries_supabase(self):
-        mock_client = MagicMock()
-        mock_query = MagicMock()
-        mock_client.table.return_value = mock_query
-        mock_query.select.return_value = mock_query
-        mock_query.eq.return_value = mock_query
-        mock_query.is_.return_value = mock_query
-        mock_query.gte.return_value = mock_query
-        mock_query.lte.return_value = mock_query
-        mock_query.execute.return_value = MagicMock(
-            data=[
-                {
-                    "owner": "org",
-                    "repo": "repo",
-                    "issue_number": 1,
-                    "merge_commit_sha": "abc",
-                    "base_sha": "def",
-                    "merged_at": "2024-01-01T00:00:00Z",
-                },
-            ]
-        )
+        fake_rows = [
+            {
+                "owner": "org",
+                "repo": "repo",
+                "issue_number": 1,
+                "merge_commit_sha": "abc",
+                "base_sha": "def",
+                "merged_at": "2024-01-01T00:00:00Z",
+            },
+        ]
 
-        with patch("datasmith.publish.records.get_client", return_value=mock_client):
+        with patch("datasmith.publish.records.fetch_all", return_value=fake_rows) as mock_fetch:
             records = records_from_supabase(start_date="2024-01-01", end_date="2024-12-31")
 
         assert len(records) == 1
         assert records[0].owner == "org"
         assert records[0].task_id == "org__repo-1"
+
+        # Verify fetch_all was called with correct filters
+        call_kwargs = mock_fetch.call_args
+        assert call_kwargs[1]["filters"] == {"is_performance_commit": True}
+        assert call_kwargs[1]["gte_filters"] == {"merged_at": "2024-01-01"}
+        assert call_kwargs[1]["lte_filters"] == {"merged_at": "2024-12-31"}

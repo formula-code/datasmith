@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import io
-from typing import Any, cast
+from typing import Any
 
 import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
 from datasmith.github.models import FormulaCodeRecord
-from datasmith.utils import get_client, get_logger
+from datasmith.utils import get_logger
+from datasmith.utils.db import fetch_all
 
 logger = get_logger("publish.records")
 
@@ -42,20 +43,29 @@ def records_from_supabase(
     unpublished_only: bool = True,
 ) -> list[FormulaCodeRecord]:
     """Query Supabase for FormulaCodeRecords, optionally filtered by date and publish status."""
-    client = get_client()
-    query = client.table("pull_requests").select("*").eq("is_performance_commit", True)
+    filters: dict[str, Any] = {"is_performance_commit": True}
+    is_null: list[str] = []
+    gte_filters: dict[str, Any] = {}
+    lte_filters: dict[str, Any] = {}
 
     if unpublished_only:
-        query = query.is_("published_at", "null")
+        is_null.append("published_at")
     if start_date:
-        query = query.gte("merged_at", start_date)
+        gte_filters["merged_at"] = start_date
     if end_date:
-        query = query.lte("merged_at", end_date)
+        lte_filters["merged_at"] = end_date
 
-    resp = query.execute()
+    rows = fetch_all(
+        "pull_requests",
+        select="*",
+        filters=filters,
+        is_null=is_null or None,
+        gte_filters=gte_filters or None,
+        lte_filters=lte_filters or None,
+    )
 
     records: list[FormulaCodeRecord] = []
-    for row in cast(list[dict[str, Any]], resp.data):
+    for row in rows:
         try:
             records.append(
                 FormulaCodeRecord(
