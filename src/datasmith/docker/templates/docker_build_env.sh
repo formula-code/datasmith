@@ -62,7 +62,7 @@ raw_stripped = raw.strip()
 
 dependencies = []
 
-# Accept either empty string ("" or blank) or a JSON object
+# Accept: empty string, JSON object {"dependencies": [...]}, or JSON array [...]
 if raw_stripped == "" or raw_stripped == '""':
     pass
 else:
@@ -70,9 +70,6 @@ else:
         data = json.loads(raw)
     except Exception as e:
         print(f"ERROR: invalid JSON in {path}: {e}", file=sys.stderr)
-        sys.exit(3)
-    if not isinstance(data, dict):
-        print("ERROR: env payload must be a JSON object or an empty string", file=sys.stderr)
         sys.exit(3)
 
     def take_list(key):
@@ -92,7 +89,20 @@ else:
                 out.append(s)
         return out
 
-    dependencies = take_list("dependencies")
+    if isinstance(data, list):
+        # Flat list of dependency strings: ["pkg==1.0", "pkg2==2.0"]
+        for i, item in enumerate(data):
+            if not isinstance(item, str):
+                print(f"ERROR: array element [{i}] is not a string", file=sys.stderr)
+                sys.exit(3)
+            s = item.strip()
+            if s:
+                dependencies.append(s)
+    elif isinstance(data, dict):
+        dependencies = take_list("dependencies")
+    else:
+        print("ERROR: env payload must be a JSON object, array, or empty string", file=sys.stderr)
+        sys.exit(3)
 
 # Write temp files
 d_fd, d_path = tempfile.mkstemp(prefix="dependencies-", suffix=".txt")
