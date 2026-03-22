@@ -110,40 +110,36 @@ class TestIsAvailable:
 
 
 class TestCodexAgent:
-    @patch("datasmith.agents.installed.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.run_agent_subprocess")
     def test_exec_success(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout='{"output": "build complete"}\n',
-            stderr="",
-        )
+        mock_run.return_value = (0, '{"output": "build complete"}\n', "", 1.0)
         result = CodexAgent().exec("build it")
         assert result.success is True
         assert "build complete" in result.output
 
-    @patch("datasmith.agents.installed.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.run_agent_subprocess")
     def test_exec_timeout(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=900)
         result = CodexAgent().exec("slow", timeout=900)
         assert result.success is False
         assert "timed out" in result.error
 
-    @patch("datasmith.agents.installed.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.run_agent_subprocess")
     def test_exec_not_found(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = FileNotFoundError()
         result = CodexAgent().exec("prompt")
         assert result.success is False
         assert "not found" in result.error
 
-    @patch("datasmith.agents.installed.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.run_agent_subprocess")
     def test_exec_workdir(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = (0, "", "", 0.5)
         CodexAgent().exec("prompt", workdir="/tmp/test")
         assert mock_run.call_args.kwargs["cwd"] == "/tmp/test"
 
-    @patch("datasmith.agents.installed.codex.subprocess.run")
+    @patch("datasmith.agents.installed.codex.run_agent_subprocess")
     def test_full_auto_sandbox_flags(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = (0, "", "", 0.5)
         CodexAgent(full_auto=True, sandbox="danger-full-access").exec("prompt")
         cmd = mock_run.call_args[0][0]
         assert "--full-auto" in cmd
@@ -155,41 +151,37 @@ class TestCodexAgent:
 
 
 class TestClaudeAgent:
-    @patch("datasmith.agents.installed.claude.subprocess.run")
+    @patch("datasmith.agents.installed.claude.run_agent_subprocess")
     def test_exec_success(self, mock_run: MagicMock) -> None:
         stdout_lines = [
             json.dumps({"type": "assistant", "message": "I fixed the build"}),
             json.dumps({"type": "tool_use", "name": "Edit", "input": {"file_path": "fix.py"}}),
             json.dumps({"type": "result", "result": "Done"}),
         ]
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="\n".join(stdout_lines) + "\n",
-            stderr="",
-        )
+        mock_run.return_value = (0, "\n".join(stdout_lines) + "\n", "", 2.0)
         result = ClaudeAgent().exec("fix the build")
         assert result.success is True
         assert "I fixed the build" in result.output
         assert "fix.py" in result.files_changed
 
-    @patch("datasmith.agents.installed.claude.subprocess.run")
+    @patch("datasmith.agents.installed.claude.run_agent_subprocess")
     def test_exec_timeout(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=600)
         result = ClaudeAgent().exec("slow", timeout=600)
         assert result.success is False
         assert "timed out" in result.error
 
-    @patch("datasmith.agents.installed.claude.subprocess.run")
+    @patch("datasmith.agents.installed.claude.run_agent_subprocess")
     def test_exec_not_found(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = FileNotFoundError()
         result = ClaudeAgent().exec("prompt")
         assert result.success is False
         assert "not found" in result.error
 
-    @patch("datasmith.agents.installed.claude.subprocess.run")
+    @patch("datasmith.agents.installed.claude.run_agent_subprocess")
     def test_nesting_guard(self, mock_run: MagicMock) -> None:
         """CLAUDE_CODE_ENTRYPOINT and CLAUDECODE should be removed from subprocess env."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = (0, "", "", 0.5)
         import os
 
         with patch.dict(os.environ, {"CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDECODE": "1"}):
@@ -198,9 +190,9 @@ class TestClaudeAgent:
         assert "CLAUDE_CODE_ENTRYPOINT" not in call_env
         assert "CLAUDECODE" not in call_env
 
-    @patch("datasmith.agents.installed.claude.subprocess.run")
+    @patch("datasmith.agents.installed.claude.run_agent_subprocess")
     def test_command_flags(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = (0, "", "", 0.5)
         ClaudeAgent().exec("prompt")
         cmd = mock_run.call_args[0][0]
         assert "--dangerously-skip-permissions" in cmd
@@ -213,38 +205,34 @@ class TestClaudeAgent:
 
 
 class TestGeminiAgent:
-    @patch("datasmith.agents.installed.gemini.subprocess.run")
+    @patch("datasmith.agents.installed.gemini.run_agent_subprocess")
     def test_exec_success(self, mock_run: MagicMock) -> None:
         stdout_lines = [
             json.dumps({"type": "response", "text": "Fixed!"}),
             json.dumps({"output": "extra info"}),
         ]
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="\n".join(stdout_lines) + "\n",
-            stderr="",
-        )
+        mock_run.return_value = (0, "\n".join(stdout_lines) + "\n", "", 1.0)
         result = GeminiAgent().exec("fix it")
         assert result.success is True
         assert "Fixed!" in result.output
 
-    @patch("datasmith.agents.installed.gemini.subprocess.run")
+    @patch("datasmith.agents.installed.gemini.run_agent_subprocess")
     def test_exec_timeout(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="gemini", timeout=600)
         result = GeminiAgent().exec("slow", timeout=600)
         assert result.success is False
         assert "timed out" in result.error
 
-    @patch("datasmith.agents.installed.gemini.subprocess.run")
+    @patch("datasmith.agents.installed.gemini.run_agent_subprocess")
     def test_exec_not_found(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = FileNotFoundError()
         result = GeminiAgent().exec("prompt")
         assert result.success is False
         assert "not found" in result.error
 
-    @patch("datasmith.agents.installed.gemini.subprocess.run")
+    @patch("datasmith.agents.installed.gemini.run_agent_subprocess")
     def test_command_flags(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_run.return_value = (0, "", "", 0.5)
         GeminiAgent().exec("prompt")
         cmd = mock_run.call_args[0][0]
         assert "--yolo" in cmd

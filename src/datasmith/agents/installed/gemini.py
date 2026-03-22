@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-import time
 
-from datasmith.agents.installed.base import AgentResult, InstalledAgent
+from datasmith.agents.installed.base import AgentResult, InstalledAgent, run_agent_subprocess
 from datasmith.utils import get_logger
 
 logger = get_logger("agents.installed.gemini")
@@ -96,34 +95,28 @@ class GeminiAgent(InstalledAgent):
 
         logger.debug("gemini command: %s", " ".join(cmd))
 
-        start = time.time()
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=workdir)
-            duration = time.time() - start
-            output_lines, files_changed = _parse_gemini_stdout(result.stdout)
+            returncode, stdout, stderr, duration = run_agent_subprocess(
+                cmd, timeout=timeout, cwd=workdir, agent_name="gemini"
+            )
+            output_lines, files_changed = _parse_gemini_stdout(stdout)
 
             return AgentResult(
-                success=result.returncode == 0,
-                output="\n".join(output_lines) if output_lines else result.stdout,
+                success=returncode == 0,
+                output="\n".join(output_lines) if output_lines else stdout,
                 files_changed=files_changed,
                 duration_s=duration,
-                error=result.stderr if result.returncode != 0 else "",
+                error=stderr if returncode != 0 else "",
             )
         except subprocess.TimeoutExpired:
             return AgentResult(
                 success=False,
-                duration_s=time.time() - start,
+                duration_s=0.0,
                 error=f"Gemini CLI execution timed out after {timeout}s",
             )
         except FileNotFoundError:
             return AgentResult(
                 success=False,
-                duration_s=time.time() - start,
+                duration_s=0.0,
                 error="gemini CLI not found. Install with: npm install -g @anthropic-ai/gemini-cli",
-            )
-        except Exception as e:
-            return AgentResult(
-                success=False,
-                duration_s=time.time() - start,
-                error=str(e),
             )

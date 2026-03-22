@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
+import signal
+import subprocess
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -70,6 +75,66 @@ class InstalledAgent(ABC):
     @staticmethod
     def _which(binary: str) -> bool:
         return shutil.which(binary) is not None
+
+
+def _kill_process_group(proc: subprocess.Popen[str], sig: int = signal.SIGTERM) -> None:
+    """Send *sig* to the process group of *proc*, swallowing errors."""
+    with contextlib.suppress(ProcessLookupError, OSError):
+        os.killpg(os.getpgid(proc.pid), sig)
+
+
+def run_agent_subprocess(
+    cmd: list[str],
+    *,
+    timeout: int = 900,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+    agent_name: str = "agent",
+) -> tuple[int, str, str, float]:
+    """Run an agent CLI command with process-group cleanup on interrupt or timeout.
+
+    Returns ``(returncode, stdout, stderr, duration_s)``.
+    Raises ``FileNotFoundError`` if the binary is missing,
+    ``subprocess.TimeoutExpired`` on timeout (after cleanup),
+    and re-raises ``KeyboardInterrupt`` (after cleanup).
+    """
+    start = time.time()
+    proc: subprocess.Popen[str] | None = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+        duration = time.time() - start
+        return proc.returncode, stdout, stderr, duration
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            _kill_process_group(proc, signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(proc, signal.SIGKILL)
+                proc.wait()
+        raise
+    except KeyboardInterrupt:
+        if proc is not None:
+            _kill_process_group(proc, signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(proc, signal.SIGKILL)
+                proc.wait()
+        raise
+    finally:
+        if proc is not None and proc.poll() is None:
+            _kill_process_group(proc, signal.SIGKILL)
+            proc.wait()
 
 
 # Registry of concrete agents in preference order.

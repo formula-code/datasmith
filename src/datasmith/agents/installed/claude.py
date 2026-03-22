@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import time
 
-from datasmith.agents.installed.base import AgentResult, InstalledAgent
+from datasmith.agents.installed.base import AgentResult, InstalledAgent, run_agent_subprocess
 from datasmith.utils import get_logger
 
 logger = get_logger("agents.installed.claude")
@@ -110,41 +109,28 @@ class ClaudeAgent(InstalledAgent):
         env.pop("CLAUDE_CODE_ENTRYPOINT", None)
         env.pop("CLAUDECODE", None)
 
-        start = time.time()
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=workdir,
-                env=env,
+            returncode, stdout, stderr, duration = run_agent_subprocess(
+                cmd, timeout=timeout, cwd=workdir, env=env, agent_name="claude"
             )
-            duration = time.time() - start
-            output_lines, files_changed = _parse_claude_stdout(result.stdout)
+            output_lines, files_changed = _parse_claude_stdout(stdout)
 
             return AgentResult(
-                success=result.returncode == 0,
-                output="\n".join(output_lines) if output_lines else result.stdout,
+                success=returncode == 0,
+                output="\n".join(output_lines) if output_lines else stdout,
                 files_changed=files_changed,
                 duration_s=duration,
-                error=result.stderr if result.returncode != 0 else "",
+                error=stderr if returncode != 0 else "",
             )
         except subprocess.TimeoutExpired:
             return AgentResult(
                 success=False,
-                duration_s=time.time() - start,
+                duration_s=0.0,
                 error=f"Claude Code execution timed out after {timeout}s",
             )
         except FileNotFoundError:
             return AgentResult(
                 success=False,
-                duration_s=time.time() - start,
+                duration_s=0.0,
                 error="claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code",
-            )
-        except Exception as e:
-            return AgentResult(
-                success=False,
-                duration_s=time.time() - start,
-                error=str(e),
             )
