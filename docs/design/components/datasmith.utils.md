@@ -38,6 +38,8 @@ graph LR
 |-------|-------------|---------|
 | `repositories` | `(owner, repo)` | Tracked repositories with metadata (stars, language, last_scraped) |
 | `pull_requests` | `(owner, repo, issue_number)` | All scraped PRs with compliance status, classification, container_name |
+| `packages` | `(owner, repo, sha)` | Resolved Python dependencies per commit. Populated by `resolve_packages` stage via `ds.resolution.analyze_commit()`. Stores `env_payload` (JSON array of pinned requirements), `python_version`, `can_install`, `resolution_strategy`, etc. Joined with `pull_requests` on `merge_commit_sha = sha` by the synthesize stage. See `datasmith.resolution.md`. |
+| `docker_contexts` | `(owner, repo, sha)` | Synthesized Docker build contexts with one column per shell script. Also stores `python_version` and `env_payload` as used during synthesis (may differ from `packages` if overridden). |
 | `hook_cache` | `(entity_key, hook_name, args_hash)` | Cached hook results keyed by entity + hook + serialized arguments |
 | `build_attempts` | `(owner, repo, issue_number, attempt_id)` | Logged synthesis attempts (script, model, stderr, stdout, success) |
 | `runner_progress` | `(runner_id)` | Runner state for resumption (total, completed, failed, last_updated) |

@@ -108,7 +108,7 @@ Uses **`docker-py`** (Python Docker SDK), not python-on-whales.
 | Tier | Tag | Purpose |
 |------|-----|---------|
 | 1 | `base` | System environment: Rust, cmake, micromamba, Python, UV |
-| 2 | `env` | Repository clone + Python environments with pinned dependencies |
+| 2 | `env` | Repository clone + Python environments with pinned dependencies. **The pinned dependencies come from the `packages` table** (populated by `ds.resolution.analyze_commit()`). `docker_build_env.sh` receives `ENV_PAYLOAD` (JSON array of pinned requirements) and `PY_VERSION` as Docker build args. See `datasmith.resolution.md`. |
 | 3 | `pkg` | Package installed in editable mode (`pip install -e .`) |
 | 4 | `run` | Prepared for benchmarking/testing (repo locked, ASV configured). Shouldn't change across PRs. |
 | 5 | `final` | Production image with benchmark list and runtime deps. These are final touches, and can be combined with `run`. Shouldn't change across PRs. |
@@ -118,7 +118,7 @@ Multi-stage Dockerfile in `src/datasmith/docker/Dockerfile` implements all 6 sta
 ### Image hierarchy (New)
 
 1. **Base image** (`formulacode/base:latest`): Common dependencies shared across all repositories. This maps to the `base` tag in the old hierarchy.
-2. **Repository image** (`formulacode/{owner}-{repo}:latest`): Repository-level dependencies (e.g. `formulacode/pandas-dev-pandas:latest`). This maps to the `env` tag in the old hierarchy. The package installation is kept as a PR-specific step as it can differ depending on when the PR was made (e.g., old PRs may use a different package installation method than new PRs).
+2. **Repository image** (`formulacode/{owner}-{repo}:latest`): Repository-level dependencies (e.g. `formulacode/pandas-dev-pandas:latest`). This maps to the `env` tag in the old hierarchy. **The environment layer installs pinned dependencies from the `packages` table** — `env_payload` (JSON array of versioned requirements resolved by `ds.resolution`) and uses the `python_version` selected by temporal filtering. Without resolution data, this layer cannot install the correct packages and the Docker build will fail or produce an incomplete environment. See `datasmith.resolution.md`. The package installation is kept as a PR-specific step as it can differ depending on when the PR was made (e.g., old PRs may use a different package installation method than new PRs).
 3. **PR image** (`formulacode/{owner}-{repo}-{issue_number}:latest`): PR-specific build script applied on top of the repository image. This maps to the `pkg` + `run` + `final` stages in the old hierarchy, but combined into a single PR-specific layer since they are all tightly coupled to the PR's code changes.
 
 `build_image` checks each tier top-down — if the base and repo images exist, it only builds the PR layer.
@@ -133,7 +133,7 @@ Multi-stage Dockerfile in `src/datasmith/docker/Dockerfile` implements all 6 sta
 `DockerContext.build_container_streaming()` in `src/datasmith/docker/context.py:528-800`:
 - Creates reproducible tar context via `_get_context_bytes()`.
 - Uses low-level `api.build(fileobj=..., decode=True)` with streaming output and `deque` tail buffers (2000 chunks max).
-- Build args: `REPO_URL`, `COMMIT_SHA`, `ENV_PAYLOAD`, `PY_VERSION`, `BUILDKIT_INLINE_CACHE`.
+- Build args: `REPO_URL`, `COMMIT_SHA`, `ENV_PAYLOAD` (JSON array of pinned deps from `packages` table — see `datasmith.resolution.md`), `PY_VERSION` (from `packages` table), `BUILDKIT_INLINE_CACHE`.
 - On broken-cache errors, retries with `nocache=True`.
 - Optional BuildKit support via `_build_with_buildx()` and S3 cache integration.
 - Labels: `datasmith.run`, `datasmith.task`, `datasmith.sha` for cleanup tracking.

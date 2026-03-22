@@ -32,8 +32,9 @@ graph LR
 
 * `ds.runners.scrape_repos`: Finds compliant GitHub repositories using the search API. Takes attribute filters (minimum stars, search query) and adds results to the `repositories` table.
 * `ds.runners.scrape_commits`: For a given repository, scrapes all commits and runs compliance checks (`.exists`, `.attribute_compliance`, `.llm_compliance`) on each PR.
-* `ds.runners.synthesize_images`: For a given set of PRs, runs `ds.agents.synthesizer` for each. Returns `list[str | None]`. This is expensive and must scale to ~20k PRs.
 * `ds.runners.classify_prs`: Runs a classifier agent across a set of PRs concurrently.
+* `ds.runners.resolve_packages`: For each classified PR, runs `ds.resolution.analyze_commit()` to resolve Python dependencies via `uv`, then persists results (pinned deps, Python version) to the `packages` table. Deduplicates by `(owner, repo, sha)`. See `datasmith.resolution.md`.
+* `ds.runners.synthesize_images`: For a given set of PRs, runs `ds.agents.synthesizer` for each. Reads `env_payload` and `python_version` from the `packages` table (populated by `resolve_packages`). Returns `list[str | None]`. This is expensive and must scale to ~20k PRs.
 
 ## Async Concurrency Model
 
@@ -86,10 +87,12 @@ There are no `ds.runners.*` module abstractions. Each pipeline stage is a standa
 `scratch/scripts/update_formulacode.py` — runs 6 stages sequentially via `subprocess.run()`:
 1. `collect_commits.py` → find perf commits via GitHub API
 2. `collect_and_filter_commits.py` → clone repos, filter irrelevant commits
-3. `prepare_commits_for_building_reports.py` → tokenize patches, crude perf filter
+3. `prepare_commits_for_building_reports.py` → tokenize patches, crude perf filter, **dependency resolution via `analyze_commit()`**
 4. `collect_perf_commits.py` → LLM-based performance classification
 5. `synthesize_contexts.py` → agent-based Docker build context synthesis
 6. `build_and_publish_to_dockerhub.py` → build and push final images
+
+In the new pipeline, the dependency resolution step (previously embedded in stage 3) is extracted into its own stage (`resolve_packages`) that runs after classification and before synthesis. See `datasmith.resolution.md`.
 
 Per-run table naming with date suffix: `merge_commits_filtered_{start}_to_{end}`, `perfonly_commits_{start}_to_{end}`.
 
@@ -112,9 +115,10 @@ Per-run table naming with date suffix: `merge_commits_filtered_{start}_to_{end}`
 Split across two stages:
 
 **Stage A** — `scratch/scripts/prepare_commits_for_building_reports.py`:
-- **ThreadPoolExecutor** for patch fetching: `max_workers=args.max_workers` (default 84).
+- **ThreadPoolExecutor** for patch fetching and dependency resolution: `max_workers=args.max_workers` (default 84).
 - Tokenizes patches via `tiktoken.encode_batch(num_threads=max_workers)`.
 - Applies `crude_perf_filter(df)`.
+- **Runs `analyze_commit(sha, repo_name)` from `datasmith.execution.resolution`** for each filtered commit. This is the dependency resolution step that produces `analysis_python_version`, `analysis_final_dependencies`, `analysis_can_install`, and `analysis_resolution_strategy` columns. Only commits with `analysis_can_install=True` and non-"unresolved" strategy proceed to synthesis. **This step is extracted into a dedicated `resolve_packages` pipeline stage in the new architecture.**
 - Creates container names via `make_task(row, tag=args.container_tag)`.
 
 **Stage B** — `scratch/scripts/synthesize_contexts.py`:

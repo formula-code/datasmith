@@ -17,6 +17,7 @@ graph LR
     B --> C
     B --> D
     B --> E
+    F --> B
 
     A[Supabase]
     B["`ds.agents
@@ -24,7 +25,10 @@ graph LR
     C[ds.docker.build_image]
     D[ds.github.pr]
     E[LLM Providers]
+    F[ds.resolution / packages table]
 ```
+
+**Note:** The synthesizer depends on `ds.resolution` output — it requires `env_payload` (pinned dependencies) and `python_version` from the `packages` table to generate correct Docker build contexts. Without this data, `docker_build_env.sh` cannot install the right packages. See `datasmith.resolution.md`.
 
 ## Modules
 

@@ -250,7 +250,7 @@ There are no Pydantic v2 `Issue` / `PR` models. Data is represented as:
 
 - **`IssueExpanded`** — frozen dataclass in `src/datasmith/scrape/models.py` with fields: `number`, `title`, `url`, `description`, `comments: tuple[str, ...]`, `cross_references: tuple[str, ...]`, `created_at`, `closed_at`. Custom `__eq__`/`__hash__` by URL.
 - **`ReportResult`** — dataclass in `src/datasmith/scrape/models.py` with `final_md`, `final_md_no_hints`, `problem_statement`, `classification`, `difficulty`, `is_performance_commit`, `all_data: dict[str, Any]`.
-- **`Task`** — frozen dataclass in `src/datasmith/core/models/task.py` with `owner`, `repo`, `sha`, `commit_date`, `env_payload`, `python_version`, `tag`, `benchmarks`. Used for Docker builds, not PR modeling.
+- **`Task`** — frozen dataclass in `src/datasmith/core/models/task.py` with `owner`, `repo`, `sha`, `commit_date`, `env_payload`, `python_version`, `tag`, `benchmarks`. Used for Docker builds, not PR modeling. Note: `env_payload` and `python_version` are now sourced from the `packages` table (populated by `ds.resolution.analyze_commit()`) rather than stored on the PR. See `datasmith.resolution.md`.
 - PR data throughout the pipeline is passed as **pandas DataFrame rows** or **plain dicts** (`pr_dict`), not as structured model instances.
 
 ### Comment scraping

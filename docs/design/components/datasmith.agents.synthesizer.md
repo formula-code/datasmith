@@ -187,8 +187,8 @@ class CodexResult:
 | `pr_context` | Rendered problem statement | Full PR context for the AGENTS.md template |
 | `verifier` | Caller (typically `MultiObjVerifier`) | Validates the built Docker image (used by TRY_SIMILAR) |
 | `base_context` | Pipeline item or templates | Base Docker context with all 9 files |
-| `env_payload` | Pipeline item | JSON string with pinned dependencies |
-| `python_version` | Pipeline item | Target Python version |
+| `env_payload` | `packages` table (via `ds.resolution`) | JSON array of pinned dependency strings. Populated by the `resolve_packages` pipeline stage, which runs `analyze_commit()` and persists results to the `packages` Supabase table keyed by `(owner, repo, sha)`. See `datasmith.resolution.md`. |
+| `python_version` | `packages` table (via `ds.resolution`) | Target Python version (e.g., "3.10"). Selected by temporal filtering against the commit date to avoid anachronisms (e.g., not using Python 3.12 for a 2019 commit). |
 
 ### Outputs
 
@@ -216,7 +216,7 @@ await runner.run(pr_items)
 
 Each item is dispatched via `asyncio.to_thread()` so multiple PRs are synthesized concurrently without blocking the event loop. Failed items raise `RuntimeError` and are logged to `runner_failures` — the runner never aborts.
 
-Items now include additional fields passed through to the sandbox: `env_payload`, `python_version`, and optionally `base_context`.
+Items now include additional fields passed through to the sandbox: `env_payload`, `python_version`, and optionally `base_context`. These are sourced from the `packages` table (populated by the `resolve_packages` pipeline stage) rather than from columns on `pull_requests`. The synthesize stage joins `pull_requests` with `packages` on `(owner, repo, merge_commit_sha = sha)` to obtain resolution data. PRs without a corresponding `packages` row (or where `can_install = FALSE`) are skipped.
 
 ## What was removed (2026-03-21)
 
