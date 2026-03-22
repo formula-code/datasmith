@@ -66,7 +66,7 @@ def _build_and_push_pr_image(
             ctx.to_directory(tmpdir)
             # Ensure the Dockerfile.pr template is present (synthesized contexts
             # may omit it — fall back to the built-in template).
-            _ensure_dockerfile_pr(tmpdir)
+            _fill_missing_scripts(tmpdir)
             mgr.build_pr_image(
                 owner,
                 repo,
@@ -127,18 +127,39 @@ def _load_context_from_db(owner: str, repo: str, sha: str) -> Any | None:
     return None
 
 
-def _ensure_dockerfile_pr(context_dir: str) -> None:
-    """Copy the template Dockerfile.pr into *context_dir* if not already present."""
+def _fill_missing_scripts(context_dir: str) -> None:
+    """Copy any missing shell scripts and Dockerfile.pr from the templates directory.
+
+    Synthesized contexts may only contain a subset of the 9 expected files
+    (e.g. only ``build_pkg_sh``).  The Dockerfile.pr ``COPY`` directives
+    require every file to be present, so we backfill from the built-in
+    templates for anything the synthesizer didn't produce.
+    """
     import os
     import shutil
     from pathlib import Path
 
-    target = os.path.join(context_dir, "Dockerfile.pr")
-    if os.path.exists(target):
-        return
-    template = Path(__file__).parents[1] / "docker" / "templates" / "Dockerfile.pr"
-    if template.exists():
-        shutil.copy2(str(template), target)
+    templates = Path(__file__).parents[1] / "docker" / "templates"
+
+    # Every file that Dockerfile.pr references via COPY
+    required = [
+        "Dockerfile.pr",
+        "docker_build_env.sh",
+        "docker_build_pkg.sh",
+        "docker_build_run.sh",
+        "docker_build_final.sh",
+        "profile.sh",
+        "run-tests.sh",
+        "entrypoint.sh",
+    ]
+
+    for fname in required:
+        target = os.path.join(context_dir, fname)
+        if os.path.exists(target):
+            continue
+        src = templates / fname
+        if src.exists():
+            shutil.copy2(str(src), target)
 
 
 # Lock to serialize prerequisite image builds (base + repo) across threads.

@@ -149,14 +149,25 @@ def load_context(owner: str, repo: str, sha: str) -> DockerContext | None:
     return None
 
 
-def ensure_dockerfile_pr(context_dir: str) -> None:
-    """Copy the template Dockerfile.pr into the context dir if missing."""
-    target = os.path.join(context_dir, "Dockerfile.pr")
-    if os.path.exists(target):
-        return
-    template = TEMPLATES_DIR / "Dockerfile.pr"
-    if template.exists():
-        shutil.copy2(str(template), target)
+def fill_missing_scripts(context_dir: str) -> None:
+    """Copy any missing shell scripts and Dockerfile.pr from templates."""
+    required = [
+        "Dockerfile.pr",
+        "docker_build_env.sh",
+        "docker_build_pkg.sh",
+        "docker_build_run.sh",
+        "docker_build_final.sh",
+        "profile.sh",
+        "run-tests.sh",
+        "entrypoint.sh",
+    ]
+    for fname in required:
+        target = os.path.join(context_dir, fname)
+        if os.path.exists(target):
+            continue
+        src = TEMPLATES_DIR / fname
+        if src.exists():
+            shutil.copy2(str(src), target)
 
 
 def build_and_push_task(
@@ -214,7 +225,7 @@ def build_and_push_task(
     try:
         with tempfile.TemporaryDirectory(prefix="docker-ctx-") as tmpdir:
             ctx.to_directory(tmpdir)
-            ensure_dockerfile_pr(tmpdir)
+            fill_missing_scripts(tmpdir)
             print(f"  Building PR image: {pr_tag}")
             mgr.build_pr_image(
                 owner,
