@@ -24,8 +24,11 @@ uv run pre-commit run -a                     # Run all pre-commit hooks
 # Dataset verification (iterative Docker build debugging)
 python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha>
 
-# Pipeline update (monthly, orchestrates all 6 stages)
-python scratch/scripts/update_formulacode.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+# Pipeline update (monthly, the primary entrypoint for DataSmith)
+ds-update --start-date YYYY-MM-DD --end-date YYYY-MM-DD          # Run all 6 stages
+ds-update --start-date 2026-01-01 --end-date 2026-01-31 --stage 4  # Run a single stage
+ds-update --start-date 2026-01-01 --end-date 2026-01-31 --resume   # Resume from last completed
+ds-update --help                                                    # See all options
 ```
 
 ## Architecture
@@ -38,19 +41,20 @@ python scratch/scripts/update_formulacode.py --start-date YYYY-MM-DD --end-date 
 | `docker/` | Docker image lifecycle: build context creation (`context.py` — largest file), orchestration, DockerHub publishing (`dockerhub.py`), AWS Batch integration, multi-stage shell scripts |
 | `scrape/` | GitHub PR scraping, report generation with Jinja2 templates, issue extraction, code coverage integration. See `src/datasmith/scrape/CLAUDE.md` for report builder data flow |
 | `agents/` | DSPy-based LLM agents for build context synthesis and performance commit classification |
-| `execution/` | Commit collection/filtering from GitHub, dependency resolution, Python environment management |
+| `resolution/` | Dependency resolution: parses pyproject.toml/setup.py/setup.cfg, resolves pinned deps via `uv pip compile`, validates installability. Pipeline stage 4. |
+| `execution/` | Commit collection/filtering from GitHub, Python environment management |
 | `detection/` | Performance breakpoint detection in benchmark results |
 | `benchmark/` | ASV benchmark collection |
 | `collation/` | Data aggregation |
 
-### Pipeline stages (`scratch/scripts/update_formulacode.py`)
+### Pipeline stages (`ds-update`)
 
-1. `collect_commits.py` — Find perf commits via GitHub API
-2. `collect_and_filter_commits.py` — Clone repos, filter irrelevant commits
-3. `prepare_commits_for_building_reports.py` — Tokenize patches, crude perf filter
-4. `collect_perf_commits.py` — LLM-based performance classification
-5. `synthesize_contexts.py` — Agent-based Docker build context synthesis
-6. `build_and_publish_to_dockerhub.py` — Build and push final images
+1. **scrape_repos** — Fetch repository metadata from GitHub
+2. **scrape_commits** — Scrape merged PR commits and patches
+3. **classify_prs** — LLM-based performance classification
+4. **resolve_packages** — Resolve Python dependencies via `uv pip compile`, persist to `packages` table
+5. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
+6. **publish** — Build, verify, and publish Docker images to DockerHub
 
 ### Dataset verification (`dataset/`)
 
