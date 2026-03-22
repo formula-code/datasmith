@@ -117,7 +117,7 @@ def _run_container_with_timeout(
         if result.returncode in (137,):
             return False, result.stdout or result.stderr
         return False, f"Container exited with code {result.returncode}\n{result.stderr[-4000:]}"
-    except sp.TimeoutExpired:
+    except (sp.TimeoutExpired, KeyboardInterrupt) as exc:
         # Kill any remaining containers for this image
         try:
             ps_result = sp.run(  # noqa: S603, S607
@@ -130,6 +130,8 @@ def _run_container_with_timeout(
                     sp.run(["docker", "kill", cid], capture_output=True)  # noqa: S603, S607
         except Exception:
             pass
+        if isinstance(exc, KeyboardInterrupt):
+            raise
         return True, f"Timed out after {timeout}s"
 
 
