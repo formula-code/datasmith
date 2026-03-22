@@ -87,7 +87,7 @@ asyncio_mode = "auto"
 target-version = "py39"
 line-length = 120
 fix = true
-extend-exclude = ["dataset/", "scratch/", "src/datasmith/docker/templates/", "src/datasmith/agents/templates/"]
+extend-exclude = ["archive/", "dataset/", "scratch/", "src/datasmith/docker/templates/", "src/datasmith/agents/templates/"]
 force-exclude = true
 
 [tool.ruff.lint]
