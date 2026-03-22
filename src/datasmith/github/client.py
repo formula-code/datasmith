@@ -222,6 +222,79 @@ class GitHubClient:
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 
+    _MERGED_PRS_QUERY = """
+    query($owner: String!, $repo: String!, $cursor: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequests(states: MERGED, first: 100, after: $cursor,
+                     orderBy: {field: CREATED_AT, direction: DESC}) {
+          nodes {
+            number
+            title
+            body
+            state
+            createdAt
+            mergedAt
+            closedAt
+            mergeCommit { oid }
+            baseRefOid
+            headRefOid
+            labels(first: 20) { nodes { name } }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+    """
+
+    async def paginate_merged_prs(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        max_pages: int = 250,
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Yield pages of merged PRs using GraphQL (only merged PRs returned)."""
+        cursor: str | None = None
+        for _ in range(max_pages):
+            variables: dict[str, Any] = {"owner": owner, "repo": repo}
+            if cursor:
+                variables["cursor"] = cursor
+
+            result = await self.graphql(self._MERGED_PRS_QUERY, variables)
+
+            repo_data = result.get("data", {}).get("repository")
+            if not repo_data:
+                return
+            pr_connection = repo_data.get("pullRequests", {})
+            nodes = pr_connection.get("nodes", [])
+            if not nodes:
+                return
+
+            # Normalize GraphQL shape to match REST field names
+            page: list[dict[str, Any]] = []
+            for node in nodes:
+                pr: dict[str, Any] = {
+                    "number": node["number"],
+                    "title": node.get("title", ""),
+                    "body": node.get("body", "") or "",
+                    "state": "closed",
+                    "created_at": node.get("createdAt"),
+                    "merged_at": node.get("mergedAt"),
+                    "closed_at": node.get("closedAt"),
+                    "merge_commit_sha": (node.get("mergeCommit") or {}).get("oid", ""),
+                    "base": {"sha": node.get("baseRefOid", "")},
+                    "head": {"sha": node.get("headRefOid", "")},
+                    "labels": [{"name": ln["name"]} for ln in (node.get("labels") or {}).get("nodes", [])],
+                }
+                page.append(pr)
+
+            yield page
+
+            page_info = pr_connection.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                return
+            cursor = page_info.get("endCursor")
+
     async def close(self) -> None:
         """Close the underlying HTTP client."""
         if self._http and not self._http.is_closed:
