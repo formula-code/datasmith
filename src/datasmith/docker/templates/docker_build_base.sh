@@ -676,6 +676,57 @@ PY
 }
 install_detect_extras
 
+# -------- System bootstrap (idempotent) --------
+# When run from a bare image (e.g. ubuntu:22.04) these install the
+# toolchain that Dockerfile.base otherwise provides inline.
+# Each guard checks whether the tool is already present so the block
+# is a no-op when the Dockerfile already set things up.
+
+export DEBIAN_FRONTEND=noninteractive
+
+if ! command -v cmake >/dev/null 2>&1; then
+    echo "[docker_build_base] Installing system packages..."
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential gcc g++ gfortran git curl wget ca-certificates \
+        jq cmake ninja-build libopenmpi-dev libgeos-dev pkg-config \
+        graphviz libgraphviz-dev libpq-dev \
+        libgl1 libegl1 libglib2.0-0 libxkbcommon0 libdbus-1-3 \
+        libfontconfig1 libxrender1 libxext6 \
+        python3 python3-pip python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+fi
+
+if ! command -v rustc >/dev/null 2>&1; then
+    echo "[docker_build_base] Installing Rust toolchain..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    export PATH="/root/.cargo/bin:${PATH}"
+fi
+
+export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-/opt/conda}"
+
+if ! command -v micromamba >/dev/null 2>&1; then
+    echo "[docker_build_base] Installing micromamba..."
+    curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+        | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
+    micromamba shell init --shell=bash --root-prefix="$MAMBA_ROOT_PREFIX"
+fi
+
+export PATH="/opt/conda/bin:/root/.cargo/bin:/root/.local/bin:${PATH}"
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "[docker_build_base] Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+
+# Ensure base conda env has python + git + asv
+if ! micromamba env list 2>/dev/null | awk '{print $1}' | grep -qx "base"; then
+    micromamba install -y -p "$MAMBA_ROOT_PREFIX" -c conda-forge \
+        python=3.10 git asv pyperf mamba conda libmambapy && \
+    micromamba clean --all --yes
+fi
+
+mkdir -p /workspace /output
+
 # -------- Script body --------
 
 install_profile_helpers

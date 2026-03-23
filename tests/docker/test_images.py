@@ -153,6 +153,7 @@ class TestBuildPrImage:
             build_args={
                 "REPO_IMAGE": get_repo_image_name("pandas-dev", "pandas"),
                 "COMMIT_SHA": "HEAD",
+                "ENV_PAYLOAD": "[]",
             },
             builder=_BUILDER,
         )
@@ -174,6 +175,7 @@ class TestBuildPrImage:
             build_args={
                 "REPO_IMAGE": get_repo_image_name("pandas-dev", "pandas"),
                 "COMMIT_SHA": "HEAD",
+                "ENV_PAYLOAD": "[]",
             },
             builder=_BUILDER,
         )

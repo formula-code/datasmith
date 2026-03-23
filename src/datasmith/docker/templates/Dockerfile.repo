@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
 ARG BASE_IMAGE=formulacode/base:latest
-ARG PY_VERSION=""
 
 FROM ${BASE_IMAGE} AS repo
-ARG PY_VERSION=""
 ARG REPO_URL
-RUN git clone "$REPO_URL" /workspace/repo
+ARG COMMIT_SHA=""
+RUN git clone "$REPO_URL" /workspace/repo && \
+    if [ -n "$COMMIT_SHA" ]; then cd /workspace/repo && git checkout "$COMMIT_SHA"; fi
 WORKDIR /workspace/repo
 ENTRYPOINT ["/bin/bash"]

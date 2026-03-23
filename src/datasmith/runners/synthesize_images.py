@@ -39,21 +39,19 @@ def _build_and_push_pr_image(
     sha: str,
     env_payload: str,
     docker_context: Any | None = None,
+    python_version: str = "",
 ) -> str:
     """Build the final PR image from synthesized context and push to DockerHub.
 
-    *docker_context* is an optional ``DockerContext`` whose files are written
-    to a temp directory and used as the Docker build context.  When ``None``,
-    the context is loaded from the ``docker_contexts`` Supabase table.
+    The three-tier Dockerfiles (base/repo/pr) use the same shell scripts as
+    the synthesized single-Dockerfile flow, so the build result is identical.
 
     Returns the pushed image tag.
     """
-    from datasmith.docker.context import DockerContext
     from datasmith.docker.images import ImageManager, get_pr_image_name, get_repo_image_name
     from datasmith.docker.publish import DockerHubPublisher
 
-    # Resolve context: argument > DB lookup > default templates
-    ctx: DockerContext | None = docker_context
+    ctx = docker_context
     if ctx is None:
         ctx = _load_context_from_db(owner, repo, sha)
 
@@ -61,11 +59,8 @@ def _build_and_push_pr_image(
     pr_tag = get_pr_image_name(owner, repo, issue_number)
 
     if ctx is not None:
-        # Materialize synthesized context to a temp dir for docker build
         with tempfile.TemporaryDirectory(prefix="docker-ctx-") as tmpdir:
             ctx.to_directory(tmpdir)
-            # Ensure the Dockerfile.pr template is present (synthesized contexts
-            # may omit it — fall back to the built-in template).
             _fill_missing_scripts(tmpdir)
             mgr.build_pr_image(
                 owner,
@@ -73,23 +68,22 @@ def _build_and_push_pr_image(
                 issue_number,
                 context=tmpdir,
                 commit_sha=sha or "HEAD",
-                env_payload=env_payload or "{}",
+                env_payload=env_payload or "[]",
+                py_version=python_version,
             )
     else:
-        # No synthesized context — use default templates
         mgr.build_pr_image(
             owner,
             repo,
             issue_number,
             commit_sha=sha or "HEAD",
-            env_payload=env_payload or "{}",
+            env_payload=env_payload or "[]",
+            py_version=python_version,
         )
 
-    # Push to DockerHub
     publisher = DockerHubPublisher()
     repo_tag = get_repo_image_name(owner, repo)
 
-    # Push repo image if not already remote (idempotent — DockerHub deduplicates layers)
     try:
         publisher.push(repo_tag)
     except Exception:
@@ -287,7 +281,9 @@ class SynthesizeImagesRunner(BaseRunner):
         logger.info("Successfully synthesized image for %s/%s#%d", owner, repo, issue_number)
 
         # Build the final PR image and push to DockerHub
-        pr_tag = await asyncio.to_thread(_build_and_push_pr_image, owner, repo, issue_number, sha, env_payload, ctx)
+        pr_tag = await asyncio.to_thread(
+            _build_and_push_pr_image, owner, repo, issue_number, sha, env_payload, ctx, py_version
+        )
 
         # Record the container name in Supabase
         client = get_client()

@@ -233,7 +233,8 @@ def build_and_push_task(
                 issue_number,
                 context=tmpdir,
                 commit_sha=sha,
-                env_payload=env_payload or "{}",
+                env_payload=env_payload or "[]",
+                py_version=py_version,
             )
     except Exception as e:
         print(f"  ERROR building PR image: {e}")

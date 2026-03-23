@@ -113,7 +113,8 @@ class ImageManager:
         build_script: str = "",
         *,
         commit_sha: str = "HEAD",
-        env_payload: str = "{}",
+        env_payload: str = "[]",
+        py_version: str = "",
     ) -> str:
         ctx = context or _default_context()
         tag = get_pr_image_name(owner, repo, issue_number)
@@ -122,11 +123,12 @@ class ImageManager:
         build_args: dict[str, str] = {
             "REPO_IMAGE": repo_image,
             "COMMIT_SHA": commit_sha,
+            "ENV_PAYLOAD": env_payload,
         }
         if build_script:
             build_args["BUILD_SCRIPT"] = build_script
-        if env_payload != "{}":
-            build_args["ENV_PAYLOAD"] = env_payload
+        if py_version:
+            build_args["PY_VERSION"] = py_version
         self._docker.build(
             ctx,
             tags=[tag],
