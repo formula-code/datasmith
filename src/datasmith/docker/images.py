@@ -39,12 +39,12 @@ def get_base_image_name() -> str:
 
 def get_repo_image_name(owner: str, repo: str) -> str:
     """Return the canonical tag for a repository image."""
-    return f"{_docker_namespace()}/{owner}-{repo}:latest"
+    return f"{_docker_namespace()}/{owner}-{repo}:latest".lower()
 
 
 def get_pr_image_name(owner: str, repo: str, issue_number: int) -> str:
     """Return the canonical tag for a PR image."""
-    return f"{_docker_namespace()}/{owner}-{repo}:{issue_number}"
+    return f"{_docker_namespace()}/{owner}-{repo}:{issue_number}".lower()
 
 
 class ImageManager:
