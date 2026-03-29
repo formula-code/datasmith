@@ -188,6 +188,38 @@ class GitHubClient:
             return []
         return resp.json()  # type: ignore[no-any-return]
 
+    async def search_code(
+        self,
+        query: str,
+        *,
+        per_page: int = 100,
+        max_pages: int = 10,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield items from the GitHub Code Search API.
+
+        The search API returns ``{"items": [...], "incomplete_results": bool}``
+        rather than a plain list, so ``paginate()`` cannot be reused.  A 2-second
+        delay is added between pages to stay within the 30 req/min search rate limit.
+        """
+        for page_num in range(1, max_pages + 1):
+            resp = await self._request(
+                "GET",
+                "/search/code",
+                params={"q": query, "per_page": per_page, "page": page_num},
+            )
+            if resp is None:
+                return
+            data = resp.json()
+            items = data.get("items", [])
+            if not items:
+                return
+            for item in items:
+                yield item
+            if len(items) < per_page:
+                return
+            # Search API has a stricter rate limit (30 req/min)
+            await asyncio.sleep(2)
+
     async def paginate(
         self,
         method: str,

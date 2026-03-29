@@ -102,6 +102,7 @@ def render_problem_statement(
     anonymize: bool = False,
     known_usernames: set[str] | None = None,
     extract: bool = True,
+    initial_observations: str | None = None,
 ) -> str:
     """Render the full problem statement for a FormulaCode task.
 
@@ -122,12 +123,21 @@ def render_problem_statement(
         If ``True`` (default), use :class:`ProblemExtractor` to separate
         problem observations from solution details, preventing information
         leakage.  Falls back to raw ``pr.body`` on failure.
+        Ignored when *initial_observations* is provided.
+    initial_observations:
+        If provided, use this text directly as the problem observations and
+        skip the :class:`ProblemExtractor` call entirely.  Pass the output of
+        ``ProblemExtraction.to_problem_markdown()`` here when the extraction
+        has already been performed outside this function.
     """
     env = _get_env()
     anon = Anonymizer(known_usernames=known_usernames) if anonymize else None
 
     # Extract problem observations (strip solution details) or use raw body
-    if extract:
+    if initial_observations is not None:
+        # Caller already ran ProblemExtractor — use the supplied text directly.
+        pass
+    elif extract:
         try:
             from datasmith.agents.extractors import ProblemExtractor
 
