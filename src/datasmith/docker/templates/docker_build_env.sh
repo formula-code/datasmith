@@ -164,18 +164,23 @@ EOF
 
 URL=$(git remote -v | grep "(fetch)" | awk '{print $2}')
 
-# Optional benchmark grafting left intact
+# Clone external benchmarks so the ASV config file (asv.*.json) is discoverable
+# below.  The pkg stage also clones these in an agent-editable section so the
+# synthesizer can adjust URLs/branches if needed.
 if [[ "$URL" =~ ^(https://)?(www\.)?github\.com/dask/dask(\.git)?$ ]]; then
-    git clone https://github.com/dask/dask-benchmarks.git /tmp/repo
+    git clone --depth 1 https://github.com/dask/dask-benchmarks.git /tmp/repo
     cp -r /tmp/repo/dask/* /workspace/repo/
+    rm -rf /tmp/repo
 elif [[ "$URL" =~ ^(https://)?(www\.)?github\.com/dask/distributed(\.git)?$ ]]; then
-    git clone https://github.com/dask/dask-benchmarks.git /tmp/repo
+    git clone --depth 1 https://github.com/dask/dask-benchmarks.git /tmp/repo
     cp -r /tmp/repo/distributed/* /workspace/repo/
+    rm -rf /tmp/repo
 elif [[ "$URL" =~ ^(https://)?(www\.)?github\.com/joblib/joblib(\.git)?$ ]]; then
-    git clone https://github.com/pierreglaser/joblib_benchmarks.git /tmp/repo
+    git clone --depth 1 https://github.com/pierreglaser/joblib_benchmarks.git /tmp/repo
     cp -r /tmp/repo/* /workspace/repo/
+    rm -rf /tmp/repo
 elif [[ "$URL" =~ ^(https://)?(www\.)?github\.com/astropy/astropy(\.git)?$ ]]; then
-    git clone -b main https://github.com/astropy/astropy-benchmarks.git --single-branch
+    git clone -b main --depth 1 --single-branch https://github.com/astropy/astropy-benchmarks.git
 fi
 
 IMPORT_NAME="$(detect_import_name || true)"

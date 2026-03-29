@@ -48,7 +48,7 @@ def get_pr_image_name(owner: str, repo: str, issue_number: int) -> str:
 
 
 class ImageManager:
-    def __init__(self, timeout: int = 600) -> None:
+    def __init__(self, timeout: int = 3600) -> None:
         self._docker = DockerClient()
         self._timeout = timeout
 

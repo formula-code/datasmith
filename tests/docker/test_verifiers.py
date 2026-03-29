@@ -59,6 +59,19 @@ class TestProfileVerifier:
         assert result.rc == 0
         assert result.stage == "profile"
 
+    def test_profile_passes_log_path_arg(self, mock_docker: MagicMock) -> None:
+        """ProfileVerifier must pass the required LOG_PATH arg to profile.sh."""
+        mock_docker.run.return_value = "profile output"
+        verifier = ProfileVerifier(timeout=60)
+        verifier.verify("test-image:latest")
+
+        mock_docker.run.assert_called_once_with(
+            "test-image:latest",
+            ["/bin/bash", "/profile.sh", "/tmp/profile_log"],
+            remove=True,
+            pull="never",
+        )
+
     def test_profile_timeout_treated_as_success(self, mock_docker: MagicMock) -> None:
         mock_docker.run.side_effect = Exception("Command timed out after timeout seconds")
         verifier = ProfileVerifier(timeout=60)
@@ -96,6 +109,22 @@ class TestPytestVerifier:
         assert result.ok is False
         assert result.rc == 1
         assert result.stage == "pytest"
+
+    def test_no_benchmarks_detected(self, mock_docker: MagicMock) -> None:
+        """run-tests.sh exit 0 but output contains FORMULACODE_NO_BENCHMARKS sentinel."""
+        mock_docker.run.return_value = (
+            "FORMULACODE_NO_BENCHMARKS: 0 ASV benchmarks discovered.\n"
+            "FORMULACODE_SNAPSHOT_START\n"
+            '{"total": 0, "passed": 0, "failed": 0, "skipped": 0}\n'
+            "FORMULACODE_SNAPSHOT_END\n"
+        )
+        verifier = PytestVerifier(timeout=60)
+        result = verifier.verify("test-image:latest")
+
+        assert result.ok is False
+        assert result.rc == 78
+        assert result.stage == "pytest"
+        assert "No ASV benchmarks" in result.stderr
 
 
 class TestMultiObjVerifier:

@@ -3,15 +3,23 @@ set -euo pipefail
 
 show_help() {
   cat <<EOF
-Usage: $(basename "$0") [ASV_BENCHMARKS]
+Usage: $(basename "$0") [ASV_BENCHMARKS_FALLBACK]
 
 Options:
-  ASV_BENCHMARKS           A string that should be written to asv-benchmarks.txt (required)
-  -h, --help         Show this help message and exit
+  ASV_BENCHMARKS_FALLBACK  Optional fallback file with pre-computed benchmark
+                           names (one per line).  Used only when live ASV
+                           discovery fails.
+  -h, --help               Show this help message and exit
 
 Description:
-  This script finalizes the Docker ASV benchmark build by activating the appropriate
-  environment, installing necessary packages, and adding the asv-benchmarks.txt file.
+  Finalises the Docker image by activating the conda environment, installing
+  runtime dependencies, and discovering ASV benchmarks.
+
+  Benchmarks are discovered via \`asv run --bench just-discover\` which scans
+  the codebase for benchmark classes/functions.  The result is written to
+  /workspace/repo/asv_benchmarks.txt and exported as ASV_BENCHMARKS in
+  /etc/profile.d/asv_build_vars.sh so downstream scripts (run-tests.sh,
+  profile.sh) can use them.
 EOF
 }
 
@@ -20,13 +28,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-if [ -z "${1:-}" ]; then
-  echo "Error: ASV_BENCHMARKS argument required." >&2
-  show_help
-  exit 1
-fi
+FALLBACK_FILE="${1:-}"
 
-ASV_BENCHMARKS=$(realpath "$1")
 cd /workspace/repo || exit 1
 
 source /etc/profile.d/asv_utils.sh || true
@@ -47,12 +50,57 @@ set -u
 micromamba run -n "$ENV_NAME" uv pip install git+https://github.com/formula-code/snapshot-tester.git || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade coverage || true
 
-# add asv-benchmarks.txt.
-cat "$ASV_BENCHMARKS" > /workspace/repo/asv-benchmarks.txt
-echo "Docker ASV benchmark finalization complete."
-# Add the location of the benchmarks folder to the asv_build_vars.sh file.
-# We should have the asv.conf.json location as $CONF_NAME
+# ── Discover ASV benchmarks ──────────────────────────────────────────
+# Step 1: `asv run --bench just-discover` scans the codebase for benchmark
+#         classes/functions and writes benchmarks.json (no benchmarks are
+#         actually executed).
+# Step 2: Benchmarks.load() reads benchmarks.json and we dump the names
+#         one-per-line to asv_benchmarks.txt.
+echo "[final] Discovering ASV benchmarks from ${CONF_NAME:-<unknown>} ..."
+REAL_CONF="$(realpath "$CONF_NAME")"
+CONF_DIR="$(dirname "$REAL_CONF")"
+
+# asv must be run from the directory containing the config
+pushd "$CONF_DIR" > /dev/null
+micromamba run -n "$ENV_NAME" asv machine --yes --config "$REAL_CONF" \
+  --machine dockertest --num_cpu 1 --ram 4GB 2>&1 | tail -1 || true
+micromamba run -n "$ENV_NAME" asv run --bench just-discover \
+  --config "$REAL_CONF" --python=same --machine=dockertest || true
+popd > /dev/null
+
+# Extract benchmark names from the generated benchmarks.json
+python - "$CONF_NAME" /workspace/repo/asv_benchmarks.txt <<'EXTRACT_EOF' || true
+import sys
+from asv.config import Config
+from asv.benchmarks import Benchmarks
+
+conf = Config.load(sys.argv[1])
+bm = Benchmarks.load(conf)
+with open(sys.argv[2], "w") as f:
+    for b in sorted(bm._all_benchmarks.keys()):
+        f.write(b + "\n")
+EXTRACT_EOF
+
+# Fall back to the pre-computed file if live discovery produced nothing.
+if [ ! -s /workspace/repo/asv_benchmarks.txt ] && [ -n "$FALLBACK_FILE" ] && [ -s "$FALLBACK_FILE" ]; then
+    echo "[final] ASV discovery produced no results; falling back to pre-computed benchmarks."
+    cp "$FALLBACK_FILE" /workspace/repo/asv_benchmarks.txt
+fi
+
+if [ -s /workspace/repo/asv_benchmarks.txt ]; then
+    COUNT=$(wc -l < /workspace/repo/asv_benchmarks.txt)
+    echo "[final] Discovered $COUNT ASV benchmarks."
+else
+    echo "[final] WARNING: No ASV benchmarks discovered."
+fi
+
+# ── Resolve benchmark directory ──────────────────────────────────────
 ABS_BENCHMARK_DIR=$(micromamba run -n "$ENV_NAME" python -c 'import os,asv; from pathlib import Path; cp=Path(os.environ["CONF_NAME"]).resolve(); cfg=asv.config.Config.load(cp); raw=os.path.expandvars(str(cfg.benchmark_dir)); b=Path(raw).expanduser(); b=(cp.parent/b) if not b.is_absolute() else b; print(b.resolve())')
 
+# ── Persist to asv_build_vars.sh for downstream scripts ──────────────
+cat >>/etc/profile.d/asv_build_vars.sh <<VARS
+export BENCHMARK_DIR=$ABS_BENCHMARK_DIR
+export ASV_BENCHMARKS=/workspace/repo/asv_benchmarks.txt
+VARS
 
-echo "export BENCHMARK_DIR=$ABS_BENCHMARK_DIR" >> /etc/profile.d/asv_build_vars.sh
+echo "Docker ASV benchmark finalization complete."

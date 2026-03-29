@@ -38,6 +38,5 @@ ARG BUILD_SCRIPT=""
 
 COPY docker_build_final.sh /docker_build_final.sh
 RUN chmod +x /docker_build_final.sh \
-    && printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks.txt; \
-    ARG_PATH=/tmp/asv_benchmarks.txt; \
-    /docker_build_final.sh "${ARG_PATH}";
+    && printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks_fallback.txt; \
+    /docker_build_final.sh /tmp/asv_benchmarks_fallback.txt;

@@ -47,7 +47,7 @@ class SmokeVerifier(Verifier):
 
 
 class ProfileVerifier(Verifier):
-    def __init__(self, timeout: int = 300) -> None:
+    def __init__(self, timeout: int = 3600) -> None:
         self._timeout = timeout
         self._docker = DockerClient()
 
@@ -56,7 +56,7 @@ class ProfileVerifier(Verifier):
         try:
             output = self._docker.run(
                 image_name,
-                ["/bin/bash", "/profile.sh"],
+                ["/bin/bash", "/profile.sh", "/tmp/profile_log"],  # noqa: S108
                 remove=True,
                 pull="never",
             )
@@ -68,7 +68,7 @@ class ProfileVerifier(Verifier):
 
 
 class PytestVerifier(Verifier):
-    def __init__(self, timeout: int = 300) -> None:
+    def __init__(self, timeout: int = 3600) -> None:
         self._timeout = timeout
         self._docker = DockerClient()
 
@@ -81,7 +81,17 @@ class PytestVerifier(Verifier):
                 remove=True,
                 pull="never",
             )
-            return VerifyResult(ok=True, rc=0, stdout=str(output), duration_s=time.time() - start, stage="pytest")
+            stdout = str(output)
+            if "FORMULACODE_NO_BENCHMARKS" in stdout:
+                return VerifyResult(
+                    ok=False,
+                    rc=78,
+                    stdout=stdout,
+                    stderr="No ASV benchmarks discovered",
+                    duration_s=time.time() - start,
+                    stage="pytest",
+                )
+            return VerifyResult(ok=True, rc=0, stdout=stdout, duration_s=time.time() - start, stage="pytest")
         except Exception as e:
             return VerifyResult(ok=False, rc=1, stderr=str(e), duration_s=time.time() - start, stage="pytest")
 
