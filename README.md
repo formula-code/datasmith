@@ -272,10 +272,11 @@ Datasmith contains seven high-level modules. FormulaCode-specific logic lives di
 	1. `ds.runners.scrape_repos`
 	2. `ds.runners.scrape_commits`
 	3. `ds.runners.classify_prs`
-	4. `ds.runners.synthesize_images`
-	5. `ds.publish`
+	4. `ds.runners.resolve_packages`
+	5. `ds.runners.synthesize_images`
+	6. `ds.publish`
 
-	Supports `--resume` (skip completed stages), `--stage N` (run only one stage), and `--dry-run`.
+	Supports `--resume`, `--stage N`, `--dry-run`, `--n-concurrent`, `--tasks-per-repo`, `--agent`, and `--force`.
 
 ### FormulaCodeRecord
 
@@ -420,13 +421,27 @@ The monthly update is a single command:
 $ ds-update --start-date 2026-02-01 --end-date 2026-03-01
 ```
 
-This runs five stages in order: scrape repos, scrape commits, classify PRs, synthesize Docker images, and publish to DockerHub + HuggingFace. Options:
+This runs six stages in order: scrape repos, scrape commits, classify PRs, resolve packages, synthesize Docker images, and publish to DockerHub + HuggingFace. Options:
 
 ```bash
-$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --resume    # skip completed stages
-$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 3   # run only classification
-$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --dry-run   # log without executing
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --resume        # skip completed stages
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 4       # run only package resolution
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --dry-run       # log without executing
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 \
+    --agent codex --n-concurrent 5 --tasks-per-repo 5                      # synthesis with codex, capped
+$ ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 \
+    --force                                                                # re-run synthesis for all tasks
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--resume` | Skip stages already marked complete and resume from the next pending stage |
+| `--stage N` | Run only stage N (1–6) |
+| `--dry-run` | Log what each stage would do without executing |
+| `--n-concurrent N` | Max concurrent items per runner stage |
+| `--tasks-per-repo N` | Cap tasks per repository for stage 5 (synthesize_images) |
+| `--agent {claude,codex,gemini}` | CLI agent for stage 5 synthesis (default: auto-detect first available) |
+| `--force` | Re-run synthesis even for tasks that already have a container or cached context (stage 5 only) |
 
 
 ## Dataset verification
