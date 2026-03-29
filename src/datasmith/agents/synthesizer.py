@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import datetime
 import enum
+import json
 from typing import Any, cast
 
+from datasmith.agents.sandbox import SandboxResult, verify_context
 from datasmith.docker.context import DockerContext
-from datasmith.docker.verifiers import Verifier, VerifyResult
 from datasmith.utils import get_client, get_logger
 
 logger = get_logger("agents.synthesizer")
@@ -25,9 +27,13 @@ class Synthesizer:
         self,
         max_attempts: int = 2,
         dry_run: bool = False,
+        agent: str | None = None,
+        force: bool = False,
     ) -> None:
         self._max_attempts = max_attempts
         self._dry_run = dry_run
+        self._agent = agent
+        self._force = force
         self._trace: list[SynthesisState] = []
 
     @property
@@ -40,56 +46,64 @@ class Synthesizer:
         repo: str,
         issue_number: int,
         pr_context: str,
-        verifier: Verifier,
         sha: str = "",
-        base_context: DockerContext | None = None,
+        repo_image: str = "",
         env_payload: str = "",
         python_version: str = "",
+        force: bool = False,
     ) -> DockerContext | None:
         """Run the synthesis state machine. Returns DockerContext on success, None on failure."""
         self._trace = []
+        force = force or self._force
 
         # State: CHECK_CACHE
         self._trace.append(SynthesisState.CHECK_CACHE)
         cached = self._check_cache(owner, repo, sha)
-        if cached is not None:
+        if (not force) and (cached is not None):
             logger.info("Cache hit for %s/%s@%s", owner, repo, sha[:12] if sha else "?")
             return cached
 
         # State: FIND_SIMILAR
         self._trace.append(SynthesisState.FIND_SIMILAR)
-        similar_scripts = self._find_similar(owner, repo)
+        similar_contexts = self._find_similar(owner, repo)
 
         # State: TRY_SIMILAR
-        failed_attempts: list[tuple[str, VerifyResult]] = []
-        if similar_scripts:
+        failed_attempts: list[tuple[DockerContext, SandboxResult]] = []
+        if similar_contexts:
             self._trace.append(SynthesisState.TRY_SIMILAR)
-            for script in similar_scripts:
-                ctx: DockerContext | None = DockerContext(build_pkg_sh=script)
-                image_name = f"formulacode/{owner}-{repo}:{issue_number}-test"
-                result = verifier.verify(image_name)
-                if result.ok:
-                    logger.info("Similar script passed for %s/%s#%d", owner, repo, issue_number)
-                    self._save_attempt(owner, repo, issue_number, sha, 0, script, result)
+            for ctx in similar_contexts:
+                result = verify_context(
+                    owner=owner,
+                    repo=repo,
+                    sha=sha,
+                    repo_image=repo_image,
+                    env_payload=env_payload,
+                    python_version=python_version,
+                    context=ctx,
+                )
+                if result.success:
+                    logger.info("Similar context passed for %s/%s#%d", owner, repo, issue_number)
                     self._save_context(owner, repo, sha, issue_number, ctx)
                     return ctx
-                failed_attempts.append((script, result))
+                failed_attempts.append((ctx, result))
 
         # State: LLM_GENERATE (sandbox-based)
         self._trace.append(SynthesisState.LLM_GENERATE)
         prior_attempts = _format_prior_attempts(failed_attempts) if failed_attempts else ""
         for attempt_idx in range(self._max_attempts):
-            ctx = self._sandbox_generate(
+            generated = self._sandbox_generate(
                 owner=owner,
                 repo=repo,
                 sha=sha,
                 pr_context=pr_context,
-                base_context=base_context or DockerContext(),
+                repo_image=repo_image,
                 env_payload=env_payload,
                 python_version=python_version,
                 prior_attempts=prior_attempts,
+                issue_number=issue_number,
+                attempt_index=attempt_idx,
             )
-            if ctx is not None:
+            if generated is not None:
                 logger.info(
                     "Sandbox synthesis succeeded for %s/%s#%d (attempt %d)",
                     owner,
@@ -97,8 +111,8 @@ class Synthesizer:
                     issue_number,
                     attempt_idx + 1,
                 )
-                self._save_context(owner, repo, sha, issue_number, ctx)
-                return ctx
+                self._save_context(owner, repo, sha, issue_number, generated)
+                return generated
             logger.warning(
                 "Sandbox synthesis attempt %d failed for %s/%s#%d",
                 attempt_idx + 1,
@@ -137,22 +151,29 @@ class Synthesizer:
             logger.debug("Cache check failed, proceeding")
         return None
 
-    def _find_similar(self, owner: str, repo: str) -> list[str]:
+    def _find_similar(self, owner: str, repo: str) -> list[DockerContext]:
+        """Find previously successful build contexts for the same repository."""
         try:
             client = get_client()
             resp = (
-                client.table("build_attempts")
-                .select("script")
+                client.table("docker_contexts")
+                .select("build_pkg_sh,build_run_sh")
                 .eq("owner", owner)
                 .eq("repo", repo)
-                .eq("ok", True)
                 .limit(5)
                 .execute()
             )
             rows = cast(list[dict[str, Any]], resp.data)
-            return [r["script"] for r in rows if r.get("script")]
+            return [
+                DockerContext(
+                    build_pkg_sh=r.get("build_pkg_sh", ""),
+                    build_run_sh=r.get("build_run_sh", ""),
+                )
+                for r in rows
+                if r.get("build_pkg_sh")
+            ]
         except Exception:
-            logger.debug("Similar script lookup failed")
+            logger.debug("Similar context lookup failed")
             return []
 
     def _sandbox_generate(
@@ -161,26 +182,79 @@ class Synthesizer:
         repo: str,
         sha: str,
         pr_context: str,
-        base_context: DockerContext,
+        repo_image: str,
         env_payload: str,
         python_version: str,
         prior_attempts: str = "",
+        issue_number: int = 0,
+        attempt_index: int = 0,
     ) -> DockerContext | None:
         from datasmith.agents.sandbox import SandboxRunner
 
-        runner = SandboxRunner()
+        runner = SandboxRunner(agent=self._agent)
         result = runner.run(
             owner=owner,
             repo=repo,
             sha=sha,
-            base_context=base_context,
+            repo_image=repo_image,
             env_payload=env_payload,
             python_version=python_version,
             pr_context=pr_context,
             prior_attempts=prior_attempts,
             dry_run=self._dry_run,
         )
+        self._log_attempt(
+            owner=owner,
+            repo=repo,
+            sha=sha,
+            issue_number=issue_number,
+            attempt_index=attempt_index,
+            result=result,
+        )
         return result.docker_context if result.success else None
+
+    def _log_attempt(
+        self,
+        owner: str,
+        repo: str,
+        sha: str,
+        issue_number: int,
+        attempt_index: int,
+        result: SandboxResult,
+    ) -> None:
+        """Persist agent output to the ``error_logs`` Supabase table."""
+        timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+
+        failure = result.failure_json or {}
+        # Cap raw output at 100 KB for Supabase storage
+        raw_output = result.raw_agent_output
+        if len(raw_output) > 100_000:
+            raw_output = raw_output[-100_000:]
+
+        row = {
+            "owner": owner,
+            "repo": repo,
+            "sha": sha,
+            "issue_number": issue_number,
+            "attempt_index": attempt_index,
+            "agent_name": result.agent_name,
+            "success": result.success,
+            "duration_s": result.duration_s,
+            "failure_stage": failure.get("stage") or None,
+            "failure_return_code": failure.get("return_code") or None,
+            "error_message": (failure.get("error_message") or "")[-10_000:] or None,
+            "agent_output": raw_output or None,
+            "files_changed": json.dumps(result.files_changed),
+            "created_at": timestamp,
+        }
+        try:
+            client = get_client()
+            client.table("error_logs").insert(row).execute()
+            logger.info(
+                "Logged synthesis attempt to error_logs for %s/%s@%s attempt %d", owner, repo, sha[:12], attempt_index
+            )
+        except Exception:
+            logger.debug("Failed to log synthesis attempt to Supabase", exc_info=True)
 
     def _save_context(
         self,
@@ -190,7 +264,11 @@ class Synthesizer:
         issue_number: int,
         ctx: DockerContext,
     ) -> None:
-        """Persist the full DockerContext to the ``docker_contexts`` table."""
+        """Persist the agent-edited scripts to the ``docker_contexts`` table.
+
+        Only ``build_pkg_sh`` and ``build_run_sh`` are saved — the other
+        fields come from templates and don't need to be persisted.
+        """
         if not sha:
             return
         try:
@@ -200,86 +278,67 @@ class Synthesizer:
                 "repo": repo,
                 "sha": sha,
                 "issue_number": issue_number,
-                "dockerfile": ctx.dockerfile,
-                "build_base_sh": ctx.build_base_sh,
-                "build_env_sh": ctx.build_env_sh,
                 "build_pkg_sh": ctx.build_pkg_sh,
                 "build_run_sh": ctx.build_run_sh,
-                "build_final_sh": ctx.build_final_sh,
-                "profile_sh": ctx.profile_sh,
-                "run_tests_sh": ctx.run_tests_sh,
-                "entrypoint_sh": ctx.entrypoint_sh,
             }).execute()
             logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
         except Exception:
             logger.warning("Failed to save context for %s/%s@%s", owner, repo, sha[:12])
 
-    @staticmethod
-    def _save_attempt(
-        owner: str,
-        repo: str,
-        issue_number: int,
-        sha: str,
-        attempt_idx: int,
-        script: str,
-        result: VerifyResult,
-    ) -> None:
-        try:
-            client = get_client()
-            row: dict[str, Any] = {
-                "owner": owner,
-                "repo": repo,
-                "issue_number": issue_number,
-                "attempt_idx": attempt_idx,
-                "script": script,
-                "ok": result.ok,
-                "rc": result.rc,
-                "duration_s": result.duration_s,
-                "stderr_tail": result.stderr[-2000:] if result.stderr else "",
-                "stdout_tail": result.stdout[-2000:] if result.stdout else "",
-            }
-            if sha:
-                row["sha"] = sha
-            client.table("build_attempts").insert(row).execute()
-        except Exception:
-            logger.warning("Failed to save build attempt")
 
-
-def _format_prior_attempts(attempts: list[tuple[str, VerifyResult]]) -> str:
+def _format_prior_attempts(attempts: list[tuple[DockerContext, SandboxResult]]) -> str:
     """Format failed TRY_SIMILAR attempts into context for the LLM agent."""
     lines = [
         "# Prior Attempts",
         "",
-        "The following build scripts were tried and failed.",
+        "The following build contexts were tried and failed.",
         "Use these failures to inform your approach — avoid repeating the same mistakes.",
         "",
     ]
-    for i, (script, result) in enumerate(attempts, 1):
+    for i, (ctx, result) in enumerate(attempts, 1):
+        failure = result.failure_json or {}
+        stage = failure.get("stage", "unknown")
+        rc = failure.get("return_code", 1)
+        error = failure.get("error_message", "")
+
         lines.append(f"## Attempt {i}")
         lines.append("")
-        lines.append(f"**Stage**: {result.stage}")
-        lines.append(f"**Return code**: {result.rc}")
+        lines.append(f"**Stage**: {stage}")
+        lines.append(f"**Return code**: {rc}")
         lines.append("")
-        lines.append("### Script used")
+
+        lines.append("### docker_build_pkg.sh")
         lines.append("```bash")
-        # Truncate very long scripts
-        if len(script) > 3000:
-            lines.append(script[:3000])
+        pkg = ctx.build_pkg_sh
+        if pkg and len(pkg) > 3000:
+            lines.append(pkg[:3000])
             lines.append("# ... (truncated)")
         else:
-            lines.append(script)
+            lines.append(pkg or "(empty)")
         lines.append("```")
         lines.append("")
-        if result.stderr:
-            stderr_tail = result.stderr[-3000:]
-            lines.append("### Error output (last 3000 chars)")
+
+        lines.append("### docker_build_run.sh")
+        lines.append("```bash")
+        run = ctx.build_run_sh
+        if run and len(run) > 3000:
+            lines.append(run[:3000])
+            lines.append("# ... (truncated)")
+        else:
+            lines.append(run or "(empty)")
+        lines.append("```")
+        lines.append("")
+
+        if error:
+            lines.append("### Error output")
             lines.append("```")
-            lines.append(stderr_tail)
+            lines.append(error[-3000:])
             lines.append("```")
             lines.append("")
-        if result.stdout:
-            stdout_tail = result.stdout[-3000:]
-            lines.append("### Stdout (last 3000 chars)")
+
+        if result.agent_output:
+            stdout_tail = result.agent_output[-3000:]
+            lines.append("### Build output (last 3000 chars)")
             lines.append("```")
             lines.append(stdout_tail)
             lines.append("```")
