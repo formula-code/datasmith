@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ class AgentResult:
 
     success: bool
     output: str = ""
+    raw_output: str = ""
     files_changed: list[str] = field(default_factory=list)
     duration_s: float = 0.0
     error: str = ""
@@ -50,7 +52,7 @@ class InstalledAgent(ABC):
     def exec(
         self,
         prompt: str,
-        timeout: int = 900,
+        timeout: int = 3600,
         workdir: str | None = None,
     ) -> AgentResult:
         """Run a prompt non-interactively. Returns AgentResult."""
@@ -58,7 +60,7 @@ class InstalledAgent(ABC):
     def exec_or_dry_run(
         self,
         prompt: str,
-        timeout: int = 900,
+        timeout: int = 3600,
         workdir: str | None = None,
         dry_run: bool = False,
     ) -> AgentResult:
@@ -83,10 +85,53 @@ def _kill_process_group(proc: subprocess.Popen[str], sig: int = signal.SIGTERM) 
         os.killpg(os.getpgid(proc.pid), sig)
 
 
+# ---------------------------------------------------------------------------
+# Global subprocess registry — allows the SIGINT handler to reach agent
+# processes that live in their own sessions (start_new_session=True) and
+# therefore don't receive CTRL+C from the terminal.
+# ---------------------------------------------------------------------------
+_active_procs: set[subprocess.Popen[str]] = set()
+_active_procs_lock = threading.Lock()
+
+
+def _register_proc(proc: subprocess.Popen[str]) -> None:
+    with _active_procs_lock:
+        _active_procs.add(proc)
+
+
+def _unregister_proc(proc: subprocess.Popen[str]) -> None:
+    with _active_procs_lock:
+        _active_procs.discard(proc)
+
+
+def terminate_all_agents(force: bool = False) -> None:
+    """Kill every tracked agent subprocess.
+
+    Called from the CLI signal handler so that threads blocked on
+    ``proc.communicate()`` can unblock and the process can exit.
+
+    With *force=True* sends SIGKILL instead of SIGTERM.
+    """
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    # list() snapshot avoids issues with concurrent set mutation.
+    for proc in list(_active_procs):
+        _kill_process_group(proc, sig)
+
+
+def _terminate_and_wait(proc: subprocess.Popen[str]) -> None:
+    """Send SIGTERM, wait, escalate to SIGKILL if needed."""
+    _kill_process_group(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc, signal.SIGKILL)
+        proc.wait()
+
+
 def run_agent_subprocess(
     cmd: list[str],
     *,
-    timeout: int = 900,
+    timeout: int = 3600,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
     agent_name: str = "agent",
@@ -94,9 +139,12 @@ def run_agent_subprocess(
     """Run an agent CLI command with process-group cleanup on interrupt or timeout.
 
     Returns ``(returncode, stdout, stderr, duration_s)``.
-    Raises ``FileNotFoundError`` if the binary is missing,
-    ``subprocess.TimeoutExpired`` on timeout (after cleanup),
-    and re-raises ``KeyboardInterrupt`` (after cleanup).
+
+    On timeout the process is killed and any partial output captured so far
+    is returned with ``returncode=-1``.
+
+    Raises ``FileNotFoundError`` if the binary is missing and
+    re-raises ``KeyboardInterrupt`` (after cleanup).
     """
     start = time.time()
     proc: subprocess.Popen[str] | None = None
@@ -110,31 +158,47 @@ def run_agent_subprocess(
             env=env,
             start_new_session=True,
         )
+        _register_proc(proc)
         stdout, stderr = proc.communicate(timeout=timeout)
         duration = time.time() - start
         return proc.returncode, stdout, stderr, duration
-    except subprocess.TimeoutExpired:
-        if proc is not None:
-            _kill_process_group(proc, signal.SIGTERM)
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _kill_process_group(proc, signal.SIGKILL)
-                proc.wait()
-        raise
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("%s timed out after %ds — capturing partial output", agent_name, timeout)
+        partial_stdout, partial_stderr = _collect_partial_output(exc, proc)
+        duration = time.time() - start
+        return -1, partial_stdout, partial_stderr, duration
     except KeyboardInterrupt:
         if proc is not None:
-            _kill_process_group(proc, signal.SIGTERM)
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _kill_process_group(proc, signal.SIGKILL)
-                proc.wait()
+            _terminate_and_wait(proc)
         raise
     finally:
-        if proc is not None and proc.poll() is None:
-            _kill_process_group(proc, signal.SIGKILL)
-            proc.wait()
+        if proc is not None:
+            _unregister_proc(proc)
+            if proc.poll() is None:
+                _kill_process_group(proc, signal.SIGKILL)
+                proc.wait()
+
+
+def _collect_partial_output(
+    exc: subprocess.TimeoutExpired,
+    proc: subprocess.Popen[str] | None,
+) -> tuple[str, str]:
+    """Extract whatever output was buffered before a timeout."""
+    partial_stdout = ""
+    partial_stderr = ""
+    if exc.stdout:
+        partial_stdout = exc.stdout if isinstance(exc.stdout, str) else exc.stdout.decode(errors="replace")
+    if exc.stderr:
+        partial_stderr = exc.stderr if isinstance(exc.stderr, str) else exc.stderr.decode(errors="replace")
+    if proc is not None:
+        _terminate_and_wait(proc)
+        try:
+            remaining_out, remaining_err = proc.communicate(timeout=5)
+            partial_stdout += remaining_out or ""
+            partial_stderr += remaining_err or ""
+        except Exception:
+            logger.debug("Failed to read remaining output after timeout", exc_info=True)
+    return partial_stdout, partial_stderr
 
 
 # Registry of concrete agents in preference order.

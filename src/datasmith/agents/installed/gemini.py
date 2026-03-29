@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 
 from datasmith.agents.installed.base import AgentResult, InstalledAgent, run_agent_subprocess
 from datasmith.utils import get_logger
@@ -81,7 +80,7 @@ class GeminiAgent(InstalledAgent):
     def exec(
         self,
         prompt: str,
-        timeout: int = 900,
+        timeout: int = 3600,
         workdir: str | None = None,
     ) -> AgentResult:
         cmd = [
@@ -104,15 +103,10 @@ class GeminiAgent(InstalledAgent):
             return AgentResult(
                 success=returncode == 0,
                 output="\n".join(output_lines) if output_lines else stdout,
+                raw_output=stdout,
                 files_changed=files_changed,
                 duration_s=duration,
                 error=stderr if returncode != 0 else "",
-            )
-        except subprocess.TimeoutExpired:
-            return AgentResult(
-                success=False,
-                duration_s=0.0,
-                error=f"Gemini CLI execution timed out after {timeout}s",
             )
         except FileNotFoundError:
             return AgentResult(

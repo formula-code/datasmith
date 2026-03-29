@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -119,10 +118,11 @@ class TestCodexAgent:
 
     @patch("datasmith.agents.installed.codex.run_agent_subprocess")
     def test_exec_timeout(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=900)
+        # run_agent_subprocess returns returncode=-1 on timeout with partial output
+        mock_run.return_value = (-1, '{"output": "partial"}\n', "timed out", 900.0)
         result = CodexAgent().exec("slow", timeout=900)
         assert result.success is False
-        assert "timed out" in result.error
+        assert result.duration_s == 900.0
 
     @patch("datasmith.agents.installed.codex.run_agent_subprocess")
     def test_exec_not_found(self, mock_run: MagicMock) -> None:
@@ -166,10 +166,12 @@ class TestClaudeAgent:
 
     @patch("datasmith.agents.installed.claude.run_agent_subprocess")
     def test_exec_timeout(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=600)
+        # run_agent_subprocess returns returncode=-1 on timeout with partial output
+        mock_run.return_value = (-1, '{"type":"assistant","message":"partial"}\n', "timed out", 600.0)
         result = ClaudeAgent().exec("slow", timeout=600)
         assert result.success is False
-        assert "timed out" in result.error
+        assert result.duration_s == 600.0
+        assert result.raw_output  # partial output is preserved
 
     @patch("datasmith.agents.installed.claude.run_agent_subprocess")
     def test_exec_not_found(self, mock_run: MagicMock) -> None:
@@ -218,10 +220,11 @@ class TestGeminiAgent:
 
     @patch("datasmith.agents.installed.gemini.run_agent_subprocess")
     def test_exec_timeout(self, mock_run: MagicMock) -> None:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="gemini", timeout=600)
+        # run_agent_subprocess returns returncode=-1 on timeout with partial output
+        mock_run.return_value = (-1, '{"type":"response","text":"partial"}\n', "timed out", 600.0)
         result = GeminiAgent().exec("slow", timeout=600)
         assert result.success is False
-        assert "timed out" in result.error
+        assert result.duration_s == 600.0
 
     @patch("datasmith.agents.installed.gemini.run_agent_subprocess")
     def test_exec_not_found(self, mock_run: MagicMock) -> None:
