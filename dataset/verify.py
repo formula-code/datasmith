@@ -2,7 +2,7 @@
 """Verify Docker build contexts for FormulaCode dataset tasks.
 
 Builds a Docker image from a task directory's multi-stage Dockerfile, then
-runs profile.sh and run-tests.sh inside the container to validate the build.
+runs run-tests.sh (which includes profile.sh) inside the container to validate the build.
 
 Usage:
     # Single task
@@ -130,9 +130,15 @@ def run_tests(docker: DockerClient, image_tag: str) -> tuple[bool, str]:
             ["/run-tests.sh"],
             remove=True,
         )
-        return True, str(output or "")
+        out_str = str(output or "")
+        if "FORMULACODE_NO_BENCHMARKS" in out_str:
+            return False, "No ASV benchmarks discovered — task cannot be used in FormulaCode"
+        return True, out_str
     except Exception as e:
-        return False, str(e)[:4000]
+        err = str(e)
+        if "FORMULACODE_NO_BENCHMARKS" in err:
+            return False, "No ASV benchmarks discovered — task cannot be used in FormulaCode"
+        return False, err[:4000]
 
 
 def verify_single(task_dir: Path, skip_tests: bool = False) -> bool:
@@ -163,15 +169,7 @@ def verify_single(task_dir: Path, skip_tests: bool = False) -> bool:
         _write_failure(task_dir, "build", str(e)[:4000])
         return False
 
-    # Profile
-    ok, output = run_profile(docker, tag)
-    if not ok:
-        logger.error("Profile failed for %s", task_dir.name)
-        _write_failure(task_dir, "profile", output)
-        return False
-    logger.info("Profile passed for %s", task_dir.name)
-
-    # Tests (optional)
+    # Tests (optional — profile.sh runs inside run-tests.sh)
     if not skip_tests:
         ok, output = run_tests(docker, tag)
         if not ok:
