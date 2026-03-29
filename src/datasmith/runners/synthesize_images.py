@@ -5,6 +5,7 @@ import tempfile
 import threading
 from typing import Any
 
+from datasmith.agents.synthesizer import Synthesizer
 from datasmith.runners.base import BaseRunner
 from datasmith.utils import get_client, get_logger
 
@@ -52,16 +53,13 @@ def _build_and_push_pr_image(
     from datasmith.docker.publish import DockerHubPublisher
 
     ctx = docker_context
-    if ctx is None:
-        ctx = _load_context_from_db(owner, repo, sha)
-
     mgr = ImageManager()
     pr_tag = get_pr_image_name(owner, repo, issue_number)
 
     if ctx is not None:
         with tempfile.TemporaryDirectory(prefix="docker-ctx-") as tmpdir:
             ctx.to_directory(tmpdir)
-            _fill_missing_scripts(tmpdir)
+            _fill_missing_scripts(tmpdir, base_commit=sha)
             mgr.build_pr_image(
                 owner,
                 repo,
@@ -94,40 +92,41 @@ def _build_and_push_pr_image(
     return pr_tag
 
 
-def _load_context_from_db(owner: str, repo: str, sha: str) -> Any | None:
-    """Load a DockerContext from the docker_contexts table, or return None."""
-    if not sha:
-        return None
-    from datasmith.docker.context import DockerContext
+def _render_run_tests_sh(docker_templates: Any, base_commit: str) -> str:
+    """Render the run-tests.sh Jinja2 template with embedded scripts."""
+    from pathlib import Path
 
-    try:
-        client = get_client()
-        resp = client.table("docker_contexts").select("*").eq("owner", owner).eq("repo", repo).eq("sha", sha).execute()
-        if resp.data:
-            row = resp.data[0]
-            return DockerContext(
-                dockerfile=row.get("dockerfile", ""),
-                build_base_sh=row.get("build_base_sh", ""),
-                build_env_sh=row.get("build_env_sh", ""),
-                build_pkg_sh=row.get("build_pkg_sh", ""),
-                build_run_sh=row.get("build_run_sh", ""),
-                build_final_sh=row.get("build_final_sh", ""),
-                profile_sh=row.get("profile_sh", ""),
-                run_tests_sh=row.get("run_tests_sh", ""),
-                entrypoint_sh=row.get("entrypoint_sh", ""),
-            )
-    except Exception:
-        logger.debug("Failed to load context from DB for %s/%s@%s", owner, repo, sha[:12] if sha else "?")
-    return None
+    from jinja2 import Environment, FileSystemLoader
+
+    docker_templates = Path(docker_templates)
+    env = Environment(
+        loader=FileSystemLoader(str(docker_templates)),
+        keep_trailing_newline=True,
+        autoescape=False,
+    )
+    template = env.get_template("run-tests.sh")
+
+    pytest_runner = (docker_templates / "pytest_runner.py").read_text()
+    parser = (docker_templates / "parser.py").read_text()
+
+    return template.render(
+        base_commit=base_commit,
+        pytest_runner=pytest_runner,
+        parser=parser,
+        run_pytest=True,
+    )
 
 
-def _fill_missing_scripts(context_dir: str) -> None:
+def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
     """Copy any missing shell scripts and Dockerfile.pr from the templates directory.
 
     Synthesized contexts may only contain a subset of the 9 expected files
     (e.g. only ``build_pkg_sh``).  The Dockerfile.pr ``COPY`` directives
     require every file to be present, so we backfill from the built-in
     templates for anything the synthesizer didn't produce.
+
+    ``run-tests.sh`` is a Jinja2 template that requires rendering with
+    ``base_commit`` and embedded Python scripts before it can be used.
     """
     import os
     import shutil
@@ -151,9 +150,15 @@ def _fill_missing_scripts(context_dir: str) -> None:
         target = os.path.join(context_dir, fname)
         if os.path.exists(target):
             continue
-        src = templates / fname
-        if src.exists():
-            shutil.copy2(str(src), target)
+        if fname == "run-tests.sh":
+            # run-tests.sh is a Jinja2 template — render it instead of copying raw
+            rendered = _render_run_tests_sh(templates, base_commit=base_commit)
+            with open(target, "w") as f:
+                f.write(rendered)
+        else:
+            src = templates / fname
+            if src.exists():
+                shutil.copy2(str(src), target)
 
 
 # Lock to serialize prerequisite image builds (base + repo) across threads.
@@ -168,14 +173,12 @@ class SynthesizeImagesRunner(BaseRunner):
 
     def __init__(
         self,
-        synthesizer: Any,
-        verifier: Any,
+        synthesizer: Synthesizer,
         gh: Any | None = None,
         n_concurrent: int = 3,
     ) -> None:
         super().__init__(name="synthesize_images", n_concurrent=n_concurrent)
         self._synthesizer = synthesizer
-        self._verifier = verifier
         self._gh = gh  # GitHubClient, optional — needed for rendering problem statements
 
     async def _render_problem(self, item: dict[str, Any]) -> str | None:
@@ -261,6 +264,10 @@ class SynthesizeImagesRunner(BaseRunner):
         sha = item.get("sha", "")
         env_payload = item.get("env_payload", "")
 
+        from datasmith.docker.images import get_repo_image_name
+
+        repo_image = get_repo_image_name(owner, repo)
+
         # Run synthesizer in thread (Docker operations are blocking)
         ctx = await asyncio.to_thread(
             self._synthesizer.run,
@@ -268,9 +275,8 @@ class SynthesizeImagesRunner(BaseRunner):
             repo,
             issue_number,
             pr_context,
-            self._verifier,
             sha,
-            base_context=item.get("base_context"),
+            repo_image=repo_image,
             env_payload=env_payload,
             python_version=py_version,
         )

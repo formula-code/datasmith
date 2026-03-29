@@ -22,6 +22,10 @@ _MOCK_BUILD_PUSH = patch(
     "datasmith.runners.synthesize_images._build_and_push_pr_image",
     return_value="formulacode/numpy-numpy:42",
 )
+_MOCK_REPO_IMAGE = patch(
+    "datasmith.docker.images.get_repo_image_name",
+    return_value="formulacode/numpy-numpy:latest",
+)
 
 
 def _mock_supabase() -> MagicMock:
@@ -63,7 +67,6 @@ class TestDockerRunsInThread:
         mock_ctx = MagicMock()
         synthesizer = MagicMock()
         synthesizer.run.return_value = mock_ctx
-        verifier = MagicMock()
 
         with (
             patch("datasmith.runners.synthesize_images.get_logger"),
@@ -71,8 +74,9 @@ class TestDockerRunsInThread:
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
             _MOCK_BUILD_PUSH,
+            _MOCK_REPO_IMAGE,
         ):
-            runner = SynthesizeImagesRunner(synthesizer=synthesizer, verifier=verifier, n_concurrent=1)
+            runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
 
         # Verify synthesizer.run was called with correct args
@@ -81,9 +85,8 @@ class TestDockerRunsInThread:
             "numpy",
             42,
             "Some PR context",
-            verifier,
             "",
-            base_context=None,
+            repo_image="formulacode/numpy-numpy:latest",
             env_payload="",
             python_version="",
         )
@@ -96,7 +99,6 @@ class TestHandlesFailure:
 
         synthesizer = MagicMock()
         synthesizer.run.return_value = None
-        verifier = MagicMock()
 
         with (
             patch("datasmith.runners.synthesize_images.get_logger"),
@@ -104,8 +106,9 @@ class TestHandlesFailure:
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
             _MOCK_BUILD_PUSH,
+            _MOCK_REPO_IMAGE,
         ):
-            runner = SynthesizeImagesRunner(synthesizer=synthesizer, verifier=verifier, n_concurrent=1)
+            runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
 
         # The runner catches exceptions, so check failure count
@@ -121,8 +124,6 @@ class TestBuildAndPushOnSuccess:
         mock_ctx = MagicMock()
         synthesizer = MagicMock()
         synthesizer.run.return_value = mock_ctx
-        verifier = MagicMock()
-
         with (
             patch("datasmith.runners.synthesize_images.get_logger"),
             patch("datasmith.runners.base.get_client", return_value=mock_client),
@@ -132,8 +133,9 @@ class TestBuildAndPushOnSuccess:
                 "datasmith.runners.synthesize_images._build_and_push_pr_image",
                 return_value="formulacode/numpy-numpy:42",
             ) as mock_build_push,
+            _MOCK_REPO_IMAGE,
         ):
-            runner = SynthesizeImagesRunner(synthesizer=synthesizer, verifier=verifier, n_concurrent=1)
+            runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
 
         # Prerequisites were checked
@@ -160,7 +162,6 @@ class TestRenderProblemWithGitHubClient:
         mock_ctx = MagicMock()
         synthesizer = MagicMock()
         synthesizer.run.return_value = mock_ctx
-        verifier = MagicMock()
 
         # Mock GitHubClient.get_issue_expanded — called by scrape_links
         gh = AsyncMock()
@@ -172,6 +173,7 @@ class TestRenderProblemWithGitHubClient:
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
             _MOCK_BUILD_PUSH,
+            _MOCK_REPO_IMAGE,
             patch(
                 "datasmith.github.render.render_problem_statement",
                 return_value="Rendered problem text",
@@ -179,7 +181,6 @@ class TestRenderProblemWithGitHubClient:
         ):
             runner = SynthesizeImagesRunner(
                 synthesizer=synthesizer,
-                verifier=verifier,
                 gh=gh,
                 n_concurrent=1,
             )
@@ -204,7 +205,6 @@ class TestRenderProblemWithGitHubClient:
         mock_ctx = MagicMock()
         synthesizer = MagicMock()
         synthesizer.run.return_value = mock_ctx
-        verifier = MagicMock()
 
         with (
             patch("datasmith.runners.synthesize_images.get_logger"),
@@ -212,13 +212,13 @@ class TestRenderProblemWithGitHubClient:
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
             _MOCK_BUILD_PUSH,
+            _MOCK_REPO_IMAGE,
             patch(
                 "datasmith.github.render.render_problem_statement",
             ) as mock_render,
         ):
             runner = SynthesizeImagesRunner(
                 synthesizer=synthesizer,
-                verifier=verifier,
                 gh=None,
                 n_concurrent=1,
             )
@@ -236,7 +236,6 @@ class TestRenderProblemWithGitHubClient:
         mock_ctx = MagicMock()
         synthesizer = MagicMock()
         synthesizer.run.return_value = mock_ctx
-        verifier = MagicMock()
 
         from datasmith.github.models import IssueExpanded
 
@@ -259,6 +258,7 @@ class TestRenderProblemWithGitHubClient:
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
             _MOCK_BUILD_PUSH,
+            _MOCK_REPO_IMAGE,
             patch(
                 "datasmith.github.render.render_problem_statement",
                 return_value="Rendered with issues",
@@ -266,7 +266,6 @@ class TestRenderProblemWithGitHubClient:
         ):
             runner = SynthesizeImagesRunner(
                 synthesizer=synthesizer,
-                verifier=verifier,
                 gh=gh,
                 n_concurrent=1,
             )
