@@ -9,12 +9,14 @@ verification — until it succeeds or the session times out.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -27,19 +29,40 @@ logger = get_logger("agents.sandbox")
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
+# Files the agent must NOT modify.  Hashes are recorded at workspace setup
+# and verified both by sandbox_verify.py (so the agent gets feedback) and by
+# _extract_results (hard server-side check the agent cannot bypass).
+_IMMUTABLE_FILES = (
+    "Dockerfile.pr",
+    "docker_build_base.sh",
+    "docker_build_env.sh",
+    "docker_build_final.sh",
+    "profile.sh",
+    "run-tests.sh",
+    "entrypoint.sh",
+    "task.txt",
+)
+
+
+def _compute_immutable_hashes(task_dir: Path) -> dict[str, str]:
+    """Compute MD5 hashes of all immutable files in *task_dir*."""
+    hashes: dict[str, str] = {}
+    for fname in _IMMUTABLE_FILES:
+        fp = task_dir / fname
+        if fp.exists():
+            hashes[fname] = hashlib.md5(fp.read_bytes()).hexdigest()  # noqa: S324
+    return hashes
+
 
 @dataclass
 class SandboxConfig:
     """Configuration for the Codex sandbox runner."""
 
-    timeout_s: int = 1800
+    timeout_s: int = 3600
     """Total wall-clock timeout for the codex session (seconds)."""
 
-    codex_timeout_s: int = 1800
+    codex_timeout_s: int = 3600
     """Timeout passed to subprocess.run for the codex process (seconds)."""
-
-    skip_tests: bool = False
-    """Pass --skip-tests to sandbox_verify.py."""
 
 
 @dataclass
@@ -51,20 +74,24 @@ class SandboxResult:
     failure_json: dict | None = None
     duration_s: float = 0.0
     agent_output: str = ""
+    raw_agent_output: str = ""
+    agent_name: str = ""
+    files_changed: list[str] = field(default_factory=list)
 
 
 class SandboxRunner:
     """Launch an installed CLI agent in a sandboxed workspace to iteratively fix Docker builds."""
 
-    def __init__(self, config: SandboxConfig | None = None) -> None:
+    def __init__(self, config: SandboxConfig | None = None, agent: str | None = None) -> None:
         self._config = config or SandboxConfig()
+        self._agent = agent
 
     def run(
         self,
         owner: str,
         repo: str,
         sha: str,
-        base_context: DockerContext,
+        repo_image: str,
         env_payload: str,
         python_version: str,
         pr_context: str,
@@ -87,7 +114,7 @@ class SandboxRunner:
                 owner=owner,
                 repo=repo,
                 sha=sha,
-                base_context=base_context,
+                repo_image=repo_image,
                 env_payload=env_payload,
                 python_version=python_version,
                 pr_context=pr_context,
@@ -107,16 +134,16 @@ class SandboxRunner:
                 )
                 return SandboxResult(
                     success=True,
-                    docker_context=base_context,
+                    docker_context=DockerContext(),
                     duration_s=time.time() - start,
                     agent_output="[dry run — no execution]",
                 )
 
             # 3. Launch agent
-            agent_result = self._launch_agent(workspace)
+            agent_name, agent_result = self._launch_agent(workspace)
 
             # 4. Extract results
-            result = self._extract_results(workspace, agent_result)
+            result = self._extract_results(workspace, agent_result, agent_name)
             result.duration_s = time.time() - start
             return result
 
@@ -126,7 +153,7 @@ class SandboxRunner:
         owner: str,
         repo: str,
         sha: str,
-        base_context: DockerContext,
+        repo_image: str,
         env_payload: str,
         python_version: str,
         pr_context: str,
@@ -134,13 +161,20 @@ class SandboxRunner:
     ) -> None:
         """Create the workspace directory structure."""
         task_dir = workspace / "task"
+        task_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write all 9 context files
-        base_context.to_directory(str(task_dir))
-
-        # Overwrite profile.sh, entrypoint.sh with latest templates (static files)
+        # Copy ALL template files from docker/templates/ into task/
         docker_templates = Path(__file__).parents[1] / "docker" / "templates"
-        for fname in ("profile.sh", "entrypoint.sh"):
+        for fname in (
+            "Dockerfile.pr",
+            "docker_build_base.sh",
+            "docker_build_env.sh",
+            "docker_build_pkg.sh",
+            "docker_build_run.sh",
+            "docker_build_final.sh",
+            "profile.sh",
+            "entrypoint.sh",
+        ):
             src = docker_templates / fname
             if src.exists():
                 shutil.copy2(str(src), str(task_dir / fname))
@@ -150,7 +184,7 @@ class SandboxRunner:
         (task_dir / "run-tests.sh").write_text(run_tests_sh)
 
         # Generate task.txt
-        task_txt = _generate_task_txt(owner, repo, sha, env_payload, python_version)
+        task_txt = _generate_task_txt(owner, repo, sha, env_payload, python_version, repo_image)
         (task_dir / "task.txt").write_text(task_txt)
 
         # Render AGENTS.md from Jinja2 template
@@ -170,6 +204,11 @@ class SandboxRunner:
         # Write prior attempts context (from failed TRY_SIMILAR stage)
         if prior_attempts:
             (workspace / "prior_attempts.md").write_text(prior_attempts)
+
+        # Record immutable file hashes so sandbox_verify.py and
+        # _extract_results can detect unauthorised modifications.
+        hashes = _compute_immutable_hashes(task_dir)
+        (workspace / ".immutable_hashes.json").write_text(json.dumps(hashes))
 
     def _init_git(self, workspace: Path) -> None:
         """Initialize a git repo in the workspace (required by Codex)."""
@@ -201,19 +240,54 @@ class SandboxRunner:
             check=True,
         )
 
-    def _launch_agent(self, workspace: Path) -> AgentResult:
-        """Launch the first available installed CLI agent in the workspace."""
-        agent = get_agent()
+    def _launch_agent(self, workspace: Path) -> tuple[str, AgentResult]:
+        """Launch the first available installed CLI agent in the workspace.
+
+        Returns ``(agent_name, AgentResult)``.
+        """
+        preference = [self._agent] if self._agent else None
+        agent = get_agent(preference=preference)
         logger.info("Launching %s agent sandbox in %s", agent.name(), workspace)
-        return agent.exec(
+        result = agent.exec(
             prompt="Read AGENTS.md and follow its instructions to fix the Docker build.",
             timeout=self._config.codex_timeout_s,
             workdir=str(workspace),
         )
+        logger.info(
+            "Agent %s exited (success=%s, duration=%.1fs, output_len=%d, error=%s)",
+            agent.name(),
+            result.success,
+            result.duration_s,
+            len(result.output),
+            result.error[:200] if result.error else "",
+        )
+        return agent.name(), result
 
-    def _extract_results(self, workspace: Path, codex_result: AgentResult) -> SandboxResult:
-        """Read workspace state after Codex exits to build the result."""
+    def _extract_results(self, workspace: Path, codex_result: AgentResult, agent_name: str = "") -> SandboxResult:
+        """Read workspace state after the agent exits to build the result."""
         task_dir = workspace / "task"
+
+        # Hard integrity check — the agent cannot bypass this even if it
+        # modifies sandbox_verify.py or writes a fake success file.
+        hashes_file = workspace / ".immutable_hashes.json"
+        if hashes_file.exists():
+            expected = json.loads(hashes_file.read_text())
+            current = _compute_immutable_hashes(task_dir)
+            modified = [f for f in expected if expected[f] != current.get(f, "")]
+            if modified:
+                logger.warning("File integrity violation: %s", ", ".join(modified))
+                return SandboxResult(
+                    success=False,
+                    failure_json={
+                        "stage": "integrity",
+                        "return_code": 1,
+                        "error_message": f"Agent modified immutable files: {', '.join(modified)}",
+                    },
+                    agent_output=codex_result.output,
+                    raw_agent_output=codex_result.raw_output,
+                    agent_name=agent_name,
+                    files_changed=codex_result.files_changed,
+                )
 
         # Check for success
         success_file = task_dir / "verification_success.json"
@@ -221,10 +295,16 @@ class SandboxRunner:
 
         success = success_file.exists()
 
-        # Read modified context back
+        # Read back only the two agent-editable scripts (the rest are templates)
         docker_context: DockerContext | None = None
         try:
-            docker_context = DockerContext.from_directory(str(task_dir))
+            pkg_sh = (
+                (task_dir / "docker_build_pkg.sh").read_text() if (task_dir / "docker_build_pkg.sh").exists() else ""
+            )
+            run_sh = (
+                (task_dir / "docker_build_run.sh").read_text() if (task_dir / "docker_build_run.sh").exists() else ""
+            )
+            docker_context = DockerContext(build_pkg_sh=pkg_sh, build_run_sh=run_sh)
         except Exception:
             logger.warning("Failed to read Docker context from workspace")
 
@@ -241,12 +321,27 @@ class SandboxRunner:
         else:
             stage = failure_json.get("stage", "unknown") if failure_json else "unknown"
             logger.warning("Sandbox synthesis failed at stage: %s", stage)
+            if stage == "unknown":
+                # No failure.json means sandbox_verify.py was never run or crashed.
+                # Log agent details to help diagnose why.
+                logger.warning(
+                    "No failure.json found — agent likely never ran sandbox_verify.py. Agent error: %s",
+                    codex_result.error[:500] if codex_result.error else "(none)",
+                )
+                if codex_result.output:
+                    logger.info(
+                        "Agent output (last 1000 chars): %s",
+                        codex_result.output[-1000:],
+                    )
 
         return SandboxResult(
             success=success,
             docker_context=docker_context if success else None,
             failure_json=failure_json,
             agent_output=codex_result.output,
+            raw_agent_output=codex_result.raw_output,
+            agent_name=agent_name,
+            files_changed=codex_result.files_changed,
         )
 
 
@@ -256,6 +351,7 @@ def _generate_task_txt(
     sha: str,
     env_payload: str,
     python_version: str,
+    repo_image: str = "",
 ) -> str:
     """Generate a task.txt file content."""
     # Escape env_payload for repr
@@ -268,7 +364,8 @@ def _generate_task_txt(
         f"    env_payload={env_payload!r},\n"
         f"    python_version={python_version!r},\n"
         f"    tag='pkg',\n"
-        f"    benchmarks=''\n"
+        f"    benchmarks='',\n"
+        f"    repo_image={repo_image!r}\n"
         f")\n"
     )
 
@@ -294,6 +391,105 @@ def _render_agents_md(
         python_version=python_version,
         pr_context=pr_context,
     )
+
+
+def verify_context(
+    owner: str,
+    repo: str,
+    sha: str,
+    repo_image: str,
+    env_payload: str,
+    python_version: str,
+    context: DockerContext,
+    timeout_s: int = 3600,
+) -> SandboxResult:
+    """Build and verify a :class:`DockerContext` without launching an agent.
+
+    Used by ``Synthesizer.TRY_SIMILAR`` to test whether a previously
+    successful build context works for a new commit in the same repository.
+    """
+    start = time.time()
+    docker_templates = Path(__file__).parents[1] / "docker" / "templates"
+
+    with tempfile.TemporaryDirectory(prefix="verify-ctx-") as tmpdir:
+        workspace = Path(tmpdir)
+        task_dir = workspace / "task"
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy template files
+        for fname in (
+            "Dockerfile.pr",
+            "docker_build_base.sh",
+            "docker_build_env.sh",
+            "docker_build_pkg.sh",
+            "docker_build_run.sh",
+            "docker_build_final.sh",
+            "profile.sh",
+            "entrypoint.sh",
+        ):
+            src = docker_templates / fname
+            if src.exists():
+                shutil.copy2(str(src), str(task_dir / fname))
+
+        # Render run-tests.sh from Jinja2 template
+        run_tests_sh = _render_run_tests_sh(docker_templates, base_commit=sha)
+        (task_dir / "run-tests.sh").write_text(run_tests_sh)
+
+        # Write task.txt
+        task_txt = _generate_task_txt(owner, repo, sha, env_payload, python_version, repo_image)
+        (task_dir / "task.txt").write_text(task_txt)
+
+        # Override with the candidate context's editable scripts
+        if context.build_pkg_sh:
+            (task_dir / "docker_build_pkg.sh").write_text(context.build_pkg_sh)
+        if context.build_run_sh:
+            (task_dir / "docker_build_run.sh").write_text(context.build_run_sh)
+
+        # Copy sandbox_verify.py
+        src_verify = _TEMPLATES_DIR / "sandbox_verify.py"
+        shutil.copy2(str(src_verify), str(workspace / "sandbox_verify.py"))
+
+        # Run sandbox_verify.py directly (no agent)
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(workspace / "sandbox_verify.py"), "--task", str(task_dir)],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            output = proc.stdout
+        except subprocess.TimeoutExpired:
+            return SandboxResult(
+                success=False,
+                failure_json={
+                    "stage": "timeout",
+                    "return_code": 124,
+                    "error_message": f"Verification timed out after {timeout_s}s",
+                },
+                duration_s=time.time() - start,
+                agent_output=f"Timed out after {timeout_s}s",
+            )
+
+        # Read results
+        success_file = task_dir / "verification_success.json"
+        failure_file = task_dir / "failure.json"
+
+        success = success_file.exists()
+
+        failure_json: dict | None = None
+        if failure_file.exists():
+            try:
+                failure_json = json.loads(failure_file.read_text())
+            except Exception:
+                logger.debug("Failed to parse failure.json in verify_context")
+
+        return SandboxResult(
+            success=success,
+            docker_context=context if success else None,
+            failure_json=failure_json,
+            duration_s=time.time() - start,
+            agent_output=output,
+        )
 
 
 def _render_run_tests_sh(docker_templates: Path, base_commit: str) -> str:

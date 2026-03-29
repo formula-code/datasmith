@@ -15,14 +15,9 @@ fix the build until `sandbox_verify.py` succeeds.
 python3 sandbox_verify.py
 ```
 
-This runs the full verification pipeline: build → profile → tests.
+This runs the full verification pipeline: build → tests.
 On failure it writes `task/failure.json`. On success it writes `task/verification_success.json`.
-
-To skip the tests stage (useful when debugging build/profile issues):
-
-```bash
-python3 sandbox_verify.py --skip-tests
-```
+Both stages (build, tests) must pass for verification to succeed.
 
 ## PR Context
 
@@ -38,7 +33,7 @@ mistakes.
 
 Follow this iterative cycle:
 
-1. Run `python3 sandbox_verify.py`
+1. Run `python3 sandbox_verify.py` (A good timeout is 60 minutes, but adjust as needed)
 2. If it fails, read `task/failure.json` for error details
 3. Edit `task/docker_build_pkg.sh` and/or `task/docker_build_run.sh`
 4. Re-run `python3 sandbox_verify.py`
@@ -54,11 +49,11 @@ Do **not** modify the Dockerfile, `task.txt`, or any other scripts.
 - `task/docker_build_run.sh` — Runtime setup. Add test/benchmark deps, repo-specific config.
 
 ### Files you MUST NOT edit
-- `task/Dockerfile` — Multi-stage build definition (auto-generated)
+- `task/Dockerfile.pr` — Multi-stage build definition (base and repo stages are pre-built)
 - `task/task.txt` — Task configuration (owner, repo, sha, deps)
-- `task/docker_build_base.sh` — Base system setup
-- `task/docker_build_env.sh` — Python environment creation
-- `task/docker_build_final.sh` — Final image setup
+- `task/docker_build_base.sh` — Base system setup (template)
+- `task/docker_build_env.sh` — Python environment creation (template)
+- `task/docker_build_final.sh` — Final image setup (template)
 - `task/profile.sh` — ASV benchmark runner
 - `task/run-tests.sh` — Test runner
 - `task/entrypoint.sh` — Container entrypoint
@@ -69,15 +64,16 @@ When verification fails, `task/failure.json` contains:
 
 ```json
 {
-  "stage": "build|profile|tests",
+  "stage": "build|tests",
   "return_code": 1,
+  "stderr": "Full error output from the failed stage",
+  "stdout": "Full standard output from the failed stage",
   "error_message": "Human-readable error description"
 }
 ```
 
 - **build** failures: Usually missing dependencies or compilation errors → fix in `docker_build_pkg.sh`
-- **profile** failures: Benchmark setup issues → fix in `docker_build_run.sh` or `docker_build_pkg.sh`
-- **tests** failures: Missing test deps or import errors → fix in `docker_build_run.sh` or `docker_build_pkg.sh`
+- **tests** failures: Missing test deps, import errors, or benchmark setup issues → fix in `docker_build_run.sh` or `docker_build_pkg.sh`
 
 ## Common Fixes for docker_build_pkg.sh
 
@@ -135,7 +131,7 @@ These are set by earlier build stages and available in both scripts:
 
 ## Docker Build Stages
 
-The Dockerfile has 6 stages: base → repo → env → pkg → run → final.
+The Dockerfile.pr has 4 stages: env → pkg → run → final (base and repo images are pre-built).
 Only the `pkg` and `run` stages use your editable scripts.
 
 - **pkg** stage: Runs `docker_build_pkg.sh` to install the package
@@ -151,3 +147,4 @@ Changes to `docker_build_run.sh` rebuild only the run stage.
 - The package install command in `docker_build_pkg.sh` is usually `pip install --no-build-isolation -v -e .`
 - If the build times out, look for ways to simplify or skip expensive steps
 - Docker layer caching means earlier stages are cached — only your changed stage rebuilds
+- A lot of bookkeeping code is used in downstream stages; avoid removing code unless you understand its purpose.
