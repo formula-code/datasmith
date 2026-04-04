@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 from unittest.mock import MagicMock, patch
 
 from datasmith.agents.sandbox import SandboxResult
@@ -137,48 +138,220 @@ class TestSynthesizerStateTransitions:
         assert trace1 is not trace2
 
 
+def _make_client_mock(
+    pr_date_rows: list[dict],
+    ctx_rows: list[dict],
+    batch_pr_rows: list[dict],
+) -> MagicMock:
+    """Build a mock Supabase client that handles the three queries in _find_similar.
+
+    Queries issued in order:
+      1. pull_requests  — current PR's created_at
+      2. docker_contexts — all contexts for the repo
+      3. pull_requests  — batch PR dates for context issue numbers
+    """
+    mock_client = MagicMock()
+
+    pr_resp1 = MagicMock()
+    pr_resp1.data = pr_date_rows
+    ctx_resp = MagicMock()
+    ctx_resp.data = ctx_rows
+    pr_resp2 = MagicMock()
+    pr_resp2.data = batch_pr_rows
+
+    # Route by table name; pull_requests is called twice so track call count.
+    pr_call_count = [0]
+
+    def table_side_effect(name: str) -> MagicMock:
+        t = MagicMock()
+        if name == "pull_requests":
+            idx = pr_call_count[0]
+            pr_call_count[0] += 1
+            resp = pr_resp1 if idx == 0 else pr_resp2
+            # Chain: .select().eq().eq().eq().execute()  or  .select().eq().eq().in_().execute()
+            t.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = resp
+            t.select.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value = resp
+        else:  # docker_contexts
+            t.select.return_value.eq.return_value.eq.return_value.execute.return_value = ctx_resp
+        return t
+
+    mock_client.table.side_effect = table_side_effect
+    return mock_client
+
+
 class TestFindSimilar:
     @patch("datasmith.agents.synthesizer.get_client")
     def test_returns_docker_contexts(self, mock_get_client: MagicMock) -> None:
         """_find_similar queries docker_contexts table and returns DockerContext list."""
-        mock_client = MagicMock()
-        resp = MagicMock()
-        resp.data = [
-            {"build_pkg_sh": "#!/bin/bash\npkg1", "build_run_sh": "#!/bin/bash\nrun1"},
-            {"build_pkg_sh": "#!/bin/bash\npkg2", "build_run_sh": ""},
-        ]
-        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = resp
+        mock_client = _make_client_mock(
+            pr_date_rows=[{"created_at": "2024-01-15T12:00:00Z"}],
+            ctx_rows=[
+                {"issue_number": 10, "build_pkg_sh": "#!/bin/bash\npkg1", "build_run_sh": "#!/bin/bash\nrun1"},
+                {"issue_number": 20, "build_pkg_sh": "#!/bin/bash\npkg2", "build_run_sh": ""},
+            ],
+            batch_pr_rows=[
+                {"issue_number": 10, "created_at": "2024-01-10T12:00:00Z"},
+                {"issue_number": 20, "created_at": "2024-01-14T12:00:00Z"},
+            ],
+        )
         mock_get_client.return_value = mock_client
 
         synth = Synthesizer()
-        results = synth._find_similar("owner", "repo")
+        results = synth._find_similar("owner", "repo", 42)
 
         assert len(results) == 2
         assert isinstance(results[0], DockerContext)
-        assert results[0].build_pkg_sh == "#!/bin/bash\npkg1"
-        assert results[0].build_run_sh == "#!/bin/bash\nrun1"
-        assert results[1].build_run_sh == ""
-
-        # Verify we queried docker_contexts table
-        mock_client.table.assert_called_once_with("docker_contexts")
+        # issue 20 is 1 day away, issue 10 is 5 days away — closer one first
+        assert results[0].build_pkg_sh == "#!/bin/bash\npkg2"
+        assert results[1].build_pkg_sh == "#!/bin/bash\npkg1"
 
     @patch("datasmith.agents.synthesizer.get_client")
     def test_skips_empty_pkg(self, mock_get_client: MagicMock) -> None:
         """Rows without build_pkg_sh are filtered out."""
-        mock_client = MagicMock()
-        resp = MagicMock()
-        resp.data = [
-            {"build_pkg_sh": "", "build_run_sh": "run"},
-            {"build_pkg_sh": "pkg", "build_run_sh": ""},
-        ]
-        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = resp
+        mock_client = _make_client_mock(
+            pr_date_rows=[{"created_at": "2024-01-15T12:00:00Z"}],
+            ctx_rows=[
+                {"issue_number": 1, "build_pkg_sh": "", "build_run_sh": "run"},
+                {"issue_number": 2, "build_pkg_sh": "pkg", "build_run_sh": ""},
+            ],
+            batch_pr_rows=[{"issue_number": 2, "created_at": "2024-01-14T12:00:00Z"}],
+        )
         mock_get_client.return_value = mock_client
 
         synth = Synthesizer()
-        results = synth._find_similar("owner", "repo")
+        results = synth._find_similar("owner", "repo", 99)
 
         assert len(results) == 1
         assert results[0].build_pkg_sh == "pkg"
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_chronological_ordering(self, mock_get_client: MagicMock) -> None:
+        """Contexts are returned in order of chronological proximity to the current PR."""
+        base = datetime.datetime(2024, 6, 1, tzinfo=datetime.timezone.utc)
+        # Distances from base: 60 days, 5 days, 30 days
+        mock_client = _make_client_mock(
+            pr_date_rows=[{"created_at": "2024-06-01T00:00:00Z"}],
+            ctx_rows=[
+                {"issue_number": 1, "build_pkg_sh": "pkg-60d", "build_run_sh": ""},
+                {"issue_number": 2, "build_pkg_sh": "pkg-5d", "build_run_sh": ""},
+                {"issue_number": 3, "build_pkg_sh": "pkg-30d", "build_run_sh": ""},
+            ],
+            batch_pr_rows=[
+                {"issue_number": 1, "created_at": "2024-04-02T00:00:00Z"},  # 60 days before
+                {"issue_number": 2, "created_at": "2024-05-27T00:00:00Z"},  # 5 days before
+                {"issue_number": 3, "created_at": "2024-05-02T00:00:00Z"},  # 30 days before
+            ],
+        )
+        mock_get_client.return_value = mock_client
+
+        synth = Synthesizer()
+        results = synth._find_similar("owner", "repo", 99)
+
+        assert len(results) == 3
+        assert results[0].build_pkg_sh == "pkg-5d"
+        assert results[1].build_pkg_sh == "pkg-30d"
+        assert results[2].build_pkg_sh == "pkg-60d"
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_limits_to_five_closest_when_more_exist(self, mock_get_client: MagicMock) -> None:
+        """With >5 contexts, only the 5 chronologically closest are returned."""
+        # 7 contexts at distances 1,2,3,4,5,6,7 days before reference date
+        ctx_rows = [{"issue_number": i, "build_pkg_sh": f"pkg-{i}d", "build_run_sh": ""} for i in range(1, 8)]
+        batch_rows = [
+            {"issue_number": i, "created_at": f"2024-05-{31 - i:02d}T00:00:00Z"}  # i days before June 1
+            for i in range(1, 8)
+        ]
+        mock_client = _make_client_mock(
+            pr_date_rows=[{"created_at": "2024-06-01T00:00:00Z"}],
+            ctx_rows=ctx_rows,
+            batch_pr_rows=batch_rows,
+        )
+        mock_get_client.return_value = mock_client
+
+        synth = Synthesizer()
+        results = synth._find_similar("owner", "repo", 99)
+
+        assert len(results) == 5
+        # Closest 5: 1d, 2d, 3d, 4d, 5d
+        assert results[0].build_pkg_sh == "pkg-1d"
+        assert results[1].build_pkg_sh == "pkg-2d"
+        assert results[4].build_pkg_sh == "pkg-5d"
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_contexts_without_issue_number_sorted_last(self, mock_get_client: MagicMock) -> None:
+        """Contexts whose issue_number cannot be resolved get sorted to the end."""
+        mock_client = _make_client_mock(
+            pr_date_rows=[{"created_at": "2024-06-01T00:00:00Z"}],
+            ctx_rows=[
+                {"issue_number": None, "build_pkg_sh": "pkg-no-date", "build_run_sh": ""},
+                {"issue_number": 1, "build_pkg_sh": "pkg-dated", "build_run_sh": ""},
+            ],
+            batch_pr_rows=[{"issue_number": 1, "created_at": "2024-05-15T00:00:00Z"}],
+        )
+        mock_get_client.return_value = mock_client
+
+        synth = Synthesizer()
+        results = synth._find_similar("owner", "repo", 99)
+
+        assert len(results) == 2
+        assert results[0].build_pkg_sh == "pkg-dated"
+        assert results[1].build_pkg_sh == "pkg-no-date"
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_fallback_when_current_pr_not_found(self, mock_get_client: MagicMock) -> None:
+        """When the current PR has no created_at, return up to 5 results without ordering."""
+        mock_client = _make_client_mock(
+            pr_date_rows=[],  # current PR not found
+            ctx_rows=[{"issue_number": i, "build_pkg_sh": f"pkg-{i}", "build_run_sh": ""} for i in range(1, 4)],
+            batch_pr_rows=[],
+        )
+        mock_get_client.return_value = mock_client
+
+        synth = Synthesizer()
+        results = synth._find_similar("owner", "repo", 99)
+
+        # Should still return contexts (up to 5), just unordered
+        assert len(results) == 3
+        assert all(isinstance(r, DockerContext) for r in results)
+
+
+class TestNoneAgentSkipsLLM:
+    def test_none_agent_skips_llm_generate(self) -> None:
+        """With agent='none', synthesizer skips LLM_GENERATE and returns None."""
+        synth = Synthesizer(agent="none")
+        with (
+            patch.object(synth, "_check_cache", return_value=None),
+            patch.object(synth, "_find_similar", return_value=[]),
+        ):
+            result = synth.run("owner", "repo", 42, "pr context")
+
+        assert result is None
+        assert SynthesisState.CHECK_CACHE in synth.trace
+        assert SynthesisState.FIND_SIMILAR in synth.trace
+        assert SynthesisState.LLM_GENERATE not in synth.trace
+        assert SynthesisState.FAIL in synth.trace
+
+    @patch("datasmith.agents.synthesizer.verify_context")
+    def test_none_agent_still_tries_similar(self, mock_verify: MagicMock) -> None:
+        """With agent='none', similar contexts are still tried before giving up."""
+        similar_ctx = DockerContext(
+            build_pkg_sh="#!/bin/bash\necho similar",
+            build_run_sh="#!/bin/bash\necho run",
+        )
+        mock_verify.return_value = SandboxResult(success=True, docker_context=similar_ctx)
+
+        synth = Synthesizer(agent="none")
+        with (
+            patch.object(synth, "_check_cache", return_value=None),
+            patch.object(synth, "_find_similar", return_value=[similar_ctx]),
+            patch.object(synth, "_save_context"),
+        ):
+            result = synth.run("owner", "repo", 42, "pr context")
+
+        assert result is not None
+        assert result.build_pkg_sh == "#!/bin/bash\necho similar"
+        assert SynthesisState.TRY_SIMILAR in synth.trace
+        assert SynthesisState.LLM_GENERATE not in synth.trace
 
 
 class TestFormatPriorAttempts:

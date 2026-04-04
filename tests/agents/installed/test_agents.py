@@ -13,6 +13,7 @@ from datasmith.agents.installed import (
     CodexAgent,
     CodexResult,
     GeminiAgent,
+    NoneAgent,
     get_agent,
 )
 from datasmith.agents.installed.claude import _parse_claude_stdout
@@ -239,6 +240,27 @@ class TestGeminiAgent:
         GeminiAgent().exec("prompt")
         cmd = mock_run.call_args[0][0]
         assert "--yolo" in cmd
+
+
+# ---- NoneAgent ----
+
+
+class TestNoneAgent:
+    def test_name(self) -> None:
+        assert NoneAgent().name() == "none"
+
+    def test_always_available(self) -> None:
+        assert NoneAgent().is_available() is True
+
+    def test_exec_returns_failure(self) -> None:
+        result = NoneAgent().exec("prompt")
+        assert result.success is False
+        assert "none agent" in result.output
+
+    @patch("shutil.which", return_value=None)
+    def test_get_agent_explicit_none(self, _mock: MagicMock) -> None:
+        agent = get_agent(preference=["none"])
+        assert agent.name() == "none"
 
 
 # ---- Dry-run mode ----
