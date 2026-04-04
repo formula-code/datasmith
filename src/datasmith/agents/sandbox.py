@@ -77,6 +77,7 @@ class SandboxResult:
     raw_agent_output: str = ""
     agent_name: str = ""
     files_changed: list[str] = field(default_factory=list)
+    resource_metrics: dict = field(default_factory=dict)
 
 
 class SandboxRunner:
@@ -334,6 +335,9 @@ class SandboxRunner:
                         codex_result.output[-1000:],
                     )
 
+        # Extract resource_metrics from whichever JSON file was written
+        resource_metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
+
         return SandboxResult(
             success=success,
             docker_context=docker_context if success else None,
@@ -342,7 +346,34 @@ class SandboxRunner:
             raw_agent_output=codex_result.raw_output,
             agent_name=agent_name,
             files_changed=codex_result.files_changed,
+            resource_metrics=resource_metrics,
         )
+
+
+def _extract_resource_metrics(
+    success_file: Path,
+    failure_file: Path,
+    failure_json: dict | None,
+) -> dict:
+    """Read ``resource_metrics`` from the verification JSON files.
+
+    ``sandbox_verify.py`` writes metrics into both ``verification_success.json``
+    and ``failure.json``.  We check the success file first (authoritative on
+    success), then fall back to the failure JSON dict (already parsed by caller).
+    """
+    if success_file.exists():
+        try:
+            data = json.loads(success_file.read_text())
+            rm = data.get("resource_metrics")
+            if isinstance(rm, dict):
+                return dict(rm)
+        except Exception:
+            logger.debug("Failed to read resource_metrics from success file")
+    if isinstance(failure_json, dict):
+        metrics = failure_json.get("resource_metrics")
+        if isinstance(metrics, dict):
+            return metrics
+    return {}
 
 
 def _generate_task_txt(
@@ -483,12 +514,15 @@ def verify_context(
             except Exception:
                 logger.debug("Failed to parse failure.json in verify_context")
 
+        resource_metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
+
         return SandboxResult(
             success=success,
             docker_context=context if success else None,
             failure_json=failure_json,
             duration_s=time.time() - start,
             agent_output=output,
+            resource_metrics=resource_metrics,
         )
 
 

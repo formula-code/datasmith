@@ -83,7 +83,14 @@ class Synthesizer:
                 )
                 if result.success:
                     logger.info("Similar context passed for %s/%s#%d", owner, repo, issue_number)
-                    self._save_context(owner, repo, sha, issue_number, ctx)
+                    self._save_context(
+                        owner,
+                        repo,
+                        sha,
+                        issue_number,
+                        ctx,
+                        resource_metrics=result.resource_metrics,
+                    )
                     return ctx
                 failed_attempts.append((ctx, result))
 
@@ -102,7 +109,7 @@ class Synthesizer:
         self._trace.append(SynthesisState.LLM_GENERATE)
         prior_attempts = _format_prior_attempts(failed_attempts) if failed_attempts else ""
         for attempt_idx in range(self._max_attempts):
-            generated = self._sandbox_generate(
+            generated, metrics = self._sandbox_generate(
                 owner=owner,
                 repo=repo,
                 sha=sha,
@@ -122,7 +129,7 @@ class Synthesizer:
                     issue_number,
                     attempt_idx + 1,
                 )
-                self._save_context(owner, repo, sha, issue_number, generated)
+                self._save_context(owner, repo, sha, issue_number, generated, resource_metrics=metrics)
                 return generated
             logger.warning(
                 "Sandbox synthesis attempt %d failed for %s/%s#%d",
@@ -253,7 +260,7 @@ class Synthesizer:
         prior_attempts: str = "",
         issue_number: int = 0,
         attempt_index: int = 0,
-    ) -> DockerContext | None:
+    ) -> tuple[DockerContext | None, dict]:
         from datasmith.agents.sandbox import SandboxRunner
 
         runner = SandboxRunner(agent=self._agent)
@@ -276,7 +283,8 @@ class Synthesizer:
             attempt_index=attempt_index,
             result=result,
         )
-        return result.docker_context if result.success else None
+        ctx = result.docker_context if result.success else None
+        return ctx, result.resource_metrics
 
     def _log_attempt(
         self,
@@ -310,6 +318,7 @@ class Synthesizer:
             "error_message": (failure.get("error_message") or "")[-10_000:] or None,
             "agent_output": raw_output or None,
             "files_changed": json.dumps(result.files_changed),
+            "resource_metrics": result.resource_metrics or None,
             "created_at": timestamp,
         }
         try:
@@ -328,6 +337,7 @@ class Synthesizer:
         sha: str,
         issue_number: int,
         ctx: DockerContext,
+        resource_metrics: dict | None = None,
     ) -> None:
         """Persist the agent-edited scripts to the ``docker_contexts`` table.
 
@@ -338,14 +348,17 @@ class Synthesizer:
             return
         try:
             client = get_client()
-            client.table("docker_contexts").upsert({
+            row: dict = {
                 "owner": owner,
                 "repo": repo,
                 "sha": sha,
                 "issue_number": issue_number,
                 "build_pkg_sh": ctx.build_pkg_sh,
                 "build_run_sh": ctx.build_run_sh,
-            }).execute()
+            }
+            if resource_metrics:
+                row["resource_metrics"] = resource_metrics
+            client.table("docker_contexts").upsert(row).execute()
             logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
         except Exception:
             logger.warning("Failed to save context for %s/%s@%s", owner, repo, sha[:12])
