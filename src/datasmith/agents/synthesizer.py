@@ -65,7 +65,7 @@ class Synthesizer:
 
         # State: FIND_SIMILAR
         self._trace.append(SynthesisState.FIND_SIMILAR)
-        similar_contexts = self._find_similar(owner, repo)
+        similar_contexts = self._find_similar(owner, repo, issue_number)
 
         # State: TRY_SIMILAR
         failed_attempts: list[tuple[DockerContext, SandboxResult]] = []
@@ -88,6 +88,17 @@ class Synthesizer:
                 failed_attempts.append((ctx, result))
 
         # State: LLM_GENERATE (sandbox-based)
+        # Skip LLM generation when using the "none" agent — rely only on similar contexts.
+        if self._agent == "none":
+            self._trace.append(SynthesisState.FAIL)
+            logger.info(
+                "Agent is 'none' — skipping LLM generation for %s/%s#%d",
+                owner,
+                repo,
+                issue_number,
+            )
+            return None
+
         self._trace.append(SynthesisState.LLM_GENERATE)
         prior_attempts = _format_prior_attempts(failed_attempts) if failed_attempts else ""
         for attempt_idx in range(self._max_attempts):
@@ -151,26 +162,80 @@ class Synthesizer:
             logger.debug("Cache check failed, proceeding")
         return None
 
-    def _find_similar(self, owner: str, repo: str) -> list[DockerContext]:
-        """Find previously successful build contexts for the same repository."""
+    def _find_similar(self, owner: str, repo: str, issue_number: int) -> list[DockerContext]:
+        """Find previously successful build contexts for the same repository.
+
+        Results are ordered by chronological proximity to the given PR so that
+        the most temporally adjacent contexts — most likely to share the same
+        dependency environment — are tried first.
+        """
         try:
             client = get_client()
-            resp = (
-                client.table("docker_contexts")
-                .select("build_pkg_sh,build_run_sh")
+
+            # Step 1: look up the current PR's creation date.
+            pr_resp = (
+                client.table("pull_requests")
+                .select("created_at")
                 .eq("owner", owner)
                 .eq("repo", repo)
-                .limit(5)
+                .eq("issue_number", issue_number)
                 .execute()
             )
-            rows = cast(list[dict[str, Any]], resp.data)
+            current_date: datetime.datetime | None = None
+            if pr_resp.data:
+                raw = cast(dict[str, Any], pr_resp.data[0]).get("created_at")
+                if raw:
+                    current_date = _parse_ts(raw)
+
+            # Step 2: fetch all non-empty contexts for this repo.
+            ctx_resp = (
+                client.table("docker_contexts")
+                .select("issue_number,build_pkg_sh,build_run_sh")
+                .eq("owner", owner)
+                .eq("repo", repo)
+                .execute()
+            )
+            rows = cast(list[dict[str, Any]], ctx_resp.data)
+            rows = [r for r in rows if r.get("build_pkg_sh")]
+
+            if not rows:
+                return []
+
+            # Step 3: if we have a reference date, sort by proximity.
+            if current_date is not None:
+                context_issue_numbers = [r["issue_number"] for r in rows if r.get("issue_number") is not None]
+                pr_dates: dict[int, datetime.datetime] = {}
+                if context_issue_numbers:
+                    dates_resp = (
+                        client.table("pull_requests")
+                        .select("issue_number,created_at")
+                        .eq("owner", owner)
+                        .eq("repo", repo)
+                        .in_("issue_number", context_issue_numbers)
+                        .execute()
+                    )
+                    for p in cast(list[dict[str, Any]], dates_resp.data):
+                        iss = p.get("issue_number")
+                        raw_date = p.get("created_at")
+                        if iss is not None and raw_date:
+                            pr_dates[iss] = _parse_ts(raw_date)
+
+                _sentinel = datetime.timedelta.max
+
+                def _proximity(row: dict[str, Any]) -> datetime.timedelta:
+                    iss = row.get("issue_number")
+                    d = pr_dates.get(iss) if iss is not None else None
+                    return abs(d - current_date) if d is not None else _sentinel
+
+                rows.sort(key=_proximity)
+
+            rows = rows[:5]
             return [
                 DockerContext(
                     build_pkg_sh=r.get("build_pkg_sh", ""),
                     build_run_sh=r.get("build_run_sh", ""),
                 )
                 for r in rows
-                if r.get("build_pkg_sh")
             ]
         except Exception:
             logger.debug("Similar context lookup failed")
@@ -284,6 +349,16 @@ class Synthesizer:
             logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
         except Exception:
             logger.warning("Failed to save context for %s/%s@%s", owner, repo, sha[:12])
+
+
+def _parse_ts(ts: str) -> datetime.datetime:
+    """Parse an ISO-8601 timestamp string to a timezone-aware datetime.
+
+    Handles both ``Z`` and ``+HH:MM`` UTC offset suffixes, which is
+    necessary for Python 3.9/3.10 compatibility where ``fromisoformat``
+    does not accept the trailing ``Z``.
+    """
+    return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
 def _format_prior_attempts(attempts: list[tuple[DockerContext, SandboxResult]]) -> str:
