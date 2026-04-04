@@ -12,6 +12,7 @@ from datasmith.agents.sandbox import (
     SandboxResult,
     SandboxRunner,
     _compute_immutable_hashes,
+    _extract_resource_metrics,
     _generate_task_txt,
     _render_agents_md,
 )
@@ -37,6 +38,7 @@ class TestSandboxResult:
         assert r.failure_json is None
         assert r.duration_s == 0.0
         assert r.agent_output == ""
+        assert r.resource_metrics == {}
 
 
 class TestGenerateTaskTxt:
@@ -306,6 +308,66 @@ class TestExtractResults:
 
         assert result.success is True
         assert result.docker_context is not None
+
+
+class TestExtractResourceMetrics:
+    def test_from_success_file(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        metrics = {"build_duration_s": 12.5, "image_size_bytes": 500_000_000}
+        success.write_text(json.dumps({"local_image": "t", "resource_metrics": metrics}))
+
+        assert _extract_resource_metrics(success, failure, None) == metrics
+
+    def test_from_failure_json(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        metrics = {"build_duration_s": 5.0}
+        failure_data = {"stage": "build", "resource_metrics": metrics}
+
+        assert _extract_resource_metrics(success, failure, failure_data) == metrics
+
+    def test_empty_when_no_metrics(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+
+        assert _extract_resource_metrics(success, failure, None) == {}
+
+    def test_extract_results_includes_metrics(self, tmp_path: Path) -> None:
+        """_extract_results populates resource_metrics from success JSON."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        metrics = {"build_duration_s": 10.0, "peak_memory_bytes": 1_000_000}
+        (task_dir / "verification_success.json").write_text(
+            json.dumps({"local_image": "test:latest", "resource_metrics": metrics})
+        )
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash")
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "ok"
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.resource_metrics == metrics
+
+    def test_extract_results_metrics_from_failure(self, tmp_path: Path) -> None:
+        """_extract_results populates resource_metrics from failure JSON."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        metrics = {"build_duration_s": 3.0}
+        failure = {"stage": "build", "return_code": 1, "error_message": "err", "resource_metrics": metrics}
+        (task_dir / "failure.json").write_text(json.dumps(failure))
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = ""
+        codex_result.error = ""
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is False
+        assert result.resource_metrics == metrics
 
 
 class TestSandboxRunnerRun:

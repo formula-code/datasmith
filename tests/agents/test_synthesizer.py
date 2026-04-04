@@ -76,7 +76,7 @@ class TestSynthesizerSimilarContext:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[similar_ctx]),
-            patch.object(synth, "_sandbox_generate", return_value=None),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {})),
         ):
             result = synth.run("owner", "repo", 42, "pr context")
 
@@ -93,7 +93,7 @@ class TestSynthesizerAllFail:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[]),
-            patch.object(synth, "_sandbox_generate", return_value=None),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {})),
         ):
             result = synth.run("owner", "repo", 42, "pr context")
 
@@ -108,7 +108,7 @@ class TestSynthesizerStateTransitions:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[]),
-            patch.object(synth, "_sandbox_generate", return_value=None),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {})),
         ):
             synth.run("owner", "repo", 42, "pr context")
 
@@ -352,6 +352,51 @@ class TestNoneAgentSkipsLLM:
         assert result.build_pkg_sh == "#!/bin/bash\necho similar"
         assert SynthesisState.TRY_SIMILAR in synth.trace
         assert SynthesisState.LLM_GENERATE not in synth.trace
+
+
+class TestResourceMetricsPersistence:
+    @patch("datasmith.agents.synthesizer.verify_context")
+    def test_try_similar_passes_metrics_to_save_context(self, mock_verify: MagicMock) -> None:
+        """When TRY_SIMILAR succeeds, resource_metrics flow to _save_context."""
+        similar_ctx = DockerContext(build_pkg_sh="pkg", build_run_sh="run")
+        metrics = {"build_duration_s": 8.0, "peak_memory_bytes": 2_000_000}
+        mock_verify.return_value = SandboxResult(
+            success=True,
+            docker_context=similar_ctx,
+            resource_metrics=metrics,
+        )
+
+        synth = Synthesizer()
+        with (
+            patch.object(synth, "_check_cache", return_value=None),
+            patch.object(synth, "_find_similar", return_value=[similar_ctx]),
+            patch.object(synth, "_save_context") as mock_save,
+        ):
+            synth.run("owner", "repo", 42, "pr context")
+
+        mock_save.assert_called_once()
+        assert mock_save.call_args.kwargs["resource_metrics"] == metrics
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_log_attempt_includes_resource_metrics(self, mock_get_client: MagicMock) -> None:
+        """_log_attempt persists resource_metrics to error_logs."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        metrics = {"build_duration_s": 5.0, "image_size_bytes": 1_000_000}
+        result = SandboxResult(
+            success=False,
+            failure_json={"stage": "build", "return_code": 1, "error_message": "err"},
+            resource_metrics=metrics,
+        )
+
+        synth = Synthesizer()
+        synth._log_attempt("o", "r", "sha123", 1, 0, result)
+
+        insert_call = mock_client.table.return_value.insert
+        insert_call.assert_called_once()
+        row = insert_call.call_args[0][0]
+        assert row["resource_metrics"] == metrics
 
 
 class TestFormatPriorAttempts:
