@@ -71,6 +71,43 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 - **Build**: hatchling backend, uv for dependency management
 - **CI**: GitHub Actions runs `make check` + tests on Python 3.11 and 3.12
 
+## Supabase (local)
+
+DataSmith uses a **local Supabase** instance for all persistent state. Connection details live in `tokens.env`:
+
+- `SUPABASE_URL=http://127.0.0.1:54321` (PostgREST API)
+- `SUPABASE_KEY=sb_secret_...` (service-role key)
+- Direct Postgres: `host=127.0.0.1 port=54322 dbname=postgres user=postgres password=postgres`
+
+### Key tables
+
+| Table | Purpose | Populated by |
+|-------|---------|-------------|
+| `pull_requests` | All scraped PRs with classification, patches, rendered problems, container names | Stages 1-3, 5-6 |
+| `packages` | Resolved `env_payload` (pinned deps) and `python_version` per commit | Stage 4 |
+| `docker_contexts` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA | Stage 6 (on success) |
+| `error_logs` | Per-attempt synthesis results: agent output, failure stage/return code, error messages | Stage 6 (`Synthesizer._log_attempt`) |
+| `runner_progress` | Live progress counters (total/completed/failed) per pipeline run | `BaseRunner` (all stages) |
+| `runner_failures` | One row per item failure with error message + traceback | `BaseRunner._log_failure` |
+| `pr_contexts` | Deconstructed PR context components for re-rendering | Stage 5 |
+| `hook_cache` | Memoization cache for `@supabase_cached` decorated functions | Various |
+
+### Migrations
+
+SQL migrations live in `supabase/migrations/` (numbered `00001_` through `00007_`). To apply a new migration against the local instance:
+
+```python
+import psycopg2
+conn = psycopg2.connect(host='127.0.0.1', port=54322, dbname='postgres', user='postgres', password='postgres')
+conn.autocommit = True
+conn.cursor().execute(open('supabase/migrations/00007_error_logs.sql').read())
+# Don't forget: GRANT ALL ON <table> TO anon, authenticated;
+```
+
+### Querying
+
+Use `datasmith.utils.db.fetch_all(table, select=..., filters=..., gte_filters=..., ...)` for paginated reads, or `get_client()` for direct Supabase client access.
+
 ## Environment setup
 
-Requires a `tokens.env` file in the repo root with `GH_TOKEN`, `CACHE_LOCATION`, and optionally `DSPY_*` vars for LLM backends and `DOCKERHUB_*` vars for publishing. See README.md for the full template.
+Requires a `tokens.env` file in the repo root with `GH_TOKEN`, `CACHE_LOCATION`, `SUPABASE_URL`, `SUPABASE_KEY`, and optionally `DSPY_*` vars for LLM backends and `DOCKERHUB_*` vars for publishing. See README.md for the full template.
