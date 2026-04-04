@@ -217,11 +217,13 @@ def get_agent(preference: list[str] | None = None) -> InstalledAgent:
     from datasmith.agents.installed.claude import ClaudeAgent
     from datasmith.agents.installed.codex import CodexAgent
     from datasmith.agents.installed.gemini import GeminiAgent
+    from datasmith.agents.installed.none import NoneAgent
 
     registry: dict[str, type[InstalledAgent]] = {
         "claude": ClaudeAgent,
         "codex": CodexAgent,
         "gemini": GeminiAgent,
+        "none": NoneAgent,
     }
 
     order = preference or ["claude", "codex", "gemini"]

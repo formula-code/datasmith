@@ -59,7 +59,7 @@ class CodexAgent(InstalledAgent):
         timeout: int = 3600,
         workdir: str | None = None,
     ) -> AgentResult:
-        cmd = ["codex", "exec"]
+        cmd = ["codex", "exec", "--model", "gpt-5.4-mini", "-c", "model_reasoning_effort=medium"]
         if self._full_auto and self._sandbox:
             cmd.extend(["--full-auto", "--sandbox", self._sandbox])
         else:

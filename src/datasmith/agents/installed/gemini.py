@@ -90,6 +90,8 @@ class GeminiAgent(InstalledAgent):
             "--yolo",
             "-o",
             "json",
+            "--model",
+            "gemini-2.5-flash",
         ]
 
         logger.debug("gemini command: %s", " ".join(cmd))

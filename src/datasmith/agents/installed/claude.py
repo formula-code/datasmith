@@ -98,6 +98,10 @@ class ClaudeAgent(InstalledAgent):
             "stream-json",
             "--no-session-persistence",
             "--verbose",
+            "--model",
+            "sonnet",
+            "--effort",
+            "medium",
         ]
 
         logger.debug("claude command: %s", " ".join(cmd))
