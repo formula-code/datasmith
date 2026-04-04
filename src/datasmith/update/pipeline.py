@@ -9,16 +9,17 @@ logger = get_logger("update.pipeline")
 
 
 def _cap_per_repo(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Return at most *limit* items per (owner, repo)."""
+    """Return at most *limit* randomly-sampled items per (owner, repo)."""
+    import random
     from collections import defaultdict
 
-    repo_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
-    capped: list[dict[str, Any]] = []
+    by_repo: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for it in items:
-        key = (it["owner"], it["repo"])
-        if repo_counts[key] < limit:
-            capped.append(it)
-            repo_counts[key] += 1
+        by_repo[(it["owner"], it["repo"])].append(it)
+
+    capped: list[dict[str, Any]] = []
+    for group in by_repo.values():
+        capped.extend(random.sample(group, min(limit, len(group))))
     logger.info("Capped to %d tasks (%d per repo) from %d total", len(capped), limit, len(items))
     return capped
 

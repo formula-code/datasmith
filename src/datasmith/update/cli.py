@@ -71,8 +71,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--agent",
         type=str,
         default=None,
-        choices=["claude", "codex", "gemini"],
-        help="CLI agent to use for stage 6 synthesis (default: auto-detect first available)",
+        choices=["claude", "codex", "gemini", "none"],
+        help="CLI agent to use for stage 6 synthesis (default: auto-detect first available). "
+        "'none' skips LLM generation and relies only on similar-context matching.",
     )
     parser.add_argument(
         "--force",
