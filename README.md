@@ -41,7 +41,7 @@ graph LR
 `datasmith` is designed primarily to enable continual dataset updates for FormulaCode. After [installation](#installation), the monthly update is a single command:
 
 ```bash
-$ pip install datasmith
+$ pip install fc-data
 $ fc-data --start-date 2026-02-01 --end-date 2026-03-01
 ```
 
