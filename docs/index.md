@@ -1,3 +1,5 @@
+![banner](https://github.com/formula-code/datasmith/raw/main/static/formula-code-datasmith.png)
+
 <p align="center">
   <a href="https://formula-code.github.io/">
     <img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-0A7A5E?style=for-the-badge" alt="FormulaCode Website">
