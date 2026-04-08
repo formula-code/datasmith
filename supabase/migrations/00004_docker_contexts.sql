@@ -2,7 +2,7 @@
 -- Each row is a verified DockerContext for a specific (owner, repo, sha).
 -- Human-readable: edit individual scripts directly in Supabase Studio.
 
-CREATE TABLE IF NOT EXISTS docker_contexts (
+CREATE TABLE IF NOT EXISTS candidate_containers (
     owner TEXT NOT NULL,
     repo TEXT NOT NULL,
     sha TEXT NOT NULL,

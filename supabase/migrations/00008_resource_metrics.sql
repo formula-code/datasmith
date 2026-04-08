@@ -3,4 +3,4 @@
 -- Using JSONB for flexibility — new metrics can be added without migrations.
 
 ALTER TABLE error_logs ADD COLUMN IF NOT EXISTS resource_metrics JSONB;
-ALTER TABLE docker_contexts ADD COLUMN IF NOT EXISTS resource_metrics JSONB;
+ALTER TABLE candidate_containers ADD COLUMN IF NOT EXISTS resource_metrics JSONB;

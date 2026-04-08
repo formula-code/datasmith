@@ -175,7 +175,7 @@ ctx = synth.run(
 # Sandbox synthesis succeeded                                     [PASS]
 # Saved context for pandas-dev/pandas@abc123def456
 #
-# On success, the DockerContext is persisted to Supabase's docker_contexts table.
+# On success, the DockerContext is persisted to Supabase's candidate_containers table.
 # ctx is a DockerContext with the working build scripts, or None if all attempts failed.
 ```
 

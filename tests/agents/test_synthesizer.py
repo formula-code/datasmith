@@ -147,7 +147,7 @@ def _make_client_mock(
 
     Queries issued in order:
       1. pull_requests  — current PR's created_at
-      2. docker_contexts — all contexts for the repo
+      2. candidate_containers — all contexts for the repo
       3. pull_requests  — batch PR dates for context issue numbers
     """
     mock_client = MagicMock()
@@ -171,7 +171,7 @@ def _make_client_mock(
             # Chain: .select().eq().eq().eq().execute()  or  .select().eq().eq().in_().execute()
             t.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = resp
             t.select.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value = resp
-        else:  # docker_contexts
+        else:  # candidate_containers
             t.select.return_value.eq.return_value.eq.return_value.execute.return_value = ctx_resp
         return t
 
@@ -181,8 +181,8 @@ def _make_client_mock(
 
 class TestFindSimilar:
     @patch("datasmith.agents.synthesizer.get_client")
-    def test_returns_docker_contexts(self, mock_get_client: MagicMock) -> None:
-        """_find_similar queries docker_contexts table and returns DockerContext list."""
+    def test_returns_candidate_containers(self, mock_get_client: MagicMock) -> None:
+        """_find_similar queries candidate_containers table and returns DockerContext list."""
         mock_client = _make_client_mock(
             pr_date_rows=[{"created_at": "2024-01-15T12:00:00Z"}],
             ctx_rows=[

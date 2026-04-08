@@ -86,9 +86,9 @@ CREATE TABLE IF NOT EXISTS packages (
 
 The `env_payload` and `python_version` columns on `pull_requests` (referenced by `pipeline.py:_synthesize_images()`) are **removed as sources of truth**. Instead, the synthesize stage joins `pull_requests` with `packages` on `(owner, repo, merge_commit_sha = sha)` to get resolution data. This avoids duplicating resolution results across PRs that share a base commit.
 
-### Impact on `docker_contexts` table
+### Impact on `candidate_containers` table
 
-The `docker_contexts` table already has `python_version` and `env_payload` columns. These continue to store the values used for the specific synthesis attempt (which may differ from the resolution output if overridden). The `packages` table is the source of truth for resolution; `docker_contexts` records what was actually used.
+The `candidate_containers` table already has `python_version` and `env_payload` columns. These continue to store the values used for the specific synthesis attempt (which may differ from the resolution output if overridden). The `packages` table is the source of truth for resolution; `candidate_containers` records what was actually used.
 
 ## Module structure
 

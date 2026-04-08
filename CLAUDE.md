@@ -85,11 +85,11 @@ DataSmith uses a **local Supabase** instance for all persistent state. Connectio
 |-------|---------|-------------|
 | `pull_requests` | All scraped PRs with classification, patches, rendered problems, container names | Stages 1-3, 5-6 |
 | `packages` | Resolved `env_payload` (pinned deps) and `python_version` per commit | Stage 4 |
-| `docker_contexts` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA | Stage 6 (on success) |
+| `candidate_containers` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA | Stage 6 (on success) |
 | `error_logs` | Per-attempt synthesis results: agent output, failure stage/return code, error messages | Stage 6 (`Synthesizer._log_attempt`) |
 | `runner_progress` | Live progress counters (total/completed/failed) per pipeline run | `BaseRunner` (all stages) |
 | `runner_failures` | One row per item failure with error message + traceback | `BaseRunner._log_failure` |
-| `pr_contexts` | Deconstructed PR context components for re-rendering | Stage 5 |
+| `candidate_prs` | Deconstructed PR context components for re-rendering | Stage 5 |
 | `hook_cache` | Memoization cache for `@supabase_cached` decorated functions | Various |
 
 ### Migrations

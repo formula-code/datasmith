@@ -150,7 +150,12 @@ class Synthesizer:
         try:
             client = get_client()
             resp = (
-                client.table("docker_contexts").select("*").eq("owner", owner).eq("repo", repo).eq("sha", sha).execute()
+                client.table("candidate_containers")
+                .select("*")
+                .eq("owner", owner)
+                .eq("repo", repo)
+                .eq("sha", sha)
+                .execute()
             )
             if resp.data:
                 row = cast(dict[str, Any], resp.data[0])
@@ -196,7 +201,7 @@ class Synthesizer:
 
             # Step 2: fetch all non-empty contexts for this repo.
             ctx_resp = (
-                client.table("docker_contexts")
+                client.table("candidate_containers")
                 .select("issue_number,build_pkg_sh,build_run_sh")
                 .eq("owner", owner)
                 .eq("repo", repo)
@@ -339,7 +344,7 @@ class Synthesizer:
         ctx: DockerContext,
         resource_metrics: dict | None = None,
     ) -> None:
-        """Persist the agent-edited scripts to the ``docker_contexts`` table.
+        """Persist the agent-edited scripts to the ``candidate_containers`` table.
 
         Only ``build_pkg_sh`` and ``build_run_sh`` are saved — the other
         fields come from templates and don't need to be persisted.
@@ -358,7 +363,7 @@ class Synthesizer:
             }
             if resource_metrics:
                 row["resource_metrics"] = resource_metrics
-            client.table("docker_contexts").upsert(row).execute()
+            client.table("candidate_containers").upsert(row).execute()
             logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
         except Exception:
             logger.warning("Failed to save context for %s/%s@%s", owner, repo, sha[:12])

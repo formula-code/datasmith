@@ -76,7 +76,7 @@ Post-synthesis Docker PR image build failures where `python_on_whales` raises `D
 | SciTools/iris | 8 / 32 | 25.0% |
 | pydata/xarray | 20 / 85 | 23.5% |
 
-These repos succeed when a temporally adjacent "similar context" exists in `docker_contexts` and can be reused. They fail when the commit is far enough from any successful context that dependencies have shifted.
+These repos succeed when a temporally adjacent "similar context" exists in `candidate_containers` and can be reused. They fail when the commit is far enough from any successful context that dependencies have shifted.
 
 ## Why repos fail: root cause taxonomy
 

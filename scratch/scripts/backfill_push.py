@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Backfill: build and push Docker images for already-synthesized tasks.
 
-Finds all rows in ``docker_contexts`` whose corresponding ``pull_requests``
+Finds all rows in ``candidate_containers`` whose corresponding ``pull_requests``
 row has no ``container_name``, builds the three-tier image hierarchy
 (base → repo → PR), pushes to DockerHub, and records the container_name.
 
@@ -52,8 +52,8 @@ def find_pending_tasks(repo_filter: str | None = None, limit: int | None = None)
     """Find synthesized contexts that haven't been pushed yet."""
 
     # 1) All synthesized contexts
-    ctx_rows = fetch_all("docker_contexts", select="owner, repo, sha, issue_number")
-    print(f"Found {len(ctx_rows)} rows in docker_contexts")
+    ctx_rows = fetch_all("candidate_containers", select="owner, repo, sha, issue_number")
+    print(f"Found {len(ctx_rows)} rows in candidate_containers")
 
     # 2) PRs without container_name that have is_performance_commit=True
     pr_rows = fetch_all(
@@ -124,7 +124,7 @@ def load_context(owner: str, repo: str, sha: str) -> DockerContext | None:
     try:
         client = get_client()
         resp = (
-            client.table("docker_contexts")
+            client.table("candidate_containers")
             .select("*")
             .eq("owner", owner)
             .eq("repo", repo)
