@@ -1,8 +1,0 @@
-# Use your local vLLM model by default
-model = "gpt-oss-20b"
-model_provider = "oss"
-
-# Override the built-in OSS provider to point at vLLM
-[model_providers.oss]
-base_url = "http://localhost:30002/v1"
-wire_api = "chat"  # use /v1/chat/completions

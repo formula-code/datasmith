@@ -1,1 +1,0 @@
-Task(owner='pytroll', repo='satpy', sha='125a9be2ef3bf355a19e6edb9eb49582dd863ee2', commit_date=1756485359.0, env_payload='', tag='pkg')

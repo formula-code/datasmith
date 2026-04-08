@@ -1,1 +1,0 @@
-Task(owner='h5py', repo='h5py', sha='6db6f054e54e82cb0c58fe655ccb382d705f3307', commit_date=1748006840.0, env_payload='{"dependencies": ["numpy==2.2.6"]}', python_version='3.12', tag='pkg', benchmarks='')

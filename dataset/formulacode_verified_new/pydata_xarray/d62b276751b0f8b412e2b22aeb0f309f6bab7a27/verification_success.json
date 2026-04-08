@@ -1,4 +1,0 @@
-{
-  "local_image": "pydata-xarray-d62b276751b0f8b412e2b22aeb0f309f6bab7a27:final",
-  "dockerhub_image": "docker.io/formulacode/all:pydata-xarray-d62b276751b0f8b412e2b22aeb0f309f6bab7a27--final"
-}

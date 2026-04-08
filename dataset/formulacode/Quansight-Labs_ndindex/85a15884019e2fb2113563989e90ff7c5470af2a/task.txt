@@ -1,1 +1,0 @@
-Task(owner='Quansight-Labs', repo='ndindex', sha='85a15884019e2fb2113563989e90ff7c5470af2a', commit_date=1726866182.0, env_payload='', tag='pkg')

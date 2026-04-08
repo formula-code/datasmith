@@ -1,1 +1,0 @@
-Task(owner='pyapp-kit', repo='psygnal', sha='4c73b4d1d3a810d8c2c47ecb5ecd2c40e0c8571c', commit_date=1715036761.0, env_payload='', python_version='', tag='pkg', benchmarks='')

@@ -1,1 +1,0 @@
-Task(owner='pydata', repo='bottleneck', sha='cd32416d826aa90d156ced2aeb112717b3331dc1', commit_date=1582006268.0, env_payload='', python_version='', tag='pkg', benchmarks='')

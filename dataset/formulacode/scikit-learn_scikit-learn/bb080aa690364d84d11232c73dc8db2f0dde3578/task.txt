@@ -1,1 +1,0 @@
-Task(owner='scikit-learn', repo='scikit-learn', sha='bb080aa690364d84d11232c73dc8db2f0dde3578', commit_date=1667482631.0, env_payload='{"dependencies": ["joblib==1.2.0", "numpy==1.23.4", "scipy==1.9.3", "threadpoolctl==3.1.0"]}', python_version='3.11', tag='pkg', benchmarks='')

@@ -1,1 +1,0 @@
-Task(owner='scikit-learn', repo='scikit-learn', sha='05c099209de66d2d888226464d9ced699143c3ec', commit_date=1721843779.0, env_payload='', python_version='', tag='pkg', benchmarks='')

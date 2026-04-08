@@ -1,1 +1,0 @@
-Task(owner='DASDAE', repo='dascore', sha='f04289f6dcc608ced03a02da28811608f31c7be7', commit_date=1704254963.0, env_payload='', python_version='', tag='pkg', benchmarks='')

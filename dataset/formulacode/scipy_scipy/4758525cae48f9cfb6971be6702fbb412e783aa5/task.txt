@@ -1,1 +1,0 @@
-Task(owner='scipy', repo='scipy', sha='4758525cae48f9cfb6971be6702fbb412e783aa5', commit_date=1735655223.0, env_payload='', tag='pkg')

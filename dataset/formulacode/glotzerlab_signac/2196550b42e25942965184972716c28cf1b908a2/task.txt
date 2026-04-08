@@ -1,1 +1,0 @@
-Task(owner='glotzerlab', repo='signac', sha='2196550b42e25942965184972716c28cf1b908a2', commit_date=1743783077.0, env_payload='', tag='pkg')

@@ -1,1 +1,0 @@
-Task(owner='pysal', repo='momepy', sha='3a76ad65b37bfd7dd48ee544532a3640fe0cf5ab', commit_date=1709741234.0, env_payload='', python_version='', tag='pkg', benchmarks='')

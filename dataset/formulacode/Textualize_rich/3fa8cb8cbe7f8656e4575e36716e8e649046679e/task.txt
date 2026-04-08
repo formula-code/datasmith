@@ -1,1 +1,0 @@
-Task(owner='Textualize', repo='rich', sha='3fa8cb8cbe7f8656e4575e36716e8e649046679e', commit_date=1650978242.0, env_payload='', tag='pkg')

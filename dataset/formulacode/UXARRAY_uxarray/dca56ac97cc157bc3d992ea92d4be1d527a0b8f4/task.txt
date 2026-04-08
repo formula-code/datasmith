@@ -1,1 +1,0 @@
-Task(owner='UXARRAY', repo='uxarray', sha='dca56ac97cc157bc3d992ea92d4be1d527a0b8f4', commit_date=1747802136.0, env_payload='', python_version='', tag='pkg', benchmarks='')

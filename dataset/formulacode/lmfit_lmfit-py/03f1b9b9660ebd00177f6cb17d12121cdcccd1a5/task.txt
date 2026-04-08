@@ -1,1 +1,0 @@
-Task(owner='lmfit', repo='lmfit-py', sha='03f1b9b9660ebd00177f6cb17d12121cdcccd1a5', commit_date=1547606940.0, env_payload='{"dependencies": ["asteval==1.0.5", "numpy==1.24.4", "scipy==1.10.1", "six==1.17.0", "uncertainties==3.2.3"]}', python_version='3.8', tag='pkg', benchmarks='')

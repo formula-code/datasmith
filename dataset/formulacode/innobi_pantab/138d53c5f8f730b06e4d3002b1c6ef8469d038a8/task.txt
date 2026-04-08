@@ -1,1 +1,0 @@
-Task(owner='innobi', repo='pantab', sha='138d53c5f8f730b06e4d3002b1c6ef8469d038a8', commit_date=1747335576.0, env_payload='{"dependencies": ["iniconfig==2.1.0", "packaging==25.0", "pluggy==1.6.0", "pyarrow==20.0.0", "pytest==8.3.5"]}', python_version='3.12', tag='pkg', benchmarks='')

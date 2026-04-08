@@ -1,1 +1,0 @@
-Task(owner='python-adaptive', repo='adaptive', sha='5167fe0c5cfafd85aa5cc3d6a7c9018b978aacae', commit_date=1747127818.0, env_payload='', tag='pkg')

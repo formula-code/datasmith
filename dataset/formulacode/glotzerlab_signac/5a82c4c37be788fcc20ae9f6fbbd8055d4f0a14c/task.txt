@@ -1,1 +1,0 @@
-Task(owner='glotzerlab', repo='signac', sha='5a82c4c37be788fcc20ae9f6fbbd8055d4f0a14c', commit_date=1707841722.0, env_payload='{"dependencies": ["filelock==3.13.1", "h5py==3.10.0", "numpy==1.26.4", "packaging==23.2", "synced-collections==1.0.0", "tqdm==4.66.2"]}', python_version='3.12', tag='pkg', benchmarks='')

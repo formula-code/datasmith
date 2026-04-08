@@ -1,1 +1,0 @@
-Task(owner='django-components', repo='django-components', sha='007009a4808c4b3ead05833cc97b32c896fe4783', commit_date=1751538441.0, env_payload='{"dependencies": ["asgiref==3.8.1", "django==5.2.4", "djc-core-html-parser==1.0.2", "sqlparse==0.5.3", "typing-extensions==4.14.0"]}', python_version='3.12', tag='pkg', benchmarks='')

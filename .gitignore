@@ -209,6 +209,8 @@ package-lock.json
 
 # Scratch / dev artifacts
 scratch/
+dataset/
+docs/archive/
 fc_record.pkl
 GEMINI.md
 PARITY_TODOs.md

@@ -1,1 +1,0 @@
-Task(owner='dwavesystems', repo='dimod', sha='247aeac73c5d28b775c417ceba8edf9d5a737f5b', commit_date=1669160276.0, env_payload='{"dependencies": ["numpy==1.23.4"]}', python_version='3.11', tag='pkg', benchmarks='')
