@@ -456,7 +456,17 @@ $ python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha
 
 Only modify `docker_build_pkg.sh` and `docker_build_run.sh` during verification fixes.
 
+```bash
+$ python scratch/scripts/prepare_formulacode_dataset.py \
+       --input  scratch/artifacts/pipeflush/perfonly_commits_master.parquet \
+       --output scratch/artifacts/pipeflush/perfonly_enriched.parquet \
+       --dockerhub-repository formulacode/all \
+       --upload-to-hf formulacode/formulacode-all \
+       --hf-verified-filter /path/to/valid_tasks.json
+```
 
-## License
+> Requires `HF_TOKEN` in `tokens.env`. The upload creates `default`, `verified`, and per-month (`YYYY-MM`) configs on Hugging Face.
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+### Evaluation
+
+Evaluation is done in FormulaCode's fork of the [terminal-bench](https://github.com/formula-code/terminal-bench) evaluation framework.
