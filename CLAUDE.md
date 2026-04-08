@@ -25,10 +25,10 @@ uv run pre-commit run -a                     # Run all pre-commit hooks
 python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha>
 
 # Pipeline update (monthly, the primary entrypoint for DataSmith)
-ds-update --start-date YYYY-MM-DD --end-date YYYY-MM-DD          # Run all 6 stages
-ds-update --start-date 2026-01-01 --end-date 2026-01-31 --stage 4  # Run a single stage
-ds-update --start-date 2026-01-01 --end-date 2026-01-31 --resume   # Resume from last completed
-ds-update --help                                                    # See all options
+fc-data --start-date YYYY-MM-DD --end-date YYYY-MM-DD          # Run all 6 stages
+fc-data --start-date 2026-01-01 --end-date 2026-01-31 --stage 4  # Run a single stage
+fc-data --start-date 2026-01-01 --end-date 2026-01-31 --resume   # Resume from last completed
+fc-data --help                                                    # See all options
 ```
 
 ## Architecture
@@ -47,7 +47,7 @@ ds-update --help                                                    # See all op
 | `benchmark/` | ASV benchmark collection |
 | `collation/` | Data aggregation |
 
-### Pipeline stages (`ds-update`)
+### Pipeline stages (`fc-data`)
 
 1. **scrape_repos** — Fetch repository metadata from GitHub
 2. **scrape_commits** — Scrape merged PR commits and patches

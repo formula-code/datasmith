@@ -49,7 +49,7 @@ rows = sb.table("pull_requests") \
 
 ## Pipeline integration
 
-Publishing is the final stage of the `ds-update` pipeline (stage 7). The `publish_pipeline()` function orchestrates:
+Publishing is the final stage of the `fc-data` pipeline (stage 7). The `publish_pipeline()` function orchestrates:
 
 1. Query DB for unpublished, verified PRs
 2. Push Docker images to DockerHub

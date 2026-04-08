@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ds-update = "datasmith.update.cli:main"
+fc-data = "datasmith.update.cli:main"
 
 [project.urls]
 Homepage = "https://formula-code.github.io/datasmith/"

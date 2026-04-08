@@ -481,15 +481,15 @@ class TestPublishSnippets:
 
 
 # ---------------------------------------------------------------------------
-# Guide — "Pipeline" (ds-update CLI)
+# Guide — "Pipeline" (fc-data CLI)
 # ---------------------------------------------------------------------------
 
 
 class TestPipelineSnippets:
-    """Snippets from the Pipeline guide page: ds-update CLI."""
+    """Snippets from the Pipeline guide page: fc-data CLI."""
 
     def test_ds_update_entry_point_exists(self) -> None:
-        """Website: ``ds-update --start-date 2026-02-01 --end-date 2026-03-01``"""
+        """Website: ``fc-data --start-date 2026-02-01 --end-date 2026-03-01``"""
         from datasmith.update.cli import main
 
         assert callable(main)

@@ -187,7 +187,7 @@ make test     # pytest
 You're ready to run the pipeline:
 
 ```bash
-ds-update --start-date 2026-03-01 --end-date 2026-04-01
+fc-data --start-date 2026-03-01 --end-date 2026-04-01
 ```
 
 See the **[Pipeline guide](../guide/pipeline.md)** for the full CLI reference and stage descriptions.

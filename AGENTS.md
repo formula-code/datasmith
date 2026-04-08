@@ -17,7 +17,7 @@ This guide helps contributors work effectively in the datasmith repository.
 - `uv run python -m pytest --doctest-modules` — run doctests with the standard test suite.
 - `uvx tox -q` — run the tox matrix (py39–py312) as defined in `tox.ini`.
 - To run commands using the same environment variables as the user, use `uv run <command>`.
-- Pipeline entrypoint: `ds-update --help` and `ds-update --start-date ... --end-date ...`.
+- Pipeline entrypoint: `fc-data --help` and `fc-data --start-date ... --end-date ...`.
 
 ## Coding Style & Naming Conventions
 - Python 3.9–3.12. 4‑space indentation, type hints required (mypy strict; see `pyproject.toml`).

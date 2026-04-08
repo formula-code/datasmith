@@ -30,14 +30,14 @@ graph LR
 Most interaction with DataSmith is through a single command:
 
 ```bash
-ds-update --start-date 2026-03-01 --end-date 2026-04-01
+fc-data --start-date 2026-03-01 --end-date 2026-04-01
 ```
 
 This runs all 7 pipeline stages: repo discovery, PR scraping, LLM classification, dependency resolution, problem rendering, Docker synthesis, and publishing. See the **[Pipeline guide](guide/pipeline.md)** for the full CLI reference.
 
 ## Key features
 
-- **Single-command pipeline** — `ds-update` runs all stages with `--resume`, `--stage`, and `--dry-run` support
+- **Single-command pipeline** — `fc-data` runs all stages with `--resume`, `--stage`, and `--dry-run` support
 - **GitHub scraping** — Async `httpx` client with automatic token rotation across multiple `GH_TOKENS`
 - **LLM classification** — DSPy-based agents classify PRs by performance category and difficulty
 - **Docker synthesis** — Automatically generate Docker build contexts using coding agents (Claude, Codex, Gemini)
@@ -47,6 +47,6 @@ This runs all 7 pipeline stages: repo discovery, PR scraping, LLM classification
 ## Quick links
 
 - [Installation](getting-started/installation.md) — Set up your development environment
-- [Pipeline guide (`ds-update`)](guide/pipeline.md) — **The primary entrypoint** — full CLI reference and stage descriptions
+- [Pipeline guide (`fc-data`)](guide/pipeline.md) — **The primary entrypoint** — full CLI reference and stage descriptions
 - [Quickstart](getting-started/quickstart.md) — Python API examples
 - [Configuration](guide/configuration.md) — `tokens.env` and environment variables

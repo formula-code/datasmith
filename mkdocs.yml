@@ -81,7 +81,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - Installation: getting-started/installation.md
-      - Pipeline (ds-update): guide/pipeline.md
+      - Pipeline (fc-data): guide/pipeline.md
       - Configuration: guide/configuration.md
   - User Guide:
       - Docker Images: guide/docker-images.md

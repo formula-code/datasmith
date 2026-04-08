@@ -34,7 +34,7 @@ def _stages_epilog() -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="ds-update",
+        prog="fc-data",
         description="Run the FormulaCode update pipeline — discovers performance-improving "
         "commits from GitHub, classifies them with LLM agents, and builds Docker images "
         "for benchmark evaluation.",
