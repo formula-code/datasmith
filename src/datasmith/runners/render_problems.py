@@ -17,7 +17,7 @@ class RenderProblemsRunner(BaseRunner):
     2. Runs :class:`~datasmith.agents.extractors.ProblemExtractor` (DSPy) once to
        split the PR body into four structured fields.
     3. Renders the full Jinja2 problem-statement template.
-    4. Upserts everything into the ``pr_contexts`` table (raw components + rendered).
+    4. Upserts everything into the ``candidate_prs`` table (raw components + rendered).
     5. Updates ``pull_requests.rendered_problem`` and the new
        ``pull_requests.problem_description`` column (problem-only text).
     """
@@ -87,9 +87,9 @@ class RenderProblemsRunner(BaseRunner):
         # Serialize linked issues for storage (mode="json" converts datetime → ISO string)
         issues_json = [issue.model_dump(mode="json") for issue in issues]
 
-        # Upsert all raw components + rendered output into pr_contexts
+        # Upsert all raw components + rendered output into candidate_prs
         client = get_client()
-        client.table("pr_contexts").upsert({
+        client.table("candidate_prs").upsert({
             "owner": owner,
             "repo": repo,
             "issue_number": issue_number,

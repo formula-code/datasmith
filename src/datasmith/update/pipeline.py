@@ -332,10 +332,10 @@ class Pipeline:
 
         repo_descriptions = _fetch_repo_descriptions(rows)
 
-        # Skip PRs already processed (have a pr_contexts row) unless --force
+        # Skip PRs already processed (have a candidate_prs row) unless --force
         existing_keys: set[tuple[str, str, int]] = set()
         if not self._force:
-            existing_rows = fetch_all("pr_contexts", select="owner, repo, issue_number")
+            existing_rows = fetch_all("candidate_prs", select="owner, repo, issue_number")
             existing_keys = {(e["owner"], e["repo"], e["issue_number"]) for e in existing_rows}
 
         items = []
@@ -412,7 +412,7 @@ class Pipeline:
         # Only synthesize PRs that have a rendered context with linked issues
         # and a non-empty extracted problem statement (from stage 5).
         ctx_rows = fetch_all(
-            "pr_contexts",
+            "candidate_prs",
             select="owner, repo, issue_number, issues_json, initial_observations",
         )
         eligible_prs: set[tuple[str, str, int]] = {
