@@ -28,6 +28,9 @@ jobs:
       - name: Set up the environment
         uses: ./.github/actions/setup-python-env
 
+      - name: Install docs dependencies
+        run: uv sync --frozen --group docs
+
       - name: Build docs
         run: uv run mkdocs build --strict
 
