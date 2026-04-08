@@ -473,8 +473,9 @@ class Pipeline:
         try:
             client = get_client()
             resp = client.table("runner_progress").select("runner_name, completed, total").execute()
-            completed = []
-            for r in resp.data:
+            rows: list[dict[str, Any]] = resp.data  # type: ignore[assignment]
+            completed: list[str] = []
+            for r in rows:
                 if r["total"] > 0 and r["completed"] >= r["total"]:
                     completed.append(r["runner_name"])
         except Exception:

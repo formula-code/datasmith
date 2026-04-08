@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any, cast
 
 try:
-    import tomllib as _toml
+    import tomllib as _toml  # type: ignore[import-not-found,unused-ignore]
 except ImportError:
-    import tomli as _toml  # type: ignore[no-redef]
+    import tomli as _toml  # type: ignore[no-redef,import-not-found,unused-ignore]
 
 from git import Commit
 

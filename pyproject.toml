@@ -70,7 +70,7 @@ packages = ["src/datasmith"]
 
 [tool.mypy]
 files = ["src"]
-exclude = ["src/datasmith/agents/templates/"]
+exclude = ["src/datasmith/agents/templates/", "src/datasmith/docker/templates/"]
 disallow_untyped_defs = true
 disallow_any_unimported = true
 no_implicit_optional = true
@@ -187,4 +187,12 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "postgrest.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "json5.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tomli.*"
 ignore_missing_imports = true
