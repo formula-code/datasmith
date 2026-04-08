@@ -23,7 +23,7 @@ class TestE2EPipeline:
                 calls.append(("publish", start, end))
 
             pipeline._publish = tracked_publish  # type: ignore[assignment]
-            await pipeline.run("2024-01-01", "2024-12-31", stage=6)
+            await pipeline.run("2024-01-01", "2024-12-31", stage=7)
 
         assert len(calls) == 1
         assert calls[0] == ("publish", "2024-01-01", "2024-12-31")

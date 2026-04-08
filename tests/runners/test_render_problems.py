@@ -61,7 +61,7 @@ class TestRendersAndStoresProblem:
         assert mock_render.called
         call_kwargs = mock_render.call_args
         assert call_kwargs.kwargs["anonymize"] is True
-        assert call_kwargs.kwargs["extract"] is True
+        assert call_kwargs.kwargs["extract"] is False
         assert call_kwargs.kwargs["repo_description"] == "A scientific computing library"
 
         # rendered_problem was persisted to DB
