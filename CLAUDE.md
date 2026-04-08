@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is this project?
 
-DataSmith is the Python toolchain for building the **FormulaCode** dataset — a benchmark of 67+ repositories with 964+ performance-improving commits, designed to evaluate LLMs' ability to optimize real-world codebases. It scores LLMs relative to the human-authored speedup using ASV (Airspeed Velocity) benchmarks rather than binary pass/fail tests.
+fc-data is the Python toolchain for building the **FormulaCode** dataset — a benchmark of 67+ repositories with 964+ performance-improving commits, designed to evaluate LLMs' ability to optimize real-world codebases. It scores LLMs relative to the human-authored speedup using ASV (Airspeed Velocity) benchmarks rather than binary pass/fail tests.
 
 ## Common commands
 
@@ -24,11 +24,11 @@ uv run pre-commit run -a                     # Run all pre-commit hooks
 # Dataset verification (iterative Docker build debugging)
 python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha>
 
-# Pipeline update (monthly, the primary entrypoint for DataSmith)
-ds-update --start-date YYYY-MM-DD --end-date YYYY-MM-DD          # Run all 6 stages
-ds-update --start-date 2026-01-01 --end-date 2026-01-31 --stage 4  # Run a single stage
-ds-update --start-date 2026-01-01 --end-date 2026-01-31 --resume   # Resume from last completed
-ds-update --help                                                    # See all options
+# Pipeline update (monthly, the primary entrypoint for fc-data)
+fc-data --start-date YYYY-MM-DD --end-date YYYY-MM-DD          # Run all 6 stages
+fc-data --start-date 2026-01-01 --end-date 2026-01-31 --stage 4  # Run a single stage
+fc-data --start-date 2026-01-01 --end-date 2026-01-31 --resume   # Resume from last completed
+fc-data --help                                                    # See all options
 ```
 
 ## Architecture
@@ -47,7 +47,7 @@ ds-update --help                                                    # See all op
 | `benchmark/` | ASV benchmark collection |
 | `collation/` | Data aggregation |
 
-### Pipeline stages (`ds-update`)
+### Pipeline stages (`fc-data`)
 
 1. **scrape_repos** — Fetch repository metadata from GitHub
 2. **scrape_commits** — Scrape merged PR commits and patches
@@ -73,7 +73,7 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 
 ## Supabase (local)
 
-DataSmith uses a **local Supabase** instance for all persistent state. Connection details live in `tokens.env`:
+fc-data uses a **local Supabase** instance for all persistent state. Connection details live in `tokens.env`:
 
 - `SUPABASE_URL=http://127.0.0.1:54321` (PostgREST API)
 - `SUPABASE_KEY=sb_secret_...` (service-role key)

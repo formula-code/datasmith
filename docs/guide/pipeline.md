@@ -1,22 +1,22 @@
-# Pipeline (`ds-update`)
+# Pipeline (`fc-data`)
 
-`ds-update` is the primary command for running DataSmith. It discovers performance-improving commits from GitHub, classifies them with LLM agents, resolves dependencies, synthesizes Docker build contexts, and publishes verified images.
+`fc-data` is the primary command for running fc-data. It discovers performance-improving commits from GitHub, classifies them with LLM agents, resolves dependencies, synthesizes Docker build contexts, and publishes verified images.
 
 ## Quick reference
 
 ```bash
 # Run all 7 stages for a date range
-ds-update --start-date 2026-02-01 --end-date 2026-03-01
+fc-data --start-date 2026-02-01 --end-date 2026-03-01
 
 # Resume from where you left off (skips completed stages)
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --resume
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --resume
 
 # Run only specific stages
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 3
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 --stage 6
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 3
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 --stage 6
 
 # Preview what would run without executing
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --dry-run
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --dry-run
 ```
 
 ## CLI flags
@@ -53,10 +53,10 @@ For each repository found, the runner fetches and stores metadata including desc
 
 ```bash
 # Discover repos with at least 1000 stars
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 1 --min-stars 1000
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 1 --min-stars 1000
 
 # Include repos from an offline dataset
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 1 --offline-source data.parquet
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 1 --offline-source data.parquet
 ```
 
 **Writes to:** `repositories` table
@@ -76,7 +76,7 @@ For every repository in the `repositories` table, scrapes all merged pull reques
 If `--offline-source` is provided, also bulk-imports PR records from the Parquet file (useful for seeding the database with historical data).
 
 ```bash
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 2
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 2
 ```
 
 **Writes to:** `pull_requests` table (one row per PR)
@@ -95,10 +95,10 @@ Only PRs that pass a symbolic pre-filter (`is_performance_commit_symbolic = True
 
 ```bash
 # Classify all unclassified PRs
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 3
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 3
 
 # Re-classify all PRs (including already-classified ones)
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 3 --force
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 3 --force
 ```
 
 **Updates:** `pull_requests` table (sets `is_performance_commit`, `classification`)
@@ -118,7 +118,7 @@ For each performance-classified PR, checks out the repository at the merge commi
 The resolved dependency set (`env_payload`) and the Python version used are stored in the `packages` table. These are consumed by stage 6 to build `docker_build_env.sh` — the shell script that installs dependencies inside the Docker image.
 
 ```bash
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 4
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 4
 ```
 
 **Writes to:** `packages` table (`env_payload`, `python_version`, `can_install`)
@@ -139,13 +139,13 @@ Builds a rich, deconstructed problem context for each PR. This context is what t
 
 ```bash
 # Render problem contexts
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 5
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 5
 
 # Limit to 3 PRs per repo (useful for testing)
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 --tasks-per-repo 3
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 --tasks-per-repo 3
 
 # Re-render already-processed PRs
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 --force
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 --force
 ```
 
 **Writes to:** `candidate_prs` table
@@ -169,19 +169,19 @@ Each attempt (success or failure) is logged to the `error_logs` table with the a
 
 ```bash
 # Use the default auto-detected agent
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 6
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 6
 
 # Force a specific agent
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --agent claude
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --agent claude
 
 # Skip LLM generation entirely — only use cached/similar scripts
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --agent none
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --agent none
 
 # Limit concurrency and tasks per repo (controls cost)
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --n-concurrent 2 --tasks-per-repo 5
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --n-concurrent 2 --tasks-per-repo 5
 
 # Re-synthesize already-completed PRs
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --force
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --force
 ```
 
 **Writes to:** `candidate_containers` table (on success), `error_logs` table (every attempt)
@@ -207,7 +207,7 @@ The publish pipeline:
 6. **Mark published** — Sets `published_at` timestamp on each published PR row
 
 ```bash
-ds-update --start-date 2026-02-01 --end-date 2026-03-01 --stage 7
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 7
 ```
 
 **Reads from:** `pull_requests`, `packages`, `candidate_containers`
@@ -221,13 +221,13 @@ A monthly update usually looks like this:
 
 ```bash
 # 1. Run the full pipeline
-ds-update --start-date 2026-03-01 --end-date 2026-04-01
+fc-data --start-date 2026-03-01 --end-date 2026-04-01
 
 # 2. If it gets interrupted, resume where it left off
-ds-update --start-date 2026-03-01 --end-date 2026-04-01 --resume
+fc-data --start-date 2026-03-01 --end-date 2026-04-01 --resume
 
 # 3. After fixing a synthesis issue, re-run just stages 6-7
-ds-update --start-date 2026-03-01 --end-date 2026-04-01 --stage 6 --stage 7 --force
+fc-data --start-date 2026-03-01 --end-date 2026-04-01 --stage 6 --stage 7 --force
 ```
 
 ## Monitoring progress

@@ -1,7 +1,7 @@
 # Stage 6 (synthesize_images) Failure Analysis
 
 **Date**: 2026-04-04
-**Pipeline invocation**: `ds-update --start-date 2017-01-01 --end-date 2026-03-01 --stage 6 --n-concurrent 4 --tasks-per-repo 1`
+**Pipeline invocation**: `fc-data --start-date 2017-01-01 --end-date 2026-03-01 --stage 6 --n-concurrent 4 --tasks-per-repo 1`
 
 ## High-level numbers
 

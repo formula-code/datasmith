@@ -1,4 +1,4 @@
-site_name: 🔧 DataSmith
+site_name: 🔧 fc-data
 site_url: https://formula-code.github.io/datasmith/
 site_description: Python toolchain for building the FormulaCode benchmark
 repo_url: https://github.com/formula-code/datasmith
@@ -81,7 +81,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - Installation: getting-started/installation.md
-      - Pipeline (ds-update): guide/pipeline.md
+      - Pipeline (fc-data): guide/pipeline.md
       - Configuration: guide/configuration.md
   - User Guide:
       - Docker Images: guide/docker-images.md

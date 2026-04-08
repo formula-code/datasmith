@@ -1,6 +1,6 @@
 # Docker Images
 
-DataSmith uses a three-tier Docker image hierarchy to build reproducible environments for each pull request.
+fc-data uses a three-tier Docker image hierarchy to build reproducible environments for each pull request.
 
 ## Image hierarchy
 
