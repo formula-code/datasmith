@@ -1,0 +1,1 @@
+Task(owner='GAA-UAM', repo='scikit-fda', sha='6781c70983a32d2b326c9f1e8d6a9c0bf8c674e4', commit_date=1744494798.0, env_payload='', tag='pkg')

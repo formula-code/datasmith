@@ -1,0 +1,4 @@
+{
+  "local_image": "pymc-devs-pymc-fe0e0d78a80b307d69404e47586b0ff0124f0eaf:final",
+  "dockerhub_image": "docker.io/formulacode/all:pymc-devs-pymc-fe0e0d78a80b307d69404e47586b0ff0124f0eaf--final"
+}

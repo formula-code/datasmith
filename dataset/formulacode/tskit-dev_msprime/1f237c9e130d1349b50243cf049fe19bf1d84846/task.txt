@@ -1,0 +1,1 @@
+Task(owner='tskit-dev', repo='msprime', sha='1f237c9e130d1349b50243cf049fe19bf1d84846', commit_date=1612893800.0, env_payload='{"dependencies": ["attrs==20.3.0", "h5py==3.1.0", "jsonschema==3.2.0", "newick==1.0.0", "numpy==1.20.1", "pyrsistent==0.17.3", "setuptools==53.0.0", "six==1.15.0", "svgwrite==1.4.1", "tskit==0.3.4"]}', python_version='3.9', tag='pkg', benchmarks='')

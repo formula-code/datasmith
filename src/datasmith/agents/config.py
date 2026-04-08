@@ -1,74 +1,108 @@
-import logging
+from __future__ import annotations
+
+import contextlib
 import os
+import threading
+from dataclasses import dataclass
+from typing import Any
 
-import dspy
-from portkey_ai import PORTKEY_GATEWAY_URL
+from datasmith.utils import get_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger("agents.config")
 
 
-def configure_agent_backends(local: bool = False, PORTKEY_MODEL_NAME: str | None = None) -> None:
-    model = os.getenv("DSPY_MODEL_NAME")
-    backend_url = os.getenv("DSPY_URL")
-    # Base LM kwargs; allow tweaking via env for long outputs.
-    kwargs: dict[str, str | int | float | dict[str, str]] = {"model_type": "chat"}
-    # Increase generation budget to reduce JSON truncation in extractors.
-    try:
-        kwargs["max_tokens"] = int(os.getenv("DSPY_MAX_TOKENS", "8000"))
-    except ValueError:
-        kwargs["max_tokens"] = 8000
-    # Keep deterministic unless overridden.
-    try:
-        kwargs["temperature"] = float(os.getenv("DSPY_TEMPERATURE", "0"))
-    except ValueError:
-        kwargs["temperature"] = 0.0
-    if portkey_api_key := os.getenv("PORTKEY_API_KEY"):
-        api_key = "unused-by-portkey"
-        model = (
-            PORTKEY_MODEL_NAME
-            if PORTKEY_MODEL_NAME
-            else os.getenv("PORTKEY_MODEL_NAME", "@anthropic/claude-3-5-sonnet-latest")
+@dataclass
+class AgentConfig:
+    """Configuration for LLM agent backends."""
+
+    primary_model: str = ""
+    fallback_model: str = ""
+    api_key: str = ""
+    api_base: str = ""
+    max_tokens: int = 16000
+    temperature: float = 0.0
+    portkey_api_key: str = ""
+    portkey_model_name: str = ""
+
+    @classmethod
+    def from_env(cls) -> AgentConfig:
+        return cls(
+            primary_model=os.environ.get("DSPY_MODEL", "openai/gpt-oss-120b"),
+            fallback_model=os.environ.get("DSPY_FALLBACK_MODEL", ""),
+            api_key=os.environ.get("DSPY_API_KEY", "local"),
+            api_base=os.environ.get("DSPY_API_BASE", "http://localhost:30001/v1"),
+            max_tokens=int(os.environ.get("DSPY_MAX_TOKENS", "16000")),
+            temperature=float(os.environ.get("DSPY_TEMPERATURE", "0")),
+            portkey_api_key=os.environ.get("PORTKEY_API_KEY", ""),
+            portkey_model_name=os.environ.get("PORTKEY_MODEL_NAME", ""),
         )
-        backend_url = PORTKEY_GATEWAY_URL
+
+
+# Module-level state for lazy DSPy configuration.
+_configured = False
+_lock = threading.Lock()
+_lm: Any = None  # Stores the dspy.LM instance for async-safe reuse
+
+
+def configure_dspy(config: AgentConfig) -> None:
+    """Configure DSPy backends from AgentConfig."""
+    global _lm
+    import dspy
+
+    kwargs: dict[str, Any] = {
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+    }
+
+    if config.api_key and config.primary_model:
+        _lm = dspy.LM(
+            model=config.primary_model,
+            api_key=config.api_key,
+            api_base=config.api_base or None,
+            **kwargs,
+        )
+        model_name = config.primary_model
+    elif config.portkey_api_key:
+        from portkey_ai import PORTKEY_GATEWAY_URL
+
+        model_name = config.portkey_model_name or "@anthropic/claude-3-5-sonnet-latest"
+        kwargs["api_base"] = PORTKEY_GATEWAY_URL
+        kwargs["api_key"] = "unused-by-portkey"
         kwargs["headers"] = {
-            "x-portkey-api-key": portkey_api_key,
-            "x-portkey-provider": model.split("/")[0].lstrip("@"),
+            "x-portkey-api-key": config.portkey_api_key,
+            "x-portkey-provider": model_name.split("/")[0].lstrip("@"),
         }
         kwargs["custom_llm_provider"] = "openai"
-    elif anthropic_api_key := os.getenv("ANTHROPIC_API_KEY"):
-        api_key = anthropic_api_key
-        model = os.getenv("ANTHROPIC_MODEL_NAME", "anthropic/claude-3-opus-20240229")
-        backend_url = None
-    elif vllm_api_key := os.getenv("DSPY_API_KEY"):
-        api_key = vllm_api_key
+        _lm = dspy.LM(model=model_name, **kwargs)
     else:
-        logger.warning("NO API KEY SET")
+        logger.warning("No LM backend configured")
         return
 
-    if model and ("gpt-5" in model):
-        # ValueError: OpenAI's reasoning models require passing temperature=1.0 and max_tokens >= 16000 to `dspy.LM(...)`, e.g., dspy.LM('openai/gpt-5', temperature=1.0, max_tokens=16000)
-        kwargs["max_tokens"] = 16000
-        kwargs["temperature"] = 1.0
+    with contextlib.suppress(RuntimeError):
+        dspy.configure(lm=_lm)
+    logger.info("Configured DSPy with model: %s", model_name)
 
-    if not model or not api_key:
-        logger.warning("Environment variables for DSPY model or API key are not set.")
+
+def ensure_configured() -> None:
+    """Lazy-initialize DSPy on first LLM call.  Thread- and async-safe.
+
+    Uses double-checked locking to avoid repeated configuration.
+    If ``dspy.configure()`` was already called from a different async task,
+    the stored LM is applied via ``dspy.context()`` instead.
+    """
+    global _configured
+    if _configured:
+        # DSPy was configured, but possibly from a different async task.
+        # Re-apply the LM via dspy.context() which is async-safe.
+        if _lm is not None:
+            import dspy
+
+            with contextlib.suppress(RuntimeError):
+                dspy.configure(lm=_lm)
         return
-
-    lm = get_local_lm() if local else dspy.LM(model=model, api_base=backend_url, api_key=api_key, **kwargs)  # pyright: ignore[reportArgumentType]
-    dspy.configure(lm=lm)
-    # Saves responses to ~/.dspy_cache
-    dspy.configure_cache(
-        enable_disk_cache=True,
-        enable_memory_cache=True,
-    )
-
-
-def get_local_lm() -> dspy.LM:
-    if (model := os.getenv("DSPY_MODEL_NAME", None)) and (backend_url := os.getenv("DSPY_URL", None)):
-        api_key = os.getenv("DSPY_API_KEY", None)
-        max_tokens_int = int(max_tokens) if (max_tokens := os.getenv("DSPY_MAX_TOKENS", None)) else 8000
-        return dspy.LM(model=model, api_base=backend_url, api_key=api_key, model_type="chat", max_tokens=max_tokens_int)
-    raise NotImplementedError(
-        "Local LM is not configured. Please set DSPY_MODEL_NAME and DSPY_URL environment variables."
-    )
+    with _lock:
+        if _configured:
+            return
+        config = AgentConfig.from_env()
+        configure_dspy(config)
+        _configured = True

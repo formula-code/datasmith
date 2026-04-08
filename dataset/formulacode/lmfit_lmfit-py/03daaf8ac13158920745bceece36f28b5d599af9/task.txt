@@ -1,0 +1,1 @@
+Task(owner='lmfit', repo='lmfit-py', sha='03daaf8ac13158920745bceece36f28b5d599af9', commit_date=1618004330.0, env_payload='{"dependencies": ["asteval==0.9.23", "future==0.18.2", "numpy==1.20.1", "scipy==1.6.2", "uncertainties==3.1.5"]}', python_version='3.9', tag='pkg', benchmarks='')

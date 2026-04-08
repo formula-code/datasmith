@@ -1,0 +1,4 @@
+{
+  "local_image": "qiskit-qiskit-6f482400e56345fe260d2144bf86acfd563855bc:final",
+  "dockerhub_image": "docker.io/formulacode/all:qiskit-qiskit-6f482400e56345fe260d2144bf86acfd563855bc--final"
+}

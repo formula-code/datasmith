@@ -1,0 +1,12 @@
+{
+  "task": {
+    "owner": "scikit-learn",
+    "repo": "scikit-learn",
+    "sha": "91d5640a82dd0bd35c8c438ef22ff3c2cd56bce3",
+    "tag": "pkg"
+  },
+  "stage": "tests",
+  "return_code": 1,
+  "stdout": "",
+  "stderr": "The command executed was `/usr/bin/docker container run --rm formulacode/scikit-learn-scikit-learn:91d5640a82dd0bd35c8c438ef22ff3c2cd56bce3--run /run_tests.sh`.\nIt returned with code 1\nThe content of stdout is ''\nThe content of stderr can be found above the stacktrace (it wasn't captured)."
+}

@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.7
+
+ARG REPO_IMAGE
+
+FROM ${REPO_IMAGE} AS env
+ARG COMMIT_SHA
+ARG ENV_PAYLOAD="[]"
+ARG PY_VERSION=""
+RUN git checkout "$COMMIT_SHA"
+LABEL vcs.ref="$COMMIT_SHA"
+
+COPY docker_build_env.sh /workspace/repo/docker_build_env.sh
+RUN chmod +x /workspace/repo/docker_build_env.sh && \
+    echo "${ENV_PAYLOAD}" > /tmp/env_payload.json && \
+    /workspace/repo/docker_build_env.sh --env-payload /tmp/env_payload.json
+
+FROM env AS pkg
+
+COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh
+RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
+    /workspace/repo/docker_build_pkg.sh
+
+COPY profile.sh /profile.sh
+COPY run-tests.sh /run-tests.sh
+RUN chmod +x /profile.sh /run-tests.sh
+
+RUN micromamba clean --all --yes
+
+FROM pkg AS run
+
+COPY docker_build_run.sh /docker_build_run.sh
+RUN chmod +x /docker_build_run.sh \
+    && /docker_build_run.sh
+
+FROM run AS final
+ARG BENCHMARKS=""
+ARG BUILD_SCRIPT=""
+
+COPY docker_build_final.sh /docker_build_final.sh
+RUN chmod +x /docker_build_final.sh \
+    && printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks_fallback.txt; \
+    /docker_build_final.sh /tmp/asv_benchmarks_fallback.txt;

@@ -1,0 +1,12 @@
+{
+  "task": {
+    "owner": "django-components",
+    "repo": "django-components",
+    "sha": "007009a4808c4b3ead05833cc97b32c896fe4783",
+    "tag": "pkg"
+  },
+  "stage": "build",
+  "return_code": 1,
+  "stdout": "",
+  "stderr": "The command executed was `/usr/bin/docker buildx build --build-arg REPO_URL=https://github.com/django-components/django-components --build-arg COMMIT_SHA=007009a4808c4b3ead05833cc97b32c896fe4783 --build-arg ENV_PAYLOAD={\"dependencies\": [\"asgiref==3.8.1\", \"django==5.2.4\", \"djc-core-html-parser==1.0.2\", \"sqlparse==0.5.3\", \"typing-extensions==4.14.0\"]} --build-arg PY_VERSION=3.12 --load --target run --tag formulacode/django-components-django-components:007009a4808c4b3ead05833cc97b32c896fe4783--run dataset/formulacode_verified_new/django-components_django-components/007009a4808c4b3ead05833cc97b32c896fe4783`.\nIt returned with code 1\nThe content of stdout is ''\nThe content of stderr can be found above the stacktrace (it wasn't captured)."
+}

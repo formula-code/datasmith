@@ -1,0 +1,477 @@
+---
+tags:
+  - documentation
+  - formulacode
+  - datasmith
+---
+
+## Abstract
+
+This document covers the `ds.resolution` module — dependency resolution for Python repositories. Given a commit SHA and repository name, this module discovers packaging metadata, resolves pinned dependencies via `uv`, validates installability, and persists results to a `packages` Supabase table. It runs as pipeline stage 3.5 — after `classify_prs` and before `synthesize_images` — providing the `env_payload` and `python_version` that the synthesizer requires to produce correct Docker build contexts.
+
+## High level overview
+
+```mermaid
+graph LR
+    A <--> B
+    B --> C
+    B --> D
+    B --> E
+    B --> F
+
+    A[Supabase]
+    B["`ds.resolution
+    (This Feature)`"]
+    C[Git / GitHub]
+    D[uv]
+    E[PyPI]
+    F[ds.runners]
+```
+
+## Motivation
+
+The synthesizer (`ds.agents.synthesizer`) expects `env_payload` (a JSON string of pinned dependencies) and `python_version` to generate Docker build contexts. Without these, the `docker_build_env.sh` script has no idea what packages to install, making synthesis unreliable. Currently nothing populates these fields — `pipeline.py:_synthesize_images()` reads `env_payload` and `python_version` from the `pull_requests` table but they default to empty strings.
+
+The old pipeline handled this in `prepare_commits_for_building_reports.py` (stage 3), which called `analyze_commit()` from the `execution.resolution` module. This module must be ported into the new architecture as a standalone pipeline stage with its own Supabase table.
+
+## Pipeline position
+
+```
+Stage 1: scrape_repos
+Stage 2: scrape_commits
+Stage 3: classify_prs
+Stage 4: resolve_packages    ← NEW
+Stage 5: synthesize_images   (now receives env_payload + python_version)
+Stage 6: publish
+```
+
+The `resolve_packages` stage runs after classification because only performance-classified PRs need resolution (expensive operation — clones repos, creates venvs, runs `uv pip compile`). Running it on all PRs would waste resources.
+
+## Supabase schema
+
+### New table: `packages`
+
+```sql
+CREATE TABLE IF NOT EXISTS packages (
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    sha TEXT NOT NULL,
+
+    -- Resolution outputs
+    package_name TEXT,              -- PyPI name (e.g., "pandas")
+    package_version TEXT,           -- Version from metadata
+    python_version TEXT NOT NULL,   -- Selected Python version (e.g., "3.10")
+    env_payload TEXT NOT NULL,      -- JSON array of pinned requirement strings
+    build_commands JSONB,           -- ASV build commands
+    install_commands JSONB,         -- ASV install commands
+    primary_root TEXT,              -- Relative path to primary package root
+    resolution_strategy TEXT,       -- Strategy description for debugging
+    can_install BOOLEAN NOT NULL,   -- Whether dry-run + real install succeeded
+    requires_python TEXT,           -- Requires-Python constraint from metadata
+
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (owner, repo, sha)
+);
+```
+
+**Key design decisions:**
+
+- **Keyed by `(owner, repo, sha)`** — not by `issue_number`. Multiple PRs can share the same base SHA within a repo; resolution results are identical for the same commit, so we deduplicate at the SHA level.
+- **`env_payload`** is a JSON array of pinned requirement strings (e.g., `["numpy==1.24.3", "scipy==1.11.0"]`). This is passed directly to `docker_build_env.sh` via Docker build args.
+- **`can_install`** filters out commits where dependency resolution failed — the synthesizer should not attempt these.
+- **`dry_run_log`** and `excluded_*` dicts from the archive are intentionally omitted. They were useful for debugging the resolution module itself but are not consumed downstream. If needed for debugging, they can be logged to `runner_failures`.
+
+### Impact on `pull_requests` table
+
+The `env_payload` and `python_version` columns on `pull_requests` (referenced by `pipeline.py:_synthesize_images()`) are **removed as sources of truth**. Instead, the synthesize stage joins `pull_requests` with `packages` on `(owner, repo, merge_commit_sha = sha)` to get resolution data. This avoids duplicating resolution results across PRs that share a base commit.
+
+### Impact on `candidate_containers` table
+
+The `candidate_containers` table already has `python_version` and `env_payload` columns. These continue to store the values used for the specific synthesis attempt (which may differ from the resolution output if overridden). The `packages` table is the source of truth for resolution; `candidate_containers` records what was actually used.
+
+## Module structure
+
+```
+src/datasmith/resolution/
+    __init__.py              # Public API: analyze_commit()
+    orchestrator.py          # Main analyze_commit() function
+    metadata_parser.py       # Parse pyproject.toml, setup.cfg, setup.py, requirements.txt
+    dependency_resolver.py   # uv pip compile, dry-run, real install
+    package_filters.py       # Filter non-PyPI packages, normalize requirements
+    python_manager.py        # Python version selection, temporal filtering, uv wrapper
+    import_analyzer.py       # Fallback: infer deps from import statements
+    blocklist.py             # Persistent blocklist of packages that fail resolution
+    constants.py             # NOT_REQUIREMENTS, ALLOWLIST, SPECIAL_IMPORT_TO_PYPI
+    models.py                # Candidate, CandidateMeta, ASVCfgAggregate
+    git_utils.py             # Repo checkout, ASV config finder
+```
+
+This is a direct port from `archive/execution/resolution/` into the new package namespace. The module is self-contained — it depends only on `git`, `uv`, and the local filesystem, not on any other `ds.*` modules (except `ds.core.cache` for the `@cache_completion` decorator and `ds.utils` for logging).
+
+## Core API
+
+### `analyze_commit(sha, repo_name) → dict | None`
+
+The single public entry point. Orchestrates the full resolution pipeline:
+
+```python
+from datasmith.resolution import analyze_commit
+
+result = analyze_commit("abc123", "pandas-dev/pandas")
+# Returns:
+# {
+#     "sha": "abc123",
+#     "repo_name": "pandas-dev/pandas",
+#     "package_name": "pandas",
+#     "package_version": "2.1.0",
+#     "python_version": "3.10",
+#     "build_command": ["python setup.py build_ext --inplace"],
+#     "install_command": ["pip install -e ."],
+#     "final_dependencies": ["numpy==1.24.3", "scipy==1.11.0", ...],
+#     "can_install": True,
+#     "primary_root": ".",
+#     "resolution_strategy": "cutoff=strict, extras=on, python=3.10, source=pyproject.toml",
+# }
+```
+
+Returns `None` if:
+- No ASV config found in the commit
+- No Python >= 3.8 available
+- No packaging files found (no pyproject.toml, setup.py, etc.)
+- All resolution strategies exhausted without success
+
+Results are cached via `@cache_completion` in the local SQLite cache (keyed by `(sha, repo_name)`), so repeated calls for the same commit are free.
+
+## Resolution strategies
+
+The orchestrator tries two strategies in order, each with self-healing retry logic:
+
+### Strategy 1: Direct `uv pip compile` from pyproject.toml (preferred)
+
+For each packaging source file (pyproject.toml, setup.cfg, setup.py) in the primary candidate:
+1. Create a `uv` venv for each of the top 3 candidate Python versions
+2. Run `uv pip compile --all-extras` with an optional RFC3339 temporal cutoff (`UV_EXCLUDE_NEWER`) set to the commit's authored date
+3. Validate with `uv pip install --dry-run`
+4. Confirm with a real `uv pip install` preflight
+5. Return on first success
+
+Tries strict cutoff first, then relaxed (no cutoff) if strict fails.
+
+### Strategy 2: Aggregate base requirements → `uv pip compile` (fallback)
+
+When Strategy 1 fails (e.g., the pyproject.toml uses dynamic dependencies, has build-time code generation, etc.):
+1. Collect base requirements from: packaging metadata (`core_deps`), ASV install commands, ASV matrix values, requirements.txt files, and optionally `uv build` wheel metadata or import-inferred deps
+2. Filter through `filter_requirements_for_pypi()` to remove stdlib, local modules, conda packages, etc.
+3. Run `uv pip compile` with self-healing: if a package is "not found", extract its name, add to persistent blocklist, remove, and retry (up to 3 times)
+4. Dry-run validate, then real install validate
+5. On ABI errors, fall back to older Python versions
+
+### Self-healing blocklist
+
+A persistent JSON blocklist (`{CACHE_DIR}/package_blocklist.json`) tracks packages that fail resolution. When `uv pip compile` or `uv pip install --dry-run` fails because a package is not found on PyPI, the failing package name is extracted from the error message, added to the blocklist, and the resolution is retried without it. The blocklist is thread-safe (uses `threading.Lock`) and persists across runs.
+
+## Data flow trace
+
+### How `prepare_commits_for_building_reports.py` called the resolution module (archive)
+
+```
+prepare_commits_for_building_reports.py
+  │
+  ├─ Load parquet → DataFrame with commit data
+  ├─ crude_perf_filter(df) → filtered_df
+  │
+  ├─ Build (sha, repo_name) pairs from filtered_df["pr_base"]["sha"]
+  ├─ _thread_map(safe_analyze_commit, pairs, max_workers=200)
+  │     │
+  │     └─ safe_analyze_commit((sha, repo_name))
+  │           │
+  │           └─ analyze_commit(sha, repo_name)   # from resolution.__init__
+  │                 │
+  │                 └─ orchestrator.analyze_commit(sha, repo_name)
+  │                       │
+  │                       ├─ prepare_repo_checkout(repo_name, sha)    [git_utils]
+  │                       ├─ asv_finder(commit)                        [git_utils]
+  │                       ├─ filter_python_versions_by_commit_date()   [python_manager]
+  │                       ├─ discover_candidates(commit)               [metadata_parser]
+  │                       ├─ analyze_candidate_meta(candidate)         [metadata_parser]
+  │                       ├─ select_primary_candidate(...)             [metadata_parser]
+  │                       │
+  │                       ├─ STRATEGY 1: For each source file × python version:
+  │                       │   ├─ run_uv(["venv", ...])                [python_manager]
+  │                       │   ├─ uv_compile_from_pyproject(...)       [dependency_resolver]
+  │                       │   ├─ uv_dry_run_install(...)              [dependency_resolver]
+  │                       │   └─ uv_install_real(...)                 [dependency_resolver]
+  │                       │
+  │                       ├─ STRATEGY 2: Aggregate requirements
+  │                       │   ├─ extract_requested_extras(...)        [package_filters]
+  │                       │   ├─ split_shell_command(cmd)             [package_filters]
+  │                       │   ├─ normalize_requirement(tok)           [package_filters]
+  │                       │   ├─ resolve_requirements_file(...)       [package_filters]
+  │                       │   ├─ uv_build_and_read_metadata(...)      [dependency_resolver]
+  │                       │   ├─ infer_runtime_from_imports(...)      [import_analyzer]
+  │                       │   ├─ filter_requirements_for_pypi(...)    [package_filters]
+  │                       │   ├─ clean_pinned(...)                    [package_filters]
+  │                       │   ├─ uv_compile(...)                      [dependency_resolver]
+  │                       │   │   └─ Self-healing retry loop:
+  │                       │   │       ├─ extract_failing_package()    [blocklist]
+  │                       │   │       ├─ add_to_blocklist()           [blocklist]
+  │                       │   │       └─ remove_package_from_requirements() [blocklist]
+  │                       │   ├─ uv_dry_run_install(...)              [dependency_resolver]
+  │                       │   │   └─ Self-healing retry loop (same)
+  │                       │   └─ uv_install_real(...)                 [dependency_resolver]
+  │                       │
+  │                       └─ Return dict with resolution results
+  │
+  ├─ pd.DataFrame(analysis_dicts).add_prefix("analysis_")
+  ├─ Filter: analysis_can_install == True
+  ├─ Filter: analysis_resolution_strategy not startswith "unresolved"
+  └─ Save enriched parquet
+```
+
+### How the new pipeline will call resolution
+
+```
+Pipeline._run_stage("resolve_packages")
+  │
+  ├─ Query pull_requests WHERE is_performance_commit = TRUE
+  │   AND NOT EXISTS (SELECT 1 FROM packages WHERE packages.sha = pr.merge_commit_sha
+  │                   AND packages.owner = pr.owner AND packages.repo = pr.repo)
+  │
+  ├─ Deduplicate by (owner, repo, merge_commit_sha)
+  │   (multiple PRs may share the same base commit)
+  │
+  ├─ ResolvePackagesRunner.run(items, n_concurrent=N)
+  │     │
+  │     └─ For each (owner, repo, sha):
+  │           ├─ analyze_commit(sha, f"{owner}/{repo}")
+  │           ├─ If result and can_install:
+  │           │   └─ Upsert into packages table
+  │           └─ If None or not can_install:
+  │               └─ Log to runner_failures
+  │
+  └─ Pipeline._synthesize_images() now reads:
+        SELECT pr.*, pkg.env_payload, pkg.python_version
+        FROM pull_requests pr
+        JOIN packages pkg ON pr.owner = pkg.owner
+                          AND pr.repo = pkg.repo
+                          AND pr.merge_commit_sha = pkg.sha
+        WHERE pr.is_performance_commit = TRUE
+          AND pr.container_name IS NULL
+          AND pkg.can_install = TRUE
+```
+
+## Key data models (from archive, ported as-is)
+
+### `Candidate`
+
+```python
+@dataclass
+class Candidate:
+    root_relpath: str                        # e.g., "." or "subpackage/"
+    pyproject_path: Path | None = None
+    setup_cfg_path: Path | None = None
+    setup_py_path: Path | None = None
+    req_files: list[Path] = field(default_factory=list)
+    env_yamls: list[Path] = field(default_factory=list)
+```
+
+### `CandidateMeta`
+
+```python
+@dataclass
+class CandidateMeta:
+    name: str | None = None                  # PyPI name
+    version: str | None = None
+    import_name: str | None = None
+    requires_python: str | None = None
+    core_deps: set[str] = field(default_factory=set)
+    extras: dict[str, set[str]] = field(default_factory=dict)
+    build_requires: set[str] = field(default_factory=set)
+```
+
+### `ASVCfgAggregate`
+
+```python
+@dataclass
+class ASVCfgAggregate:
+    pythons: set[tuple[int, ...]] = field(default_factory=set)
+    build_commands: set[str] = field(default_factory=set)
+    install_commands: set[str] = field(default_factory=set)
+    matrix: dict[str, set[str]] = field(default_factory=dict)
+```
+
+## Functions and classes used per module
+
+### `orchestrator.py`
+
+| Function | Purpose |
+|----------|---------|
+| `analyze_commit(sha, repo_name)` | Main entry point — two-strategy resolution with caching |
+
+### `metadata_parser.py`
+
+| Function | Purpose |
+|----------|---------|
+| `parse_pyproject(path)` | Extract name, deps, extras from pyproject.toml (TOML) |
+| `parse_setup_cfg(path)` | Extract from setup.cfg (ConfigParser) |
+| `parse_setup_py(path)` | Heuristic AST-based extraction from setup.py (no code execution) |
+| `parse_requirements_txt(path)` | Line-by-line requirements parser |
+| `parse_conda_env_yaml(path)` | Extract pip deps from environment.yml |
+| `discover_candidates(commit)` | Scan commit tree for packaging files, return `dict[str, Candidate]` |
+| `analyze_candidate_meta(candidate)` | Merge metadata from all sources into `CandidateMeta` |
+| `select_primary_candidate(repo_name, candidates, install_cmds, analyzed)` | Heuristic selection of the primary package |
+
+### `dependency_resolver.py`
+
+| Function | Signature | Purpose |
+|----------|-----------|---------|
+| `uv_compile_from_pyproject` | `(path, python_version, cutoff_rfc3339) → list[str]` | `uv pip compile --all-extras` from pyproject.toml |
+| `uv_compile` | `(requirements, python_version, cutoff_rfc3339) → list[str]` | `uv pip compile` from stdin requirements |
+| `uv_dry_run_install` | `(pinned, python_version, venv_path) → (bool, str)` | Validate wheels downloadable |
+| `uv_install_real` | `(pinned, python_executable) → (bool, str)` | Surface sdist build failures |
+| `uv_build_and_read_metadata` | `(project_dir) → (name, version, requires_dist, requires_python)` | Build wheel and read METADATA |
+| `rfc3339` | `(datetime) → str` | Convert to RFC3339 timestamp |
+
+### `package_filters.py`
+
+| Function | Purpose |
+|----------|---------|
+| `filter_requirements_for_pypi(reqs, project_dir, own_import_name)` | Remove stdlib, non-PyPI, local modules |
+| `extract_pkg_name(req)` | Extract package name from requirement string |
+| `normalize_requirement(tok)` | Validate and normalize a token into requirement(s) |
+| `extract_requested_extras(install_cmds, matrix, available)` | Find extras referenced in ASV config |
+| `resolve_requirements_file(commit, rel_path, seen)` | Recursively resolve `-r` includes |
+| `split_shell_command(cmd)` | Split on `&&`, `\|\|`, `;` |
+| `clean_pinned(reqs)` | Remove redundant lower-bound specifiers |
+| `fix_marker_spacing(req)` | Fix malformed PEP 508 markers |
+
+### `python_manager.py`
+
+| Function | Purpose |
+|----------|---------|
+| `ensure_python_version_available(version)` | Install Python via `uv python install` if needed |
+| `filter_python_versions_by_commit_date(versions, commit_date)` | Temporal filtering with 90-day grace |
+| `run_uv(args, input_text, cwd, extra_env)` | Subprocess wrapper for all `uv` commands |
+
+### `import_analyzer.py`
+
+| Function | Purpose |
+|----------|---------|
+| `top_level_imports_under(root)` | AST-parse all `.py` files for import statements |
+| `infer_runtime_from_imports(project_dir, own_import_name)` | Map imports to PyPI names |
+
+### `blocklist.py`
+
+| Function | Purpose |
+|----------|---------|
+| `get_blocklist()` | Load persistent blocklist from JSON |
+| `add_to_blocklist(package_name)` | Add package, persist to disk |
+| `extract_failing_package(error_log)` | Regex extract package name from uv error |
+| `should_retry_without_package(error_log)` | Determine if removal+retry is worth it |
+| `remove_package_from_requirements(reqs, pkg)` | Filter package from list |
+
+### `constants.py`
+
+| Constant | Purpose |
+|----------|---------|
+| `NOT_REQUIREMENTS` | ~175 names that are not PyPI packages (stdlib, system, build tools) |
+| `ALLOWLIST_COMMON_PYPI` | ~120 well-known PyPI packages to never filter out |
+| `GENERIC_LOCAL_NAMES` | ~30 names likely to be local modules (lib, utils, core, etc.) |
+| `CONDA_SYSTEM_PACKAGES` | ~30 system/compiler packages with no PyPI equivalent |
+| `SPECIAL_IMPORT_TO_PYPI` | Import-to-PyPI mapping (e.g., `PIL` → `Pillow`, `cv2` → `opencv-python`) |
+
+## Runner
+
+### `ResolvePackagesRunner`
+
+```python
+class ResolvePackagesRunner:
+    """Resolve dependencies for classified PRs and persist to packages table."""
+
+    def __init__(self, n_concurrent: int = 16):
+        ...
+
+    async def run(self, items: list[dict]) -> None:
+        """Process items concurrently via asyncio.to_thread (analyze_commit is blocking)."""
+        ...
+```
+
+Each item is `{"owner": str, "repo": str, "sha": str}`. The runner:
+1. Deduplicates by `(owner, repo, sha)` — multiple PRs may reference the same commit
+2. Skips items already in the `packages` table (resumption)
+3. Runs `analyze_commit(sha, f"{owner}/{repo}")` via `asyncio.to_thread`
+4. Upserts results into `packages` table
+5. Logs failures to `runner_failures`
+
+Default concurrency is 16 (each analysis clones a repo and runs `uv` — higher concurrency may exhaust disk I/O or rate-limit GitHub).
+
+## Integration with synthesizer
+
+After resolution, the synthesize stage becomes:
+
+```python
+async def _synthesize_images(self) -> None:
+    client = get_client()
+    resp = (
+        client.table("pull_requests")
+        .select(
+            "owner, repo, issue_number, merge_commit_sha, title, body, "
+            "created_at, rendered_problem"
+        )
+        .eq("is_performance_commit", True)
+        .is_("container_name", "null")
+        .execute()
+    )
+    rows = resp.data
+
+    # Join with packages for env_payload and python_version
+    shas = {(r["owner"], r["repo"], r["merge_commit_sha"]) for r in rows}
+    pkg_resp = (
+        client.table("packages")
+        .select("owner, repo, sha, env_payload, python_version")
+        .eq("can_install", True)
+        .execute()
+    )
+    pkg_lookup = {
+        (p["owner"], p["repo"], p["sha"]): p
+        for p in pkg_resp.data
+    }
+
+    items = []
+    for r in rows:
+        key = (r["owner"], r["repo"], r.get("merge_commit_sha", ""))
+        pkg = pkg_lookup.get(key, {})
+        items.append({
+            ...
+            "env_payload": pkg.get("env_payload", ""),
+            "python_version": pkg.get("python_version", ""),
+        })
+```
+
+The `env_payload` is a JSON array of pinned requirements. The `docker_build_env.sh` template receives it as a Docker build arg and installs the packages:
+
+```bash
+# docker_build_env.sh
+ENV_PAYLOAD='${ENV_PAYLOAD}'
+if [ -n "$ENV_PAYLOAD" ]; then
+    echo "$ENV_PAYLOAD" | python -c "import sys,json; [print(p) for p in json.load(sys.stdin)]" > /tmp/requirements.txt
+    uv pip install -r /tmp/requirements.txt
+fi
+```
+
+## Verification
+
+- **Unit tests**: Mock `run_uv` and test each strategy path (direct compile success, fallback to aggregate, self-healing blocklist).
+- **Integration test**: Run `analyze_commit` on a known commit (e.g., a pandas PR) and verify `can_install=True` with correct `python_version`.
+- **Resumption test**: Run the runner, kill mid-execution, restart — verify it skips already-resolved packages.
+- **Blocklist test**: Feed a requirements list with a nonexistent package, verify it's blocklisted and retried without it.
+
+## Migration path
+
+1. Create `supabase/migrations/00005_packages.sql` with the table definition above.
+2. Port `archive/execution/resolution/` → `src/datasmith/resolution/`, updating imports from `datasmith.execution.resolution` to `datasmith.resolution`.
+3. Add `ResolvePackagesRunner` to `src/datasmith/runners/resolve_packages.py`.
+4. Add `"resolve_packages"` to `STAGES` in `pipeline.py` between `"classify_prs"` and `"synthesize_images"`.
+5. Update `_synthesize_images()` to join with `packages` table.
+6. Remove `env_payload` and `python_version` columns from `pull_requests` (migration 00006).

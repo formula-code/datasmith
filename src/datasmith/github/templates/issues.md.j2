@@ -1,0 +1,21 @@
+{% for it in issues %}
+# Issue #{{ it.number }}: {{ it.title }}
+{% if it.description %}
+Description:
+{{ it.description }}
+{% endif %}
+
+{% if it.comments %}
+Comments:
+{% for c in it.comments %}
+ - {{ c }}
+{% endfor %}
+{% endif %}
+
+{% if it.cross_references %}
+Cross-references:
+{% for x in it.cross_references %}
+ - {{ x }}
+{% endfor %}
+{% endif %}
+{% endfor %}

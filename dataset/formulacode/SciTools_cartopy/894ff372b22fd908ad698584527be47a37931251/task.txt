@@ -1,0 +1,1 @@
+Task(owner='SciTools', repo='cartopy', sha='894ff372b22fd908ad698584527be47a37931251', commit_date=1729712165.0, env_payload='', tag='pkg')

@@ -1,0 +1,150 @@
+# FormulaCode Docker Build Verification Guide
+
+You are fixing a Docker build context for the FormulaCode dataset. Your goal is to iteratively
+fix the build until `sandbox_verify.py` succeeds.
+
+## Task Info
+
+- **Repository**: {{ owner }}/{{ repo }}
+- **Commit SHA**: {{ sha }}
+- **Python version**: {{ python_version }}
+
+## Quick Start
+
+```bash
+python3 sandbox_verify.py
+```
+
+This runs the full verification pipeline: build → tests.
+On failure it writes `task/failure.json`. On success it writes `task/verification_success.json`.
+Both stages (build, tests) must pass for verification to succeed.
+
+## PR Context
+
+{{ pr_context }}
+
+## Prior Attempts
+
+If `prior_attempts.md` exists in this workspace, it contains build scripts that were already
+tried and failed. **Read it first** to understand what went wrong and avoid repeating the same
+mistakes.
+
+## Workflow
+
+Follow this iterative cycle:
+
+1. Run `python3 sandbox_verify.py` (A good timeout is 60 minutes, but adjust as needed)
+2. If it fails, read `task/failure.json` for error details
+3. Edit `task/docker_build_pkg.sh` and/or `task/docker_build_run.sh`
+4. Re-run `python3 sandbox_verify.py`
+5. Repeat until `task/verification_success.json` is created
+
+**IMPORTANT**: Only modify `task/docker_build_pkg.sh` and `task/docker_build_run.sh`.
+Do **not** modify the Dockerfile, `task.txt`, or any other scripts.
+
+## File Constraints
+
+### Files you CAN edit
+- `task/docker_build_pkg.sh` — Primary build script. Install the package, add build deps.
+- `task/docker_build_run.sh` — Runtime setup. Add test/benchmark deps, repo-specific config.
+
+### Files you MUST NOT edit
+- `task/Dockerfile.pr` — Multi-stage build definition (base and repo stages are pre-built)
+- `task/task.txt` — Task configuration (owner, repo, sha, deps)
+- `task/docker_build_base.sh` — Base system setup (template)
+- `task/docker_build_env.sh` — Python environment creation (template)
+- `task/docker_build_final.sh` — Final image setup (template)
+- `task/profile.sh` — ASV benchmark runner
+- `task/run-tests.sh` — Test runner
+- `task/entrypoint.sh` — Container entrypoint
+
+## Understanding failure.json
+
+When verification fails, `task/failure.json` contains:
+
+```json
+{
+  "stage": "build|tests",
+  "return_code": 1,
+  "stderr": "Full error output from the failed stage",
+  "stdout": "Full standard output from the failed stage",
+  "error_message": "Human-readable error description"
+}
+```
+
+- **build** failures: Usually missing dependencies or compilation errors → fix in `docker_build_pkg.sh`
+- **tests** failures: Missing test deps, import errors, or benchmark setup issues → fix in `docker_build_run.sh` or `docker_build_pkg.sh`
+
+## Common Fixes for docker_build_pkg.sh
+
+### Add build dependency (conda)
+```bash
+micromamba install -y -n "$ENV_NAME" -c conda-forge some-build-tool
+```
+
+### Add build dependency (pip)
+```bash
+micromamba run -n "$ENV_NAME" pip install build-dependency
+```
+
+### Set compiler flags
+```bash
+export CFLAGS="${CFLAGS:--Wno-error=incompatible-pointer-types}"
+export CXXFLAGS="${CXXFLAGS:--Wno-error}"
+```
+
+### Initialize git submodules
+```bash
+git -C "$REPO_ROOT" submodule update --init --recursive
+```
+
+### Build Cython extensions
+```bash
+micromamba install -y -n "$ENV_NAME" -c conda-forge cython
+micromamba run -n "$ENV_NAME" python setup.py build_ext --inplace
+```
+
+### Patch source files
+```bash
+sed -i 's/problematic_code/fixed_code/' path/to/file.py
+```
+
+## Common Fixes for docker_build_run.sh
+
+### Add runtime/test dependencies
+```bash
+source /etc/profile.d/asv_utils.sh
+source /etc/profile.d/asv_build_vars.sh
+micromamba run -n "$ENV_NAME" pip install pytest-xdist pytest-timeout
+```
+
+## Environment Variables Available
+
+These are set by earlier build stages and available in both scripts:
+
+- `REPO_ROOT` — Repository root path (usually `/workspace/repo`)
+- `ENV_NAME` — Current environment name (e.g., `asv_3.10`)
+- `ASV_PY_VERSIONS` — Space-separated Python versions
+- `CONF_NAME` — Path to ASV config file
+- `ALL_EXTRAS` — Extras to install (if any)
+- `MAMBA_ROOT_PREFIX` — Micromamba root (`/opt/conda`)
+
+## Docker Build Stages
+
+The Dockerfile.pr has 4 stages: env → pkg → run → final (base and repo images are pre-built).
+Only the `pkg` and `run` stages use your editable scripts.
+
+- **pkg** stage: Runs `docker_build_pkg.sh` to install the package
+- **run** stage: Runs `docker_build_run.sh` to prepare for tests/benchmarks
+
+Changes to `docker_build_pkg.sh` rebuild from the pkg stage onward (fast iteration).
+Changes to `docker_build_run.sh` rebuild only the run stage.
+
+## Tips
+
+- Read the full error in `failure.json` before making changes
+- Start with the simplest fix (add a missing dep) before trying complex patches
+- The package install command in `docker_build_pkg.sh` is usually `pip install --no-build-isolation -v -e .`
+- If the build times out, look for ways to simplify or skip expensive steps
+- Docker layer caching means earlier stages are cached — only your changed stage rebuilds
+- A lot of bookkeeping code is used in downstream stages; avoid removing code unless you understand its purpose.

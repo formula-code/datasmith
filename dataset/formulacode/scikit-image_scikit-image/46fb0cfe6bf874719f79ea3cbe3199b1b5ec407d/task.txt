@@ -1,0 +1,1 @@
+Task(owner='scikit-image', repo='scikit-image', sha='46fb0cfe6bf874719f79ea3cbe3199b1b5ec407d', commit_date=1753019035.0, env_payload='', tag='pkg')

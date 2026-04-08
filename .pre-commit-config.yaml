@@ -6,12 +6,14 @@ repos:
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
+        args: [--unsafe]
       - id: check-json
         exclude: ^.devcontainer/devcontainer.json
       - id: pretty-format-json
         exclude: ^.devcontainer/devcontainer.json
         args: [--autofix, --no-sort-keys]
       - id: end-of-file-fixer
+        exclude: ^supabase/snippets/
       - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit

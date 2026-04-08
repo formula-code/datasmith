@@ -1,6 +1,6 @@
 [project]
 name = "datasmith"
-version = "0.0.1"
+version = "0.1.0"
 description = "Python codebase for preparing formulacode's hugginface repositories."
 authors = [{ name = "Atharva Sehgal", email = "atharva.sehgal@gmail.com" }]
 readme = "README.md"
@@ -15,24 +15,25 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "asv",
-    "docker",
     "dspy>=2.6.27",
     "gitpython",
+    "httpx>=0.27",
+    "huggingface-hub>=0.20",
     "jinja2>=3.1.6",
-    "json5",
-    "numpy",
-    "packaging>=25.0",
-    "pandas",
+    "json5>=0.9",
     "portkey-ai>=1.14.3",
+    "pyarrow>=14.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
     "python-dotenv>=1.1.1",
-    "requests",
-    "ruptures",
-    "simple-useragent",
+    "python-on-whales>=0.60",
+    "supabase>=2.0",
     "tiktoken",
-    "tomli",
-    "tqdm",
+    "tomli>=2.0; python_version < '3.11'",
 ]
+
+[project.scripts]
+ds-update = "datasmith.update.cli:main"
 
 [project.urls]
 Homepage = "https://formula-code.github.io/datasmith/"
@@ -41,23 +42,20 @@ Documentation = "https://formula-code.github.io/datasmith/"
 
 [dependency-groups]
 dev = [
-    "asv",
     "deptry>=0.23.0",
-    "docker",
-    "gitpython",
     "ipykernel",
     "ipython",
     "matplotlib",
     "mypy>=0.991",
+    "pandas",
     "pandas-stubs",
     "pre-commit>=2.20.0",
-    "pyarrow",
+    "pytest-asyncio>=0.23",
     "pytest-cov>=4.0.0",
     "pytest>=7.2.0",
+    "respx>=0.21",
     "ruff>=0.11.5",
     "tox-uv>=1.11.3",
-    "types-docker",
-    "types-requests",
     "types-tqdm",
 ]
 
@@ -70,6 +68,7 @@ packages = ["src/datasmith"]
 
 [tool.mypy]
 files = ["src"]
+exclude = ["src/datasmith/agents/templates/", "src/datasmith/docker/templates/"]
 disallow_untyped_defs = true
 disallow_any_unimported = true
 no_implicit_optional = true
@@ -80,11 +79,14 @@ show_error_codes = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [tool.ruff]
 target-version = "py39"
 line-length = 120
 fix = true
+extend-exclude = ["archive/", "dataset/", "scratch/", "src/datasmith/docker/templates/", "src/datasmith/agents/templates/"]
+force-exclude = true
 
 [tool.ruff.lint]
 select = [
@@ -124,13 +126,26 @@ ignore = [
     "E501",
     # DoNotAssignLambda
     "E731",
+    # try-except return (common in fallback patterns)
+    "TRY300",
+    # subprocess call security (we control inputs)
+    "S603",
+    # partial executable path (we use git, codex, etc.)
+    "S607",
+    # jinja2 autoescape (we render markdown, not HTML)
+    "S701",
+    # mutable class attr without ClassVar (acceptable for registries)
+    "RUF012",
+    # ternary suggestions (readability preference)
+    "SIM108",
 ]
 
 [tool.ruff.lint.isort]
 known-first-party = ["datasmith", "dataset"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "S105", "S106", "SIM117"]
+"tests/*" = ["S101", "S105", "S106", "S108", "PGH003", "B017", "SIM117", "F841"]
+"src/datasmith/agents/templates/*" = ["S108", "S307"]
 "*.py" = ["TRY003"]
 "scratch/notebooks/*.ipynb" = ["S101"]
 
@@ -144,12 +159,27 @@ skip_empty = true
 branch = true
 source = ["src"]
 
+[tool.deptry]
+exclude = ["src/datasmith/docker/templates/", "src/datasmith/agents/templates/"]
+ignore = ["DEP003"]
+[tool.deptry.per_rule_ignores]
+DEP001 = ["tomllib"]
+DEP004 = ["pandas"]
+
 [[tool.mypy.overrides]]
 module = "dspy.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "asv.*"
+module = "supabase.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "python_on_whales.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "huggingface_hub.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -157,5 +187,17 @@ module = "datasmith.agents.*"
 disable_error_code = ["no-any-unimported", "import-untyped"]
 
 [[tool.mypy.overrides]]
-module = "datasmith.execution.utils"
-disallow_untyped_defs = false
+module = "portkey_ai.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "postgrest.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "json5.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tomli.*"
+ignore_missing_imports = true

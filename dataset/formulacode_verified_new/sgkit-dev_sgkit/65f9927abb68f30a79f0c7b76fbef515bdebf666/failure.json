@@ -1,0 +1,12 @@
+{
+  "task": {
+    "owner": "sgkit-dev",
+    "repo": "sgkit",
+    "sha": "65f9927abb68f30a79f0c7b76fbef515bdebf666",
+    "tag": "pkg"
+  },
+  "stage": "tests",
+  "return_code": 1,
+  "stdout": "",
+  "stderr": "The command executed was `/usr/bin/docker container run --rm formulacode/sgkit-dev-sgkit:65f9927abb68f30a79f0c7b76fbef515bdebf666--run /run_tests.sh`.\nIt returned with code 1\nThe content of stdout is ''\nThe content of stderr can be found above the stacktrace (it wasn't captured)."
+}

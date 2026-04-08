@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1.7
+
+ARG BASE_IMAGE=formulacode/base:latest
+
+FROM ${BASE_IMAGE} AS repo
+ARG REPO_URL
+ARG COMMIT_SHA=""
+RUN git clone "$REPO_URL" /workspace/repo && \
+    if [ -n "$COMMIT_SHA" ]; then cd /workspace/repo && git checkout "$COMMIT_SHA"; fi
+WORKDIR /workspace/repo
+ENTRYPOINT ["/bin/bash"]

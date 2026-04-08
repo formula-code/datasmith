@@ -1,0 +1,4 @@
+{
+  "local_image": "geopandas-geopandas-321dc873526949d5ab22ca6f7b4c06ef3d7d0f0a:final",
+  "dockerhub_image": "docker.io/formulacode/all:geopandas-geopandas-321dc873526949d5ab22ca6f7b4c06ef3d7d0f0a--final"
+}

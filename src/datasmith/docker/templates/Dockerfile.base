@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+
+ARG PY_VERSION=""
+FROM buildpack-deps:jammy AS base
+ARG PY_VERSION=""
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    MAMBA_ROOT_PREFIX=/opt/conda \
+    PATH=/opt/conda/bin:/root/.cargo/bin:/root/.local/bin:$PATH \
+    MAMBA_DOCKERFILE_ACTIVATE=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OMP_NUM_THREADS=1
+
+RUN mkdir -p /workspace /output
+WORKDIR /workspace
+
+COPY docker_build_base.sh /workspace/docker_build_base.sh
+RUN chmod +x /workspace/docker_build_base.sh && \
+    if [ -n "${PY_VERSION}" ]; then \
+        PY_VERSION="${PY_VERSION}" /workspace/docker_build_base.sh --py-version "${PY_VERSION}"; \
+    else \
+        /workspace/docker_build_base.sh; \
+    fi
+
+RUN micromamba clean --all --yes

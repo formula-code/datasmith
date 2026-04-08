@@ -144,7 +144,6 @@ venv.bak/
 .ropeproject
 
 # mkdocs documentation
-/site
 
 # mypy
 .mypy_cache/
@@ -194,46 +193,27 @@ cython_debug/
 .cursorindexingignore
 
 tokens.env
-benchmark_results/
 scratch/artifacts/
-scratch/example-docker-task
-scratch/rsync-backups/
-scratch/artifacts/tarballs/
-asv-output/
-output
-*context_registry*.json
-# Database files
 *.db
-scratch/artifacts/git/
-scratch/artifacts/.git/
-scratch/notebooks/git/
-scratch/artifacts/**/*.parquet
-scratch/**/*.json
-scratch/pr_runs/arrow_36738_after.md
-scratch/pr_runs/arrow_36738_final.md
-scratch/pr_runs/arrow_36738.md
-scratch/pr_runs/arrow_adbc_2697_final.md
-scratch/pr_runs/arrow_adbc_2697.md
-scratch/pr_runs/astropy_13498_after.md
-scratch/pr_runs/astropy_13498_after2.md
-scratch/pr_runs/astropy_13498_final1.md
-scratch/pr_runs/astropy_13498_final2.md
-scratch/pr_runs/astropy_13498_run1_head.txt
-scratch/pr_runs/astropy_13498_run1.md
-scratch/pr_runs/astropy_13498_run2.md
-scratch/pr_runs/qiskit_10651_after.md
-scratch/pr_runs/qiskit_10651_after2.md
-scratch/pr_runs/qiskit_10651_final.md
-scratch/pr_runs/qiskit_10651_head.txt
-scratch/pr_runs/qiskit_10651.md
-scratch/pr_runs/qiskit_12869_final.md
-scratch/pr_runs/qiskit_12869.md
-.aider*
 
-# Dataset artifacts (kept locally, not tracked)
-dataset/
+# Supabase
+supabase/.temp/
+supabase/.branches/
 
-# Scratch artifacts (kept locally, not tracked)
-scratch/example-repo/
-scratch/merged_context_registry_*.json
-scratch/artifacts/raw/online_dashboards.jsonl
+# MkDocs build output
+site/
+
+# Node (Gemini CLI)
+node_modules/
+package-lock.json
+
+# Scratch / dev artifacts
+scratch/
+fc_record.pkl
+GEMINI.md
+PARITY_TODOs.md
+
+# One-off scripts
+backup
+rebuild
+run_interpreter.py

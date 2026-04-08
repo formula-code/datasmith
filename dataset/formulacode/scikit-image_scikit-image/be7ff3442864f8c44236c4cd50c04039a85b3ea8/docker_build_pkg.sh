@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Purpose: Build/install the repo (editable) in one or more ASV micromamba envs, then run health checks.
+set -euo pipefail
+
+# Define log function
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" >&2
+}
+
+###### SETUP CODE (NOT TO BE MODIFIED) ######
+# Loads micromamba, common helpers, and persisted variables from the env stage.
+source /etc/profile.d/asv_utils.sh || true
+source /etc/profile.d/asv_build_vars.sh || true
+
+ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
+REPO_ROOT="$ROOT_PATH"
+TARGET_VERSIONS="3.11"  # Required Python version
+EXTRAS="${ALL_EXTRAS:+[$ALL_EXTRAS]}"
+
+# -----------------------------
+# Build & test across envs
+# -----------------------------
+for version in $TARGET_VERSIONS; do
+  ENV_NAME="asv_${version}"
+  log "==> Building in env: $ENV_NAME (python=$version)"
+
+  IMP="skimage"
+  log "Using import name: $IMP"
+
+  # Install build dependencies and runtime dependencies
+  micromamba install -y -n "$ENV_NAME" -c conda-forge \
+    "python=$version" \
+    pip git conda mamba "libmambapy<=1.9.9" \
+    "numpy>=2.0" \
+    "scipy>=1.11.4" \
+    "networkx>=3.0" \
+    "pillow>=10.1" \
+    "imageio>=2.33" \
+    "tifffile>=2022.8.12" \
+    "packaging>=21" \
+    "lazy-loader>=0.4" \
+    "meson-python>=0.16" \
+    "ninja>=1.11.1.1" \
+    "cython>=3.0.8" \
+    "pythran>=0.16" \
+    compilers pkg-config cmake
+
+  # Create build directory and configure meson
+  log "Setting up meson build"
+  cd "$REPO_ROOT"
+
+  # Editable install with no build isolation
+  log "Installing package with meson-python"
+  PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e ".$EXTRAS"
+
+  # Health checks
+  log "Running smoke checks"
+  micromamba run -n "$ENV_NAME" asv_smokecheck.py --import-name "$IMP" --repo-root "$REPO_ROOT" ${RUN_PYTEST_SMOKE:+--pytest-smoke}
+
+  echo "::import_name=${IMP}::env=${ENV_NAME}"
+done
+
+log "All builds complete ✅"

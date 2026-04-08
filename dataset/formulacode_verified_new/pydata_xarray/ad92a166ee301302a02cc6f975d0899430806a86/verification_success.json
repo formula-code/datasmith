@@ -1,0 +1,6 @@
+{
+  "image": "formulacode/pydata-xarray:ad92a166ee301302a02cc6f975d0899430806a86--run",
+  "owner": "pydata",
+  "repo": "xarray",
+  "sha": "ad92a166ee301302a02cc6f975d0899430806a86"
+}

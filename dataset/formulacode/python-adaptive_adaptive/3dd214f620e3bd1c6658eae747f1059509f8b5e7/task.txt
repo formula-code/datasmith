@@ -1,0 +1,1 @@
+Task(owner='python-adaptive', repo='adaptive', sha='3dd214f620e3bd1c6658eae747f1059509f8b5e7', commit_date=1755646059.0, env_payload='', python_version='', tag='pkg', benchmarks='')
