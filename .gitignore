@@ -144,7 +144,6 @@ venv.bak/
 .ropeproject
 
 # mkdocs documentation
-/site
 
 # mypy
 .mypy_cache/
@@ -200,3 +199,21 @@ scratch/artifacts/
 # Supabase
 supabase/.temp/
 supabase/.branches/
+
+# MkDocs build output
+site/
+
+# Node (Gemini CLI)
+node_modules/
+package-lock.json
+
+# Scratch / dev artifacts
+scratch/
+fc_record.pkl
+GEMINI.md
+PARITY_TODOs.md
+
+# One-off scripts
+backup
+rebuild
+run_interpreter.py
