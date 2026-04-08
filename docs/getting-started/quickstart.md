@@ -1,6 +1,6 @@
 # Quickstart
 
-This guide walks through common DataSmith operations with code examples.
+This guide walks through common fc-data operations with code examples.
 
 ## Working with pull requests
 

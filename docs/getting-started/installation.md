@@ -33,7 +33,7 @@ This creates a virtual environment with `uv`, installs all dependencies, and set
 
 ## 3. Configure `tokens.env`
 
-DataSmith reads all configuration from a `tokens.env` file in the repo root. The `Settings` class (powered by `pydantic-settings`) loads it automatically — no manual `source` or `export` needed.
+fc-data reads all configuration from a `tokens.env` file in the repo root. The `Settings` class (powered by `pydantic-settings`) loads it automatically — no manual `source` or `export` needed.
 
 Create the file:
 
@@ -55,7 +55,7 @@ SUPABASE_KEY=<paste service-role key here>
 
 # === GitHub (required) ===
 # One or more GitHub personal access tokens, comma-separated.
-# DataSmith rotates tokens automatically when one hits the rate limit.
+# fc-data rotates tokens automatically when one hits the rate limit.
 # Create tokens at https://github.com/settings/tokens with `repo` scope.
 GH_TOKENS=github_pat_xxx
 ```
@@ -98,7 +98,7 @@ See [Configuration](../guide/configuration.md) for a complete reference of all e
 
 ## 4. Set up Supabase
 
-DataSmith uses a local Supabase instance for all persistent state (no cloud account needed).
+fc-data uses a local Supabase instance for all persistent state (no cloud account needed).
 
 ### Start the instance
 
@@ -129,7 +129,7 @@ This prints connection details. Copy the **service_role key** (not the anon key)
 
 ### Apply migrations
 
-DataSmith's schema is defined in numbered SQL migrations:
+fc-data's schema is defined in numbered SQL migrations:
 
 ```bash
 npx supabase migration up --local

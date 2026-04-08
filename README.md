@@ -17,7 +17,7 @@
 
 [FormulaCode](https://formula-code.github.io/) is a *continually updating*  benchmark for evaluating  the holistic ability of LLM agents to optimize codebases. FormulaCode consists of two parts: a [pipeline](https://github.com/formula-code/datasmith) to construct performance optimization tasks, and an [execution harness](https://github.com/formula-code/terminal-bench) that connects a language model to our terminal sandbox. _This repository contains the task generation pipeline._
 
-`datasmith` is a python package for automatically curating and managing [FormulaCode](https://formula-code.github.io/) tasks. After installation, datasmith is designed to run as a monthly CRON job that updates the FormulaCode dataset with new commits and repositories.
+`fc-data` is a python package for automatically curating and managing [FormulaCode](https://formula-code.github.io/) tasks. After installation, fc-data is designed to run as a monthly CRON job that updates the FormulaCode dataset with new commits and repositories.
 
 ## High level overview
 
@@ -30,7 +30,7 @@ graph LR
 
     A[Github]
     A2[Supabase]
-    B["`Datasmith
+    B["`fc-data
     (This repository)`"]
     C[DockerHub]
     D[HuggingFace]
@@ -38,7 +38,7 @@ graph LR
 
 ## Use cases
 
-`datasmith` is designed primarily to enable continual dataset updates for FormulaCode. After [installation](#installation), the monthly update is a single command:
+`fc-data` is designed primarily to enable continual dataset updates for FormulaCode. After [installation](#installation), the monthly update is a single command:
 
 ```bash
 $ pip install fc-data
@@ -48,7 +48,7 @@ $ fc-data --start-date 2026-02-01 --end-date 2026-03-01
 This runs six stages in order: scrape repos, scrape commits, classify PRs, resolve packages, synthesize Docker images, and publish the docker images to DockerHub and the PRs to HuggingFace The dataset is versioned by month (e.g. `formulacode@2026-03`). In our servers, this command runs as a monthly CRON job.
 
 
-However, this isn't the only use case for `datasmith`. We've designed `datasmith` to helps you manage your custom github-centric benchmark. Each benchmark contains a task which revolves around a GitHub Issue (or Pull request; which is just an issue with extra details). We include some helpful properties to start off:
+However, this isn't the only use case for `fc-data`. We've designed `fc-data` to helps you manage your custom github-centric benchmark. Each benchmark contains a task which revolves around a GitHub Issue (or Pull request; which is just an issue with extra details). We include some helpful properties to start off:
 
 ```python
 from datasmith.github import PR, GitHubClient
@@ -131,7 +131,7 @@ await runner.run(pr_items)
 
 By default, each operation is cached in Supabase so you don't keep hitting expensive hooks.
 
-A pull request is useless if you cannot build a reproducible environment for it. Datasmith supports building docker images for any pull request using a three-tier hierarchy:
+A pull request is useless if you cannot build a reproducible environment for it. fc-data supports building docker images for any pull request using a three-tier hierarchy:
 
 ```python
 from datasmith.docker import ImageManager, MultiObjVerifier, SmokeVerifier, ProfileVerifier
@@ -158,7 +158,7 @@ result = verifier.verify("formulacode/pandas-dev-pandas:16222")
 # result.ok, result.rc, result.stdout, result.stderr, result.duration_s
 ```
 
-One of the main features of `datasmith` is the ability to automatically synthesize docker containers for a pull request. The synthesizer is a state machine that checks Supabase for cached contexts, tries similar build scripts, then falls back to an installed CLI agent (Claude Code, Codex, or Gemini — auto-detected):
+One of the main features of `fc-data` is the ability to automatically synthesize docker containers for a pull request. The synthesizer is a state machine that checks Supabase for cached contexts, tries similar build scripts, then falls back to an installed CLI agent (Claude Code, Codex, or Gemini — auto-detected):
 
 ```python
 from datasmith.agents import Synthesizer

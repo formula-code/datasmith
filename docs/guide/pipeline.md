@@ -1,6 +1,6 @@
 # Pipeline (`fc-data`)
 
-`fc-data` is the primary command for running DataSmith. It discovers performance-improving commits from GitHub, classifies them with LLM agents, resolves dependencies, synthesizes Docker build contexts, and publishes verified images.
+`fc-data` is the primary command for running fc-data. It discovers performance-improving commits from GitHub, classifies them with LLM agents, resolves dependencies, synthesizes Docker build contexts, and publishes verified images.
 
 ## Quick reference
 

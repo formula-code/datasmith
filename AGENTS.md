@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-This guide helps contributors work effectively in the datasmith repository.
+This guide helps contributors work effectively in the fc-data repository.
 
 ## Project Structure & Module Organization
 - Source: `src/datasmith/` — current modules: `agents/`, `docker/`, `github/`, `publish/`, `resolution/`, `runners/`, `update/`, `utils/`, plus helper modules like `filters.py` and `preflight.py`.

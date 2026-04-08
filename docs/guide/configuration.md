@@ -1,6 +1,6 @@
 # Configuration
 
-DataSmith is configured primarily through a `tokens.env` file in the repository root. The `Settings` class (powered by `pydantic-settings`) loads these automatically.
+fc-data is configured primarily through a `tokens.env` file in the repository root. The `Settings` class (powered by `pydantic-settings`) loads these automatically.
 
 ## Environment variables
 

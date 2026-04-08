@@ -1,6 +1,6 @@
 # Publishing
 
-DataSmith publishes verified tasks to DockerHub (Docker images) and HuggingFace (Parquet datasets).
+fc-data publishes verified tasks to DockerHub (Docker images) and HuggingFace (Parquet datasets).
 
 ## Publishing workflow
 
