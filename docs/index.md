@@ -1,13 +1,25 @@
-# 🔧 fc-data
+<p align="center">
+  <a href="https://formula-code.github.io/">
+    <img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-0A7A5E?style=for-the-badge" alt="FormulaCode Website">
+  </a>
+  <a href="https://huggingface.co/papers/2603.16011">
+    <img src="https://img.shields.io/badge/Paper-1F6FEB?style=for-the-badge&logo=arxiv&logoColor=white" alt="FormulaCode Paper">
+  </a>
+  <a href="https://formula-code.github.io/leaderboard/">
+    <img src="https://img.shields.io/badge/%F0%9F%93%88%20Leaderboard-EA580C?style=for-the-badge&logoColor=white" alt="FormulaCode Leaderboard">
+  </a>
+  <a href="https://formula-code.github.io/registry/">
+    <img src="https://img.shields.io/badge/%F0%9F%93%88%20Live%20Task%20Registry-7F1D1D?style=for-the-badge&logoColor=white" alt="FormulaCode Live Task Registry">
+  </a>
+  <a href="https://pypi.org/project/fc-data/">
+    <img src="https://img.shields.io/badge/%F0%9F%93%A6%20PyPI-3775A9?style=for-the-badge&logo=pypi&logoColor=white" alt="fc-data on PyPI">
+  </a>
+</p>
 
-**Python toolchain for building the [FormulaCode](https://github.com/formula-code) benchmark.**
+`fc-data` is a python package for automatically curating and managing [FormulaCode](https://formula-code.github.io/) tasks. After installation, fc-data is designed to run as a monthly CRON job that updates the FormulaCode dataset with new commits and repositories.
 
-[![Build status](https://img.shields.io/github/actions/workflow/status/formula-code/datasmith/main.yml?branch=main)](https://github.com/formula-code/datasmith/actions/workflows/main.yml?query=branch%3Amain)
-[![License](https://img.shields.io/github/license/formula-code/datasmith)](https://img.shields.io/github/license/formula-code/datasmith)
+[FormulaCode](https://formula-code.github.io/) is a *continually updating*  benchmark for evaluating  the holistic ability of LLM agents to optimize codebases. FormulaCode consists of two parts: a [pipeline](https://github.com/formula-code/datasmith) to construct performance optimization tasks, and an [execution harness](https://github.com/formula-code/terminal-bench) that connects a language model to our terminal sandbox.
 
-fc-data is a package for automatically building and maintaining FormulaCode tasks. It is engineered to support any repository-level, verification-by-execution based coding benchmark that heavily uses Docker and GitHub.
-
-FormulaCode is a benchmark of **67+ repositories** with **964+ performance-improving commits**, designed to evaluate LLMs' ability to optimize real-world codebases. It scores optimizers relative to the human-authored speedup using ASV (Airspeed Velocity) benchmarks — providing a dense performance signal instead of binary pass/fail.
 
 ## How it works
 
