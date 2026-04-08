@@ -211,6 +211,8 @@ package-lock.json
 scratch/
 dataset/
 docs/archive/
+archive/
+.vscode/
 fc_record.pkl
 GEMINI.md
 PARITY_TODOs.md
