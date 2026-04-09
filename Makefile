@@ -66,6 +66,10 @@ grafana-down: ## Stop Grafana dashboard
 grafana-logs: ## Tail Grafana container logs
 	@docker compose -f grafana/docker-compose.yml logs -f
 
+.PHONY: grafana-tunnel
+grafana-tunnel: ## Expose Grafana publicly via Cloudflare Tunnel
+	@cloudflared tunnel run datasmith-grafana
+
 
 .PHONY: help
 help:
