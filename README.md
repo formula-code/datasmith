@@ -10,14 +10,11 @@
   <a href="https://formula-code.github.io/leaderboard/">
     <img src="https://img.shields.io/badge/%F0%9F%93%88%20Leaderboard-EA580C?style=for-the-badge&logoColor=white" alt="FormulaCode Leaderboard">
   </a>
-  <a href="https://formula-code.github.io/registry/">
-    <img src="https://img.shields.io/badge/%F0%9F%93%88%20Live%20Task%20Registry-7F1D1D?style=for-the-badge&logoColor=white" alt="FormulaCode Live Task Registry">
-  </a>
   <a href="https://formula-code.github.io/datasmith/">
     <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Docs-4B0082?style=for-the-badge" alt="fc-data Documentation">
   </a>
   <a href="https://nonconstricting-zara-unhinderingly.ngrok-free.dev/">
-    <img src="https://img.shields.io/badge/%F0%9F%93%8A%20Dashboard-FF6600?style=for-the-badge" alt="Live Dashboard">
+    <img src="https://img.shields.io/badge/%F0%9F%93%8A%20Live%20Dashboard-7F1D1D?style=for-the-badge" alt="Live Dashboard">
   </a>
 </p>
 
