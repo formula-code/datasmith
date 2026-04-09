@@ -16,6 +16,9 @@
   <a href="https://formula-code.github.io/datasmith/">
     <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Docs-4B0082?style=for-the-badge" alt="fc-data Documentation">
   </a>
+  <a href="https://nonconstricting-zara-unhinderingly.ngrok-free.dev/">
+    <img src="https://img.shields.io/badge/%F0%9F%93%8A%20Dashboard-FF6600?style=for-the-badge" alt="Live Dashboard">
+  </a>
 </p>
 
 [FormulaCode](https://formula-code.github.io/) is a *continually updating*  benchmark for evaluating  the holistic ability of LLM agents to optimize codebases. FormulaCode consists of two parts: a [pipeline](https://github.com/formula-code/datasmith) to construct performance optimization tasks, and an [execution harness](https://github.com/formula-code/terminal-bench) that connects a language model to our terminal sandbox. _This repository contains the task generation pipeline._

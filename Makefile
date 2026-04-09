@@ -36,6 +36,36 @@ docker-clean: ## Clean up dangling Docker images and containers
 	@echo "Cleaning up dangling Docker images and containers"
 	@docker system prune -f
 
+.PHONY: supabase-up
+supabase-up: ## Start local Supabase instance
+	@npx supabase start
+
+.PHONY: supabase-down
+supabase-down: ## Stop local Supabase instance
+	@npx supabase stop
+
+.PHONY: supabase-status
+supabase-status: ## Show Supabase service status and URLs
+	@npx supabase status
+
+.PHONY: grafana-migrate
+grafana-migrate: ## Apply the grafana_ro read-only database role
+	@docker exec supabase_db_datasmith_new psql -U postgres -d postgres -f /dev/stdin < supabase/migrations/00009_grafana_readonly.sql
+	@echo "grafana_ro role created"
+
+.PHONY: grafana-up
+grafana-up: ## Start Grafana dashboard (http://localhost:3001)
+	@docker compose -f grafana/docker-compose.yml up -d
+	@echo "Grafana is running at http://localhost:3001"
+
+.PHONY: grafana-down
+grafana-down: ## Stop Grafana dashboard
+	@docker compose -f grafana/docker-compose.yml down
+
+.PHONY: grafana-logs
+grafana-logs: ## Tail Grafana container logs
+	@docker compose -f grafana/docker-compose.yml logs -f
+
 
 .PHONY: help
 help:
