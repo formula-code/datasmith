@@ -34,7 +34,27 @@ _POSITIVE_RE = re.compile(
     r"vectori[sz](?:e[ds]?|ation)|"
     r"accelerat(?:e[ds]?|ion)|"
     r"efficien(?:t|cy)|"
-    r"regress(?:ion|ed)?"
+    r"regress(?:ion|ed)?|"
+    r"memory|mem(?:ory)?|"
+    r"reduc(?:e[ds]?|ing|tion)|"
+    r"batch(?:ed|ing)?|"
+    r"inline[ds]?|inlining|"
+    r"async(?:io)?|"
+    r"lazy|"
+    r"gpu|cpu|"
+    r"chunk(?:ed|ing|s)?|"
+    r"compil(?:e[ds]?|ation)|jit|"
+    r"simd|sse|avx|neon|"
+    r"overhead|"
+    r"allocat(?:e[ds]?|ion[s]?)|preallocat(?:e[ds]?|ion)|"
+    r"memoi[sz](?:e[ds]?|ation)|precomput(?:e[ds]?|ation)|"
+    r"concurren(?:t|cy)|"
+    r"buffer(?:ed|ing|s)?|"
+    r"compress(?:ed|ion)?|"
+    r"unroll(?:ed|ing)?|"
+    r"dedup(?:licat(?:e[ds]?|ion))?|"
+    r"pool(?:ing|ed)?|"
+    r"streaming"
     r")\b",
     re.IGNORECASE,
 )
@@ -60,7 +80,10 @@ _NEGATIVE_RE = re.compile(
     r"annotations?|"
     r"deprecat(?:e[ds]?|ion)|"
     r"revert(?:ed|ing)?|"
-    r"backport"
+    r"backport|"
+    r"docstring[s]?|"
+    r"autoupdate|"
+    r"pre-commit"
     r")\b",
     re.IGNORECASE,
 )
@@ -85,12 +108,12 @@ MAX_PATCH_TOKENS = 16_000
 def message_filter(title: str) -> bool:
     """Return True if the PR title suggests a performance improvement.
 
-    Passes if the title matches at least one positive keyword and
-    does NOT match any negative keyword.
+    Passes if the title matches at least one positive keyword OR
+    does NOT match any negative keyword.  This is intentionally loose:
+    a positive keyword is strong signal, and the absence of negative
+    keywords indicates ambiguity worth sending to the LLM classifier.
     """
-    if _NEGATIVE_RE.search(title):
-        return False
-    return bool(_POSITIVE_RE.search(title))
+    return bool(_POSITIVE_RE.search(title)) or not bool(_NEGATIVE_RE.search(title))
 
 
 def has_core_file(filenames: list[str]) -> bool:

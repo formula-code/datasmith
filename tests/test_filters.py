@@ -78,22 +78,24 @@ class TestMessageFilterNegative:
             "Support Python 3.12",
         ],
     )
-    def test_rejects_no_keyword(self, title: str) -> None:
-        assert message_filter(title) is False
+    def test_passes_ambiguous_no_keyword(self, title: str) -> None:
+        """Titles with no positive AND no negative keyword pass (ambiguous → let LLM decide)."""
+        assert message_filter(title) is True
 
 
 class TestMessageFilterEdgeCases:
-    def test_negative_overrides_positive(self) -> None:
-        """If title has both positive and negative keywords, reject it."""
-        assert message_filter("Revert performance optimization") is False
-        assert message_filter("Documentation for benchmark suite") is False
+    def test_positive_overrides_negative(self) -> None:
+        """If title has both positive and negative keywords, pass (positive is sufficient)."""
+        assert message_filter("Revert performance optimization") is True
+        assert message_filter("Documentation for benchmark suite") is True
 
     def test_case_insensitive(self) -> None:
         assert message_filter("OPTIMIZE memory usage") is True
         assert message_filter("Performance Improvement") is True
 
     def test_empty_title(self) -> None:
-        assert message_filter("") is False
+        """Empty title has no negative keyword, so it passes (ambiguous)."""
+        assert message_filter("") is True
 
 
 # ── has_core_file ───────────────────────────────────────────────────
