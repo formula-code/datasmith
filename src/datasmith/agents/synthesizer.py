@@ -343,11 +343,13 @@ class Synthesizer:
         issue_number: int,
         ctx: DockerContext,
         resource_metrics: dict | None = None,
+        env_payload_override: str | None = None,
     ) -> None:
         """Persist the agent-edited scripts to the ``candidate_containers`` table.
 
-        Only ``build_pkg_sh`` and ``build_run_sh`` are saved — the other
-        fields come from templates and don't need to be persisted.
+        Saves ``build_pkg_sh``, ``build_run_sh``, and ``build_env_sh``.
+        When the agent also modified the env payload, ``env_payload_override``
+        is persisted to the ``env_payload`` column.
         """
         if not sha:
             return
@@ -360,9 +362,12 @@ class Synthesizer:
                 "issue_number": issue_number,
                 "build_pkg_sh": ctx.build_pkg_sh,
                 "build_run_sh": ctx.build_run_sh,
+                "build_env_sh": ctx.build_env_sh,
             }
             if resource_metrics:
                 row["resource_metrics"] = resource_metrics
+            if env_payload_override:
+                row["env_payload"] = env_payload_override
             client.table("candidate_containers").upsert(row).execute()
             logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
         except Exception:
