@@ -21,8 +21,8 @@ from datasmith.agents.sandbox import (
 class TestSandboxConfig:
     def test_defaults(self) -> None:
         cfg = SandboxConfig()
-        assert cfg.timeout_s == 3600
-        assert cfg.codex_timeout_s == 3600
+        assert cfg.timeout_s == 14400
+        assert cfg.codex_timeout_s == 14400
 
     def test_custom(self) -> None:
         cfg = SandboxConfig(timeout_s=600, codex_timeout_s=300)
