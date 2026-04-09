@@ -1,4 +1,4 @@
-site_name: 🔧 fc-data
+site_name: fc-data
 site_url: https://formula-code.github.io/datasmith/
 site_description: Python toolchain for building the FormulaCode benchmark
 repo_url: https://github.com/formula-code/datasmith
@@ -89,3 +89,4 @@ nav:
       - Publishing: guide/publishing.md
       - Verification: guide/verification.md
       - Python API Quickstart: getting-started/quickstart.md
+      - Monitoring: guide/monitoring.md
