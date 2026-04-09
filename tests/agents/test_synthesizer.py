@@ -399,6 +399,75 @@ class TestResourceMetricsPersistence:
         assert row["resource_metrics"] == metrics
 
 
+class TestSaveContextEnvAndPayload:
+    """_save_context should persist build_env_sh and env_payload_override."""
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_save_context_persists_build_env_sh(self, mock_get_client: MagicMock) -> None:
+        """When DockerContext has build_env_sh, it should be included in the upsert row."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        ctx = DockerContext(
+            build_pkg_sh="#!/bin/bash\npkg",
+            build_run_sh="#!/bin/bash\nrun",
+            build_env_sh="#!/bin/bash\npip install Cython\n# modified env",
+        )
+
+        synth = Synthesizer()
+        synth._save_context("owner", "repo", "abc123", 42, ctx)
+
+        upsert_call = mock_client.table.return_value.upsert
+        upsert_call.assert_called_once()
+        row = upsert_call.call_args[0][0]
+        assert row["build_env_sh"] == "#!/bin/bash\npip install Cython\n# modified env"
+        assert row["build_pkg_sh"] == "#!/bin/bash\npkg"
+        assert row["build_run_sh"] == "#!/bin/bash\nrun"
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_save_context_empty_env_sh(self, mock_get_client: MagicMock) -> None:
+        """When build_env_sh is empty, it should still be included as empty string."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        ctx = DockerContext(build_pkg_sh="pkg", build_run_sh="run")
+
+        synth = Synthesizer()
+        synth._save_context("owner", "repo", "abc123", 42, ctx)
+
+        row = mock_client.table.return_value.upsert.call_args[0][0]
+        assert row["build_env_sh"] == ""
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_save_context_persists_env_payload_override(self, mock_get_client: MagicMock) -> None:
+        """When env_payload_override is provided, it should be persisted."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        ctx = DockerContext(build_pkg_sh="pkg", build_run_sh="run")
+        override = '["numpy==1.21.0", "scipy==1.7.0"]'
+
+        synth = Synthesizer()
+        synth._save_context("owner", "repo", "abc123", 42, ctx, env_payload_override=override)
+
+        row = mock_client.table.return_value.upsert.call_args[0][0]
+        assert row["env_payload"] == override
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_save_context_no_payload_override(self, mock_get_client: MagicMock) -> None:
+        """When no env_payload_override is given, env_payload should not be in the row."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        ctx = DockerContext(build_pkg_sh="pkg", build_run_sh="run")
+
+        synth = Synthesizer()
+        synth._save_context("owner", "repo", "abc123", 42, ctx)
+
+        row = mock_client.table.return_value.upsert.call_args[0][0]
+        assert "env_payload" not in row
+
+
 class TestFormatPriorAttempts:
     def test_formats_failed_attempts(self) -> None:
         ctx = DockerContext(build_pkg_sh="#!/bin/bash\npkg", build_run_sh="#!/bin/bash\nrun")

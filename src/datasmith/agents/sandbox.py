@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,6 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _IMMUTABLE_FILES = (
     "Dockerfile.pr",
     "docker_build_base.sh",
-    "docker_build_env.sh",
     "docker_build_final.sh",
     "profile.sh",
     "run-tests.sh",
@@ -54,14 +54,34 @@ def _compute_immutable_hashes(task_dir: Path) -> dict[str, str]:
     return hashes
 
 
+def _read_env_payload_override(task_dir: Path) -> str | None:
+    """Read and validate ``env_payload_override.json`` from *task_dir*.
+
+    Returns the raw JSON string if the file exists and contains a valid
+    JSON list, otherwise ``None``.
+    """
+    override_file = task_dir / "env_payload_override.json"
+    if not override_file.exists():
+        return None
+    try:
+        raw = override_file.read_text()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return raw
+        logger.warning("env_payload_override.json is not a JSON list, ignoring")
+    except (json.JSONDecodeError, Exception):
+        logger.warning("Failed to parse env_payload_override.json, ignoring")
+    return None
+
+
 @dataclass
 class SandboxConfig:
     """Configuration for the Codex sandbox runner."""
 
-    timeout_s: int = 3600
+    timeout_s: int = int(os.environ.get("SYNTHESIS_TIMEOUT_S", "14400"))
     """Total wall-clock timeout for the codex session (seconds)."""
 
-    codex_timeout_s: int = 3600
+    codex_timeout_s: int = int(os.environ.get("SYNTHESIS_TIMEOUT_S", "14400"))
     """Timeout passed to subprocess.run for the codex process (seconds)."""
 
 
@@ -78,6 +98,7 @@ class SandboxResult:
     agent_name: str = ""
     files_changed: list[str] = field(default_factory=list)
     resource_metrics: dict = field(default_factory=dict)
+    env_payload_override: str | None = None
 
 
 class SandboxRunner:
@@ -296,7 +317,7 @@ class SandboxRunner:
 
         success = success_file.exists()
 
-        # Read back only the two agent-editable scripts (the rest are templates)
+        # Read back the agent-editable scripts (the rest are templates)
         docker_context: DockerContext | None = None
         try:
             pkg_sh = (
@@ -305,9 +326,15 @@ class SandboxRunner:
             run_sh = (
                 (task_dir / "docker_build_run.sh").read_text() if (task_dir / "docker_build_run.sh").exists() else ""
             )
-            docker_context = DockerContext(build_pkg_sh=pkg_sh, build_run_sh=run_sh)
+            env_sh = (
+                (task_dir / "docker_build_env.sh").read_text() if (task_dir / "docker_build_env.sh").exists() else ""
+            )
+            docker_context = DockerContext(build_pkg_sh=pkg_sh, build_run_sh=run_sh, build_env_sh=env_sh)
         except Exception:
             logger.warning("Failed to read Docker context from workspace")
+
+        # Read env_payload override if the agent wrote one
+        env_payload_override = _read_env_payload_override(task_dir)
 
         # Read failure.json if present
         failure_json: dict | None = None
@@ -347,6 +374,7 @@ class SandboxRunner:
             agent_name=agent_name,
             files_changed=codex_result.files_changed,
             resource_metrics=resource_metrics,
+            env_payload_override=env_payload_override if success else None,
         )
 
 

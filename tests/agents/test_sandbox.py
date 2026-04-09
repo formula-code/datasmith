@@ -21,8 +21,8 @@ from datasmith.agents.sandbox import (
 class TestSandboxConfig:
     def test_defaults(self) -> None:
         cfg = SandboxConfig()
-        assert cfg.timeout_s == 3600
-        assert cfg.codex_timeout_s == 3600
+        assert cfg.timeout_s == 14400
+        assert cfg.codex_timeout_s == 14400
 
     def test_custom(self) -> None:
         cfg = SandboxConfig(timeout_s=600, codex_timeout_s=300)
@@ -39,6 +39,12 @@ class TestSandboxResult:
         assert r.duration_s == 0.0
         assert r.agent_output == ""
         assert r.resource_metrics == {}
+        assert r.env_payload_override is None
+
+    def test_with_env_payload_override(self) -> None:
+        override = '["numpy==1.21.0"]'
+        r = SandboxResult(success=True, env_payload_override=override)
+        assert r.env_payload_override == override
 
 
 class TestGenerateTaskTxt:
@@ -155,7 +161,6 @@ class TestPrepareWorkspace:
         for fname in (
             "Dockerfile.pr",
             "docker_build_base.sh",
-            "docker_build_env.sh",
             "docker_build_final.sh",
             "profile.sh",
             "run-tests.sh",
@@ -169,6 +174,7 @@ class TestPrepareWorkspace:
         # Editable files should NOT be in hashes
         assert "docker_build_pkg.sh" not in hashes
         assert "docker_build_run.sh" not in hashes
+        assert "docker_build_env.sh" not in hashes
 
     def test_all_files_from_templates(self, tmp_path: Path) -> None:
         runner = SandboxRunner()
@@ -460,3 +466,364 @@ class TestSandboxRunnerRun:
         assert result.success is False
         assert result.failure_json is not None
         assert result.failure_json["stage"] == "build"
+
+
+# ── docker_build_env.sh editability ────────────────────────────────
+
+
+class TestEnvShEditability:
+    """docker_build_env.sh should be editable by the agent, not immutable."""
+
+    def test_env_sh_not_in_immutable_files(self) -> None:
+        """docker_build_env.sh must NOT appear in _IMMUTABLE_FILES."""
+        from datasmith.agents.sandbox import _IMMUTABLE_FILES
+
+        assert "docker_build_env.sh" not in _IMMUTABLE_FILES
+
+    def test_env_sh_not_in_verify_immutable_files(self) -> None:
+        """docker_build_env.sh must NOT appear in sandbox_verify.py's _IMMUTABLE_FILES."""
+        verify_src = (
+            Path(__file__).parents[1] / ".." / "src" / "datasmith" / "agents" / "templates" / "sandbox_verify.py"
+        )
+        content = verify_src.resolve().read_text()
+        # Parse the _IMMUTABLE_FILES tuple from the source
+        import ast
+
+        tree = ast.parse(content)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "_IMMUTABLE_FILES":
+                        immutable = ast.literal_eval(node.value)
+                        assert "docker_build_env.sh" not in immutable, (
+                            "docker_build_env.sh should not be in sandbox_verify.py _IMMUTABLE_FILES"
+                        )
+                        return
+        raise AssertionError("Could not find _IMMUTABLE_FILES in sandbox_verify.py")
+
+    def test_env_sh_not_in_immutable_hashes(self, tmp_path: Path) -> None:
+        """_prepare_workspace should NOT hash docker_build_env.sh (it's editable)."""
+        runner = SandboxRunner()
+        runner._prepare_workspace(
+            workspace=tmp_path,
+            owner="o",
+            repo="r",
+            sha="s",
+            repo_image="formulacode/o-r:latest",
+            env_payload="",
+            python_version="3.10",
+            pr_context="",
+        )
+
+        hashes = json.loads((tmp_path / ".immutable_hashes.json").read_text())
+        assert "docker_build_env.sh" not in hashes
+        # Editable files should not be hashed
+        assert "docker_build_pkg.sh" not in hashes
+        assert "docker_build_run.sh" not in hashes
+
+    def test_integrity_allows_env_sh_edits(self, tmp_path: Path) -> None:
+        """Editing docker_build_env.sh must NOT trigger an integrity violation."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        # Write immutable files and the editable env script
+        (task_dir / "Dockerfile.pr").write_text("FROM base")
+        (task_dir / "docker_build_env.sh").write_text("#!/bin/bash\noriginal env")
+        hashes = _compute_immutable_hashes(task_dir)
+        (tmp_path / ".immutable_hashes.json").write_text(json.dumps(hashes))
+
+        # Agent edits env script and succeeds
+        (task_dir / "docker_build_env.sh").write_text("#!/bin/bash\npip install Cython\noriginal env")
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash\necho pkg")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash\necho run")
+        (task_dir / "verification_success.json").write_text('{"local_image": "test:latest"}')
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "done"
+        codex_result.raw_output = ""
+        codex_result.files_changed = ["task/docker_build_env.sh"]
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.docker_context is not None
+
+    def test_extract_results_reads_build_env_sh(self, tmp_path: Path) -> None:
+        """_extract_results must read back docker_build_env.sh into DockerContext.build_env_sh."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        env_content = "#!/bin/bash\npip install Cython\n# modified env"
+        (task_dir / "docker_build_env.sh").write_text(env_content)
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash\necho pkg")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash\necho run")
+        (task_dir / "verification_success.json").write_text('{"local_image": "test:latest"}')
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "done"
+        codex_result.raw_output = ""
+        codex_result.files_changed = []
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.docker_context is not None
+        assert result.docker_context.build_env_sh == env_content
+
+    def test_extract_results_env_sh_empty_when_missing(self, tmp_path: Path) -> None:
+        """If docker_build_env.sh doesn't exist, build_env_sh should be empty."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash\necho pkg")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash\necho run")
+        (task_dir / "verification_success.json").write_text('{"local_image": "test:latest"}')
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "done"
+        codex_result.raw_output = ""
+        codex_result.files_changed = []
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.docker_context is not None
+        assert result.docker_context.build_env_sh == ""
+
+    def test_failed_result_does_not_return_context(self, tmp_path: Path) -> None:
+        """On failure, docker_context should still be None even with env edits."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        (task_dir / "docker_build_env.sh").write_text("#!/bin/bash\nmodified")
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash\necho pkg")
+        failure = {"stage": "build", "return_code": 1, "error_message": "err"}
+        (task_dir / "failure.json").write_text(json.dumps(failure))
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = ""
+        codex_result.error = ""
+        codex_result.raw_output = ""
+        codex_result.files_changed = []
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is False
+        assert result.docker_context is None
+
+
+# ── env_payload override ───────────────────────────────────────────
+
+
+class TestEnvPayloadOverride:
+    """Agent can write env_payload_override.json to modify the package list."""
+
+    def test_extract_results_reads_payload_override(self, tmp_path: Path) -> None:
+        """_extract_results reads env_payload_override.json when present."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        override = '["numpy==1.21.0", "scipy==1.7.0"]'
+        (task_dir / "env_payload_override.json").write_text(override)
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash")
+        (task_dir / "verification_success.json").write_text('{"local_image": "test:latest"}')
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "done"
+        codex_result.raw_output = ""
+        codex_result.files_changed = []
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.env_payload_override == override
+
+    def test_extract_results_no_override_returns_none(self, tmp_path: Path) -> None:
+        """When no override file exists, env_payload_override should be None."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash")
+        (task_dir / "verification_success.json").write_text('{"local_image": "test:latest"}')
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "done"
+        codex_result.raw_output = ""
+        codex_result.files_changed = []
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.env_payload_override is None
+
+    def test_override_not_returned_on_failure(self, tmp_path: Path) -> None:
+        """On failure, env_payload_override should be None."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        (task_dir / "env_payload_override.json").write_text('["numpy==1.21.0"]')
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash")
+        failure = {"stage": "build", "return_code": 1, "error_message": "err"}
+        (task_dir / "failure.json").write_text(json.dumps(failure))
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = ""
+        codex_result.error = ""
+        codex_result.raw_output = ""
+        codex_result.files_changed = []
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is False
+        assert result.env_payload_override is None
+
+    def test_override_must_be_valid_json_list(self, tmp_path: Path) -> None:
+        """Malformed env_payload_override.json should be treated as no override."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        (task_dir / "env_payload_override.json").write_text("not valid json")
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash")
+        (task_dir / "verification_success.json").write_text('{"local_image": "test:latest"}')
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "done"
+        codex_result.raw_output = ""
+        codex_result.files_changed = []
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.env_payload_override is None
+
+    def test_override_rejects_non_list(self, tmp_path: Path) -> None:
+        """env_payload_override.json must be a JSON list, not an object or string."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+
+        (task_dir / "env_payload_override.json").write_text('{"numpy": "1.21.0"}')
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash")
+        (task_dir / "verification_success.json").write_text('{"local_image": "test:latest"}')
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "done"
+        codex_result.raw_output = ""
+        codex_result.files_changed = []
+
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.env_payload_override is None
+
+
+# ── Build stage detection ──────────────────────────────────────────
+
+
+class TestBuildStageDetection:
+    """sandbox_verify.py should identify which Dockerfile stage (env/pkg/run) failed."""
+
+    def test_parse_failed_stage_env(self) -> None:
+        """Detect failure in the 'env' stage from Docker build logs."""
+        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+
+        # Typical buildkit log: the last stage marker before the error
+        logs = (
+            "#5 [env 1/2] RUN git checkout abc123\n"
+            "#5 DONE 0.5s\n"
+            "#6 [env 2/2] RUN chmod +x ... && /workspace/repo/docker_build_env.sh\n"
+            "#6 ERROR: process returned non-zero exit code: 1\n"
+        )
+        assert _parse_failed_stage(logs) == "env"
+
+    def test_parse_failed_stage_pkg(self) -> None:
+        """Detect failure in the 'pkg' stage from Docker build logs."""
+        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+
+        logs = (
+            "#5 [env 2/2] RUN chmod +x ... && /workspace/repo/docker_build_env.sh\n"
+            "#5 DONE 30.0s\n"
+            "#6 [pkg 1/2] COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh\n"
+            "#6 DONE 0.1s\n"
+            "#7 [pkg 2/2] RUN chmod +x ... && /workspace/repo/docker_build_pkg.sh\n"
+            "#7 ERROR: process returned non-zero exit code: 1\n"
+        )
+        assert _parse_failed_stage(logs) == "pkg"
+
+    def test_parse_failed_stage_run(self) -> None:
+        """Detect failure in the 'run' stage from Docker build logs."""
+        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+
+        logs = (
+            "#8 [pkg 2/2] RUN chmod +x ... && /workspace/repo/docker_build_pkg.sh\n"
+            "#8 DONE 15.0s\n"
+            "#9 [run 1/2] COPY docker_build_run.sh /docker_build_run.sh\n"
+            "#9 DONE 0.1s\n"
+            "#10 [run 2/2] RUN chmod +x /docker_build_run.sh && /docker_build_run.sh\n"
+            "#10 ERROR: process returned non-zero exit code: 2\n"
+        )
+        assert _parse_failed_stage(logs) == "run"
+
+    def test_parse_failed_stage_no_markers(self) -> None:
+        """When no stage markers are found, return 'build' as fallback."""
+        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+
+        logs = "Some random error output\nwithout any stage markers\n"
+        assert _parse_failed_stage(logs) == "build"
+
+    def test_parse_failed_stage_empty(self) -> None:
+        """Empty log returns 'build' fallback."""
+        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+
+        assert _parse_failed_stage("") == "build"
+
+    def test_parse_failed_stage_legacy_docker(self) -> None:
+        """Legacy (non-buildkit) Docker output with 'Step N/M : FROM x AS stage'."""
+        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+
+        logs = (
+            "Step 3/10 : FROM env AS pkg\n"
+            "Step 4/10 : COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh\n"
+            "Step 5/10 : RUN chmod +x ... && /workspace/repo/docker_build_pkg.sh\n"
+            "The command '/bin/sh -c chmod +x ...' returned a non-zero code: 1\n"
+        )
+        assert _parse_failed_stage(logs) == "pkg"
+
+    def test_write_failure_uses_detected_stage(self, tmp_path: Path) -> None:
+        """_write_failure should write the specific stage name, not generic 'build'."""
+        from datasmith.agents.templates.sandbox_verify import _write_failure
+
+        _write_failure(tmp_path, "env", stdout="log output", stderr="error", rc=1)
+
+        failure = json.loads((tmp_path / "failure.json").read_text())
+        assert failure["stage"] == "env"
+        assert failure["return_code"] == 1
+
+    def test_build_error_carries_stage_through_verify(self, tmp_path: Path) -> None:
+        """When build_image raises BuildError, verify() should detect and write the correct stage."""
+        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage, _write_failure
+
+        # Simulate: BuildError with env-stage logs
+        build_stdout = (
+            "#5 [env 2/2] RUN chmod +x ... && /workspace/repo/docker_build_env.sh\n"
+            "#5 ERROR: process returned non-zero exit code: 1\n"
+        )
+        stage = _parse_failed_stage(build_stdout)
+        assert stage == "env"
+
+        # Write failure with detected stage
+        _write_failure(tmp_path, stage, stdout=build_stdout, stderr="", rc=1)
+        failure = json.loads((tmp_path / "failure.json").read_text())
+        assert failure["stage"] == "env"

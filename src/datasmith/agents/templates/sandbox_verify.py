@@ -34,7 +34,6 @@ from python_on_whales.exceptions import DockerException
 _IMMUTABLE_FILES = (
     "Dockerfile.pr",
     "docker_build_base.sh",
-    "docker_build_env.sh",
     "docker_build_final.sh",
     "profile.sh",
     "run-tests.sh",
@@ -171,6 +170,31 @@ class BuildError(Exception):
         self.stdout = stdout
         self.stderr = stderr
         self.rc = rc
+
+
+def _parse_failed_stage(build_log: str) -> str:
+    """Identify which Dockerfile stage (env/pkg/run) failed from Docker build output.
+
+    Scans for BuildKit stage markers like ``[env 2/2]`` or legacy markers like
+    ``FROM env AS pkg``.  Returns the name of the last stage seen before the
+    error, or ``"build"`` as a fallback.
+    """
+    # BuildKit format: #N [stage_name step/total] ...
+    buildkit_re = re.compile(r"\[(\w+)\s+\d+/\d+\]")
+    # Legacy format: Step N/M : FROM x AS stage
+    legacy_re = re.compile(r"Step \d+/\d+\s*:\s*FROM\s+\S+\s+AS\s+(\w+)", re.IGNORECASE)
+
+    last_stage = ""
+    for line in build_log.splitlines():
+        m = buildkit_re.search(line)
+        if m:
+            last_stage = m.group(1)
+            continue
+        m = legacy_re.search(line)
+        if m:
+            last_stage = m.group(1)
+
+    return last_stage if last_stage else "build"
 
 
 _MEM_UNITS = {"B": 1, "KIB": 1024, "MIB": 1024**2, "GIB": 1024**3, "TIB": 1024**4}
@@ -380,13 +404,38 @@ def verify(task_dir: Path) -> bool:
         _write_failure(task_dir, "parse", stderr="Task.sha is None", metrics=metrics)
         return False
 
+    # Check for env_payload override written by the agent
+    override_file = task_dir / "env_payload_override.json"
+    if override_file.exists():
+        try:
+            raw = override_file.read_text()
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                print(f"Using env_payload_override.json ({len(parsed)} packages)")
+                task = Task(
+                    owner=task.owner,
+                    repo=task.repo,
+                    sha=task.sha,
+                    commit_date=task.commit_date,
+                    env_payload=json.dumps(parsed),
+                    python_version=task.python_version,
+                    tag=task.tag,
+                    benchmarks=task.benchmarks,
+                    repo_image=task.repo_image,
+                )
+            else:
+                print("WARNING: env_payload_override.json is not a JSON list, ignoring")
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"WARNING: Failed to parse env_payload_override.json: {e}")
+
     # Build
     try:
         tag = build_image(docker, task_dir, task, target="run", metrics=metrics)
         print(f"Build succeeded: {tag}")
     except BuildError as e:
-        print(f"Build failed: {e}")
-        _write_failure(task_dir, "build", stdout=e.stdout, stderr=e.stderr, rc=e.rc, metrics=metrics)
+        stage = _parse_failed_stage(e.stdout)
+        print(f"Build failed at stage '{stage}': {e}")
+        _write_failure(task_dir, stage, stdout=e.stdout, stderr=e.stderr, rc=e.rc, metrics=metrics)
         return False
     except Exception as e:
         print(f"Build failed: {str(e)[:200]}")
