@@ -200,6 +200,9 @@ scratch/artifacts/
 supabase/.temp/
 supabase/.branches/
 
+# Grafana
+grafana/data/
+
 # MkDocs build output
 site/
 
