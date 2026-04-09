@@ -1,0 +1,37 @@
+services:
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    container_name: datasmith_grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    env_file:
+      - ../tokens.env
+    environment:
+      # Anonymous read-only access (no login required)
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      # Admin account for dashboard editing — password from tokens.env
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Home dashboard
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_UID=datasmith-overview
+      # Minimum refresh interval
+      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=1m
+      # Plugins
+      - GF_INSTALL_PLUGINS=netsage-sankey-panel,marcusolsson-treemap-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./provisioning/dashboards-json:/var/lib/grafana/dashboards:ro
+    networks:
+      - supabase_net
+
+volumes:
+  grafana-data:
+
+networks:
+  supabase_net:
+    external: true
+    name: supabase_network_datasmith_new

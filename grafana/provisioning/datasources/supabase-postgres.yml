@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: Supabase PostgreSQL
+    type: postgres
+    uid: supabase-pg
+    access: proxy
+    url: supabase_db_datasmith_new:5432
+    database: postgres
+    user: grafana_ro
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+      postgresVersion: 1500
+      timescaledb: false
+    secureJsonData:
+      password: grafana_readonly
+    isDefault: true
+    editable: false

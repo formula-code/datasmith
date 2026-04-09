@@ -1,0 +1,1445 @@
+{
+  "uid": "datasmith-overview",
+  "title": "DataSmith Pipeline Overview",
+  "tags": [
+    "datasmith",
+    "pipeline"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "2015-01-01T00:00:00.000Z",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "table_name",
+        "label": "Table",
+        "type": "custom",
+        "query": "repositories,pull_requests,packages,candidate_containers,candidate_prs,error_logs,runner_progress,runner_failures,hook_cache",
+        "current": {
+          "text": "pull_requests",
+          "value": "pull_requests"
+        },
+        "options": [
+          {
+            "text": "repositories",
+            "value": "repositories",
+            "selected": false
+          },
+          {
+            "text": "pull_requests",
+            "value": "pull_requests",
+            "selected": true
+          },
+          {
+            "text": "packages",
+            "value": "packages",
+            "selected": false
+          },
+          {
+            "text": "candidate_containers",
+            "value": "candidate_containers",
+            "selected": false
+          },
+          {
+            "text": "candidate_prs",
+            "value": "candidate_prs",
+            "selected": false
+          },
+          {
+            "text": "error_logs",
+            "value": "error_logs",
+            "selected": false
+          },
+          {
+            "text": "runner_progress",
+            "value": "runner_progress",
+            "selected": false
+          },
+          {
+            "text": "runner_failures",
+            "value": "runner_failures",
+            "selected": false
+          },
+          {
+            "text": "hook_cache",
+            "value": "hook_cache",
+            "selected": false
+          }
+        ]
+      },
+      {
+        "name": "row_limit",
+        "label": "Limit",
+        "type": "custom",
+        "query": "50,100,250,500,1000",
+        "current": {
+          "text": "100",
+          "value": "100"
+        },
+        "options": [
+          {
+            "text": "50",
+            "value": "50",
+            "selected": false
+          },
+          {
+            "text": "100",
+            "value": "100",
+            "selected": true
+          },
+          {
+            "text": "250",
+            "value": "250",
+            "selected": false
+          },
+          {
+            "text": "500",
+            "value": "500",
+            "selected": false
+          },
+          {
+            "text": "1000",
+            "value": "1000",
+            "selected": false
+          }
+        ]
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Dataset Growth",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 14,
+      "title": "Total PRs",
+      "type": "stat",
+      "gridPos": {
+        "x": 14,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS total FROM pull_requests;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "title": "Total Containers",
+      "type": "stat",
+      "gridPos": {
+        "x": 17,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS total FROM candidate_containers;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "title": "Total Packages",
+      "type": "stat",
+      "gridPos": {
+        "x": 14,
+        "y": 5,
+        "w": 3,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS total FROM packages;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "title": "Total Repos",
+      "type": "stat",
+      "gridPos": {
+        "x": 17,
+        "y": 5,
+        "w": 3,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS total FROM repositories;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "title": "PR to Container Rate",
+      "type": "stat",
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND((SELECT COUNT(*)::numeric FROM candidate_containers) / NULLIF((SELECT COUNT(*) FROM pull_requests), 0) * 100, 1) AS container_rate_pct;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Repository Overview",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 52,
+      "title": "All Repositories by Stars",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT owner || '/' || repo AS repository, stars FROM repositories WHERE stars IS NOT NULL ORDER BY stars DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xTickLabelMaxLength": 0,
+        "xTickLabelSpacing": 0,
+        "axisCenteredZero": false,
+        "axisBorderShow": false,
+        "xAxis": {
+          "showLabels": false
+        }
+      }
+    },
+    {
+      "id": 54,
+      "title": "Containers by Repository",
+      "type": "marcusolsson-treemap-panel",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT owner || '/' || repo AS repository, COUNT(*) AS containers FROM candidate_containers GROUP BY 1 ORDER BY 2 DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "sizeByField": "containers",
+        "textByField": "repository",
+        "colorByField": "containers"
+      }
+    },
+    {
+      "id": 50,
+      "title": "Containers Built by Month",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 14,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT to_char(pr.merged_at, 'MM-YYYY') AS month, COUNT(*) AS containers FROM candidate_containers cc JOIN pull_requests pr ON cc.owner = pr.owner AND cc.repo = pr.repo AND cc.issue_number = pr.issue_number WHERE pr.merged_at IS NOT NULL GROUP BY 1, date_trunc('month', pr.merged_at) ORDER BY date_trunc('month', pr.merged_at);",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Pull Request Insights",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 31,
+      "title": "Performance Commit Ratio",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 4,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND(COUNT(*) FILTER (WHERE is_performance_commit)::numeric / NULLIF(COUNT(*), 0) * 100, 1) AS perf_pct FROM pull_requests;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 53,
+      "title": "Dataset Time Span",
+      "type": "table",
+      "gridPos": {
+        "x": 4,
+        "y": 39,
+        "w": 5,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT 'Earliest' AS metric, to_char(MIN(merged_at), 'YYYY-MM-DD') AS value FROM pull_requests WHERE is_performance_commit AND merged_at IS NOT NULL UNION ALL SELECT 'Latest', to_char(MAX(merged_at), 'YYYY-MM-DD') FROM pull_requests WHERE is_performance_commit AND merged_at IS NOT NULL UNION ALL SELECT 'Span', COUNT(DISTINCT date_trunc('year', merged_at)) || ' years' FROM pull_requests WHERE is_performance_commit AND merged_at IS NOT NULL;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "textMode": "value",
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 33,
+      "title": "Difficulty Distribution",
+      "type": "piechart",
+      "gridPos": {
+        "x": 9,
+        "y": 39,
+        "w": 5,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(difficulty, 'unset') AS difficulty, COUNT(*) AS count FROM pull_requests WHERE is_performance_commit GROUP BY 1 ORDER BY 2 DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": []
+        },
+        "pieType": "pie"
+      }
+    },
+    {
+      "id": 34,
+      "title": "PR Volume Over Time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 14,
+        "y": 39,
+        "w": 10,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('month', created_at) AS time, COUNT(*) FILTER (WHERE is_performance_commit) AS perf_prs FROM pull_requests WHERE created_at IS NOT NULL GROUP BY 1 ORDER BY 1;",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 51,
+      "title": "Optimization Type Distribution",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT REPLACE(COALESCE(classification, 'unclassified'), '_', ' ') AS optimization_type, COUNT(*) AS count FROM pull_requests WHERE is_performance_commit AND classification != 'legacy-verified' GROUP BY 1 ORDER BY 2 DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Package Resolution",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 35,
+      "title": "Python Version Distribution",
+      "type": "piechart",
+      "gridPos": {
+        "x": 0,
+        "y": 57,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(python_version, 'unknown') AS python_version, COUNT(*) AS count FROM packages GROUP BY 1 ORDER BY 2 DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": []
+        },
+        "pieType": "pie"
+      }
+    },
+    {
+      "id": 36,
+      "title": "Installability by Repo (Worst)",
+      "type": "barchart",
+      "gridPos": {
+        "x": 6,
+        "y": 57,
+        "w": 10,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT owner || '/' || repo AS repository, COUNT(*) FILTER (WHERE can_install) AS installable, COUNT(*) FILTER (WHERE NOT can_install) AS failed FROM packages GROUP BY 1 HAVING COUNT(*) FILTER (WHERE NOT can_install) > 0 ORDER BY failed DESC LIMIT 20;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "installable"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "stacking": "normal"
+      }
+    },
+    {
+      "id": 37,
+      "title": "Resolution Strategy Breakdown",
+      "type": "piechart",
+      "gridPos": {
+        "x": 16,
+        "y": 57,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(resolution_strategy, 'unknown') AS strategy, COUNT(*) AS count FROM packages GROUP BY 1 ORDER BY 2 DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": []
+        },
+        "pieType": "pie"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Pipeline Status",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 65,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 1,
+      "title": "Active Runners",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 66,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT runner_name, runner_id, total, completed, failed, total - completed - failed AS remaining, ROUND(completed::numeric / NULLIF(total, 0) * 100, 1) AS pct_complete, started_at, updated_at FROM runner_progress ORDER BY updated_at DESC LIMIT 20;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pct_complete"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 50
+                    },
+                    {
+                      "color": "green",
+                      "value": 90
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "title": "Latest Runner Completion",
+      "type": "gauge",
+      "gridPos": {
+        "x": 12,
+        "y": 66,
+        "w": 6,
+        "h": 7
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND(completed::numeric / NULLIF(total, 0) * 100, 1) AS completion_pct FROM runner_progress ORDER BY updated_at DESC LIMIT 1;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Recent Runner Failures",
+      "type": "table",
+      "gridPos": {
+        "x": 18,
+        "y": 66,
+        "w": 6,
+        "h": 7
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT rp.runner_name, rf.item_id, LEFT(rf.error_message, 200) AS error_message, rf.created_at FROM runner_failures rf JOIN runner_progress rp ON rf.runner_id = rp.runner_id ORDER BY rf.created_at DESC LIMIT 20;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Synthesis",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 73,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 4,
+      "title": "Synthesis Success Rate Over Time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 74,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('day', created_at) AS time, COUNT(*) FILTER (WHERE success) AS successes, COUNT(*) FILTER (WHERE NOT success) AS failures FROM error_logs WHERE created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 1;",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "successes"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failures"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "title": "Failure Stage Distribution",
+      "type": "piechart",
+      "gridPos": {
+        "x": 12,
+        "y": 74,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(failure_stage, 'unknown') AS stage, COUNT(*) AS count FROM error_logs WHERE NOT success AND created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 2 DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": []
+        },
+        "pieType": "pie"
+      }
+    },
+    {
+      "id": 6,
+      "title": "Top Error Messages",
+      "type": "table",
+      "gridPos": {
+        "x": 18,
+        "y": 74,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(failure_stage, 'unknown') AS stage, LEFT(error_message, 150) AS error_message, COUNT(*) AS occurrences FROM error_logs WHERE NOT success AND created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 15;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Synthesis Deeper Analysis",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 82,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 38,
+      "title": "First-Attempt vs Multi-Attempt Success",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 83,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "WITH first_attempts AS (  SELECT owner, repo, sha, success FROM error_logs WHERE attempt_index = 0), retry_success AS (  SELECT DISTINCT owner, repo, sha FROM error_logs WHERE attempt_index > 0 AND success) SELECT 'First attempt' AS category, COUNT(*) FILTER (WHERE success) AS successes, COUNT(*) FILTER (WHERE NOT success) AS failures FROM first_attempts UNION ALL SELECT 'Needed retries', COUNT(*), 0 FROM retry_success;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 39,
+      "title": "Hardest Repos (Lowest Success Rate)",
+      "type": "table",
+      "gridPos": {
+        "x": 8,
+        "y": 83,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT owner || '/' || repo AS repository, COUNT(*) AS attempts, COUNT(*) FILTER (WHERE success) AS successes, ROUND(COUNT(*) FILTER (WHERE success)::numeric / NULLIF(COUNT(*), 0) * 100, 1) AS success_rate_pct FROM error_logs GROUP BY 1 HAVING COUNT(*) >= 3 ORDER BY success_rate_pct ASC, attempts DESC LIMIT 20;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 40,
+      "title": "Agent Head-to-Head",
+      "type": "table",
+      "gridPos": {
+        "x": 16,
+        "y": 83,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(agent_name, 'unknown') AS agent, COUNT(*) AS attempts, COUNT(*) FILTER (WHERE success) AS successes, ROUND(COUNT(*) FILTER (WHERE success)::numeric / NULLIF(COUNT(*), 0) * 100, 1) AS success_rate_pct, ROUND(AVG(duration_s)::numeric, 1) AS avg_duration_s FROM error_logs WHERE created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY success_rate_pct DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Attempt Details",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 91,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 7,
+      "title": "Attempts per Repository",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 92,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT owner || '/' || repo AS repository, COUNT(*) FILTER (WHERE success) AS successes, COUNT(*) FILTER (WHERE NOT success) AS failures FROM error_logs WHERE created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 20;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "successes"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failures"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "stacking": "normal"
+      }
+    },
+    {
+      "id": 8,
+      "title": "Avg Duration by Agent",
+      "type": "barchart",
+      "gridPos": {
+        "x": 12,
+        "y": 92,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(agent_name, 'unknown') AS agent, ROUND(AVG(duration_s)::numeric, 1) AS avg_duration_s, COUNT(*) AS attempts FROM error_logs WHERE created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 2 DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "Synthesis Duration Over Time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 18,
+        "y": 92,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('day', created_at) AS time, ROUND(AVG(duration_s)::numeric, 1) AS avg_duration_s, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_s)::numeric, 1) AS p95_duration_s FROM error_logs WHERE created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 1;",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Resource Metrics",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 100,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 10,
+      "title": "Build Metrics (Successful Attempts)",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 101,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT owner || '/' || repo AS repository, sha, ROUND((resource_metrics->>'build_duration_s')::numeric, 1) AS build_s, ROUND((resource_metrics->>'test_duration_s')::numeric, 1) AS test_s, ROUND((resource_metrics->>'image_size_bytes')::numeric / 1048576, 1) AS image_mb, ROUND((resource_metrics->>'peak_memory_bytes')::numeric / 1048576, 1) AS peak_mem_mb, created_at FROM error_logs WHERE resource_metrics IS NOT NULL AND success AND created_at >= $__timeFrom() AND created_at <= $__timeTo() ORDER BY created_at DESC LIMIT 50;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Image Size vs Build Time",
+      "type": "table",
+      "gridPos": {
+        "x": 12,
+        "y": 101,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND((resource_metrics->>'build_duration_s')::numeric, 1) AS build_s, ROUND((resource_metrics->>'image_size_bytes')::numeric / 1048576, 0) AS image_mb, ROUND((resource_metrics->>'test_duration_s')::numeric, 1) AS test_s, owner || '/' || repo AS repository FROM error_logs WHERE resource_metrics IS NOT NULL AND resource_metrics->>'build_duration_s' IS NOT NULL AND created_at >= $__timeFrom() AND created_at <= $__timeTo() ORDER BY build_s DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "Avg Resource Metrics Over Time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 18,
+        "y": 101,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('day', created_at) AS time, ROUND(AVG((resource_metrics->>'build_duration_s')::numeric), 1) AS avg_build_s, ROUND(AVG((resource_metrics->>'test_duration_s')::numeric), 1) AS avg_test_s, ROUND(AVG((resource_metrics->>'peak_memory_bytes')::numeric) / 1048576, 0) AS avg_peak_mem_mb FROM error_logs WHERE resource_metrics IS NOT NULL AND created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 1;",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Data Explorer",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 118,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 22,
+      "title": "Performance PRs with Referenced Issues",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 123,
+        "w": 24,
+        "h": 12
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT pr.* FROM pull_requests pr JOIN candidate_prs cp ON pr.owner = cp.owner AND pr.repo = cp.repo AND pr.issue_number = cp.issue_number WHERE pr.is_performance_commit AND cp.issues_json IS NOT NULL AND cp.issues_json != '[]'::jsonb ORDER BY pr.merged_at DESC NULLS LAST LIMIT ${row_limit:raw};",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Pipeline Funnel",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 135,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 30,
+      "title": "End-to-End Pipeline Funnel",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 136,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT stage, count FROM (SELECT 1 AS ord, 'Repositories' AS stage, COUNT(*) AS count FROM repositories UNION ALL SELECT 2, 'Pull Requests', COUNT(*) FROM pull_requests UNION ALL SELECT 3, 'Performance PRs', COUNT(*) FROM pull_requests WHERE is_performance_commit UNION ALL SELECT 4, 'Packages Resolved', COUNT(*) FROM packages WHERE can_install UNION ALL SELECT 5, 'Containers Built', COUNT(*) FROM candidate_containers UNION ALL SELECT 6, 'Published', COUNT(*) FROM pull_requests WHERE published_at IS NOT NULL) sub ORDER BY ord;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    }
+  ]
+}
