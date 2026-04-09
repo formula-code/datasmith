@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from datasmith.utils import get_client, get_logger
@@ -87,6 +88,56 @@ class Pipeline:
         self._min_stars = min_stars
         self._completed_stages: list[str] = []
 
+    def _log_dry_run_summary(
+        self,
+        stage_name: str,
+        items: list[Any],
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Log an informative dry-run summary for a stage."""
+        lines = [f"[DRY RUN] Stage: {stage_name}", f"  Items to process: {len(items)}"]
+
+        if not items:
+            lines.append("  Nothing to do.")
+            logger.info("\n".join(lines))
+            return
+
+        lines.extend(self._repo_breakdown(items))
+        lines.extend(self._settings_lines())
+
+        for k, v in (extra or {}).items():
+            lines.append(f"  {k}: {v}")
+
+        logger.info("\n".join(lines))
+
+    def _repo_breakdown(self, items: list[Any]) -> list[str]:
+        repo_counts: Counter[tuple[str, str]] = Counter()
+        for it in items:
+            if isinstance(it, dict):
+                repo_counts[(it["owner"], it["repo"])] += 1
+            elif isinstance(it, tuple) and len(it) >= 2:
+                repo_counts[(it[0], it[1])] += 1
+
+        lines = [f"  Unique repos: {len(repo_counts)}"]
+        top = repo_counts.most_common(10)
+        if top:
+            lines.append("  Top repos:")
+            for (owner, repo), count in top:
+                lines.append(f"    {owner}/{repo}: {count}")
+            if len(repo_counts) > 10:
+                lines.append(f"    ... and {len(repo_counts) - 10} more")
+        return lines
+
+    def _settings_lines(self) -> list[str]:
+        settings: list[str] = []
+        if self._n_concurrent:
+            settings.append(f"concurrency={self._n_concurrent}")
+        if self._force:
+            settings.append("force=True")
+        if self._tasks_per_repo:
+            settings.append(f"tasks_per_repo={self._tasks_per_repo}")
+        return [f"  Settings: {', '.join(settings)}"] if settings else []
+
     async def run(
         self,
         start_date: str,
@@ -125,15 +176,15 @@ class Pipeline:
 
         for stage_name in stages_to_run:
             if self._dry_run:
-                logger.info("[DRY RUN] Would run stage: %s", stage_name)
-                continue
-
-            logger.info("Starting stage: %s", stage_name)
+                logger.info("[DRY RUN] Collecting summary for stage: %s", stage_name)
+            else:
+                logger.info("Starting stage: %s", stage_name)
             try:
                 await self._run_stage(stage_name, start_date, end_date)
-                self._completed_stages.append(stage_name)
-                self._mark_stage_completed(stage_name)
-                logger.info("Completed stage: %s", stage_name)
+                if not self._dry_run:
+                    self._completed_stages.append(stage_name)
+                    self._mark_stage_completed(stage_name)
+                    logger.info("Completed stage: %s", stage_name)
             except Exception:
                 logger.exception("Stage %s failed", stage_name)
                 raise
@@ -162,7 +213,6 @@ class Pipeline:
 
         pool = TokenPool()
         gh = GitHubClient(pool)
-        runner = ScrapeReposRunner(gh, **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}))
 
         seen: set[tuple[str, str]] = set()
         items: list[tuple[str, str]] = []
@@ -197,6 +247,17 @@ class Pipeline:
                 items.append(pair)
 
         logger.info("Total repos to process: %d", len(items))
+
+        if self._dry_run:
+            self._log_dry_run_summary(
+                "scrape_repos",
+                items,
+                extra={"From GitHub search": len(discovered), "From DB (refresh)": len(rows)},
+            )
+            await gh.close()
+            return
+
+        runner = ScrapeReposRunner(gh, **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}))
         await runner.run(items)
         await gh.close()
 
@@ -205,6 +266,17 @@ class Pipeline:
         from datasmith.runners.scrape_commits import ScrapeCommitsRunner
         from datasmith.utils.tokens import TokenPool
 
+        rows = fetch_all("repositories", select="owner, repo")
+        items = [(r["owner"], r["repo"]) for r in rows]
+
+        if self._dry_run:
+            self._log_dry_run_summary(
+                "scrape_commits",
+                items,
+                extra={"Date range": f"{start_date} to {end_date}"},
+            )
+            return
+
         pool = TokenPool()
         gh = GitHubClient(pool)
         kwargs: dict[str, Any] = {"since": start_date, "until": end_date}
@@ -212,8 +284,6 @@ class Pipeline:
             kwargs["n_concurrent"] = self._n_concurrent
         runner = ScrapeCommitsRunner(gh, **kwargs)
 
-        rows = fetch_all("repositories", select="owner, repo")
-        items = [(r["owner"], r["repo"]) for r in rows]
         await runner.run(items)
         await gh.close()
 
@@ -227,20 +297,6 @@ class Pipeline:
             logger.info("Imported %d pull request records from offline source", n)
 
     async def _classify_prs(self) -> None:
-        from datasmith.agents.classifiers import ClassifyJudge, PerfClassifier
-        from datasmith.agents.config import AgentConfig, configure_dspy
-        from datasmith.runners.classify_prs import ClassifyPRsRunner
-
-        configure_dspy(AgentConfig.from_env())
-
-        classifier = PerfClassifier()
-        judge = ClassifyJudge()
-        runner = ClassifyPRsRunner(
-            classifier,
-            judge,
-            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
-        )
-
         classify_kwargs: dict[str, Any] = {
             "select": "owner, repo, issue_number, title, body, patch, file_changes",
             "filters": {"is_performance_commit_symbolic": True},
@@ -259,15 +315,31 @@ class Pipeline:
             }
             for r in rows
         ]
+
+        if self._dry_run:
+            self._log_dry_run_summary(
+                "classify_prs",
+                items,
+                extra={"Filter": "unclassified only" if not self._force else "all (force=True)"},
+            )
+            return
+
+        from datasmith.agents.classifiers import ClassifyJudge, PerfClassifier
+        from datasmith.agents.config import AgentConfig, configure_dspy
+        from datasmith.runners.classify_prs import ClassifyPRsRunner
+
+        configure_dspy(AgentConfig.from_env())
+
+        classifier = PerfClassifier()
+        judge = ClassifyJudge()
+        runner = ClassifyPRsRunner(
+            classifier,
+            judge,
+            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
+        )
         await runner.run(items)
 
     async def _resolve_packages(self, start_date: str, end_date: str) -> None:
-        from datasmith.runners.resolve_packages import ResolvePackagesRunner
-
-        runner = ResolvePackagesRunner(
-            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
-        )
-
         # Get performance-classified PRs within the date range
         rows = fetch_all(
             "pull_requests",
@@ -291,29 +363,34 @@ class Pipeline:
             items.append({"owner": r["owner"], "repo": r["repo"], "sha": sha})
 
         # Skip items already in the packages table (unless --force)
+        skipped = 0
         if items and not self._force:
             existing_rows = fetch_all("packages", select="owner, repo, sha")
             existing_keys = {(e["owner"], e["repo"], e["sha"]) for e in existing_rows}
+            before = len(items)
             items = [it for it in items if (it["owner"], it["repo"], it["sha"]) not in existing_keys]
+            skipped = before - len(items)
 
         logger.info("Resolving packages for %d commits", len(items))
+
+        if self._dry_run:
+            extra: dict[str, Any] = {
+                "Date range": f"{start_date} to {end_date}",
+                "Unique commits from PRs": len(seen),
+            }
+            if skipped:
+                extra["Already resolved (skipped)"] = skipped
+            self._log_dry_run_summary("resolve_packages", items, extra=extra)
+            return
+
+        from datasmith.runners.resolve_packages import ResolvePackagesRunner
+
+        runner = ResolvePackagesRunner(
+            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
+        )
         await runner.run(items)
 
     async def _render_problems(self) -> None:
-        from datasmith.agents.config import AgentConfig, configure_dspy
-        from datasmith.github.client import GitHubClient
-        from datasmith.runners.render_problems import RenderProblemsRunner
-        from datasmith.utils.tokens import TokenPool
-
-        configure_dspy(AgentConfig.from_env())
-
-        pool = TokenPool()
-        gh = GitHubClient(pool)
-        runner = RenderProblemsRunner(
-            gh=gh,
-            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
-        )
-
         # Fetch performance-classified PRs
         rows = fetch_all(
             "pull_requests",
@@ -338,12 +415,15 @@ class Pipeline:
             existing_rows = fetch_all("candidate_prs", select="owner, repo, issue_number")
             existing_keys = {(e["owner"], e["repo"], e["issue_number"]) for e in existing_rows}
 
+        skipped_no_pkg = 0
+        skipped_existing = 0
         items = []
         for r in rows:
             sha = r.get("merge_commit_sha", "")
             if not sha:
                 continue
             if (r["owner"], r["repo"], sha) not in installable:
+                skipped_no_pkg += 1
                 logger.debug(
                     "Skipping %s/%s#%d: no can_install package for sha %s",
                     r["owner"],
@@ -353,6 +433,7 @@ class Pipeline:
                 )
                 continue
             if (r["owner"], r["repo"], r["issue_number"]) in existing_keys:
+                skipped_existing += 1
                 continue
             items.append({
                 "owner": r["owner"],
@@ -369,25 +450,33 @@ class Pipeline:
             items = _cap_per_repo(items, self._tasks_per_repo)
 
         logger.info("Rendering problem contexts for %d PRs", len(items))
+
+        if self._dry_run:
+            extra: dict[str, Any] = {"Performance PRs in DB": len(rows)}
+            if skipped_no_pkg:
+                extra["Skipped (no installable package)"] = skipped_no_pkg
+            if skipped_existing:
+                extra["Skipped (already rendered)"] = skipped_existing
+            self._log_dry_run_summary("render_problems", items, extra=extra)
+            return
+
+        from datasmith.agents.config import AgentConfig, configure_dspy
+        from datasmith.github.client import GitHubClient
+        from datasmith.runners.render_problems import RenderProblemsRunner
+        from datasmith.utils.tokens import TokenPool
+
+        configure_dspy(AgentConfig.from_env())
+
+        pool = TokenPool()
+        gh = GitHubClient(pool)
+        runner = RenderProblemsRunner(
+            gh=gh,
+            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
+        )
         await runner.run(items)
         await gh.close()
 
     async def _synthesize_images(self) -> None:
-        from datasmith.agents.synthesizer import Synthesizer
-        from datasmith.github.client import GitHubClient
-        from datasmith.runners.synthesize_images import SynthesizeImagesRunner
-        from datasmith.utils.tokens import TokenPool
-
-        pool = TokenPool()
-        gh = GitHubClient(pool)
-
-        synth = Synthesizer(agent=self._agent, force=self._force)
-        runner = SynthesizeImagesRunner(
-            synth,
-            gh=gh,
-            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
-        )
-
         query_kwargs: dict[str, Any] = {
             "select": "owner, repo, issue_number, merge_commit_sha, title, body, created_at, rendered_problem",
             "filters": {"is_performance_commit": True, "is_performance_commit_symbolic": True},
@@ -421,12 +510,15 @@ class Pipeline:
             if c.get("issues_json") or c.get("initial_observations")
         }
 
+        skipped_no_pkg = 0
+        skipped_no_ctx = 0
         items = []
         for r in rows:
             sha = r.get("merge_commit_sha", "")
             pkg = pkg_lookup.get((r["owner"], r["repo"], sha), {})
             # Skip PRs without resolved packages
             if not pkg:
+                skipped_no_pkg += 1
                 logger.debug(
                     "Skipping %s/%s#%d: no resolved packages for sha %s",
                     r["owner"],
@@ -437,6 +529,7 @@ class Pipeline:
                 continue
             # Skip PRs without a rendered context (non-empty issues + observations)
             if (r["owner"], r["repo"], r["issue_number"]) not in eligible_prs:
+                skipped_no_ctx += 1
                 logger.debug(
                     "Skipping %s/%s#%d: no eligible pr_context (empty issues_json or initial_observations)",
                     r["owner"],
@@ -461,10 +554,47 @@ class Pipeline:
             items = _cap_per_repo(items, self._tasks_per_repo)
 
         logger.info("Synthesizing images for %d PRs", len(items))
+
+        if self._dry_run:
+            extra: dict[str, Any] = {"Candidate PRs in DB": len(rows)}
+            if skipped_no_pkg:
+                extra["Skipped (no resolved packages)"] = skipped_no_pkg
+            if skipped_no_ctx:
+                extra["Skipped (no rendered context)"] = skipped_no_ctx
+            self._log_dry_run_summary("synthesize_images", items, extra=extra)
+            return
+
+        from datasmith.agents.synthesizer import Synthesizer
+        from datasmith.github.client import GitHubClient
+        from datasmith.runners.synthesize_images import SynthesizeImagesRunner
+        from datasmith.utils.tokens import TokenPool
+
+        pool = TokenPool()
+        gh = GitHubClient(pool)
+
+        synth = Synthesizer(agent=self._agent, force=self._force)
+        runner = SynthesizeImagesRunner(
+            synth,
+            gh=gh,
+            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
+        )
         await runner.run(items)
         await gh.close()
 
     async def _publish(self, start_date: str, end_date: str) -> None:
+        if self._dry_run:
+            # Query what would be published without running the pipeline
+            rows = fetch_all(
+                "candidate_containers",
+                select="owner, repo, issue_number",
+            )
+            self._log_dry_run_summary(
+                "publish",
+                [{"owner": r["owner"], "repo": r["repo"]} for r in rows],
+                extra={"Date range": f"{start_date} to {end_date}"},
+            )
+            return
+
         from datasmith.publish.pipeline import publish_pipeline
 
         await publish_pipeline(start_date, end_date)

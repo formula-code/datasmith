@@ -61,19 +61,27 @@ class TestPipeline:
         assert "scrape_commits" in calls
         assert "classify_prs" not in calls
 
-    async def test_dry_run_no_execution(self):
+    async def test_dry_run_no_stage_completion(self):
         pipeline = Pipeline(dry_run=True)
         calls = []
 
         async def mock_run_stage(name, start, end):
             calls.append(name)
 
-        with patch.object(pipeline, "_mark_stage_completed"):
-            pipeline._run_stage = mock_run_stage  # type: ignore[assignment]
-            await pipeline.run("2024-01-01", "2024-12-31")
+        mark_calls = []
+        original_mark = pipeline._mark_stage_completed
 
-        # All stages are skipped in dry_run mode.
-        assert calls == []
+        def tracking_mark(name):
+            mark_calls.append(name)
+
+        pipeline._run_stage = mock_run_stage  # type: ignore[assignment]
+        pipeline._mark_stage_completed = tracking_mark  # type: ignore[assignment]
+        await pipeline.run("2024-01-01", "2024-12-31")
+
+        # Stages are still dispatched (for summary collection) but never marked completed.
+        assert calls == STAGES
+        assert mark_calls == []
+        assert pipeline._completed_stages == []
 
     async def test_single_stage_execution(self):
         pipeline = Pipeline()
