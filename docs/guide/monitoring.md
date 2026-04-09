@@ -2,6 +2,8 @@
 
 fc-data includes a pre-configured Grafana dashboard for monitoring the pipeline, browsing data, and tracking dataset growth.
 
+The live dashboard is available at **<https://datasmith-grafana.atharvas.net/>**.
+
 ## Prerequisites
 
 - Local Supabase instance running (`make supabase-up`)
@@ -19,10 +21,18 @@ make grafana-up
 
 Grafana is now available at **<http://localhost:3001>** with no login required (anonymous read-only access).
 
-To expose it publicly via ngrok:
+## Public Exposure
+
+The live dashboard is exposed via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) — free, persistent, and uses your own domain. Setup:
 
 ```bash
-ngrok http 3001
+# Install cloudflared, then:
+cloudflared tunnel login
+cloudflared tunnel create datasmith-grafana
+cloudflared tunnel route dns datasmith-grafana grafana.yourdomain.com
+
+# Create ~/.cloudflared/config.yml with protocol: http2 (avoids QUIC/UDP firewall issues)
+cloudflared tunnel run datasmith-grafana
 ```
 
 ## Architecture

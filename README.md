@@ -13,7 +13,7 @@
   <a href="https://formula-code.github.io/datasmith/">
     <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Docs-4B0082?style=for-the-badge" alt="fc-data Documentation">
   </a>
-  <a href="https://nonconstricting-zara-unhinderingly.ngrok-free.dev/">
+  <a href="https://datasmith-grafana.atharvas.net/">
     <img src="https://img.shields.io/badge/%F0%9F%93%8A%20Live%20Dashboard-7F1D1D?style=for-the-badge" alt="Live Dashboard">
   </a>
 </p>
