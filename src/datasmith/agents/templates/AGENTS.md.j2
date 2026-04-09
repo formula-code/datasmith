@@ -35,24 +35,31 @@ Follow this iterative cycle:
 
 1. Run `python3 sandbox_verify.py` (A good timeout is 60 minutes, but adjust as needed)
 2. If it fails, read `task/failure.json` for error details
-3. Edit `task/docker_build_pkg.sh` and/or `task/docker_build_run.sh`
+3. Edit `task/docker_build_pkg.sh`, `task/docker_build_run.sh`, and/or `task/docker_build_env.sh`
 4. Re-run `python3 sandbox_verify.py`
 5. Repeat until `task/verification_success.json` is created
 
-**IMPORTANT**: Only modify `task/docker_build_pkg.sh` and `task/docker_build_run.sh`.
+**IMPORTANT**: Only modify `task/docker_build_pkg.sh`, `task/docker_build_run.sh`, and `task/docker_build_env.sh`.
 Do **not** modify the Dockerfile, `task.txt`, or any other scripts.
+
+You may also write `task/env_payload_override.json` — a JSON list of pinned package strings
+(e.g. `["numpy==1.21.0", "scipy==1.7.0"]`) — to replace the default env payload when the
+original package versions fail to build.
 
 ## File Constraints
 
 ### Files you CAN edit
 - `task/docker_build_pkg.sh` — Primary build script. Install the package, add build deps.
 - `task/docker_build_run.sh` — Runtime setup. Add test/benchmark deps, repo-specific config.
+- `task/docker_build_env.sh` — Python environment setup. Add build prerequisites needed before env payload installation (e.g. Cython, distutils).
+
+### Files you CAN create
+- `task/env_payload_override.json` — JSON list of pinned package strings to replace the default env payload. Use this when the original package versions are fundamentally broken (e.g. no wheels available, incompatible with the Python version).
 
 ### Files you MUST NOT edit
 - `task/Dockerfile.pr` — Multi-stage build definition (base and repo stages are pre-built)
 - `task/task.txt` — Task configuration (owner, repo, sha, deps)
 - `task/docker_build_base.sh` — Base system setup (template)
-- `task/docker_build_env.sh` — Python environment creation (template)
 - `task/docker_build_final.sh` — Final image setup (template)
 - `task/profile.sh` — ASV benchmark runner
 - `task/run-tests.sh` — Test runner
@@ -64,7 +71,7 @@ When verification fails, `task/failure.json` contains:
 
 ```json
 {
-  "stage": "build|tests",
+  "stage": "env|pkg|run|tests|build",
   "return_code": 1,
   "stderr": "Full error output from the failed stage",
   "stdout": "Full standard output from the failed stage",
@@ -72,8 +79,11 @@ When verification fails, `task/failure.json` contains:
 }
 ```
 
-- **build** failures: Usually missing dependencies or compilation errors → fix in `docker_build_pkg.sh`
+- **env** failures: Env payload packages fail to install (missing build tools, broken wheels) → fix in `docker_build_env.sh` or write `env_payload_override.json`
+- **pkg** failures: Package installation errors or missing build deps → fix in `docker_build_pkg.sh`
+- **run** failures: Runtime setup issues → fix in `docker_build_run.sh`
 - **tests** failures: Missing test deps, import errors, or benchmark setup issues → fix in `docker_build_run.sh` or `docker_build_pkg.sh`
+- **build** (generic): Stage could not be determined from logs — check stdout/stderr for details
 
 ## Common Fixes for docker_build_pkg.sh
 
@@ -132,13 +142,15 @@ These are set by earlier build stages and available in both scripts:
 ## Docker Build Stages
 
 The Dockerfile.pr has 4 stages: env → pkg → run → final (base and repo images are pre-built).
-Only the `pkg` and `run` stages use your editable scripts.
+The `env`, `pkg`, and `run` stages use your editable scripts.
 
+- **env** stage: Runs `docker_build_env.sh` to set up the Python environment and install pinned deps
 - **pkg** stage: Runs `docker_build_pkg.sh` to install the package
 - **run** stage: Runs `docker_build_run.sh` to prepare for tests/benchmarks
 
+Changes to `docker_build_env.sh` rebuild from the env stage onward (slowest).
 Changes to `docker_build_pkg.sh` rebuild from the pkg stage onward (fast iteration).
-Changes to `docker_build_run.sh` rebuild only the run stage.
+Changes to `docker_build_run.sh` rebuild only the run stage (fastest).
 
 ## Tips
 
@@ -148,3 +160,6 @@ Changes to `docker_build_run.sh` rebuild only the run stage.
 - If the build times out, look for ways to simplify or skip expensive steps
 - Docker layer caching means earlier stages are cached — only your changed stage rebuilds
 - A lot of bookkeeping code is used in downstream stages; avoid removing code unless you understand its purpose.
+- **Fixing env payload packages**: If packages in the env payload fail to build (e.g. no wheels, missing build deps), you have two options:
+  1. **Edit `docker_build_env.sh`** to install build prerequisites (Cython, compiler toolchains, etc.) *before* the payload is installed. This is preferred when the package versions are correct but just need build tools.
+  2. **Write `task/env_payload_override.json`** with a corrected JSON list of pinned packages (e.g. `["numpy==1.21.0", "h5py==3.1.0"]`). `sandbox_verify.py` will use this instead of the original payload. Use this when a package version is fundamentally broken (no source dist, incompatible with the Python version, yanked). Keep changes minimal — stay as close as possible to the originals.
