@@ -1,6 +1,6 @@
 [project]
 name = "fc-data"
-version = "0.2.1"
+version = "0.2.2"
 description = "Python toolchain for building and maintaining FormulaCode benchmark tasks."
 authors = [{ name = "Atharva Sehgal", email = "atharva.sehgal@gmail.com" }]
 readme = "README.md"

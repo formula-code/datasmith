@@ -1,6 +1,6 @@
 ![banner](https://github.com/formula-code/datasmith/raw/main/static/formula-code-datasmith.png)
 
-I<p align="center">
+<p align="center">
   <a href="https://formula-code.github.io/">
     <img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-0A7A5E?style=for-the-badge" alt="FormulaCode Website">
   </a>
@@ -10,11 +10,11 @@ I<p align="center">
   <a href="https://formula-code.github.io/leaderboard/">
     <img src="https://img.shields.io/badge/%F0%9F%93%88%20Leaderboard-EA580C?style=for-the-badge&logoColor=white" alt="FormulaCode Leaderboard">
   </a>
-  <a href="https://formula-code.github.io/registry/">
-    <img src="https://img.shields.io/badge/%F0%9F%93%88%20Live%20Task%20Registry-7F1D1D?style=for-the-badge&logoColor=white" alt="FormulaCode Live Task Registry">
+  <a href="https://formula-code.github.io/datasmith/">
+    <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Docs-4B0082?style=for-the-badge" alt="fc-data Documentation">
   </a>
-  <a href="https://pypi.org/project/fc-data/">
-    <img src="https://img.shields.io/badge/%F0%9F%93%A6%20PyPI-3775A9?style=for-the-badge&logo=pypi&logoColor=white" alt="fc-data on PyPI">
+  <a href="https://nonconstricting-zara-unhinderingly.ngrok-free.dev/">
+    <img src="https://img.shields.io/badge/%F0%9F%93%8A%20Live%20Dashboard-7F1D1D?style=for-the-badge" alt="Live Dashboard">
   </a>
 </p>
 
