@@ -323,6 +323,27 @@ def run_tests(image_tag: str, timeout: int = 720, metrics: dict | None = None) -
     if timed_out:
         return True, stdout, f"Tests timed out after {timeout}s (treated as success)", rc
 
+    # Anti-cheating: run-tests.sh emits this marker when it finds pre-fabricated
+    # validator artifacts (forged /logs/summary_*.json or test_results.json) or
+    # injected test_*.py files at the repo root that are not in the PR base
+    # commit.  Either is direct evidence the agent tried to bypass validation.
+    if "FORMULACODE_TAMPER_DETECTED" in stdout:
+        marker_line = next(
+            (ln for ln in stdout.splitlines() if "FORMULACODE_TAMPER_DETECTED" in ln),
+            "FORMULACODE_TAMPER_DETECTED",
+        )
+        return (
+            False,
+            stdout,
+            (
+                f"Validation tamper detected: {marker_line.strip()}. "
+                "Do not pre-create /logs/*.json files or commit test_*.py files at "
+                "the repo root — the validator detects and rejects these. "
+                "Remove the offending steps from docker_build_pkg.sh / docker_build_run.sh."
+            ),
+            rc,
+        )
+
     # Exit code 78 (EX_CONFIG) or sentinel = no benchmarks discovered
     if rc == 78 or "FORMULACODE_NO_BENCHMARKS" in stdout:
         return False, stdout, "No ASV benchmarks discovered — task cannot be used in FormulaCode", rc
@@ -336,11 +357,6 @@ def run_tests(image_tag: str, timeout: int = 720, metrics: dict | None = None) -
     if summary is not None:
         if summary.get("total", 0) == 0 or summary.get("error", 0) > 0:
             return False, stdout, stderr, rc
-
-    # Check that benchmarks were actually discovered
-    snapshot = _parse_snapshot_summary(stdout)
-    if snapshot is not None and snapshot.get("total", 0) == 0:
-        return False, stdout, "No ASV benchmarks discovered (snapshot total=0)", rc
 
     return True, stdout, stderr, rc
 
