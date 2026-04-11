@@ -1,104 +1,52 @@
 # FormulaCode Docker Build Verification Guide
 
-You are fixing a Docker build context for the FormulaCode dataset. Your goal is to iteratively
-fix the build until `sandbox_verify.py` succeeds.
+You are fixing a Docker build context for the FormulaCode dataset. The goal of
+this workspace is to produce a Docker image in which the upstream repository
+**at the base commit** (`{{ sha }}`) builds cleanly, the project package
+imports, ASV benchmarks discover, and the upstream pytest suite runs without
+import errors. Your work is iterative: run `local_ci.py`, read the real tool
+output it captures, fix the underlying problem, run again. Treat `local_ci.py`
+as a tool — the local equivalent of upstream CI — that builds the docker image
+and runs the upstream test/benchmark suite, then surfaces whatever the
+underlying tools (Docker, pip, pytest, asv) actually said.
 
-## Hard requirements (your work is discarded otherwise)
+## Hard requirements
 
-1. You MUST execute `python3 sandbox_verify.py` from the workspace root. This is the
-   ONLY accepted verifier. A `bash -n` syntax check, a manual `pip install`, a manual
-   `docker build`, or any "local reproduction" outside this script does NOT count and
-   will be ignored by the harness.
-2. The ONLY accepted success state is `task/verification_success.json` existing on disk
-   when you exit. If that file is missing, the attempt is recorded as a failure no
-   matter what edits you made or how confident you are in the fix.
-3. **Never** run `pkill`, `kill`, `killall`, or `pgrep` against `sandbox_verify`,
-   `docker`, `asv`, `pytest`, `python`, or any process you didn't start yourself.
-   Other workers may be running concurrently on this host — their processes are visible
-   via `ps` but **must be left alone**. Killing peer processes corrupts other tasks.
-4. A full verifier run kicks off a multi-stage Docker build that typically takes
-   **15-40 minutes**, sometimes up to 60. Do not exit while a build is still running.
-   Wait for `sandbox_verify.py` to finish and write its result file before deciding
-   what to do next. Budget your turns accordingly — a single end-to-end run is
-   normal and expected.
-
-## Forbidden actions (the validator will detect and reject these)
-
-The verifier runs anti-tamper checks before AND after the test phase inside
-`/run-tests.sh`. If it sees any of the patterns below, it prints
-`FORMULACODE_TAMPER_DETECTED` and the attempt is recorded as a failure no
-matter what else happened. The checks are non-negotiable; previous attempts
-to work around them have all been detected and rejected. Do not try.
-
-### Validator output
-
-1. **Do not write anything to `/logs/`** from `docker_build_*.sh`. The validator
-   wipes `/logs/summary_*.json` and `/logs/test_results.json` both at the start
-   of `run-tests.sh` AND again right before `parser.py` runs. Any pre-existing
-   copy is logged as `prefab:<filename>` and fails the run. This includes:
-   - `/logs/summary_agent.json`, `/logs/summary_smoke.json`, or any
-     `summary_${anything}.json`
-   - `/logs/test_results.json`
-   - Pre-baked `/logs/postrun_agent-*.tar.gz` ASV result archives
-
-2. **Do not override `T_BENCH_AGENT_MODEL_NAME`** in any script or in
-   `/etc/profile.d/asv_build_vars.sh`. `run-tests.sh` unsets and re-exports it
-   to the literal string `agent` before reading any `summary_*.json`. Setting
-   it to `smoke`, `oracle`, `oracle:oracle`, etc. has no effect.
-
-### Test files
-
-3. **Do not create any `test_*.py` or `*_test.py` file**, anywhere in the repo
-   tree — not at the root, not under `tests/`, not under
-   `python/<pkg>/tests/`, nowhere. The post-pytest tamper check enumerates
-   every test file pytest actually executed and rejects the run if any file
-   is not present in `git ls-tree {{ sha }}`. Tagged as `collected_untracked`.
-
-4. **Do not modify any tracked test file**, including with a "harmless"
-   trailing comment, a `# codex-smoke-anchor` marker, or by appending a
-   trivial `def test_smoke(): pass`. The post-pytest check compares each
-   executed test file's blob hash to the base commit and rejects mismatches.
-   Tagged as `collected_mutated`. If you need pytest to discover a specific
-   file, install missing test dependencies instead — that is the only
-   legitimate way to influence collection.
-
-### Validator binaries
-
-5. **Do not shim `tmux`**, `pytest`, `python`, `git`, or any other binary that
-   `run-tests.sh` invokes. The validator checks that `tmux` on `$PATH` is an
-   ELF binary and rejects shell-script replacements (`tmux_shim:<path>`).
-   Do not rename `tmux` to `tmux.real` and substitute a wrapper.
-
-6. **Do not modify `parser.py`, `pytest_runner.py`,
-   `formulacode_testrunner.py`, `run-tests.sh`, `profile.sh`, or
-   `Dockerfile.pr`** at any point. Their hashes are checked.
-
-### What to do instead
-
-If `sandbox_verify.py` keeps failing because pytest doesn't find tests or the
-tests it finds fail to import, the correct fix is to install missing test
-dependencies in `docker_build_run.sh` — e.g. `pytest-xdist`, `pytest-timeout`,
-`hypothesis`, `pytest-benchmark`, repo-specific test extras like
-`pip install -e .[test]`. If the upstream repo genuinely has no tests, or
-its tests are fundamentally broken at this commit, the PR is unsuitable for
-FormulaCode and should be left failing. **A failed verification is a valid
-outcome. A faked success is not.**
-
-## Task Info
-
-- **Repository**: {{ owner }}/{{ repo }}
-- **Commit SHA**: {{ sha }}
-- **Python version**: {{ python_version }}
+1. You MUST execute `python3 local_ci.py` from the workspace root. This is
+   the ONLY accepted way to check whether the build works. A `bash -n` syntax
+   check, a manual `pip install`, a manual `docker build`, or any "local
+   reproduction" outside this script does NOT count and will be ignored by
+   the harness.
+2. The ONLY accepted success state is `task/verification_success.json`
+   existing on disk when you exit. If that file is missing, the attempt is
+   recorded as a failure no matter what edits you made or how confident you
+   are in the fix.
+3. Other workers may be running concurrently on this host — their processes
+   are visible via `ps` but **must be left alone**. Never run `pkill`, `kill`,
+   `killall`, or `pgrep` against `local_ci`, `docker`, `asv`, `pytest`,
+   `python`, or any process you didn't start yourself. Killing peer processes
+   corrupts other tasks.
+4. A full `local_ci.py` run kicks off a multi-stage Docker build that
+   typically takes **15–40 minutes**, sometimes up to 60. Do not exit while a
+   build is still running. Wait for `local_ci.py` to finish and write its
+   result file before deciding what to do next. Budget your turns accordingly
+   — a single end-to-end run is normal and expected.
 
 ## Quick Start
 
 ```bash
-python3 sandbox_verify.py
+python3 local_ci.py
 ```
 
-This runs the full verification pipeline: build → tests.
-On failure it writes `task/failure.json`. On success it writes `task/verification_success.json`.
-Both stages (build, tests) must pass for verification to succeed.
+This runs the full local-CI pipeline (build → tests). On failure it writes
+`task/failure.json`. On success it writes `task/verification_success.json`.
+Both stages must succeed for the run to be recorded as a success.
+
+## Task Info
+
+- **Repository**: {{ owner }}/{{ repo }}
+- **Base commit (`$BASE`)**: {{ sha }}
+- **Python version**: {{ python_version }}
 
 ## PR Context
 
@@ -106,143 +54,384 @@ Both stages (build, tests) must pass for verification to succeed.
 
 ## Prior Attempts
 
-If `prior_attempts.md` exists in this workspace, it contains build scripts that were already
-tried and failed. **Read it first** to understand what went wrong and avoid repeating the same
-mistakes.
+If `prior_attempts.md` exists in this workspace, it contains build scripts
+that were already tried and failed in earlier sessions. **Read it first** to
+understand what went wrong and avoid repeating the same mistakes.
 
 ## Workflow
 
-Follow this iterative cycle:
+The local-CI loop is iterative and follows this cycle:
 
-1. Run `python3 sandbox_verify.py` and **wait for it to finish** — this typically
-   takes 15-40 minutes for the docker build plus tests. Do not interrupt it, do not
-   exit early, and do not run any "local" pip/docker substitute.
-2. If it fails, read `task/failure.json` for error details
-3. Edit `task/docker_build_pkg.sh`, `task/docker_build_run.sh`, and/or `task/docker_build_env.sh`
-4. Re-run `python3 sandbox_verify.py`
-5. Repeat until `task/verification_success.json` is created
+```
+1. Run local_ci.py
+   ↓
+2. If it fails, read task/failure.json for the raw error output
+   ↓
+3. Identify the failing stage (env, pkg, run, tests, build) and the
+   underlying cause (missing dep, compile error, import error, etc.)
+   ↓
+4. Make a targeted change to docker_build_pkg.sh, docker_build_run.sh,
+   or docker_build_env.sh
+   ↓
+5. Re-run local_ci.py
+   ↓
+6. Repeat until task/verification_success.json appears
+```
 
-**IMPORTANT**: Only modify `task/docker_build_pkg.sh`, `task/docker_build_run.sh`, and `task/docker_build_env.sh`.
-Do **not** modify the Dockerfile, `task.txt`, or any other scripts.
+## Task Directory Structure
 
-You may also write `task/env_payload_override.json` — a JSON list of pinned package strings
-(e.g. `["numpy==1.21.0", "scipy==1.7.0"]`) — to replace the default env payload when the
-original package versions fail to build.
+The `task/` directory contains the build context for this PR. The most
+important files:
 
-## File Constraints
+### Core configuration
 
-### Files you CAN edit
-- `task/docker_build_pkg.sh` — Primary build script. Install the package, add build deps.
-- `task/docker_build_run.sh` — Runtime setup. Add test/benchmark deps, repo-specific config.
-- `task/docker_build_env.sh` — Python environment setup. Add build prerequisites needed before env payload installation (e.g. Cython, distutils).
+#### task.txt
 
-### Files you CAN create
-- `task/env_payload_override.json` — JSON list of pinned package strings to replace the default env payload. Use this when the original package versions are fundamentally broken (e.g. no wheels available, incompatible with the Python version).
+Contains the `Task` object as a Python expression:
 
-### Files you MUST NOT edit
-- `task/Dockerfile.pr` — Multi-stage build definition (base and repo stages are pre-built)
-- `task/task.txt` — Task configuration (owner, repo, sha, deps)
+```python
+Task(
+    owner='{{ owner }}',
+    repo='{{ repo }}',
+    sha='{{ sha }}',
+    commit_date=...,
+    env_payload='{"dependencies": [...]}',  # JSON string of pinned packages
+    python_version='{{ python_version }}',
+    tag='pkg',
+    benchmarks='',
+)
+```
+
+`env_payload` lists the exact pinned versions resolved by stage 4 of the
+pipeline. Most build failures trace back to one of these packages either not
+having a wheel for `{{ python_version }}` or needing extra system build tools.
+
+### Docker build configuration
+
+#### Dockerfile.pr
+
+Multi-stage Docker build with the following stages (each named in the
+`FROM ... AS <stage>` lines):
+
+1. **env** — Checks out commit `$BASE` from a pre-built `${REPO_IMAGE}` and
+   runs `docker_build_env.sh` to install the pinned `env_payload` into the
+   per-Python-version micromamba environment (e.g. `asv_3.10`).
+2. **pkg** — Runs `docker_build_pkg.sh` to install the project package itself
+   (usually `pip install -e .`) and copies `profile.sh` and `run-tests.sh`
+   into the image.
+3. **run** — Runs `docker_build_run.sh` to prepare runtime state (lock the
+   git ref, set ASV machine config, install band-aid packages).
+4. **final** — Runs `docker_build_final.sh` which installs `snapshot-tester`,
+   runs `asv run --bench just-discover` to introspect the upstream's real
+   benchmark suite, and writes the canonical `/workspace/repo/asv_benchmarks.txt`.
+   This is the authoritative source of truth for which benchmarks exist;
+   agent build scripts should never write that file themselves.
+
+`local_ci.py` builds **target=final** when verifying — so `docker_build_final.sh`
+runs as part of the verification build, after all three agent-editable
+scripts (`env`, `pkg`, `run`).
+
+### Build scripts
+
+#### docker_build_env.sh — *editable*
+
+**Purpose**: Create the Python environment(s) and install the pinned
+`env_payload` packages.
+
+**What it does**:
+- Parses `env_payload` JSON into a list of `pkg==ver` strings.
+- Creates a micromamba env per `ASV_PY_VERSION` (e.g. `asv_3.10`).
+- `pip install`s the pinned packages into each env.
+- Persists `ENV_NAME`, `CONF_NAME`, `ASV_PY_VERSIONS` etc. to
+  `/etc/profile.d/asv_build_vars.sh` so later stages can read them.
+
+**When to modify**:
+- The pinned packages need a build prerequisite that isn't on the base
+  image (e.g. `cython`, `numpy`, `cmake`, a compiler toolchain).
+- A package fundamentally cannot be installed at this Python version
+  (then prefer writing `task/env_payload_override.json` — see below).
+
+**Common fixes**:
+
+```bash
+# Install build prerequisites BEFORE the env_payload install
+micromamba install -y -n "$ENV_NAME" -c conda-forge cython numpy cmake
+```
+
+#### docker_build_pkg.sh — *editable, primary*
+
+**Purpose**: Build and install the project package itself in editable mode.
+This is the **most commonly edited file**.
+
+**What it does**:
+- Sources environment helpers from previous stages.
+- For each Python version in `ASV_PY_VERSIONS`:
+  - Activates the corresponding env (`asv_3.10`).
+  - Runs `detect_import_name` to find the package's import path.
+  - Optionally clones an external benchmarks repo for known repos
+    (`dask`, `joblib`, `astropy`, `dask/distributed`).
+  - Runs `pip install --no-build-isolation -v -e .`
+  - Runs `asv_smokecheck.py` to verify the package imports.
+
+**When to modify**:
+- Add extra conda or pip build dependencies needed by the package.
+- Set compiler flags (`CFLAGS`, `CXXFLAGS`, `LDFLAGS`).
+- Run pre-build steps (submodule init, Cython generation, configure scripts).
+- Apply repository-specific source patches via `sed` for known compile errors.
+
+**Common fixes**:
+
+```bash
+# Add a build dependency (conda)
+micromamba install -y -n "$ENV_NAME" -c conda-forge openblas libopenmp
+
+# Add a build dependency (pip)
+micromamba run -n "$ENV_NAME" pip install build-dependency
+
+# Relax a compiler-error gate
+export CFLAGS="${CFLAGS:--Wno-error=incompatible-pointer-types}"
+export CXXFLAGS="${CXXFLAGS:--Wno-error}"
+
+# Initialize git submodules
+git -C "$REPO_ROOT" submodule update --init --recursive
+
+# Build Cython extensions in place
+micromamba install -y -n "$ENV_NAME" -c conda-forge cython
+micromamba run -n "$ENV_NAME" python setup.py build_ext --inplace
+
+# Patch a problematic source file
+sed -i 's/problematic_code/fixed_code/' path/to/file.py
+```
+
+#### docker_build_run.sh — *editable*
+
+**Purpose**: Prepare the runtime environment for tests and benchmarks. Runs
+in the `run` stage, after `pkg` has installed the package.
+
+**What it does**:
+- Sets up ASV machine config (`asv machine --yes`).
+- Calls `lock_repo_to_current_commit()` to detach git from upstream and pin
+  the working tree to `HEAD`.
+- Installs band-aid runtime packages (`tmux`, upgraded `jinja2`, `pytest`).
+- Persists final env vars to `/etc/profile.d/asv_build_vars.sh`.
+
+**When to modify**:
+- Install missing test/benchmark runtime dependencies (`pytest-xdist`,
+  `pytest-timeout`, `hypothesis`, `pytest-benchmark`).
+- Install repo-specific test extras: `pip install -e ".[test]"` or
+  `pip install -e ".[dev]"`.
+- Add a shim for a removed/renamed module the test suite imports.
+
+**Common fixes**:
+
+```bash
+source /etc/profile.d/asv_utils.sh
+source /etc/profile.d/asv_build_vars.sh
+
+# Install standard pytest extras
+micromamba run -n "$ENV_NAME" pip install pytest-xdist pytest-timeout
+
+# Install repo's own [test] extras
+micromamba run -n "$ENV_NAME" pip install -e "$REPO_ROOT[test]"
+```
+
+### Files you may also create
+
+#### task/env_payload_override.json
+
+A JSON list of pinned package strings that **replaces** the original
+`env_payload` from `task.txt`. Use this when packages in the original payload
+are fundamentally broken at this commit/Python version (no source dist, yanked,
+incompatible) and editing `docker_build_env.sh` cannot fix the issue.
+
+```json
+["numpy==1.21.0", "scipy==1.7.0", "h5py==3.1.0"]
+```
+
+Keep changes minimal — stay as close as possible to the originals. The
+`local_ci.py` picks this file up automatically before building.
+
+### Files you must NOT edit
+
+These files are part of the local-CI harness itself; their hashes are checked
+at the start of every run and a mismatch causes immediate failure.
+
+- `task/Dockerfile.pr` — Multi-stage build definition
+- `task/task.txt` — Task configuration (owner, repo, sha, env_payload, …)
 - `task/docker_build_base.sh` — Base system setup (template)
 - `task/docker_build_final.sh` — Final image setup (template)
 - `task/profile.sh` — ASV benchmark runner
-- `task/run-tests.sh` — Test runner
+- `task/run-tests.sh` — Test runner harness
 - `task/entrypoint.sh` — Container entrypoint
 
-## Understanding failure.json
+## Pipeline Stages
 
-When verification fails, `task/failure.json` contains:
+`local_ci.py` runs through these stages in order. The first one to fail
+writes `task/failure.json` with that stage's name.
+
+### 1. build (env → pkg → run)
+
+Builds the multi-stage Docker image. Inside the build, the `env`, `pkg`, and
+`run` stages run their respective `docker_build_*.sh` scripts.
+
+**`failure.json.stage` will be one of**: `env`, `pkg`, `run`, or `build`
+(when the stage couldn't be determined from the Docker output).
+
+**Common failures**:
+- *env*: pinned package fails to install — missing build tool, no wheel for
+  `{{ python_version }}`, package yanked. Fix in `docker_build_env.sh` or
+  write `env_payload_override.json`.
+- *pkg*: package fails to install or compile — missing build dep, wrong
+  compiler flag, missing submodule, broken Cython generation. Fix in
+  `docker_build_pkg.sh`.
+- *run*: runtime setup fails — usually a follow-on from a `pkg` issue or a
+  band-aid install that itself fails. Fix in `docker_build_run.sh`.
+
+### 2. tests
+
+Runs `/run-tests.sh --all` inside the freshly built `run` image. This
+exercises three things end-to-end:
+
+1. ASV benchmark discovery — collects the upstream's ASV benchmark suite.
+2. ASV baseline timing — quick sanity timing of the discovered benchmarks.
+3. Pytest run against the upstream test suite at the base commit.
+
+**`failure.json.stage` will be**: `tests`.
+
+**Common failures**:
+- *Test dependencies missing*: an `ImportError` for `pytest-xdist`,
+  `hypothesis`, `mock`, etc. — install in `docker_build_run.sh`.
+- *Package import error*: the project's own modules fail to import — usually
+  a follow-on from a broken `pkg` install. Re-check `docker_build_pkg.sh`.
+- *Real test failures*: the upstream test suite has assertions that fail at
+  this commit. Read the pytest output, identify the broken module, and
+  install missing runtime deps or apply targeted source patches.
+- *No ASV benchmarks discovered*: the repo has no ASV benchmark suite at
+  this commit, so the task is structurally unsuitable for FormulaCode.
+  This is a **real failure outcome**, not a bug to fix — leave it failing
+  and exit. (`failure.json.error_message` will say so explicitly.)
+
+## failure.json reference
+
+When `local_ci.py` fails, `task/failure.json` contains:
 
 ```json
 {
   "stage": "env|pkg|run|tests|build",
   "return_code": 1,
-  "stderr": "Full error output from the failed stage",
-  "stdout": "Full standard output from the failed stage",
-  "error_message": "Human-readable error description"
+  "error_message": "Human-readable summary of the failure",
+  "stdout": "Full standard output from the failed operation (truncated)",
+  "stderr": "Full standard error from the failed operation (truncated)",
+  "resource_metrics": {
+    "build_duration_s": 412.3,
+    "image_size_bytes": 11234567890,
+    "test_duration_s": 87.5,
+    "peak_memory_bytes": 1234567890
+  }
 }
 ```
 
-- **env** failures: Env payload packages fail to install (missing build tools, broken wheels) → fix in `docker_build_env.sh` or write `env_payload_override.json`
-- **pkg** failures: Package installation errors or missing build deps → fix in `docker_build_pkg.sh`
-- **run** failures: Runtime setup issues → fix in `docker_build_run.sh`
-- **tests** failures: Missing test deps, import errors, or benchmark setup issues → fix in `docker_build_run.sh` or `docker_build_pkg.sh`
-- **build** (generic): Stage could not be determined from logs — check stdout/stderr for details
+The `stdout` and `stderr` fields contain the **raw output of the failing
+underlying tool** (Docker, pip, gcc, pytest, asv). That is the most useful
+debugging signal — read it carefully before changing anything.
 
-## Common Fixes for docker_build_pkg.sh
+## Common Debugging Workflow
 
-### Add build dependency (conda)
+### 1. Identify the failing stage
+
 ```bash
-micromamba install -y -n "$ENV_NAME" -c conda-forge some-build-tool
+python3 local_ci.py
+cat task/failure.json | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["stage"], d.get("return_code"))'
 ```
 
-### Add build dependency (pip)
+### 2. Read the raw error
+
 ```bash
-micromamba run -n "$ENV_NAME" pip install build-dependency
+python3 -c 'import json;d=json.load(open("task/failure.json"));print(d.get("stderr",""))' | tail -200
+python3 -c 'import json;d=json.load(open("task/failure.json"));print(d.get("stdout",""))' | tail -200
 ```
 
-### Set compiler flags
+### 3. Make a targeted change
+
+Based on the stage:
+
+| Stage | Most likely fix location |
+|---|---|
+| `env` | `docker_build_env.sh` or `env_payload_override.json` |
+| `pkg` | `docker_build_pkg.sh` |
+| `run` | `docker_build_run.sh` |
+| `tests` | `docker_build_run.sh` (most often a missing test dep) or `docker_build_pkg.sh` (if it's a project import error) |
+
+### 4. Rerun
+
 ```bash
-export CFLAGS="${CFLAGS:--Wno-error=incompatible-pointer-types}"
-export CXXFLAGS="${CXXFLAGS:--Wno-error}"
+python3 local_ci.py
 ```
 
-### Initialize git submodules
-```bash
-git -C "$REPO_ROOT" submodule update --init --recursive
-```
+### 5. Iterate
 
-### Build Cython extensions
-```bash
-micromamba install -y -n "$ENV_NAME" -c conda-forge cython
-micromamba run -n "$ENV_NAME" python setup.py build_ext --inplace
-```
-
-### Patch source files
-```bash
-sed -i 's/problematic_code/fixed_code/' path/to/file.py
-```
-
-## Common Fixes for docker_build_run.sh
-
-### Add runtime/test dependencies
-```bash
-source /etc/profile.d/asv_utils.sh
-source /etc/profile.d/asv_build_vars.sh
-micromamba run -n "$ENV_NAME" pip install pytest-xdist pytest-timeout
-```
+Repeat 1–4 until `task/verification_success.json` is created. Each iteration
+rebuilds only the stages downstream of your edit (Docker layer caching), so
+later edits to `docker_build_run.sh` are much faster than edits to
+`docker_build_env.sh`.
 
 ## Environment Variables Available
 
-These are set by earlier build stages and available in both scripts:
+These are set by earlier stages and are available in `docker_build_pkg.sh`,
+`docker_build_run.sh`, and `docker_build_env.sh`:
 
-- `REPO_ROOT` — Repository root path (usually `/workspace/repo`)
-- `ENV_NAME` — Current environment name (e.g., `asv_3.10`)
-- `ASV_PY_VERSIONS` — Space-separated Python versions
-- `CONF_NAME` — Path to ASV config file
-- `ALL_EXTRAS` — Extras to install (if any)
+- `REPO_ROOT` — Repository root inside the container (usually `/workspace/repo`)
+- `ENV_NAME` — Active micromamba environment (e.g. `asv_3.10`)
+- `ASV_PY_VERSIONS` — Space-separated list of Python versions to build
+- `CONF_NAME` — Path to the discovered ASV config file
+- `ALL_EXTRAS` — Optional package extras
 - `MAMBA_ROOT_PREFIX` — Micromamba root (`/opt/conda`)
+- `CMAKE_BUILD_PARALLEL_LEVEL`, `NPY_NUM_BUILD_JOBS` — Parallelism caps for
+  C/C++ and numpy builds (set to 2 by default to avoid OOM on shared hosts)
 
-## Docker Build Stages
+## Docker Build Optimization
 
-The Dockerfile.pr has 4 stages: env → pkg → run → final (base and repo images are pre-built).
-The `env`, `pkg`, and `run` stages use your editable scripts.
+The `Dockerfile.pr` is multi-stage and Docker caches layers by stage:
 
-- **env** stage: Runs `docker_build_env.sh` to set up the Python environment and install pinned deps
-- **pkg** stage: Runs `docker_build_pkg.sh` to install the package
-- **run** stage: Runs `docker_build_run.sh` to prepare for tests/benchmarks
+- Editing `docker_build_env.sh` rebuilds **env → pkg → run** (slowest).
+- Editing `docker_build_pkg.sh` rebuilds **pkg → run** (medium).
+- Editing `docker_build_run.sh` rebuilds **run only** (fastest).
 
-Changes to `docker_build_env.sh` rebuild from the env stage onward (slowest).
-Changes to `docker_build_pkg.sh` rebuild from the pkg stage onward (fast iteration).
-Changes to `docker_build_run.sh` rebuild only the run stage (fastest).
+Prefer fixing things as far downstream as possible. If you can install a
+missing test dep in `docker_build_run.sh` rather than `docker_build_env.sh`,
+do — your next iteration will be much faster.
 
 ## Tips
 
-- Read the full error in `failure.json` before making changes
-- Start with the simplest fix (add a missing dep) before trying complex patches
-- The package install command in `docker_build_pkg.sh` is usually `pip install --no-build-isolation -v -e .`
-- If the build times out, look for ways to simplify or skip expensive steps
-- Docker layer caching means earlier stages are cached — only your changed stage rebuilds
-- A lot of bookkeeping code is used in downstream stages; avoid removing code unless you understand its purpose.
-- **Fixing env payload packages**: If packages in the env payload fail to build (e.g. no wheels, missing build deps), you have two options:
-  1. **Edit `docker_build_env.sh`** to install build prerequisites (Cython, compiler toolchains, etc.) *before* the payload is installed. This is preferred when the package versions are correct but just need build tools.
-  2. **Write `task/env_payload_override.json`** with a corrected JSON list of pinned packages (e.g. `["numpy==1.21.0", "h5py==3.1.0"]`). `sandbox_verify.py` will use this instead of the original payload. Use this when a package version is fundamentally broken (no source dist, incompatible with the Python version, yanked). Keep changes minimal — stay as close as possible to the originals.
+- **Read `failure.json.stderr` first**, then `stdout`. Most underlying tools
+  put the actionable error in stderr.
+- **Start with the simplest fix**. Add a missing dep before trying complex
+  patches. Most failures are missing build/test dependencies.
+- **Trust the upstream test suite**. If pytest fails on a test you didn't
+  touch, the cause is almost always a missing runtime dep or a broken
+  `pkg`-stage install — not the test itself.
+- **Use the layer cache**. After a successful `env` stage, you can iterate on
+  `pkg` for a couple of minutes per attempt. After a successful `pkg`, you
+  can iterate on `run` in seconds.
+- **The package install command** in `docker_build_pkg.sh` is usually
+  `pip install --no-build-isolation -v -e .`. Keep `--no-build-isolation` —
+  it makes the env_payload's pinned versions actually take effect.
+- **Let `docker_build_final.sh` generate `asv_benchmarks.txt`.** The `final`
+  Docker stage (which `local_ci.py` builds) runs `docker_build_final.sh`,
+  which calls `asv run --bench just-discover` and writes the canonical
+  benchmark list to `/workspace/repo/asv_benchmarks.txt`. You do not need
+  to pre-generate this file — and you shouldn't: any manual write will be
+  overwritten by `docker_build_final.sh` running after your edits. If ASV
+  discovery is failing, fix the **root cause** (usually a missing runtime
+  dependency or a benchmark import error) in `docker_build_run.sh` or
+  `docker_build_pkg.sh` — for example, install the runtime deps the
+  benchmark modules need, or patch a broken benchmark import. Writing the
+  file directly masks the underlying failure. A "no ASV benchmarks
+  discovered" failure means the PR is structurally unsuitable for
+  FormulaCode — that is a valid outcome, not a gate to be worked around.
+- **A failed `local_ci.py` run is a valid outcome**. If the upstream repo
+  genuinely cannot be built/tested at this commit (yanked deps, broken
+  source, no ASV benchmarks), leave it failing and exit. Faking a success
+  produces a worse dataset than recording an honest failure.
+- **Don't kill peer processes**. Multiple synthesis workers run concurrently
+  on this host. Killing them corrupts other tasks.
