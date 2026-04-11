@@ -78,7 +78,7 @@ class TestRenderAgentsMd:
         assert "abc123def456" in md
         assert "3.10" in md
         assert "This PR optimizes groupby performance." in md
-        assert "sandbox_verify.py" in md
+        assert "local_ci.py" in md
         assert "docker_build_pkg.sh" in md
 
     def test_no_skip_tests_mentioned(self) -> None:
@@ -131,9 +131,9 @@ class TestPrepareWorkspace:
         assert agents_md.exists()
         assert "pandas-dev/pandas" in agents_md.read_text()
 
-        # Check sandbox_verify.py at workspace root
-        assert (tmp_path / "sandbox_verify.py").exists()
-        verify_content = (tmp_path / "sandbox_verify.py").read_text()
+        # Check local_ci.py at workspace root
+        assert (tmp_path / "local_ci.py").exists()
+        verify_content = (tmp_path / "local_ci.py").read_text()
         assert "def verify(" in verify_content
 
     def test_immutable_hashes_written(self, tmp_path: Path) -> None:
@@ -481,10 +481,8 @@ class TestEnvShEditability:
         assert "docker_build_env.sh" not in _IMMUTABLE_FILES
 
     def test_env_sh_not_in_verify_immutable_files(self) -> None:
-        """docker_build_env.sh must NOT appear in sandbox_verify.py's _IMMUTABLE_FILES."""
-        verify_src = (
-            Path(__file__).parents[1] / ".." / "src" / "datasmith" / "agents" / "templates" / "sandbox_verify.py"
-        )
+        """docker_build_env.sh must NOT appear in local_ci.py's _IMMUTABLE_FILES."""
+        verify_src = Path(__file__).parents[1] / ".." / "src" / "datasmith" / "agents" / "templates" / "local_ci.py"
         content = verify_src.resolve().read_text()
         # Parse the _IMMUTABLE_FILES tuple from the source
         import ast
@@ -496,10 +494,10 @@ class TestEnvShEditability:
                     if isinstance(target, ast.Name) and target.id == "_IMMUTABLE_FILES":
                         immutable = ast.literal_eval(node.value)
                         assert "docker_build_env.sh" not in immutable, (
-                            "docker_build_env.sh should not be in sandbox_verify.py _IMMUTABLE_FILES"
+                            "docker_build_env.sh should not be in local_ci.py _IMMUTABLE_FILES"
                         )
                         return
-        raise AssertionError("Could not find _IMMUTABLE_FILES in sandbox_verify.py")
+        raise AssertionError("Could not find _IMMUTABLE_FILES in local_ci.py")
 
     def test_env_sh_not_in_immutable_hashes(self, tmp_path: Path) -> None:
         """_prepare_workspace should NOT hash docker_build_env.sh (it's editable)."""
@@ -733,11 +731,11 @@ class TestEnvPayloadOverride:
 
 
 class TestBuildStageDetection:
-    """sandbox_verify.py should identify which Dockerfile stage (env/pkg/run) failed."""
+    """local_ci.py should identify which Dockerfile stage (env/pkg/run) failed."""
 
     def test_parse_failed_stage_env(self) -> None:
         """Detect failure in the 'env' stage from Docker build logs."""
-        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+        from datasmith.agents.templates.local_ci import _parse_failed_stage
 
         # Typical buildkit log: the last stage marker before the error
         logs = (
@@ -750,7 +748,7 @@ class TestBuildStageDetection:
 
     def test_parse_failed_stage_pkg(self) -> None:
         """Detect failure in the 'pkg' stage from Docker build logs."""
-        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+        from datasmith.agents.templates.local_ci import _parse_failed_stage
 
         logs = (
             "#5 [env 2/2] RUN chmod +x ... && /workspace/repo/docker_build_env.sh\n"
@@ -764,7 +762,7 @@ class TestBuildStageDetection:
 
     def test_parse_failed_stage_run(self) -> None:
         """Detect failure in the 'run' stage from Docker build logs."""
-        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+        from datasmith.agents.templates.local_ci import _parse_failed_stage
 
         logs = (
             "#8 [pkg 2/2] RUN chmod +x ... && /workspace/repo/docker_build_pkg.sh\n"
@@ -778,20 +776,20 @@ class TestBuildStageDetection:
 
     def test_parse_failed_stage_no_markers(self) -> None:
         """When no stage markers are found, return 'build' as fallback."""
-        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+        from datasmith.agents.templates.local_ci import _parse_failed_stage
 
         logs = "Some random error output\nwithout any stage markers\n"
         assert _parse_failed_stage(logs) == "build"
 
     def test_parse_failed_stage_empty(self) -> None:
         """Empty log returns 'build' fallback."""
-        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+        from datasmith.agents.templates.local_ci import _parse_failed_stage
 
         assert _parse_failed_stage("") == "build"
 
     def test_parse_failed_stage_legacy_docker(self) -> None:
         """Legacy (non-buildkit) Docker output with 'Step N/M : FROM x AS stage'."""
-        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage
+        from datasmith.agents.templates.local_ci import _parse_failed_stage
 
         logs = (
             "Step 3/10 : FROM env AS pkg\n"
@@ -803,7 +801,7 @@ class TestBuildStageDetection:
 
     def test_write_failure_uses_detected_stage(self, tmp_path: Path) -> None:
         """_write_failure should write the specific stage name, not generic 'build'."""
-        from datasmith.agents.templates.sandbox_verify import _write_failure
+        from datasmith.agents.templates.local_ci import _write_failure
 
         _write_failure(tmp_path, "env", stdout="log output", stderr="error", rc=1)
 
@@ -813,7 +811,7 @@ class TestBuildStageDetection:
 
     def test_build_error_carries_stage_through_verify(self, tmp_path: Path) -> None:
         """When build_image raises BuildError, verify() should detect and write the correct stage."""
-        from datasmith.agents.templates.sandbox_verify import _parse_failed_stage, _write_failure
+        from datasmith.agents.templates.local_ci import _parse_failed_stage, _write_failure
 
         # Simulate: BuildError with env-stage logs
         build_stdout = (

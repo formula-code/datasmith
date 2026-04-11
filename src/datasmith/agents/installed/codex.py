@@ -12,7 +12,7 @@ logger = get_logger("agents.installed.codex")
 
 # Codex CLI's `background_terminal_max_timeout` defaults to 300_000 ms (5 min).
 # That's the polling window for backgrounded shell tool calls; if the model
-# launches `python3 sandbox_verify.py` (which runs a multi-stage docker build
+# launches `python3 local_ci.py` (which runs a multi-stage docker build
 # typically lasting 15-40 minutes), the polling window expires long before
 # the verifier finishes, codex returns control to the model with no completion
 # event, and the agent eventually exits leaving the verifier orphaned and no
@@ -35,7 +35,7 @@ _TOOL_OUTPUT_TOKEN_LIMIT = int(os.environ.get("CODEX_TOOL_OUTPUT_TOKEN_LIMIT", "
 # "Context window exceeded while compacting; removing oldest history item.").
 # Both behaviors risk silently losing the launch prompt's hard requirements
 # and earlier failure context — i.e. the agent forgets the rules halfway
-# through a long synthesis session and starts skipping sandbox_verify.py
+# through a long synthesis session and starts skipping local_ci.py
 # again. We push the threshold high to defer compaction past most sessions,
 # and override compact_prompt below so that when compaction *does* happen,
 # the rules survive into the post-compaction state.
@@ -54,14 +54,14 @@ but you MUST preserve the following items verbatim or near-verbatim — they
 are load-bearing and the agent will fail without them:
 
 1. The hard requirements from the original developer/user prompt:
-   - The agent MUST run `python3 sandbox_verify.py` from the workspace root.
+   - The agent MUST run `python3 local_ci.py` from the workspace root.
      This is the ONLY accepted verifier. A `bash -n` syntax check, a manual
      `pip install`, a manual `docker build`, or any "local reproduction"
      outside this script does NOT count and will be ignored.
    - The ONLY accepted success state is `task/verification_success.json`
      existing on disk when the agent exits.
    - The agent must NEVER run `pkill`, `kill`, `killall`, or `pgrep` against
-     `sandbox_verify`, `docker`, `asv`, `pytest`, `python`, or any process it
+     `local_ci`, `docker`, `asv`, `pytest`, `python`, or any process it
      did not start itself. Peer worker processes visible in `ps` belong to
      other tasks and must be left alone.
    - A full verifier run typically takes 15-40 minutes; the agent must wait

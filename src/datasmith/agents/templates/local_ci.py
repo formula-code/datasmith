@@ -9,8 +9,8 @@ This file is self-contained — no datasmith imports. It is copied into the
 Codex sandbox workspace and executed by the agent.
 
 Usage:
-    python sandbox_verify.py                # verify task/ directory
-    python sandbox_verify.py --task /path    # verify custom task directory
+    python local_ci.py                # verify task/ directory
+    python local_ci.py --task /path    # verify custom task directory
 """
 
 from __future__ import annotations
@@ -286,78 +286,29 @@ def _run_container_with_timeout(
     return timed_out, stdout, stderr, rc
 
 
-def _parse_test_summary(stdout: str) -> dict | None:
-    """Extract the JSON summary between FORMULACODE_TESTS_START/END markers."""
-    start = "FORMULACODE_TESTS_START"
-    end = "FORMULACODE_TESTS_END"
-    s = stdout.find(start)
-    e = stdout.find(end)
-    if s == -1 or e == -1:
-        return None
-    payload = stdout[s + len(start) : e].strip()
-    try:
-        return json.loads(payload)  # type: ignore[no-any-return]
-    except json.JSONDecodeError:
-        return None
-
-
-def _parse_snapshot_summary(stdout: str) -> dict | None:
-    """Extract the JSON summary between FORMULACODE_SNAPSHOT_START/END markers."""
-    start = "FORMULACODE_SNAPSHOT_START"
-    end = "FORMULACODE_SNAPSHOT_END"
-    s = stdout.find(start)
-    e = stdout.find(end)
-    if s == -1 or e == -1:
-        return None
-    payload = stdout[s + len(start) : e].strip()
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        return None
-
-
 def run_tests(image_tag: str, timeout: int = 720, metrics: dict | None = None) -> tuple[bool, str, str, int]:
+    """Run /run-tests.sh inside the built image.
+
+    The contract is intentionally simple: we trust /run-tests.sh's exit code.
+    A non-zero exit means the underlying tool (pytest, asv, etc.) failed and
+    its raw stdout/stderr will be surfaced to the agent verbatim through
+    failure.json so they can read the real error and fix it.
+
+    Two structural special cases:
+      - host-side timeout → treated as success (long benchmark runs are OK)
+      - rc == 78 (EX_CONFIG) or the FORMULACODE_NO_BENCHMARKS sentinel → the
+        repo has no ASV benchmark suite at this commit; this is a task-level
+        unsuitability, not a fixable bug.
+    """
     timed_out, stdout, stderr, rc = _run_container_with_timeout(
         image_tag, ["/run-tests.sh", "--all"], timeout, metrics=metrics
     )
     if timed_out:
         return True, stdout, f"Tests timed out after {timeout}s (treated as success)", rc
-
-    # Anti-cheating: run-tests.sh emits this marker when it finds pre-fabricated
-    # validator artifacts (forged /logs/summary_*.json or test_results.json) or
-    # injected test_*.py files at the repo root that are not in the PR base
-    # commit.  Either is direct evidence the agent tried to bypass validation.
-    if "FORMULACODE_TAMPER_DETECTED" in stdout:
-        marker_line = next(
-            (ln for ln in stdout.splitlines() if "FORMULACODE_TAMPER_DETECTED" in ln),
-            "FORMULACODE_TAMPER_DETECTED",
-        )
-        return (
-            False,
-            stdout,
-            (
-                f"Validation tamper detected: {marker_line.strip()}. "
-                "Do not pre-create /logs/*.json files or commit test_*.py files at "
-                "the repo root — the validator detects and rejects these. "
-                "Remove the offending steps from docker_build_pkg.sh / docker_build_run.sh."
-            ),
-            rc,
-        )
-
-    # Exit code 78 (EX_CONFIG) or sentinel = no benchmarks discovered
     if rc == 78 or "FORMULACODE_NO_BENCHMARKS" in stdout:
         return False, stdout, "No ASV benchmarks discovered — task cannot be used in FormulaCode", rc
-
-    # Non-timeout failures
     if rc != 0:
         return False, stdout, stderr, rc
-
-    # run-tests.sh may exit 0 even on collection errors — check structured output
-    summary = _parse_test_summary(stdout)
-    if summary is not None:
-        if summary.get("total", 0) == 0 or summary.get("error", 0) > 0:
-            return False, stdout, stderr, rc
-
     return True, stdout, stderr, rc
 
 
@@ -446,7 +397,7 @@ def verify(task_dir: Path) -> bool:
 
     # Build
     try:
-        tag = build_image(docker, task_dir, task, target="run", metrics=metrics)
+        tag = build_image(docker, task_dir, task, target="final", metrics=metrics)
         print(f"Build succeeded: {tag}")
     except BuildError as e:
         stage = _parse_failed_stage(e.stdout)

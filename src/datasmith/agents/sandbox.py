@@ -31,7 +31,7 @@ logger = get_logger("agents.sandbox")
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 # Files the agent must NOT modify.  Hashes are recorded at workspace setup
-# and verified both by sandbox_verify.py (so the agent gets feedback) and by
+# and verified both by local_ci.py (so the agent gets feedback) and by
 # _extract_results (hard server-side check the agent cannot bypass).
 _IMMUTABLE_FILES = (
     "Dockerfile.pr",
@@ -102,7 +102,7 @@ class SandboxResult:
     aborted: bool = False
     """True when the agent exited without ever producing failure.json or
     verification_success.json — i.e. it never ran (or never finished running)
-    sandbox_verify.py. Distinct from a real verifier failure, and should not
+    local_ci.py. Distinct from a real verifier failure, and should not
     consume the synthesizer's per-PR attempt budget."""
 
 
@@ -224,15 +224,15 @@ class SandboxRunner:
         )
         (workspace / "AGENTS.md").write_text(agents_md)
 
-        # Copy sandbox_verify.py
-        src_verify = _TEMPLATES_DIR / "sandbox_verify.py"
-        shutil.copy2(str(src_verify), str(workspace / "sandbox_verify.py"))
+        # Copy local_ci.py
+        src_verify = _TEMPLATES_DIR / "local_ci.py"
+        shutil.copy2(str(src_verify), str(workspace / "local_ci.py"))
 
         # Write prior attempts context (from failed TRY_SIMILAR stage)
         if prior_attempts:
             (workspace / "prior_attempts.md").write_text(prior_attempts)
 
-        # Record immutable file hashes so sandbox_verify.py and
+        # Record immutable file hashes so local_ci.py and
         # _extract_results can detect unauthorised modifications.
         hashes = _compute_immutable_hashes(task_dir)
         (workspace / ".immutable_hashes.json").write_text(json.dumps(hashes))
@@ -280,17 +280,17 @@ class SandboxRunner:
                 "Read AGENTS.md and follow its instructions to fix the Docker build.\n"
                 "\n"
                 "HARD REQUIREMENTS — your work will be discarded otherwise:\n"
-                "1. You MUST execute `python3 sandbox_verify.py` from the workspace root "
+                "1. You MUST execute `python3 local_ci.py` from the workspace root "
                 "at least once. This is the ONLY accepted verifier — do not validate by "
                 "running pip, docker, or build commands outside this script.\n"
                 "2. The ONLY accepted success state is `task/verification_success.json` "
                 "existing on disk when you exit. A `bash -n` syntax check, a 'local' pip "
                 "install, or a manual docker build does NOT count and will be ignored.\n"
                 "3. Do NOT touch processes outside the workspace. Never run `pkill`, "
-                "`kill`, `killall`, or `pgrep` against `sandbox_verify`, `docker`, "
+                "`kill`, `killall`, or `pgrep` against `local_ci`, `docker`, "
                 "`asv`, `pytest`, or any other process — peer worker processes you may "
                 "see in `ps` belong to other tasks and must be left alone.\n"
-                "4. A full docker build inside `sandbox_verify.py` typically takes "
+                "4. A full docker build inside `local_ci.py` typically takes "
                 "15-40 minutes. Budget your turns accordingly and wait for it to "
                 "finish; do not exit while a build is still running.\n"
             ),
@@ -312,7 +312,7 @@ class SandboxRunner:
         task_dir = workspace / "task"
 
         # Hard integrity check — the agent cannot bypass this even if it
-        # modifies sandbox_verify.py or writes a fake success file.
+        # modifies local_ci.py or writes a fake success file.
         hashes_file = workspace / ".immutable_hashes.json"
         if hashes_file.exists():
             expected = json.loads(hashes_file.read_text())
@@ -372,10 +372,10 @@ class SandboxRunner:
             stage = failure_json.get("stage", "unknown") if failure_json else "unknown"
             logger.warning("Sandbox synthesis failed at stage: %s", stage)
             if stage == "unknown":
-                # No failure.json means sandbox_verify.py was never run or crashed.
+                # No failure.json means local_ci.py was never run or crashed.
                 # Log agent details to help diagnose why.
                 logger.warning(
-                    "No failure.json found — agent likely never ran sandbox_verify.py. Agent error: %s",
+                    "No failure.json found — agent likely never ran local_ci.py. Agent error: %s",
                     codex_result.error[:500] if codex_result.error else "(none)",
                 )
                 if codex_result.output:
@@ -413,7 +413,7 @@ def _extract_resource_metrics(
 ) -> dict:
     """Read ``resource_metrics`` from the verification JSON files.
 
-    ``sandbox_verify.py`` writes metrics into both ``verification_success.json``
+    ``local_ci.py`` writes metrics into both ``verification_success.json``
     and ``failure.json``.  We check the success file first (authoritative on
     success), then fall back to the failure JSON dict (already parsed by caller).
     """
@@ -532,14 +532,14 @@ def verify_context(
         if context.build_run_sh:
             (task_dir / "docker_build_run.sh").write_text(context.build_run_sh)
 
-        # Copy sandbox_verify.py
-        src_verify = _TEMPLATES_DIR / "sandbox_verify.py"
-        shutil.copy2(str(src_verify), str(workspace / "sandbox_verify.py"))
+        # Copy local_ci.py
+        src_verify = _TEMPLATES_DIR / "local_ci.py"
+        shutil.copy2(str(src_verify), str(workspace / "local_ci.py"))
 
-        # Run sandbox_verify.py directly (no agent)
+        # Run local_ci.py directly (no agent)
         try:
             proc = subprocess.run(
-                [sys.executable, str(workspace / "sandbox_verify.py"), "--task", str(task_dir)],
+                [sys.executable, str(workspace / "local_ci.py"), "--task", str(task_dir)],
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,

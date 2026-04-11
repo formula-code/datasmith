@@ -392,7 +392,7 @@ class Synthesizer:
         if result.aborted:
             failure_stage: str | None = "aborted"
             error_message: str | None = (
-                "Agent exited without running sandbox_verify.py to completion "
+                "Agent exited without running local_ci.py to completion "
                 "(no failure.json or verification_success.json found)."
             )
         else:
