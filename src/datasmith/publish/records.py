@@ -12,6 +12,8 @@ from datasmith.utils.db import fetch_all
 
 logger = get_logger("publish.records")
 
+MIN_HARBOR_SPEEDUP = 1.05
+
 
 def records_to_parquet(records: list[FormulaCodeRecord]) -> bytes:
     """Serialize FormulaCodeRecords to Parquet bytes via pyarrow."""
@@ -37,7 +39,7 @@ def records_from_parquet(data: bytes) -> list[FormulaCodeRecord]:
     return [FormulaCodeRecord(**row) for row in rows]
 
 
-def records_from_supabase(
+def records_from_supabase(  # noqa: C901
     start_date: str | None = None,
     end_date: str | None = None,
     unpublished_only: bool = True,
@@ -64,8 +66,44 @@ def records_from_supabase(
         lte_filters=lte_filters or None,
     )
 
+    # Stage 7 (harbor_healthcheck) gate: drop any PR whose best successful
+    # harbor run produced a max_speedup below MIN_HARBOR_SPEEDUP, and any PR
+    # with no successful harbor run at all. Fail-closed so we never publish
+    # a container we haven't positively verified speeds something up.
+    #
+    # Only Daytona runs count as publishable evidence. Local Docker runs are
+    # useful for iterating on the pipeline but can be flaky on the build
+    # host (shared CPU, varying load), so we don't let them gate the
+    # published dataset.
+    harbor_rows = fetch_all(
+        "harbor_runs",
+        select="owner, repo, sha, max_speedup, status, environment",
+        filters={"environment": "daytona"},
+    )
+    best_speedup: dict[tuple[str, str, str], float] = {}
+    for hr in harbor_rows:
+        if hr.get("status") != "success":
+            continue
+        speedup = hr.get("max_speedup")
+        if speedup is None:
+            continue
+        key = (hr["owner"], hr["repo"], hr["sha"])
+        prev = best_speedup.get(key)
+        if prev is None or speedup > prev:
+            best_speedup[key] = float(speedup)
+
+    dropped_no_run = 0
+    dropped_slow = 0
     records: list[FormulaCodeRecord] = []
     for row in rows:
+        sha = row.get("merge_commit_sha", "")
+        best = best_speedup.get((row.get("owner"), row.get("repo"), sha))
+        if best is None:
+            dropped_no_run += 1
+            continue
+        if best < MIN_HARBOR_SPEEDUP:
+            dropped_slow += 1
+            continue
         try:
             records.append(
                 FormulaCodeRecord(
@@ -73,7 +111,7 @@ def records_from_supabase(
                     repo=row["repo"],
                     issue_number=row["issue_number"],
                     task_id=f"{row['owner']}__{row['repo']}-{row['issue_number']}",
-                    gt_hash=row.get("merge_commit_sha", ""),
+                    gt_hash=sha,
                     base_commit=row.get("base_sha", ""),
                     date=row.get("merged_at"),
                     instructions=row.get("rendered_problem", ""),
@@ -87,5 +125,14 @@ def records_from_supabase(
             logger.warning(
                 "Failed to create record for %s/%s#%s", row.get("owner"), row.get("repo"), row.get("issue_number")
             )
+
+    if dropped_no_run or dropped_slow:
+        logger.info(
+            "publish: dropped %d records without successful Daytona harbor run, %d below %.2fx speedup gate (kept %d)",
+            dropped_no_run,
+            dropped_slow,
+            MIN_HARBOR_SPEEDUP,
+            len(records),
+        )
 
     return records
