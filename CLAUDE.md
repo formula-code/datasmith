@@ -25,10 +25,15 @@ uv run pre-commit run -a                     # Run all pre-commit hooks
 python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha>
 
 # Pipeline update (monthly, the primary entrypoint for fc-data)
-fc-data --start-date YYYY-MM-DD --end-date YYYY-MM-DD          # Run all 6 stages
+fc-data --start-date YYYY-MM-DD --end-date YYYY-MM-DD          # Run all 8 stages
 fc-data --start-date 2026-01-01 --end-date 2026-01-31 --stage 4  # Run a single stage
 fc-data --start-date 2026-01-01 --end-date 2026-01-31 --resume   # Resume from last completed
 fc-data --help                                                    # See all options
+
+# Stage 7 (harbor_healthcheck) knobs
+fc-data --stage 7 --harbor-environment docker                          # Local Docker (default)
+fc-data --stage 7 --harbor-environment daytona --n-concurrent 16       # Daytona, 16 parallel trials
+fc-data --stage 7 --harbor-limit 10                                    # Smoke test on 10 tasks
 ```
 
 ## Architecture
@@ -53,8 +58,10 @@ fc-data --help                                                    # See all opti
 2. **scrape_commits** — Scrape merged PR commits and patches
 3. **classify_prs** — LLM-based performance classification
 4. **resolve_packages** — Resolve Python dependencies via `uv pip compile`, persist to `packages` table
-5. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
-6. **publish** — Build, verify, and publish Docker images to DockerHub
+5. **render_problems** — Scrape linked issues and render deconstructed problem contexts
+6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
+7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
+8. **publish** — Build, verify, and publish Docker images to DockerHub. Only publishes PRs with at least one successful **Daytona** `harbor_runs` row whose `max_speedup >= 1.05`.
 
 ### Dataset verification (`dataset/`)
 
@@ -86,6 +93,7 @@ fc-data uses a **local Supabase** instance for all persistent state. Connection 
 | `pull_requests` | All scraped PRs with classification, patches, rendered problems, container names | Stages 1-3, 5-6 |
 | `packages` | Resolved `env_payload` (pinned deps) and `python_version` per commit | Stage 4 |
 | `candidate_containers` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA | Stage 6 (on success) |
+| `harbor_runs` | One row per Harbor oracle trial for a synthesized container: `max_speedup`, `geomean_speedup`, `n_benchmarks`, `wallclock_sec`, `reward_payload`, `status`. One-to-many FK on `candidate_containers(owner, repo, sha)`. | Stage 7 |
 | `error_logs` | Per-attempt synthesis results: agent output, failure stage/return code, error messages | Stage 6 (`Synthesizer._log_attempt`) |
 | `runner_progress` | Live progress counters (total/completed/failed) per pipeline run | `BaseRunner` (all stages) |
 | `runner_failures` | One row per item failure with error message + traceback | `BaseRunner._log_failure` |

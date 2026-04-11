@@ -9,6 +9,35 @@ from datasmith.utils.db import fetch_all
 logger = get_logger("update.pipeline")
 
 
+def _parse_task_specs(specs: str) -> set[tuple[str, str, int]]:
+    """Parse a --tasks value into a set of (owner, repo, pr_number) tuples.
+
+    Accepts comma-separated specs in either ``owner/repo#N`` or
+    ``owner/repo/N`` form. Invalid specs raise ``ValueError``.
+    """
+    out: set[tuple[str, str, int]] = set()
+    for raw in specs.split(","):
+        spec = raw.strip()
+        if not spec:
+            continue
+        if "#" in spec:
+            path, _, pr = spec.partition("#")
+        else:
+            parts = spec.rsplit("/", 1)
+            if len(parts) != 2:
+                raise ValueError(f"Invalid --tasks spec '{spec}' (expected owner/repo#N)")
+            path, pr = parts
+        if "/" not in path:
+            raise ValueError(f"Invalid --tasks spec '{spec}' (missing owner/repo)")
+        owner, repo = path.split("/", 1)
+        try:
+            pr_number = int(pr)
+        except ValueError as exc:
+            raise ValueError(f"Invalid PR number in --tasks spec '{spec}'") from exc
+        out.add((owner, repo, pr_number))
+    return out
+
+
 def _cap_per_repo(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """Return at most *limit* randomly-sampled items per (owner, repo)."""
     import random
@@ -45,6 +74,7 @@ STAGES = [
     "resolve_packages",
     "render_problems",
     "synthesize_images",
+    "harbor_healthcheck",
     "publish",
 ]
 
@@ -78,6 +108,10 @@ class Pipeline:
         force: bool = False,
         offline_source: str | None = None,
         min_stars: int = 500,
+        harbor_use_daytona: bool = False,
+        harbor_rounds: int = 4,
+        harbor_limit: int | None = None,
+        harbor_tasks: str | None = None,
     ) -> None:
         self._dry_run = dry_run
         self._n_concurrent = n_concurrent
@@ -86,6 +120,10 @@ class Pipeline:
         self._force = force
         self._offline_source = offline_source
         self._min_stars = min_stars
+        self._harbor_use_daytona = harbor_use_daytona
+        self._harbor_rounds = harbor_rounds
+        self._harbor_limit = harbor_limit
+        self._harbor_tasks = _parse_task_specs(harbor_tasks) if harbor_tasks else None
         self._completed_stages: list[str] = []
 
     def _log_dry_run_summary(
@@ -202,6 +240,8 @@ class Pipeline:
             await self._render_problems()
         elif stage_name == "synthesize_images":
             await self._synthesize_images()
+        elif stage_name == "harbor_healthcheck":
+            await self._harbor_healthcheck()
         elif stage_name == "publish":
             await self._publish(start_date, end_date)
 
@@ -567,6 +607,7 @@ class Pipeline:
         from datasmith.agents.synthesizer import Synthesizer
         from datasmith.github.client import GitHubClient
         from datasmith.runners.synthesize_images import SynthesizeImagesRunner
+        from datasmith.utils.docker_prune import builder_prune_watcher
         from datasmith.utils.tokens import TokenPool
 
         pool = TokenPool()
@@ -578,8 +619,109 @@ class Pipeline:
             gh=gh,
             **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
         )
-        await runner.run(items)
+        with builder_prune_watcher():
+            await runner.run(items)
         await gh.close()
+
+    async def _harbor_healthcheck(self) -> None:
+        # Pull every PR with a synthesized container from stage 6.
+        rows = fetch_all(
+            "pull_requests",
+            select=(
+                "owner, repo, issue_number, merge_commit_sha, base_sha, "
+                "container_name, patch, rendered_problem, classification, "
+                "difficulty, merged_at"
+            ),
+            filters={"is_performance_commit": True},
+            neq_filters={"container_name": ""},
+        )
+
+        # Require non-empty container_name, merge sha, base sha.
+        ready = [r for r in rows if r.get("container_name") and r.get("merge_commit_sha") and r.get("base_sha")]
+
+        # Filter to the explicit --tasks spec set first, if provided. Each spec
+        # names a specific PR the operator wants to triage, so an unmatched
+        # spec is a hard error (fail fast before spinning up Harbor).
+        if self._harbor_tasks:
+            wanted = self._harbor_tasks
+            matched = [r for r in ready if (r["owner"], r["repo"], int(r["issue_number"])) in wanted]
+            got_keys = {(r["owner"], r["repo"], int(r["issue_number"])) for r in matched}
+            missing = wanted - got_keys
+            if missing:
+                missing_str = ", ".join(f"{o}/{rp}#{n}" for o, rp, n in sorted(missing))
+                logger.warning(
+                    "harbor_healthcheck: --tasks requested %d PR(s) not in candidate set: %s",
+                    len(missing),
+                    missing_str,
+                )
+            ready = matched
+            logger.info("harbor_healthcheck: --tasks filter selected %d PR(s)", len(ready))
+
+        # Skip PRs that already have a successful harbor_runs row, unless --force
+        # or --tasks (explicit triage request implies re-run).
+        skipped_already_run = 0
+        if not self._force and not self._harbor_tasks:
+            hr_rows = fetch_all(
+                "harbor_runs",
+                select="owner, repo, sha, status, max_speedup",
+                filters={"status": "success"},
+            )
+            already_good = {(hr["owner"], hr["repo"], hr["sha"]) for hr in hr_rows if hr.get("max_speedup") is not None}
+            before = len(ready)
+            ready = [r for r in ready if (r["owner"], r["repo"], r["merge_commit_sha"]) not in already_good]
+            skipped_already_run = before - len(ready)
+
+        if self._tasks_per_repo is not None:
+            ready = _cap_per_repo(ready, self._tasks_per_repo)
+
+        if self._harbor_limit is not None and self._harbor_limit > 0:
+            before = len(ready)
+            ready = ready[: self._harbor_limit]
+            logger.info("harbor_healthcheck: capped %d -> %d via --harbor-limit", before, len(ready))
+
+        environment = "daytona" if self._harbor_use_daytona else "docker"
+        n_concurrent_trials = self._n_concurrent or 4
+
+        logger.info(
+            "harbor_healthcheck: %d PRs ready (env=%s, n_concurrent_trials=%d)",
+            len(ready),
+            environment,
+            n_concurrent_trials,
+        )
+
+        if self._dry_run:
+            extra: dict[str, Any] = {
+                "Harbor environment": environment,
+                "n_concurrent_trials": n_concurrent_trials,
+                "rounds": self._harbor_rounds,
+            }
+            if skipped_already_run:
+                extra["Skipped (already succeeded)"] = skipped_already_run
+            self._log_dry_run_summary("harbor_healthcheck", ready, extra=extra)
+            return
+
+        if not ready:
+            logger.info("harbor_healthcheck: nothing to dispatch")
+            return
+
+        import tempfile
+        from pathlib import Path
+
+        from datasmith.runners.harbor_healthcheck import run_harbor_healthcheck
+
+        task_dir = Path(tempfile.mkdtemp(prefix="fc-harbor-"))
+        try:
+            await run_harbor_healthcheck(
+                ready,
+                task_dir=task_dir,
+                use_daytona=self._harbor_use_daytona,
+                n_concurrent_trials=n_concurrent_trials,
+                rounds=self._harbor_rounds,
+            )
+        finally:
+            # Leave the task dir in place for post-mortem debugging; Harbor
+            # writes trial artifacts under jobs/ which are already separate.
+            logger.info("harbor_healthcheck: task dir retained at %s", task_dir)
 
     async def _publish(self, start_date: str, end_date: str) -> None:
         if self._dry_run:

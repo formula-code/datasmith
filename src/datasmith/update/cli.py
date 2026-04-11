@@ -15,13 +15,14 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 _STAGE_DESCRIPTIONS = {
-    1: "scrape_repos      — Fetch repository metadata from GitHub for all tracked repos",
-    2: "scrape_commits    — Scrape merged PR commits and patches from each repository",
-    3: "classify_prs      — Use LLM agents to classify PRs as performance-related",
-    4: "resolve_packages  — Resolve Python dependencies for performance commits via uv",
-    5: "render_problems   — Scrape linked issues and render deconstructed problem contexts",
-    6: "synthesize_images — Generate Docker build contexts for confirmed performance commits",
-    7: "publish           — Build, verify, and publish Docker images to DockerHub",
+    1: "scrape_repos       — Fetch repository metadata from GitHub for all tracked repos",
+    2: "scrape_commits     — Scrape merged PR commits and patches from each repository",
+    3: "classify_prs       — Use LLM agents to classify PRs as performance-related",
+    4: "resolve_packages   — Resolve Python dependencies for performance commits via uv",
+    5: "render_problems    — Scrape linked issues and render deconstructed problem contexts",
+    6: "synthesize_images  — Generate Docker build contexts for confirmed performance commits",
+    7: "harbor_healthcheck — Run synthesized containers through Harbor oracle; record speedups to harbor_runs",
+    8: "publish            — Build, verify, and publish Docker images to DockerHub",
 }
 
 
@@ -54,7 +55,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         action="append",
         metavar="N",
-        help="Run only stage N (1-7); repeat to run multiple stages (e.g. --stage 1 --stage 2)",
+        help="Run only stage N (1-8); repeat to run multiple stages (e.g. --stage 1 --stage 2)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Log what each stage would do without executing")
     parser.add_argument(
@@ -65,7 +66,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         metavar="N",
-        help="Max tasks per repo for stages 5 (render_problems) and 6 (synthesize_images). Ignored by other stages.",
+        help="Max tasks per repo for stages 5 (render_problems), 6 (synthesize_images), and 7 (harbor_healthcheck). Ignored by other stages.",
     )
     parser.add_argument(
         "--agent",
@@ -93,6 +94,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=500,
         metavar="N",
         help="Minimum stars for GitHub code search repo discovery in stage 1 (default: 500)",
+    )
+    parser.add_argument(
+        "--harbor-environment",
+        choices=["docker", "daytona"],
+        default="docker",
+        help="Harbor execution environment for stage 7 (default: docker). Stage 7 trial parallelism is controlled by --n-concurrent.",
+    )
+    parser.add_argument(
+        "--harbor-rounds",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Number of LSV timing rounds per Harbor trial in stage 7 (default: 4)",
+    )
+    parser.add_argument(
+        "--harbor-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap total PRs dispatched to Harbor in stage 7 (default: no cap)",
+    )
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        default=None,
+        metavar="SPECS",
+        help="Comma-separated list of stage-7 task specs (owner/repo#PR or owner/repo/PR). "
+        "When set, stage 7 runs only these tasks (bypasses date/repo filters). "
+        "Example: --tasks apache/arrow#34476,pandas-dev/pandas#58617",
     )
     return parser.parse_args(argv)
 
@@ -150,6 +180,10 @@ def main(argv: list[str] | None = None) -> None:
         force=args.force,
         offline_source=args.offline_source,
         min_stars=args.min_stars,
+        harbor_use_daytona=(args.harbor_environment == "daytona"),
+        harbor_rounds=args.harbor_rounds,
+        harbor_limit=args.harbor_limit,
+        harbor_tasks=args.tasks,
     )
     try:
         asyncio.run(
