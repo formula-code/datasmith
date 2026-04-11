@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import enum
 import json
+from pathlib import Path
 from typing import Any, cast
 
 from datasmith.agents.sandbox import SandboxResult, verify_context
@@ -16,8 +17,29 @@ class SynthesisState(str, enum.Enum):
     CHECK_CACHE = "check_cache"
     FIND_SIMILAR = "find_similar"
     TRY_SIMILAR = "try_similar"
+    TRY_DEFAULT = "try_default"
     LLM_GENERATE = "llm_generate"
     FAIL = "fail"
+
+
+def _load_default_context() -> DockerContext:
+    """Read the stock template docker_build_*.sh scripts into a DockerContext.
+
+    Used by TRY_DEFAULT to attempt an unmodified build before any agent work,
+    and to persist the working scripts so future PRs for the same repo can
+    reuse them via TRY_SIMILAR.
+    """
+    templates = Path(__file__).parents[1] / "docker" / "templates"
+
+    def _read(name: str) -> str:
+        path = templates / name
+        return path.read_text() if path.exists() else ""
+
+    return DockerContext(
+        build_env_sh=_read("docker_build_env.sh"),
+        build_pkg_sh=_read("docker_build_pkg.sh"),
+        build_run_sh=_read("docker_build_run.sh"),
+    )
 
 
 class Synthesizer:
@@ -37,12 +59,15 @@ class Synthesizer:
         self._agent = agent
         self._force = force
         self._trace: list[SynthesisState] = []
+        # Repos for which TRY_DEFAULT has already run in this pipeline run.
+        # Gated in-memory so we only pay the default-build cost once per repo.
+        self._tried_default_repos: set[tuple[str, str]] = set()
 
     @property
     def trace(self) -> list[SynthesisState]:
         return list(self._trace)
 
-    def run(
+    def run(  # noqa: C901
         self,
         owner: str,
         repo: str,
@@ -95,6 +120,41 @@ class Synthesizer:
                     )
                     return ctx
                 failed_attempts.append((ctx, result))
+
+        # State: TRY_DEFAULT — attempt a build with the stock template scripts
+        # once per repo per run. If it works, no agent needed; if it doesn't,
+        # the failure trace becomes prior-attempt context for the LLM.
+        if (owner, repo) not in self._tried_default_repos:
+            self._tried_default_repos.add((owner, repo))
+            self._trace.append(SynthesisState.TRY_DEFAULT)
+            default_ctx = _load_default_context()
+            result = verify_context(
+                owner=owner,
+                repo=repo,
+                sha=sha,
+                repo_image=repo_image,
+                env_payload=env_payload,
+                python_version=python_version,
+                context=default_ctx,
+            )
+            if result.success:
+                logger.info("Default template build succeeded for %s/%s#%d", owner, repo, issue_number)
+                self._save_context(
+                    owner,
+                    repo,
+                    sha,
+                    issue_number,
+                    default_ctx,
+                    resource_metrics=result.resource_metrics,
+                )
+                return default_ctx
+            failed_attempts.append((default_ctx, result))
+            logger.info(
+                "Default template build failed for %s/%s#%d — feeding trace into LLM priors",
+                owner,
+                repo,
+                issue_number,
+            )
 
         # State: LLM_GENERATE (sandbox-based)
         # Skip LLM generation when using the "none" agent — rely only on similar contexts.

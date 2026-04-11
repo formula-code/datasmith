@@ -87,8 +87,13 @@ class TestSynthesizerSimilarContext:
 
 
 class TestSynthesizerAllFail:
-    def test_all_fail_returns_none(self) -> None:
+    @patch("datasmith.agents.synthesizer.verify_context")
+    def test_all_fail_returns_none(self, mock_verify: MagicMock) -> None:
         """All synthesis attempts fail, returns None."""
+        mock_verify.return_value = SandboxResult(
+            success=False,
+            failure_json={"stage": "build", "return_code": 1, "error_message": "boom"},
+        )
         synth = Synthesizer()
         with (
             patch.object(synth, "_check_cache", return_value=None),
@@ -102,8 +107,13 @@ class TestSynthesizerAllFail:
 
 
 class TestSynthesizerStateTransitions:
-    def test_state_transitions_logged(self) -> None:
+    @patch("datasmith.agents.synthesizer.verify_context")
+    def test_state_transitions_logged(self, mock_verify: MagicMock) -> None:
         """Verify trace has correct states in order for full failure path."""
+        mock_verify.return_value = SandboxResult(
+            success=False,
+            failure_json={"stage": "build", "return_code": 1, "error_message": "boom"},
+        )
         synth = Synthesizer()
         with (
             patch.object(synth, "_check_cache", return_value=None),
@@ -117,8 +127,9 @@ class TestSynthesizerStateTransitions:
         assert trace[1] == SynthesisState.FIND_SIMILAR
         # No similar contexts found, so TRY_SIMILAR should be skipped
         assert SynthesisState.TRY_SIMILAR not in trace
-        assert trace[2] == SynthesisState.LLM_GENERATE
-        assert trace[3] == SynthesisState.FAIL
+        assert trace[2] == SynthesisState.TRY_DEFAULT
+        assert trace[3] == SynthesisState.LLM_GENERATE
+        assert trace[4] == SynthesisState.FAIL
 
     @patch("datasmith.agents.synthesizer.get_client")
     def test_trace_is_copy(self, mock_get_client: MagicMock) -> None:
