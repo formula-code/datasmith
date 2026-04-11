@@ -233,15 +233,15 @@ class Pipeline:
         elif stage_name == "scrape_commits":
             await self._scrape_commits(start_date, end_date)
         elif stage_name == "classify_prs":
-            await self._classify_prs()
+            await self._classify_prs(start_date, end_date)
         elif stage_name == "resolve_packages":
             await self._resolve_packages(start_date, end_date)
         elif stage_name == "render_problems":
-            await self._render_problems()
+            await self._render_problems(start_date, end_date)
         elif stage_name == "synthesize_images":
-            await self._synthesize_images()
+            await self._synthesize_images(start_date, end_date)
         elif stage_name == "harbor_healthcheck":
-            await self._harbor_healthcheck()
+            await self._harbor_healthcheck(start_date, end_date)
         elif stage_name == "publish":
             await self._publish(start_date, end_date)
 
@@ -336,10 +336,12 @@ class Pipeline:
             n = batch_upsert("pull_requests", records)
             logger.info("Imported %d pull request records from offline source", n)
 
-    async def _classify_prs(self) -> None:
+    async def _classify_prs(self, start_date: str, end_date: str) -> None:
         classify_kwargs: dict[str, Any] = {
             "select": "owner, repo, issue_number, title, body, patch, file_changes",
             "filters": {"is_performance_commit_symbolic": True},
+            "gte_filters": {"created_at": start_date},
+            "lte_filters": {"created_at": end_date},
         }
         if not self._force:
             classify_kwargs["is_null"] = ["is_performance_commit"]
@@ -360,7 +362,10 @@ class Pipeline:
             self._log_dry_run_summary(
                 "classify_prs",
                 items,
-                extra={"Filter": "unclassified only" if not self._force else "all (force=True)"},
+                extra={
+                    "Date range": f"{start_date} to {end_date}",
+                    "Filter": "unclassified only" if not self._force else "all (force=True)",
+                },
             )
             return
 
@@ -430,13 +435,15 @@ class Pipeline:
         )
         await runner.run(items)
 
-    async def _render_problems(self) -> None:
+    async def _render_problems(self, start_date: str, end_date: str) -> None:
         # Fetch performance-classified PRs
         rows = fetch_all(
             "pull_requests",
             select="owner, repo, issue_number, merge_commit_sha, title, body, created_at",
             filters={"is_performance_commit": True, "is_performance_commit_symbolic": True},
             neq_filters={"merge_commit_sha": ""},
+            gte_filters={"created_at": start_date},
+            lte_filters={"created_at": end_date},
         )
 
         # Only process PRs whose commit has can_install=True resolved packages
@@ -492,7 +499,10 @@ class Pipeline:
         logger.info("Rendering problem contexts for %d PRs", len(items))
 
         if self._dry_run:
-            extra: dict[str, Any] = {"Performance PRs in DB": len(rows)}
+            extra: dict[str, Any] = {
+                "Date range": f"{start_date} to {end_date}",
+                "Performance PRs in DB": len(rows),
+            }
             if skipped_no_pkg:
                 extra["Skipped (no installable package)"] = skipped_no_pkg
             if skipped_existing:
@@ -516,11 +526,13 @@ class Pipeline:
         await runner.run(items)
         await gh.close()
 
-    async def _synthesize_images(self) -> None:
+    async def _synthesize_images(self, start_date: str, end_date: str) -> None:
         query_kwargs: dict[str, Any] = {
             "select": "owner, repo, issue_number, merge_commit_sha, title, body, created_at, rendered_problem",
             "filters": {"is_performance_commit": True, "is_performance_commit_symbolic": True},
             "neq_filters": {"merge_commit_sha": ""},
+            "gte_filters": {"created_at": start_date},
+            "lte_filters": {"created_at": end_date},
         }
         if not self._force:
             query_kwargs["is_null"] = ["container_name"]
@@ -596,7 +608,10 @@ class Pipeline:
         logger.info("Synthesizing images for %d PRs", len(items))
 
         if self._dry_run:
-            extra: dict[str, Any] = {"Candidate PRs in DB": len(rows)}
+            extra: dict[str, Any] = {
+                "Date range": f"{start_date} to {end_date}",
+                "Candidate PRs in DB": len(rows),
+            }
             if skipped_no_pkg:
                 extra["Skipped (no resolved packages)"] = skipped_no_pkg
             if skipped_no_ctx:
@@ -623,7 +638,7 @@ class Pipeline:
             await runner.run(items)
         await gh.close()
 
-    async def _harbor_healthcheck(self) -> None:
+    async def _harbor_healthcheck(self, start_date: str, end_date: str) -> None:
         # Pull every PR with a synthesized container from stage 6.
         rows = fetch_all(
             "pull_requests",
@@ -634,6 +649,8 @@ class Pipeline:
             ),
             filters={"is_performance_commit": True},
             neq_filters={"container_name": ""},
+            gte_filters={"created_at": start_date},
+            lte_filters={"created_at": end_date},
         )
 
         # Require non-empty container_name, merge sha, base sha.
@@ -691,6 +708,7 @@ class Pipeline:
 
         if self._dry_run:
             extra: dict[str, Any] = {
+                "Date range": f"{start_date} to {end_date}",
                 "Harbor environment": environment,
                 "n_concurrent_trials": n_concurrent_trials,
                 "rounds": self._harbor_rounds,
