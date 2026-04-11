@@ -33,7 +33,7 @@ def _ensure_prerequisite_images(owner: str, repo: str, py_version: str = "") -> 
         mgr.build_repo_image(owner, repo, py_version=py_version)
 
 
-def _build_and_push_pr_image(
+def _build_pr_image(
     owner: str,
     repo: str,
     issue_number: int,
@@ -42,15 +42,11 @@ def _build_and_push_pr_image(
     docker_context: Any | None = None,
     python_version: str = "",
 ) -> str:
-    """Build the final PR image from synthesized context and push to DockerHub.
+    """Build the final PR image from synthesized context (no push).
 
-    The three-tier Dockerfiles (base/repo/pr) use the same shell scripts as
-    the synthesized single-Dockerfile flow, so the build result is identical.
-
-    Returns the pushed image tag.
+    Returns the PR image tag that will be used for the subsequent push.
     """
-    from datasmith.docker.images import ImageManager, get_pr_image_name, get_repo_image_name
-    from datasmith.docker.publish import DockerHubPublisher
+    from datasmith.docker.images import ImageManager, get_pr_image_name
 
     ctx = docker_context
     mgr = ImageManager()
@@ -79,6 +75,14 @@ def _build_and_push_pr_image(
             py_version=python_version,
         )
 
+    return pr_tag
+
+
+def _push_pr_image(owner: str, repo: str, pr_tag: str) -> None:
+    """Push a previously-built PR image (and its repo parent) to DockerHub."""
+    from datasmith.docker.images import get_repo_image_name
+    from datasmith.docker.publish import DockerHubPublisher
+
     publisher = DockerHubPublisher()
     repo_tag = get_repo_image_name(owner, repo)
 
@@ -89,7 +93,6 @@ def _build_and_push_pr_image(
 
     publisher.push(pr_tag)
     logger.info("Pushed PR image: %s", pr_tag)
-    return pr_tag
 
 
 def _render_run_tests_sh(docker_templates: Any, base_commit: str) -> str:
@@ -286,16 +289,19 @@ class SynthesizeImagesRunner(BaseRunner):
 
         logger.info("Successfully synthesized image for %s/%s#%d", owner, repo, issue_number)
 
-        # Build the final PR image and push to DockerHub
-        pr_tag = await asyncio.to_thread(
-            _build_and_push_pr_image, owner, repo, issue_number, sha, env_payload, ctx, py_version
-        )
+        # Build the final PR image locally (no push yet)
+        pr_tag = await asyncio.to_thread(_build_pr_image, owner, repo, issue_number, sha, env_payload, ctx, py_version)
 
-        # Record the container name in Supabase
+        # Record the container name in Supabase *before* pushing. If the DB
+        # write fails, the image stays unpublished and a re-run picks up the
+        # PR cleanly — avoids orphan images on DockerHub with no DB state.
         client = get_client()
         client.table("pull_requests").update({"container_name": pr_tag}).eq("owner", owner).eq("repo", repo).eq(
             "issue_number", issue_number
         ).execute()
+
+        # DB state is durable — safe to publish the image.
+        await asyncio.to_thread(_push_pr_image, owner, repo, pr_tag)
 
     @staticmethod
     def _ensure_prereqs(owner: str, repo: str, py_version: str) -> None:
