@@ -99,6 +99,11 @@ class SandboxResult:
     files_changed: list[str] = field(default_factory=list)
     resource_metrics: dict = field(default_factory=dict)
     env_payload_override: str | None = None
+    aborted: bool = False
+    """True when the agent exited without ever producing failure.json or
+    verification_success.json — i.e. it never ran (or never finished running)
+    sandbox_verify.py. Distinct from a real verifier failure, and should not
+    consume the synthesizer's per-PR attempt budget."""
 
 
 class SandboxRunner:
@@ -271,7 +276,24 @@ class SandboxRunner:
         agent = get_agent(preference=preference)
         logger.info("Launching %s agent sandbox in %s", agent.name(), workspace)
         result = agent.exec(
-            prompt="Read AGENTS.md and follow its instructions to fix the Docker build.",
+            prompt=(
+                "Read AGENTS.md and follow its instructions to fix the Docker build.\n"
+                "\n"
+                "HARD REQUIREMENTS — your work will be discarded otherwise:\n"
+                "1. You MUST execute `python3 sandbox_verify.py` from the workspace root "
+                "at least once. This is the ONLY accepted verifier — do not validate by "
+                "running pip, docker, or build commands outside this script.\n"
+                "2. The ONLY accepted success state is `task/verification_success.json` "
+                "existing on disk when you exit. A `bash -n` syntax check, a 'local' pip "
+                "install, or a manual docker build does NOT count and will be ignored.\n"
+                "3. Do NOT touch processes outside the workspace. Never run `pkill`, "
+                "`kill`, `killall`, or `pgrep` against `sandbox_verify`, `docker`, "
+                "`asv`, `pytest`, or any other process — peer worker processes you may "
+                "see in `ps` belong to other tasks and must be left alone.\n"
+                "4. A full docker build inside `sandbox_verify.py` typically takes "
+                "15-40 minutes. Budget your turns accordingly and wait for it to "
+                "finish; do not exit while a build is still running.\n"
+            ),
             timeout=self._config.codex_timeout_s,
             workdir=str(workspace),
         )
@@ -365,6 +387,11 @@ class SandboxRunner:
         # Extract resource_metrics from whichever JSON file was written
         resource_metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
 
+        # An "aborted" attempt is one where the agent exited without producing
+        # either result file. Distinct from a real verifier failure: the
+        # synthesizer should retry these without consuming the attempt budget.
+        aborted = (not success) and (not failure_file.exists())
+
         return SandboxResult(
             success=success,
             docker_context=docker_context if success else None,
@@ -375,6 +402,7 @@ class SandboxRunner:
             files_changed=codex_result.files_changed,
             resource_metrics=resource_metrics,
             env_payload_override=env_payload_override if success else None,
+            aborted=aborted,
         )
 
 

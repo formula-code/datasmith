@@ -76,7 +76,7 @@ class TestSynthesizerSimilarContext:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[similar_ctx]),
-            patch.object(synth, "_sandbox_generate", return_value=(None, {})),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {}, False)),
         ):
             result = synth.run("owner", "repo", 42, "pr context")
 
@@ -93,7 +93,7 @@ class TestSynthesizerAllFail:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[]),
-            patch.object(synth, "_sandbox_generate", return_value=(None, {})),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {}, False)),
         ):
             result = synth.run("owner", "repo", 42, "pr context")
 
@@ -108,7 +108,7 @@ class TestSynthesizerStateTransitions:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[]),
-            patch.object(synth, "_sandbox_generate", return_value=(None, {})),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {}, False)),
         ):
             synth.run("owner", "repo", 42, "pr context")
 
@@ -227,7 +227,7 @@ class TestFindSimilar:
     @patch("datasmith.agents.synthesizer.get_client")
     def test_chronological_ordering(self, mock_get_client: MagicMock) -> None:
         """Contexts are returned in order of chronological proximity to the current PR."""
-        base = datetime.datetime(2024, 6, 1, tzinfo=datetime.timezone.utc)
+        base = datetime.datetime(2024, 6, 1, tzinfo=datetime.UTC)
         # Distances from base: 60 days, 5 days, 30 days
         mock_client = _make_client_mock(
             pr_date_rows=[{"created_at": "2024-06-01T00:00:00Z"}],

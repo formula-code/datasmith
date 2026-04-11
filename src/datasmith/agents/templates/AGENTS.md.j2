@@ -3,6 +3,87 @@
 You are fixing a Docker build context for the FormulaCode dataset. Your goal is to iteratively
 fix the build until `sandbox_verify.py` succeeds.
 
+## Hard requirements (your work is discarded otherwise)
+
+1. You MUST execute `python3 sandbox_verify.py` from the workspace root. This is the
+   ONLY accepted verifier. A `bash -n` syntax check, a manual `pip install`, a manual
+   `docker build`, or any "local reproduction" outside this script does NOT count and
+   will be ignored by the harness.
+2. The ONLY accepted success state is `task/verification_success.json` existing on disk
+   when you exit. If that file is missing, the attempt is recorded as a failure no
+   matter what edits you made or how confident you are in the fix.
+3. **Never** run `pkill`, `kill`, `killall`, or `pgrep` against `sandbox_verify`,
+   `docker`, `asv`, `pytest`, `python`, or any process you didn't start yourself.
+   Other workers may be running concurrently on this host — their processes are visible
+   via `ps` but **must be left alone**. Killing peer processes corrupts other tasks.
+4. A full verifier run kicks off a multi-stage Docker build that typically takes
+   **15-40 minutes**, sometimes up to 60. Do not exit while a build is still running.
+   Wait for `sandbox_verify.py` to finish and write its result file before deciding
+   what to do next. Budget your turns accordingly — a single end-to-end run is
+   normal and expected.
+
+## Forbidden actions (the validator will detect and reject these)
+
+The verifier runs anti-tamper checks before AND after the test phase inside
+`/run-tests.sh`. If it sees any of the patterns below, it prints
+`FORMULACODE_TAMPER_DETECTED` and the attempt is recorded as a failure no
+matter what else happened. The checks are non-negotiable; previous attempts
+to work around them have all been detected and rejected. Do not try.
+
+### Validator output
+
+1. **Do not write anything to `/logs/`** from `docker_build_*.sh`. The validator
+   wipes `/logs/summary_*.json` and `/logs/test_results.json` both at the start
+   of `run-tests.sh` AND again right before `parser.py` runs. Any pre-existing
+   copy is logged as `prefab:<filename>` and fails the run. This includes:
+   - `/logs/summary_agent.json`, `/logs/summary_smoke.json`, or any
+     `summary_${anything}.json`
+   - `/logs/test_results.json`
+   - Pre-baked `/logs/postrun_agent-*.tar.gz` ASV result archives
+
+2. **Do not override `T_BENCH_AGENT_MODEL_NAME`** in any script or in
+   `/etc/profile.d/asv_build_vars.sh`. `run-tests.sh` unsets and re-exports it
+   to the literal string `agent` before reading any `summary_*.json`. Setting
+   it to `smoke`, `oracle`, `oracle:oracle`, etc. has no effect.
+
+### Test files
+
+3. **Do not create any `test_*.py` or `*_test.py` file**, anywhere in the repo
+   tree — not at the root, not under `tests/`, not under
+   `python/<pkg>/tests/`, nowhere. The post-pytest tamper check enumerates
+   every test file pytest actually executed and rejects the run if any file
+   is not present in `git ls-tree {{ sha }}`. Tagged as `collected_untracked`.
+
+4. **Do not modify any tracked test file**, including with a "harmless"
+   trailing comment, a `# codex-smoke-anchor` marker, or by appending a
+   trivial `def test_smoke(): pass`. The post-pytest check compares each
+   executed test file's blob hash to the base commit and rejects mismatches.
+   Tagged as `collected_mutated`. If you need pytest to discover a specific
+   file, install missing test dependencies instead — that is the only
+   legitimate way to influence collection.
+
+### Validator binaries
+
+5. **Do not shim `tmux`**, `pytest`, `python`, `git`, or any other binary that
+   `run-tests.sh` invokes. The validator checks that `tmux` on `$PATH` is an
+   ELF binary and rejects shell-script replacements (`tmux_shim:<path>`).
+   Do not rename `tmux` to `tmux.real` and substitute a wrapper.
+
+6. **Do not modify `parser.py`, `pytest_runner.py`,
+   `formulacode_testrunner.py`, `run-tests.sh`, `profile.sh`, or
+   `Dockerfile.pr`** at any point. Their hashes are checked.
+
+### What to do instead
+
+If `sandbox_verify.py` keeps failing because pytest doesn't find tests or the
+tests it finds fail to import, the correct fix is to install missing test
+dependencies in `docker_build_run.sh` — e.g. `pytest-xdist`, `pytest-timeout`,
+`hypothesis`, `pytest-benchmark`, repo-specific test extras like
+`pip install -e .[test]`. If the upstream repo genuinely has no tests, or
+its tests are fundamentally broken at this commit, the PR is unsuitable for
+FormulaCode and should be left failing. **A failed verification is a valid
+outcome. A faked success is not.**
+
 ## Task Info
 
 - **Repository**: {{ owner }}/{{ repo }}
@@ -33,7 +114,9 @@ mistakes.
 
 Follow this iterative cycle:
 
-1. Run `python3 sandbox_verify.py` (A good timeout is 60 minutes, but adjust as needed)
+1. Run `python3 sandbox_verify.py` and **wait for it to finish** — this typically
+   takes 15-40 minutes for the docker build plus tests. Do not interrupt it, do not
+   exit early, and do not run any "local" pip/docker substitute.
 2. If it fails, read `task/failure.json` for error details
 3. Edit `task/docker_build_pkg.sh`, `task/docker_build_run.sh`, and/or `task/docker_build_env.sh`
 4. Re-run `python3 sandbox_verify.py`

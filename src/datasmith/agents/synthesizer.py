@@ -29,8 +29,10 @@ class Synthesizer:
         dry_run: bool = False,
         agent: str | None = None,
         force: bool = False,
+        max_aborts: int = 2,
     ) -> None:
         self._max_attempts = max_attempts
+        self._max_aborts = max_aborts
         self._dry_run = dry_run
         self._agent = agent
         self._force = force
@@ -108,8 +110,10 @@ class Synthesizer:
 
         self._trace.append(SynthesisState.LLM_GENERATE)
         prior_attempts = _format_prior_attempts(failed_attempts) if failed_attempts else ""
-        for attempt_idx in range(self._max_attempts):
-            generated, metrics = self._sandbox_generate(
+        attempt_idx = 0
+        abort_count = 0
+        while attempt_idx < self._max_attempts:
+            generated, metrics, aborted = self._sandbox_generate(
                 owner=owner,
                 repo=repo,
                 sha=sha,
@@ -131,6 +135,18 @@ class Synthesizer:
                 )
                 self._save_context(owner, repo, sha, issue_number, generated, resource_metrics=metrics)
                 return generated
+            if aborted and abort_count < self._max_aborts:
+                abort_count += 1
+                logger.warning(
+                    "Sandbox synthesis attempt for %s/%s#%d aborted (verifier never ran) "
+                    "— retrying without consuming attempt budget (%d/%d aborts used)",
+                    owner,
+                    repo,
+                    issue_number,
+                    abort_count,
+                    self._max_aborts,
+                )
+                continue
             logger.warning(
                 "Sandbox synthesis attempt %d failed for %s/%s#%d",
                 attempt_idx + 1,
@@ -138,6 +154,7 @@ class Synthesizer:
                 repo,
                 issue_number,
             )
+            attempt_idx += 1
 
         # State: FAIL
         self._trace.append(SynthesisState.FAIL)
@@ -265,7 +282,7 @@ class Synthesizer:
         prior_attempts: str = "",
         issue_number: int = 0,
         attempt_index: int = 0,
-    ) -> tuple[DockerContext | None, dict]:
+    ) -> tuple[DockerContext | None, dict, bool]:
         from datasmith.agents.sandbox import SandboxRunner
 
         runner = SandboxRunner(agent=self._agent)
@@ -289,7 +306,7 @@ class Synthesizer:
             result=result,
         )
         ctx = result.docker_context if result.success else None
-        return ctx, result.resource_metrics
+        return ctx, result.resource_metrics, result.aborted
 
     def _log_attempt(
         self,
@@ -301,13 +318,26 @@ class Synthesizer:
         result: SandboxResult,
     ) -> None:
         """Persist agent output to the ``error_logs`` Supabase table."""
-        timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+        timestamp = datetime.datetime.now(tz=datetime.UTC).isoformat()
 
         failure = result.failure_json or {}
         # Cap raw output at 100 KB for Supabase storage
         raw_output = result.raw_agent_output
         if len(raw_output) > 100_000:
             raw_output = raw_output[-100_000:]
+
+        # Aborted attempts (agent never produced failure.json or
+        # verification_success.json) get a sentinel stage so they're
+        # distinguishable from real verifier failures in error_logs.
+        if result.aborted:
+            failure_stage: str | None = "aborted"
+            error_message: str | None = (
+                "Agent exited without running sandbox_verify.py to completion "
+                "(no failure.json or verification_success.json found)."
+            )
+        else:
+            failure_stage = failure.get("stage") or None
+            error_message = (failure.get("error_message") or "")[-10_000:] or None
 
         row = {
             "owner": owner,
@@ -318,9 +348,9 @@ class Synthesizer:
             "agent_name": result.agent_name,
             "success": result.success,
             "duration_s": result.duration_s,
-            "failure_stage": failure.get("stage") or None,
+            "failure_stage": failure_stage,
             "failure_return_code": failure.get("return_code") or None,
-            "error_message": (failure.get("error_message") or "")[-10_000:] or None,
+            "error_message": error_message,
             "agent_output": raw_output or None,
             "files_changed": json.dumps(result.files_changed),
             "resource_metrics": result.resource_metrics or None,
@@ -353,25 +383,22 @@ class Synthesizer:
         """
         if not sha:
             return
-        try:
-            client = get_client()
-            row: dict = {
-                "owner": owner,
-                "repo": repo,
-                "sha": sha,
-                "issue_number": issue_number,
-                "build_pkg_sh": ctx.build_pkg_sh,
-                "build_run_sh": ctx.build_run_sh,
-                "build_env_sh": ctx.build_env_sh,
-            }
-            if resource_metrics:
-                row["resource_metrics"] = resource_metrics
-            if env_payload_override:
-                row["env_payload"] = env_payload_override
-            client.table("candidate_containers").upsert(row).execute()
-            logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
-        except Exception:
-            logger.warning("Failed to save context for %s/%s@%s", owner, repo, sha[:12])
+        client = get_client()
+        row: dict = {
+            "owner": owner,
+            "repo": repo,
+            "sha": sha,
+            "issue_number": issue_number,
+            "build_pkg_sh": ctx.build_pkg_sh,
+            "build_run_sh": ctx.build_run_sh,
+            "build_env_sh": ctx.build_env_sh,
+        }
+        if resource_metrics:
+            row["resource_metrics"] = resource_metrics
+        if env_payload_override:
+            row["env_payload"] = env_payload_override
+        client.table("candidate_containers").upsert(row).execute()
+        logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
 
 
 def _parse_ts(ts: str) -> datetime.datetime:
