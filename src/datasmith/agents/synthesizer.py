@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from datasmith.agents.sandbox import SandboxResult, verify_context
+from datasmith.agents.tamper_audit import TamperResult, classify_context
 from datasmith.docker.context import DockerContext
 from datasmith.utils import get_client, get_logger
 
@@ -138,17 +139,33 @@ class Synthesizer:
                 context=default_ctx,
             )
             if result.success:
-                logger.info("Default template build succeeded for %s/%s#%d", owner, repo, issue_number)
-                self._save_context(
-                    owner,
-                    repo,
-                    sha,
-                    issue_number,
-                    default_ctx,
-                    resource_metrics=result.resource_metrics,
-                )
-                return default_ctx
-            failed_attempts.append((default_ctx, result))
+                tamper = classify_context(default_ctx)
+                if tamper.tampered:
+                    # Default template should never tamper — this is a red flag
+                    # that one of our committed templates drifted.  Log and
+                    # refuse to cache.
+                    logger.error(
+                        "Default template tamper-audit failed for %s/%s#%d: %s",
+                        owner,
+                        repo,
+                        issue_number,
+                        tamper.as_list(),
+                    )
+                    self._log_tamper(owner, repo, sha, issue_number, 0, tamper, "try_default")
+                    failed_attempts.append((default_ctx, result))
+                else:
+                    logger.info("Default template build succeeded for %s/%s#%d", owner, repo, issue_number)
+                    self._save_context(
+                        owner,
+                        repo,
+                        sha,
+                        issue_number,
+                        default_ctx,
+                        resource_metrics=result.resource_metrics,
+                    )
+                    return default_ctx
+            else:
+                failed_attempts.append((default_ctx, result))
             logger.info(
                 "Default template build failed for %s/%s#%d — feeding trace into LLM priors",
                 owner,
@@ -186,6 +203,26 @@ class Synthesizer:
                 attempt_index=attempt_idx,
             )
             if generated is not None:
+                tamper = classify_context(generated)
+                if tamper.tampered:
+                    # Local CI passed but the agent reached the pass state via
+                    # a pattern we consider fraudulent (forged validator
+                    # artifacts, fabricated benchmarks, etc.).  Log the tags
+                    # to error_logs and treat the attempt as failed so the
+                    # next iteration re-prompts the agent from scratch.  The
+                    # agent is *not* told which specific pattern was caught —
+                    # the cooperative framing stays intact.
+                    logger.warning(
+                        "Sandbox synthesis attempt %d for %s/%s#%d passed local CI but failed tamper audit: %s",
+                        attempt_idx + 1,
+                        owner,
+                        repo,
+                        issue_number,
+                        tamper.as_list(),
+                    )
+                    self._log_tamper(owner, repo, sha, issue_number, attempt_idx, tamper, "llm_generate")
+                    attempt_idx += 1
+                    continue
                 logger.info(
                     "Sandbox synthesis succeeded for %s/%s#%d (attempt %d)",
                     owner,
@@ -424,6 +461,49 @@ class Synthesizer:
             )
         except Exception:
             logger.debug("Failed to log synthesis attempt to Supabase", exc_info=True)
+
+    def _log_tamper(
+        self,
+        owner: str,
+        repo: str,
+        sha: str,
+        issue_number: int,
+        attempt_index: int,
+        tamper: TamperResult,
+        source: str,
+    ) -> None:
+        """Persist a post-verification tamper detection to ``error_logs``.
+
+        The row uses ``failure_stage="tamper_detected"`` and stores the
+        detected tag set in ``error_message`` so we can audit later without
+        grepping raw agent output.
+        """
+        timestamp = datetime.datetime.now(tz=datetime.UTC).isoformat()
+        row = {
+            "owner": owner,
+            "repo": repo,
+            "sha": sha,
+            "issue_number": issue_number,
+            "attempt_index": attempt_index,
+            "agent_name": self._agent,
+            "success": False,
+            "failure_stage": "tamper_detected",
+            "error_message": f"source={source} tags={','.join(tamper.as_list())}",
+            "created_at": timestamp,
+        }
+        try:
+            client = get_client()
+            client.table("error_logs").insert(row).execute()
+            logger.info(
+                "Logged tamper detection for %s/%s@%s attempt %d: %s",
+                owner,
+                repo,
+                sha[:12],
+                attempt_index,
+                tamper.as_list(),
+            )
+        except Exception:
+            logger.debug("Failed to log tamper detection to Supabase", exc_info=True)
 
     def _save_context(
         self,
