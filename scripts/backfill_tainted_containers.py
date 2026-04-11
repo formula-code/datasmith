@@ -93,6 +93,40 @@ APPEND_TO_TEST_FILE_RE = re.compile(
 # Pre-baked ASV result tarballs
 PREBAKED_TARBALL_RE = re.compile(r"postrun_agent[\w.\-:${}*]*\.tar\.gz")
 
+# asv_benchmarks.txt forgery. run-tests.sh generates this file via
+# `asv run --bench just-discover`; a legitimate build should never write it
+# manually. Writing it from a build script is a bypass targeting the
+# FORMULACODE_NO_BENCHMARKS gate.
+ASV_BENCHMARKS_WRITE_RE = re.compile(
+    r"""(?xs)
+    (?:cat|tee|echo|printf)
+    [^\n]*?>\s*["']?
+    [\w./$@{}-]*asv_benchmarks\.txt
+    """
+)
+# Comments admitting the write is just to satisfy the gate.
+# Must mention asv/benchmark explicitly — otherwise "placeholder" etc. match
+# legitimate fixes like setuptools-scm version stubs.
+ASV_BENCHMARKS_STUB_COMMENT_RE = re.compile(
+    r"""(?ixs)
+    \#[^\n]*(?:asv|benchmark)[^\n]*(?:
+        stub
+      | placeholder
+      | just\s+need.*non[-\s]?empty
+      | for\s+the\s+(?:gate|guard|check)
+      | skip\s+.*discovery
+      | early[-\s]?exit\s+guard
+      | satisfy.*(?:gate|guard|check)
+      | fake
+    )
+    |
+    \#[^\n]*(?:
+        just\s+need.*non[-\s]?empty
+      | early[-\s]?exit\s+guard
+    )[^\n]*(?:asv|benchmark)?
+    """
+)
+
 
 def script_blob(row: dict) -> str:
     return "\n".join((row.get(k) or "") for k in SCRIPT_COLUMNS)
@@ -123,6 +157,27 @@ def classify(row: dict) -> set[str]:  # noqa: C901
         tags.add("append_to_test_file")
     if PREBAKED_TARBALL_RE.search(blob):
         tags.add("prebaked_postrun_tarball")
+    # Note: asv_benchmarks_write and asv_benchmarks_stub_comment are kept as
+    # advisory checks (callers can opt in) but excluded from the default
+    # classification because run-tests.sh is now structurally resilient to
+    # pre-writes (it always runs its own discovery and overwrites).
+    return tags
+
+
+def classify_with_advisory(row: dict) -> set[str]:
+    """Extended classification that also flags `asv_benchmarks.txt` writes.
+
+    Run this for review, not auto-delete — a legitimate multi-fallback
+    pre-discovery chain (e.g. pandas-dev/pandas#64031) and a stub forgery
+    (e.g. google-deepmind/mujoco_warp#1057) look identical by regex, and
+    only a human can distinguish them.
+    """
+    tags = classify(row)
+    blob = script_blob(row)
+    if ASV_BENCHMARKS_WRITE_RE.search(blob):
+        tags.add("asv_benchmarks_write")
+    if ASV_BENCHMARKS_STUB_COMMENT_RE.search(blob):
+        tags.add("asv_benchmarks_stub_comment")
     return tags
 
 
