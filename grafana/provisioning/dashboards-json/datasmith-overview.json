@@ -1373,7 +1373,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 118,
+        "y": 135,
         "w": 24,
         "h": 1
       }
@@ -1384,7 +1384,7 @@
       "type": "table",
       "gridPos": {
         "x": 0,
-        "y": 123,
+        "y": 140,
         "w": 24,
         "h": 12
       },
@@ -1410,7 +1410,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 135,
+        "y": 152,
         "w": 24,
         "h": 1
       }
@@ -1421,7 +1421,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 0,
-        "y": 136,
+        "y": 153,
         "w": 24,
         "h": 8
       },
@@ -1438,6 +1438,264 @@
       ],
       "fieldConfig": {
         "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Harbor Runs (Stage 7)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 109,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 60,
+      "title": "Run Outcomes by Environment",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 110,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT status, environment, COUNT(*) AS runs FROM harbor_runs GROUP BY 1, 2 ORDER BY COUNT(*) DESC;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "stacking": "normal"
+      }
+    },
+    {
+      "id": 61,
+      "title": "Max Speedup Distribution (Successful Daytona Runs)",
+      "type": "barchart",
+      "gridPos": {
+        "x": 12,
+        "y": 110,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN max_speedup < 1.0 THEN '< 1.0 (slower)' WHEN max_speedup < 1.05 THEN '1.0 - 1.05 (below threshold)' WHEN max_speedup < 1.25 THEN '1.05 - 1.25' WHEN max_speedup < 1.5 THEN '1.25 - 1.5' WHEN max_speedup < 2.0 THEN '1.5 - 2.0' WHEN max_speedup < 5.0 THEN '2.0 - 5.0' ELSE '>= 5.0' END AS speedup_bucket, COUNT(*) AS runs FROM harbor_runs WHERE status = 'success' AND environment = 'daytona' AND max_speedup IS NOT NULL GROUP BY 1 ORDER BY 1;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 62,
+      "title": "Best Speedup per Container (Daytona Success)",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 118,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT h.owner || '/' || h.repo AS repository, h.sha, LEFT(pr.title, 80) AS pr_title, ROUND(MAX(h.max_speedup)::numeric, 3) AS best_max_speedup, ROUND(AVG(h.geomean_speedup)::numeric, 3) AS avg_geomean, MAX(h.n_benchmarks) AS n_benchmarks, COUNT(*) AS trials FROM harbor_runs h LEFT JOIN pull_requests pr ON pr.owner = h.owner AND pr.repo = h.repo AND pr.issue_number = h.issue_number WHERE h.status = 'success' AND h.environment = 'daytona' GROUP BY h.owner, h.repo, h.sha, pr.title ORDER BY best_max_speedup DESC LIMIT 50;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 63,
+      "title": "Publishable Containers",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 118,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS publishable FROM (SELECT owner, repo, sha, MAX(max_speedup) AS best FROM harbor_runs WHERE status = 'success' AND environment = 'daytona' AND max_speedup IS NOT NULL GROUP BY owner, repo, sha HAVING MAX(max_speedup) >= 1.05) t;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 64,
+      "title": "Total Trials",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 118,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS total FROM harbor_runs;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 65,
+      "title": "Success Rate",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 122,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND(COUNT(*) FILTER (WHERE status = 'success')::numeric / NULLIF(COUNT(*), 0) * 100, 1) AS success_rate_pct FROM harbor_runs;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 66,
+      "title": "Avg Max Speedup (Successful)",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 122,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ROUND(AVG(max_speedup)::numeric, 2) AS avg_speedup FROM harbor_runs WHERE status = 'success' AND max_speedup IS NOT NULL;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        },
         "overrides": []
       }
     }
