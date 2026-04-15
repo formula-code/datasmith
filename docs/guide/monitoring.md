@@ -2,7 +2,7 @@
 
 fc-data includes a pre-configured Grafana dashboard for monitoring the pipeline, browsing data, and tracking dataset growth.
 
-The live dashboard is available at **<https://datasmith-grafana.atharvas.net/>**.
+The live dashboard is available at **<https://data.formulacode.org/>**.
 
 ## Prerequisites
 
