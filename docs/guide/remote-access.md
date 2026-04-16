@@ -1,37 +1,41 @@
 # Remote Access
 
-The fc-data Supabase instance is not exposed on the public internet. Two paths
-reach it from outside the host:
+The fc-data Supabase instance is not exposed on the public internet. Two
+hostnames front the same tunnel:
 
-1. **Full read/write access** over a Cloudflare Tunnel, gated by Cloudflare
-   Access service tokens. Intended for pipeline operators running `fc-data`
-   against the shared database.
-2. **Public read-only access** via the Supabase anon key. Intended for
-   client-side websites that display dataset statistics.
+| Hostname | CF Access gate | Credential | Scope |
+|---|---|---|---|
+| `db.formulacode.org` | yes, service-token policy | service-role key | full read/write |
+| `api.formulacode.org` | no | anon (publishable) key | `SELECT` on four tables |
+
+Pipeline operators use `db.*`; public websites use `api.*`. Two independent
+credentials (service token + service-role key) must both leak before full
+write access is at risk.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    User["Remote fc-data<br/>(service token)"]
+    User["Pipeline operator<br/>(service-role key + CF token)"]
     Web["Public website<br/>(anon key)"]
-    CFE["Cloudflare Edge<br/>db.formulacode.org"]
-    CFA["Cloudflare Access"]
+    CFE1["db.formulacode.org"]
+    CFE2["api.formulacode.org"]
+    CFA["Cloudflare Access<br/>(service-token policy)"]
     subgraph Host["Host machine"]
-        CFD["cloudflared"]
+        CFD["cloudflared<br/>(datasmith-db tunnel)"]
         SB["Supabase :54321<br/>PostgREST + RLS"]
     end
-    User -->|CF-Access headers + service-role key| CFE
-    Web -->|anon key| CFE
-    CFE --> CFA
-    CFA --> CFD
+    User --> CFE1 --> CFA --> CFD
+    Web --> CFE2 --> CFD
     CFD --> SB
 ```
 
-Cloudflare Access blocks every request at the edge unless it carries a valid
-service token. The anon-key path works because the RLS policies in
-`supabase/migrations/00012_public_read_rls.sql` allow `SELECT` for the `anon`
-role on four tables; writes and all other tables are rejected by RLS.
+On `db.*`, Cloudflare Access rejects any request without a valid service
+token before it reaches Supabase. On `api.*`, there is no Access application;
+Supabase's `anon` role has `SELECT` grants on four tables only (see
+`supabase/migrations/00012_public_read_rls.sql` and
+`supabase/migrations/00015_revoke_anon_select.sql`), so anything else returns
+`permission denied`.
 
 ---
 
@@ -62,7 +66,9 @@ fc-data --preflight
 ### Public read-only access
 
 Use the Supabase anon key (shown as the "Publishable" key in
-`supabase status`). No tunnel credentials are required; the host is the same.
+`supabase status`) against `https://api.formulacode.org`. No Cloudflare
+Access credentials are required for this hostname; the anon key is the only
+auth layer.
 
 | Table | Exposed |
 |-------|---------|
@@ -74,7 +80,7 @@ Use the Supabase anon key (shown as the "Publishable" key in
 Example:
 
 ```js
-const SUPABASE_URL = "https://db.formulacode.org";
+const SUPABASE_URL = "https://api.formulacode.org";
 const ANON_KEY = "sb_publishable_...";
 
 const res = await fetch(
@@ -88,7 +94,9 @@ const res = await fetch(
 );
 ```
 
-Writes return `HTTP 403: new row violates row-level security policy`.
+Writes are rejected by RLS (`HTTP 401`, `new row violates row-level security
+policy`). Reads of any table outside the four listed above return
+`permission denied for table <name>`.
 
 ---
 
@@ -127,14 +135,26 @@ credentials-file: /home/<user>/.cloudflared/<TUNNEL_ID>.json
 ingress:
   - hostname: db.formulacode.org
     service: http://localhost:54321
+  - hostname: api.formulacode.org
+    service: http://localhost:54321
   - service: http_status:404
 ```
 
-### 4. DNS record
+Both hostnames proxy to the same Supabase port. `db.*` is the gated
+read/write path; `api.*` is the ungated public-read path. The distinction
+lives in Cloudflare Access (step 6), not in the tunnel config.
+
+### 4. DNS records
 
 ```bash
 cloudflared tunnel route dns datasmith-db db.formulacode.org
+cloudflared --config ~/.cloudflared/config-db.yml tunnel route dns \
+  --overwrite-dns datasmith-db api.formulacode.org
 ```
+
+The `--config` + `--overwrite-dns` flags on the second command are necessary
+because `cloudflared` resolves the tunnel name against the default config;
+without them it will route the CNAME to the wrong tunnel.
 
 ### 5. Run the tunnel
 
@@ -147,7 +167,7 @@ sudo systemctl enable --now cloudflared
 At this point `https://db.formulacode.org` proxies to local Supabase but
 Cloudflare Access blocks everything until the policy is in place.
 
-### 6. Cloudflare Access policy
+### 6. Cloudflare Access policy — for `db.*` only
 
 In [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → Access →
 Applications, add a self-hosted app:
@@ -162,15 +182,28 @@ Then under Access → Service Auth → Service Tokens, create a token (e.g.
 is only shown once. Hand these to the requesting user along with the
 service-role key.
 
-### 7. Apply the RLS migration
+**Do not create an Access application for `api.formulacode.org`.** That
+hostname must remain ungated so anon-key clients can reach PostgREST. The
+anon key plus RLS grants are the only auth layer there.
 
-The anon-key path requires `supabase/migrations/00012_public_read_rls.sql` to
-be applied:
+### 7. Apply the Supabase migrations
+
+The anon-key path depends on two migrations being applied against the host
+Supabase instance:
 
 ```bash
-docker exec supabase_db_<project> psql -U postgres -d postgres \
-  -c "$(cat supabase/migrations/00012_public_read_rls.sql)"
+docker exec -i supabase_db_<project> psql -U postgres -d postgres \
+  < supabase/migrations/00012_public_read_rls.sql
+docker exec -i supabase_db_<project> psql -U postgres -d postgres \
+  < supabase/migrations/00015_revoke_anon_select.sql
 ```
+
+`00012` enables RLS and adds the `public_read` SELECT policy on the four
+exposed tables. `00015` revokes the default `anon` `SELECT ON ALL TABLES`
+grant that Supabase ships with, then re-grants it only on those four tables
+and sets the default for future tables to anon-invisible. Without `00015`,
+anon can read every table because Supabase's default grants override the
+absence of RLS.
 
 ### How the client picks up the headers
 
