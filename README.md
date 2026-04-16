@@ -323,6 +323,16 @@ $ npx supabase stop               # stop all containers
 
 Studio is available at the URL printed by `supabase status` (default `http://127.0.0.1:54323`) — use it to browse tables, run SQL, and inspect data.
 
+#### Remote access
+
+To connect from a remote machine (without running Supabase locally), the PostgREST API is available at `https://db.formulacode.org` via a Cloudflare Tunnel. Add these to your `tokens.env`:
+```bash
+SUPABASE_URL=https://db.formulacode.org
+DATASMITH_CF_ACCESS_CLIENT_ID=your-cf-client-id
+DATASMITH_CF_ACCESS_CLIENT_SECRET=your-cf-client-secret
+```
+See the [Remote Access guide](docs/guide/remote-access.md) for full setup and credential provisioning.
+
 Running `preflight` ensures that all the variables are properly defined:
 ```bash
 $ python -m datasmith.preflight
