@@ -39,16 +39,13 @@ cloudflared tunnel run datasmith-grafana
 
 Grafana runs as a Docker container that joins the existing Supabase Docker network. It connects to Postgres via a **read-only** `grafana_ro` database role that can only `SELECT` — no writes are possible, even from the Explore SQL editor.
 
-```
-┌──────────────┐     ┌──────────────────────────┐
-│   Browser    │────▶│  Grafana (port 3001)     │
-└──────────────┘     │  Anonymous Viewer access  │
-                     └───────────┬──────────────┘
-                                 │ SELECT only
-                     ┌───────────▼──────────────┐
-                     │  Supabase PostgreSQL      │
-                     │  (grafana_ro role)        │
-                     └──────────────────────────┘
+```mermaid
+flowchart TD
+    Browser["Browser"]
+    Grafana["Grafana (port 3001)<br/>Anonymous Viewer access"]
+    PG["Supabase PostgreSQL<br/>(grafana_ro role)"]
+    Browser --> Grafana
+    Grafana -- "SELECT only" --> PG
 ```
 
 ## Dashboard Panels

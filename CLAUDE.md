@@ -82,6 +82,8 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 
 After making a feature change, decide whether the change is significant enough to warrant updating the documentation in `docs/`. Changes that affect user-facing behavior, CLI flags, configuration knobs, pipeline stages, agent backends, or architectural decisions should be reflected in the relevant guide or design doc. Internal refactors, bug fixes, and implementation details generally do not need doc updates unless they change observable behavior.
 
+**Diagrams**: use Mermaid (`` ```mermaid `` fenced blocks) for any architecture, flow, or state diagram in `.md` files. Do not use ASCII box-drawing art (`┌ ─ │ └ ──▶`). Mermaid renders natively on GitHub and in the docs site; ASCII does not, and is harder to edit.
+
 ### Tunable constants
 
 Any module-level constant that is a knob — timeouts, retries, caps, windows,

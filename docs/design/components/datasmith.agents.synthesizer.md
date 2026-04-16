@@ -56,22 +56,21 @@ ctx = synth.run(
 
 The synthesizer progresses through five states in order. Each state either returns a `DockerContext` (success) or falls through to the next state.
 
-```
-CHECK_CACHE ──hit──> return DockerContext
-     │
-     │ miss
-     v
-FIND_SIMILAR ──> TRY_SIMILAR ──any pass──> return DockerContext
-                      │
-                      │ all fail / none found
-                      v
-              LLM_GENERATE (sandbox, up to max_attempts)
-                      │
-                      │ any pass ──> return DockerContext
-                      │
-                      │ all fail
-                      v
-                    FAIL ──> return None
+```mermaid
+flowchart TD
+    Cache["CHECK_CACHE"]
+    Find["FIND_SIMILAR"]
+    Try["TRY_SIMILAR"]
+    Gen["LLM_GENERATE<br/>(sandbox, up to max_attempts)"]
+    Ok(["return DockerContext"])
+    Fail(["FAIL: return None"])
+    Cache -- hit --> Ok
+    Cache -- miss --> Find
+    Find --> Try
+    Try -- "any pass" --> Ok
+    Try -- "all fail / none found" --> Gen
+    Gen -- "any pass" --> Ok
+    Gen -- "all fail" --> Fail
 ```
 
 ### State details

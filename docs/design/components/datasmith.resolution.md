@@ -175,90 +175,72 @@ A persistent JSON blocklist (`{CACHE_DIR}/package_blocklist.json`) tracks packag
 
 ### How `prepare_commits_for_building_reports.py` called the resolution module (archive)
 
-```
-prepare_commits_for_building_reports.py
-  │
-  ├─ Load parquet → DataFrame with commit data
-  ├─ crude_perf_filter(df) → filtered_df
-  │
-  ├─ Build (sha, repo_name) pairs from filtered_df["pr_base"]["sha"]
-  ├─ _thread_map(safe_analyze_commit, pairs, max_workers=200)
-  │     │
-  │     └─ safe_analyze_commit((sha, repo_name))
-  │           │
-  │           └─ analyze_commit(sha, repo_name)   # from resolution.__init__
-  │                 │
-  │                 └─ orchestrator.analyze_commit(sha, repo_name)
-  │                       │
-  │                       ├─ prepare_repo_checkout(repo_name, sha)    [git_utils]
-  │                       ├─ asv_finder(commit)                        [git_utils]
-  │                       ├─ filter_python_versions_by_commit_date()   [python_manager]
-  │                       ├─ discover_candidates(commit)               [metadata_parser]
-  │                       ├─ analyze_candidate_meta(candidate)         [metadata_parser]
-  │                       ├─ select_primary_candidate(...)             [metadata_parser]
-  │                       │
-  │                       ├─ STRATEGY 1: For each source file × python version:
-  │                       │   ├─ run_uv(["venv", ...])                [python_manager]
-  │                       │   ├─ uv_compile_from_pyproject(...)       [dependency_resolver]
-  │                       │   ├─ uv_dry_run_install(...)              [dependency_resolver]
-  │                       │   └─ uv_install_real(...)                 [dependency_resolver]
-  │                       │
-  │                       ├─ STRATEGY 2: Aggregate requirements
-  │                       │   ├─ extract_requested_extras(...)        [package_filters]
-  │                       │   ├─ split_shell_command(cmd)             [package_filters]
-  │                       │   ├─ normalize_requirement(tok)           [package_filters]
-  │                       │   ├─ resolve_requirements_file(...)       [package_filters]
-  │                       │   ├─ uv_build_and_read_metadata(...)      [dependency_resolver]
-  │                       │   ├─ infer_runtime_from_imports(...)      [import_analyzer]
-  │                       │   ├─ filter_requirements_for_pypi(...)    [package_filters]
-  │                       │   ├─ clean_pinned(...)                    [package_filters]
-  │                       │   ├─ uv_compile(...)                      [dependency_resolver]
-  │                       │   │   └─ Self-healing retry loop:
-  │                       │   │       ├─ extract_failing_package()    [blocklist]
-  │                       │   │       ├─ add_to_blocklist()           [blocklist]
-  │                       │   │       └─ remove_package_from_requirements() [blocklist]
-  │                       │   ├─ uv_dry_run_install(...)              [dependency_resolver]
-  │                       │   │   └─ Self-healing retry loop (same)
-  │                       │   └─ uv_install_real(...)                 [dependency_resolver]
-  │                       │
-  │                       └─ Return dict with resolution results
-  │
-  ├─ pd.DataFrame(analysis_dicts).add_prefix("analysis_")
-  ├─ Filter: analysis_can_install == True
-  ├─ Filter: analysis_resolution_strategy not startswith "unresolved"
-  └─ Save enriched parquet
+```mermaid
+flowchart TD
+    Entry["prepare_commits_for_building_reports.py"]
+    Load["Load parquet → DataFrame"]
+    Filter1["crude_perf_filter(df)"]
+    Pairs["Build (sha, repo_name) pairs"]
+    TMap["_thread_map(safe_analyze_commit, pairs, max_workers=200)"]
+    Analyze["orchestrator.analyze_commit(sha, repo_name)"]
+    subgraph Prep["Per-commit preparation"]
+        direction TB
+        Checkout["prepare_repo_checkout  [git_utils]"]
+        ASV["asv_finder  [git_utils]"]
+        PyVers["filter_python_versions_by_commit_date  [python_manager]"]
+        Discover["discover_candidates  [metadata_parser]"]
+        AnalyzeMeta["analyze_candidate_meta  [metadata_parser]"]
+        SelectCand["select_primary_candidate  [metadata_parser]"]
+    end
+    subgraph S1["STRATEGY 1: per source file × python version"]
+        direction TB
+        Venv["run_uv(['venv', ...])  [python_manager]"]
+        Pyproj["uv_compile_from_pyproject  [dependency_resolver]"]
+        DryRun1["uv_dry_run_install  [dependency_resolver]"]
+        Install1["uv_install_real  [dependency_resolver]"]
+    end
+    subgraph S2["STRATEGY 2: aggregate requirements"]
+        direction TB
+        Extras["extract_requested_extras  [package_filters]"]
+        Split["split_shell_command / normalize_requirement  [package_filters]"]
+        Resolve["resolve_requirements_file  [package_filters]"]
+        BuildMeta["uv_build_and_read_metadata  [dependency_resolver]"]
+        Imports["infer_runtime_from_imports  [import_analyzer]"]
+        FilterPyPI["filter_requirements_for_pypi / clean_pinned  [package_filters]"]
+        Compile["uv_compile  [dependency_resolver]"]
+        Heal["Self-healing retry loop:<br/>extract_failing_package → add_to_blocklist →<br/>remove_package_from_requirements  [blocklist]"]
+        DryRun2["uv_dry_run_install (same heal loop)"]
+        Install2["uv_install_real"]
+        Compile --> Heal
+    end
+    Result["Return dict with resolution results"]
+    Post["pd.DataFrame(...).add_prefix('analysis_')<br/>filter can_install == True<br/>filter resolution_strategy not startswith 'unresolved'<br/>save enriched parquet"]
+
+    Entry --> Load --> Filter1 --> Pairs --> TMap --> Analyze
+    Analyze --> Prep --> S1
+    Analyze --> S2
+    S1 --> Result
+    S2 --> Result
+    Result --> Post
 ```
 
 ### How the new pipeline will call resolution
 
-```
-Pipeline._run_stage("resolve_packages")
-  │
-  ├─ Query pull_requests WHERE is_performance_commit = TRUE
-  │   AND NOT EXISTS (SELECT 1 FROM packages WHERE packages.sha = pr.merge_commit_sha
-  │                   AND packages.owner = pr.owner AND packages.repo = pr.repo)
-  │
-  ├─ Deduplicate by (owner, repo, merge_commit_sha)
-  │   (multiple PRs may share the same base commit)
-  │
-  ├─ ResolvePackagesRunner.run(items, n_concurrent=N)
-  │     │
-  │     └─ For each (owner, repo, sha):
-  │           ├─ analyze_commit(sha, f"{owner}/{repo}")
-  │           ├─ If result and can_install:
-  │           │   └─ Upsert into packages table
-  │           └─ If None or not can_install:
-  │               └─ Log to runner_failures
-  │
-  └─ Pipeline._synthesize_images() now reads:
-        SELECT pr.*, pkg.env_payload, pkg.python_version
-        FROM pull_requests pr
-        JOIN packages pkg ON pr.owner = pkg.owner
-                          AND pr.repo = pkg.repo
-                          AND pr.merge_commit_sha = pkg.sha
-        WHERE pr.is_performance_commit = TRUE
-          AND pr.container_name IS NULL
-          AND pkg.can_install = TRUE
+```mermaid
+flowchart TD
+    Stage["Pipeline._run_stage('resolve_packages')"]
+    Query["Query pull_requests WHERE is_performance_commit = TRUE<br/>AND NOT EXISTS (packages row for same owner/repo/sha)"]
+    Dedup["Deduplicate by (owner, repo, merge_commit_sha)"]
+    Runner["ResolvePackagesRunner.run(items, n_concurrent=N)"]
+    PerItem["For each (owner, repo, sha):<br/>analyze_commit(sha, owner/repo)"]
+    Upsert["Upsert into packages table"]
+    Failure["Log to runner_failures"]
+    Synth["Pipeline._synthesize_images() joins packages on<br/>(owner, repo, merge_commit_sha) and filters can_install"]
+
+    Stage --> Query --> Dedup --> Runner --> PerItem
+    PerItem -- "result and can_install" --> Upsert
+    PerItem -- "None or not can_install" --> Failure
+    Upsert --> Synth
 ```
 
 ## Key data models (from archive, ported as-is)
