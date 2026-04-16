@@ -224,3 +224,9 @@ PARITY_TODOs.md
 backup
 rebuild
 run_interpreter.py
+
+# Local artifacts
+.claude/
+.python-version
+backups/
+jobs/
