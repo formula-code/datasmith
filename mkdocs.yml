@@ -83,6 +83,7 @@ nav:
       - Installation: getting-started/installation.md
       - Pipeline (fc-data): guide/pipeline.md
       - Configuration: guide/configuration.md
+      - Remote Access: guide/remote-access.md
   - User Guide:
       - Docker Images: guide/docker-images.md
       - Synthesis: guide/synthesis.md
