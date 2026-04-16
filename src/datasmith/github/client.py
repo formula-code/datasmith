@@ -26,6 +26,7 @@ class GitHubClient:
             self._http = httpx.AsyncClient(
                 base_url="https://api.github.com",
                 timeout=30.0,
+                follow_redirects=True,
                 headers={"Accept": "application/vnd.github.v3+json"},
                 limits=httpx.Limits(
                     max_connections=200,

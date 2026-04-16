@@ -109,7 +109,7 @@ class Pipeline:
         offline_source: str | None = None,
         min_stars: int = 500,
         harbor_use_daytona: bool = False,
-        harbor_rounds: int = 4,
+        harbor_rounds: int = 2,
         harbor_limit: int | None = None,
         harbor_tasks: str | None = None,
     ) -> None:
@@ -528,7 +528,7 @@ class Pipeline:
 
     async def _synthesize_images(self, start_date: str, end_date: str) -> None:
         query_kwargs: dict[str, Any] = {
-            "select": "owner, repo, issue_number, merge_commit_sha, title, body, created_at, rendered_problem",
+            "select": "owner, repo, issue_number, merge_commit_sha, base_sha, title, body, created_at, rendered_problem",
             "filters": {"is_performance_commit": True, "is_performance_commit_symbolic": True},
             "neq_filters": {"merge_commit_sha": ""},
             "gte_filters": {"created_at": start_date},
@@ -594,6 +594,7 @@ class Pipeline:
                 "repo": r["repo"],
                 "issue_number": r["issue_number"],
                 "sha": sha,
+                "base_sha": r.get("base_sha", ""),
                 "title": r.get("title", ""),
                 "body": r.get("body", ""),
                 "created_at": r.get("created_at"),
@@ -761,9 +762,7 @@ class Pipeline:
 
     def _get_completed_stages(self) -> list[str]:
         try:
-            client = get_client()
-            resp = client.table("runner_progress").select("runner_name, completed, total").execute()
-            rows: list[dict[str, Any]] = resp.data  # type: ignore[assignment]
+            rows = fetch_all("runner_progress", select="runner_name, completed, total")
             completed: list[str] = []
             for r in rows:
                 if r["total"] > 0 and r["completed"] >= r["total"]:

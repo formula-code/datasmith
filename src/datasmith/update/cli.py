@@ -72,7 +72,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--agent",
         type=str,
         default=None,
-        choices=["claude", "codex", "gemini", "none"],
+        choices=["claude", "codex", "gemini", "qwen", "none"],
         help="CLI agent to use for stage 6 synthesis (default: auto-detect first available). "
         "'none' skips LLM generation and relies only on similar-context matching.",
     )
@@ -104,9 +104,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--harbor-rounds",
         type=int,
-        default=4,
+        default=2,
         metavar="N",
-        help="Number of LSV timing rounds per Harbor trial in stage 7 (default: 4)",
+        help="Number of LSV timing rounds per Harbor trial in stage 7 (default: 2). "
+        "Higher values scale measure/init time linearly; 4 routinely blew Harbor's "
+        "6-hour verifier budget on large repos (scikit-image, arrow).",
     )
     parser.add_argument(
         "--harbor-limit",
