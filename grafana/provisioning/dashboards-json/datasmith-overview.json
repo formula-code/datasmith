@@ -14,114 +14,35 @@
     "to": "now"
   },
   "templating": {
-    "list": [
-      {
-        "name": "table_name",
-        "label": "Table",
-        "type": "custom",
-        "query": "repositories,pull_requests,packages,candidate_containers,candidate_prs,error_logs,runner_progress,runner_failures,hook_cache",
-        "current": {
-          "text": "pull_requests",
-          "value": "pull_requests"
-        },
-        "options": [
-          {
-            "text": "repositories",
-            "value": "repositories",
-            "selected": false
-          },
-          {
-            "text": "pull_requests",
-            "value": "pull_requests",
-            "selected": true
-          },
-          {
-            "text": "packages",
-            "value": "packages",
-            "selected": false
-          },
-          {
-            "text": "candidate_containers",
-            "value": "candidate_containers",
-            "selected": false
-          },
-          {
-            "text": "candidate_prs",
-            "value": "candidate_prs",
-            "selected": false
-          },
-          {
-            "text": "error_logs",
-            "value": "error_logs",
-            "selected": false
-          },
-          {
-            "text": "runner_progress",
-            "value": "runner_progress",
-            "selected": false
-          },
-          {
-            "text": "runner_failures",
-            "value": "runner_failures",
-            "selected": false
-          },
-          {
-            "text": "hook_cache",
-            "value": "hook_cache",
-            "selected": false
-          }
-        ]
-      },
-      {
-        "name": "row_limit",
-        "label": "Limit",
-        "type": "custom",
-        "query": "50,100,250,500,1000",
-        "current": {
-          "text": "100",
-          "value": "100"
-        },
-        "options": [
-          {
-            "text": "50",
-            "value": "50",
-            "selected": false
-          },
-          {
-            "text": "100",
-            "value": "100",
-            "selected": true
-          },
-          {
-            "text": "250",
-            "value": "250",
-            "selected": false
-          },
-          {
-            "text": "500",
-            "value": "500",
-            "selected": false
-          },
-          {
-            "text": "1000",
-            "value": "1000",
-            "selected": false
-          }
-        ]
-      }
-    ]
+    "list": []
   },
   "annotations": {
     "list": []
   },
   "panels": [
     {
+      "id": 100,
+      "type": "text",
+      "title": "",
+      "transparent": true,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 10
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "<div style=\"text-align: center;\">\n  <img src=\"https://raw.githubusercontent.com/formula-code/datasmith/main/static/formula-code-datasmith.png\" alt=\"FormulaCode Datasmith\" style=\"max-width: 640px; width: 80%;\" />\n</div>\n\n<div style=\"text-align: center; margin: 0.75em 0 1em 0;\">\n  <a href=\"https://formula-code.github.io/\"><img src=\"https://img.shields.io/badge/%F0%9F%8C%90%20Website-0A7A5E?style=for-the-badge\" alt=\"FormulaCode Website\" /></a>\n  <a href=\"https://huggingface.co/papers/2603.16011\"><img src=\"https://img.shields.io/badge/Paper-1F6FEB?style=for-the-badge&logo=arxiv&logoColor=white\" alt=\"FormulaCode Paper\" /></a>\n  <a href=\"https://formula-code.github.io/leaderboard/\"><img src=\"https://img.shields.io/badge/%F0%9F%93%88%20Leaderboard-EA580C?style=for-the-badge&logoColor=white\" alt=\"FormulaCode Leaderboard\" /></a>\n  <a href=\"https://formula-code.github.io/datasmith/\"><img src=\"https://img.shields.io/badge/%F0%9F%93%9A%20Docs-4B0082?style=for-the-badge\" alt=\"fc-data Documentation\" /></a>\n</div>\n\n[FormulaCode](https://formula-code.github.io/) is a *continually updating* benchmark for evaluating the holistic ability of LLM agents to optimize codebases. FormulaCode consists of two parts: a [pipeline](https://github.com/formula-code/datasmith) to construct performance optimization tasks, and an [execution harness](https://github.com/formula-code/terminal-bench) that connects a language model to our terminal sandbox. _This dashboard shows live metrics for the task generation pipeline._\n\n`fc-data` is a python package for automatically curating and managing FormulaCode tasks. fc-data is designed to run as a monthly CRON job that updates the FormulaCode dataset with new commits and repositories.\n\nThis dashboard provides insights into the growth of the FormulaCode dataset, the distribution of tasks across repositories, and the performance characteristics of the pull requests that form the basis of our optimization problems. For more details on the dataset and how to contribute, please visit our [GitHub repository](https://github.com/formula-code/)."
+      }
+    },
+    {
       "type": "row",
       "title": "Dataset Growth",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 10,
         "w": 24,
         "h": 1
       }
@@ -132,7 +53,7 @@
       "type": "stat",
       "gridPos": {
         "x": 14,
-        "y": 1,
+        "y": 11,
         "w": 3,
         "h": 4
       },
@@ -164,11 +85,11 @@
     },
     {
       "id": 15,
-      "title": "Total Containers",
+      "title": "Total Problems",
       "type": "stat",
       "gridPos": {
         "x": 17,
-        "y": 1,
+        "y": 11,
         "w": 3,
         "h": 4
       },
@@ -200,11 +121,11 @@
     },
     {
       "id": 16,
-      "title": "Total Packages",
+      "title": "Perf. PRs",
       "type": "stat",
       "gridPos": {
         "x": 14,
-        "y": 5,
+        "y": 15,
         "w": 3,
         "h": 4
       },
@@ -214,7 +135,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT COUNT(*) AS total FROM packages;",
+          "rawSql": "SELECT COUNT(*) AS total FROM packages WHERE can_install;",
           "format": "table",
           "refId": "A"
         }
@@ -240,7 +161,7 @@
       "type": "stat",
       "gridPos": {
         "x": 17,
-        "y": 5,
+        "y": 15,
         "w": 3,
         "h": 4
       },
@@ -272,13 +193,13 @@
     },
     {
       "id": 18,
-      "title": "PR to Container Rate",
+      "title": "PR to Problem Rate",
       "type": "stat",
       "gridPos": {
         "x": 20,
-        "y": 1,
+        "y": 15,
         "w": 4,
-        "h": 8
+        "h": 4
       },
       "datasource": {
         "uid": "supabase-pg",
@@ -321,18 +242,18 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 9,
+        "y": 19,
         "w": 24,
         "h": 1
       }
     },
     {
       "id": 52,
-      "title": "All Repositories by Stars",
+      "title": "Repository Distribution",
       "type": "barchart",
       "gridPos": {
         "x": 0,
-        "y": 10,
+        "y": 20,
         "w": 24,
         "h": 10
       },
@@ -342,7 +263,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT owner || '/' || repo AS repository, stars FROM repositories WHERE stars IS NOT NULL ORDER BY stars DESC;",
+          "rawSql": "SELECT owner || '/' || repo AS repository, stars AS \"stargazer count\" FROM repositories WHERE stars IS NOT NULL ORDER BY stars DESC;",
           "format": "table",
           "refId": "A"
         }
@@ -367,11 +288,11 @@
     },
     {
       "id": 54,
-      "title": "Containers by Repository",
+      "title": "Problems by Repository",
       "type": "marcusolsson-treemap-panel",
       "gridPos": {
         "x": 0,
-        "y": 20,
+        "y": 30,
         "w": 24,
         "h": 10
       },
@@ -398,11 +319,11 @@
     },
     {
       "id": 50,
-      "title": "Containers Built by Month",
+      "title": "Monthly distribution of Problems",
       "type": "barchart",
       "gridPos": {
         "x": 0,
-        "y": 1,
+        "y": 11,
         "w": 14,
         "h": 8
       },
@@ -425,6 +346,15 @@
           }
         },
         "overrides": []
+      },
+      "options": {
+        "xTickLabelMaxLength": 0,
+        "xTickLabelSpacing": 0,
+        "axisCenteredZero": false,
+        "axisBorderShow": false,
+        "xAxis": {
+          "showLabels": false
+        }
       }
     },
     {
@@ -433,7 +363,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 38,
+        "y": 48,
         "w": 24,
         "h": 1
       }
@@ -444,7 +374,7 @@
       "type": "stat",
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 49,
         "w": 4,
         "h": 8
       },
@@ -481,7 +411,7 @@
       "type": "table",
       "gridPos": {
         "x": 4,
-        "y": 39,
+        "y": 49,
         "w": 5,
         "h": 8
       },
@@ -521,7 +451,7 @@
       "type": "piechart",
       "gridPos": {
         "x": 9,
-        "y": 39,
+        "y": 49,
         "w": 5,
         "h": 8
       },
@@ -550,11 +480,11 @@
     },
     {
       "id": 34,
-      "title": "PR Volume Over Time",
-      "type": "timeseries",
+      "title": "Performance PR Volume Over Time",
+      "type": "barchart",
       "gridPos": {
         "x": 14,
-        "y": 39,
+        "y": 49,
         "w": 10,
         "h": 8
       },
@@ -564,14 +494,28 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('month', created_at) AS time, COUNT(*) FILTER (WHERE is_performance_commit) AS perf_prs FROM pull_requests WHERE created_at IS NOT NULL GROUP BY 1 ORDER BY 1;",
-          "format": "time_series",
+          "rawSql": "SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, COUNT(*) FILTER (WHERE is_performance_commit) AS perf_prs FROM pull_requests WHERE created_at IS NOT NULL GROUP BY 1 ORDER BY 1;",
+          "format": "table",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": {},
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
         "overrides": []
+      },
+      "options": {
+        "xTickLabelMaxLength": 0,
+        "xTickLabelSpacing": 0,
+        "axisCenteredZero": false,
+        "axisBorderShow": false,
+        "xAxis": {
+          "showLabels": false
+        }
       }
     },
     {
@@ -580,7 +524,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 57,
         "w": 24,
         "h": 8
       },
@@ -613,7 +557,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 56,
+        "y": 66,
         "w": 24,
         "h": 1
       }
@@ -624,7 +568,7 @@
       "type": "piechart",
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 67,
         "w": 6,
         "h": 8
       },
@@ -657,7 +601,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 6,
-        "y": 57,
+        "y": 67,
         "w": 10,
         "h": 8
       },
@@ -717,7 +661,7 @@
       "type": "piechart",
       "gridPos": {
         "x": 16,
-        "y": 57,
+        "y": 67,
         "w": 8,
         "h": 8
       },
@@ -750,7 +694,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 65,
+        "y": 75,
         "w": 24,
         "h": 1
       }
@@ -761,7 +705,7 @@
       "type": "table",
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 76,
         "w": 12,
         "h": 7
       },
@@ -861,7 +805,7 @@
       "type": "gauge",
       "gridPos": {
         "x": 12,
-        "y": 66,
+        "y": 76,
         "w": 6,
         "h": 7
       },
@@ -908,7 +852,7 @@
       "type": "table",
       "gridPos": {
         "x": 18,
-        "y": 66,
+        "y": 76,
         "w": 6,
         "h": 7
       },
@@ -934,7 +878,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 73,
+        "y": 83,
         "w": 24,
         "h": 1
       }
@@ -945,7 +889,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 74,
+        "y": 84,
         "w": 12,
         "h": 8
       },
@@ -955,7 +899,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('day', created_at) AS time, COUNT(*) FILTER (WHERE success) AS successes, COUNT(*) FILTER (WHERE NOT success) AS failures FROM error_logs WHERE created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 1;",
+          "rawSql": "SELECT date_trunc('day', created_at) AS time, COUNT(*) FILTER (WHERE success) AS successes, COUNT(*) FILTER (WHERE NOT success) AS failures FROM error_logs WHERE created_at BETWEEN (SELECT MIN(created_at) FROM error_logs) AND (SELECT MAX(created_at) FROM error_logs) GROUP BY 1 ORDER BY 1;",
           "format": "time_series",
           "refId": "A"
         }
@@ -1001,7 +945,9 @@
             ]
           }
         ]
-      }
+      },
+      "timeFrom": "30d",
+      "timeShift": null
     },
     {
       "id": 5,
@@ -1009,7 +955,7 @@
       "type": "piechart",
       "gridPos": {
         "x": 12,
-        "y": 74,
+        "y": 84,
         "w": 6,
         "h": 8
       },
@@ -1019,7 +965,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT COALESCE(failure_stage, 'unknown') AS stage, COUNT(*) AS count FROM error_logs WHERE NOT success AND created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 2 DESC;",
+          "rawSql": "SELECT COALESCE(failure_stage, 'unknown') AS stage, COUNT(*) AS count FROM error_logs WHERE NOT success AND failure_stage IS DISTINCT FROM 'aborted' AND created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 2 DESC;",
           "format": "table",
           "refId": "A"
         }
@@ -1042,7 +988,7 @@
       "type": "table",
       "gridPos": {
         "x": 18,
-        "y": 74,
+        "y": 84,
         "w": 6,
         "h": 8
       },
@@ -1068,7 +1014,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 82,
+        "y": 92,
         "w": 24,
         "h": 1
       }
@@ -1079,7 +1025,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 0,
-        "y": 83,
+        "y": 93,
         "w": 8,
         "h": 8
       },
@@ -1105,7 +1051,7 @@
       "type": "table",
       "gridPos": {
         "x": 8,
-        "y": 83,
+        "y": 93,
         "w": 8,
         "h": 8
       },
@@ -1131,7 +1077,7 @@
       "type": "table",
       "gridPos": {
         "x": 16,
-        "y": 83,
+        "y": 93,
         "w": 8,
         "h": 8
       },
@@ -1157,7 +1103,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 91,
+        "y": 101,
         "w": 24,
         "h": 1
       }
@@ -1168,7 +1114,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 0,
-        "y": 92,
+        "y": 102,
         "w": 12,
         "h": 8
       },
@@ -1228,7 +1174,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 12,
-        "y": 92,
+        "y": 102,
         "w": 6,
         "h": 8
       },
@@ -1256,7 +1202,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 18,
-        "y": 92,
+        "y": 102,
         "w": 6,
         "h": 8
       },
@@ -1266,7 +1212,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('day', created_at) AS time, ROUND(AVG(duration_s)::numeric, 1) AS avg_duration_s, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_s)::numeric, 1) AS p95_duration_s FROM error_logs WHERE created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 1;",
+          "rawSql": "SELECT date_trunc('day', created_at) AS time, ROUND(AVG(duration_s)::numeric, 1) AS avg_duration_s, ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_s)::numeric, 1) AS p95_duration_s FROM error_logs WHERE created_at BETWEEN (SELECT MIN(created_at) FROM error_logs) AND (SELECT MAX(created_at) FROM error_logs) GROUP BY 1 ORDER BY 1;",
           "format": "time_series",
           "refId": "A"
         }
@@ -1276,7 +1222,9 @@
           "unit": "s"
         },
         "overrides": []
-      }
+      },
+      "timeFrom": "30d",
+      "timeShift": null
     },
     {
       "type": "row",
@@ -1284,7 +1232,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 100,
+        "y": 110,
         "w": 24,
         "h": 1
       }
@@ -1295,7 +1243,7 @@
       "type": "table",
       "gridPos": {
         "x": 0,
-        "y": 101,
+        "y": 111,
         "w": 12,
         "h": 8
       },
@@ -1321,7 +1269,7 @@
       "type": "table",
       "gridPos": {
         "x": 12,
-        "y": 101,
+        "y": 111,
         "w": 6,
         "h": 8
       },
@@ -1347,7 +1295,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 18,
-        "y": 101,
+        "y": 111,
         "w": 6,
         "h": 8
       },
@@ -1357,7 +1305,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT date_trunc('day', created_at) AS time, ROUND(AVG((resource_metrics->>'build_duration_s')::numeric), 1) AS avg_build_s, ROUND(AVG((resource_metrics->>'test_duration_s')::numeric), 1) AS avg_test_s, ROUND(AVG((resource_metrics->>'peak_memory_bytes')::numeric) / 1048576, 0) AS avg_peak_mem_mb FROM error_logs WHERE resource_metrics IS NOT NULL AND created_at >= $__timeFrom() AND created_at <= $__timeTo() GROUP BY 1 ORDER BY 1;",
+          "rawSql": "SELECT date_trunc('day', created_at) AS time, ROUND(AVG((resource_metrics->>'build_duration_s')::numeric), 1) AS avg_build_s, ROUND(AVG((resource_metrics->>'test_duration_s')::numeric), 1) AS avg_test_s, ROUND(AVG((resource_metrics->>'peak_memory_bytes')::numeric) / 1048576, 0) AS avg_peak_mem_mb FROM error_logs WHERE resource_metrics IS NOT NULL AND created_at BETWEEN (SELECT MIN(created_at) FROM error_logs WHERE resource_metrics IS NOT NULL) AND (SELECT MAX(created_at) FROM error_logs WHERE resource_metrics IS NOT NULL) GROUP BY 1 ORDER BY 1;",
           "format": "time_series",
           "refId": "A"
         }
@@ -1365,7 +1313,9 @@
       "fieldConfig": {
         "defaults": {},
         "overrides": []
-      }
+      },
+      "timeFrom": "30d",
+      "timeShift": null
     },
     {
       "type": "row",
@@ -1373,7 +1323,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 135,
+        "y": 145,
         "w": 24,
         "h": 1
       }
@@ -1384,7 +1334,7 @@
       "type": "table",
       "gridPos": {
         "x": 0,
-        "y": 140,
+        "y": 150,
         "w": 24,
         "h": 12
       },
@@ -1394,7 +1344,7 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT pr.* FROM pull_requests pr JOIN candidate_prs cp ON pr.owner = cp.owner AND pr.repo = cp.repo AND pr.issue_number = cp.issue_number WHERE pr.is_performance_commit AND cp.issues_json IS NOT NULL AND cp.issues_json != '[]'::jsonb ORDER BY pr.merged_at DESC NULLS LAST LIMIT ${row_limit:raw};",
+          "rawSql": "SELECT pr.* FROM pull_requests pr JOIN candidate_prs cp ON pr.owner = cp.owner AND pr.repo = cp.repo AND pr.issue_number = cp.issue_number WHERE pr.is_performance_commit AND cp.issues_json IS NOT NULL AND cp.issues_json != '[]'::jsonb ORDER BY pr.merged_at DESC NULLS LAST LIMIT 100;",
           "format": "table",
           "refId": "A"
         }
@@ -1410,7 +1360,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 152,
+        "y": 162,
         "w": 24,
         "h": 1
       }
@@ -1421,7 +1371,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 0,
-        "y": 153,
+        "y": 163,
         "w": 24,
         "h": 8
       },
@@ -1447,7 +1397,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 109,
+        "y": 119,
         "w": 24,
         "h": 1
       }
@@ -1458,7 +1408,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 0,
-        "y": 110,
+        "y": 120,
         "w": 12,
         "h": 8
       },
@@ -1492,7 +1442,7 @@
       "type": "barchart",
       "gridPos": {
         "x": 12,
-        "y": 110,
+        "y": 120,
         "w": 12,
         "h": 8
       },
@@ -1518,11 +1468,11 @@
     },
     {
       "id": 62,
-      "title": "Best Speedup per Container (Daytona Success)",
+      "title": "Best Speedup per Problem",
       "type": "table",
       "gridPos": {
         "x": 0,
-        "y": 118,
+        "y": 128,
         "w": 12,
         "h": 8
       },
@@ -1532,23 +1482,59 @@
       },
       "targets": [
         {
-          "rawSql": "SELECT h.owner || '/' || h.repo AS repository, h.sha, LEFT(pr.title, 80) AS pr_title, ROUND(MAX(h.max_speedup)::numeric, 3) AS best_max_speedup, ROUND(AVG(h.geomean_speedup)::numeric, 3) AS avg_geomean, MAX(h.n_benchmarks) AS n_benchmarks, COUNT(*) AS trials FROM harbor_runs h LEFT JOIN pull_requests pr ON pr.owner = h.owner AND pr.repo = h.repo AND pr.issue_number = h.issue_number WHERE h.status = 'success' AND h.environment = 'daytona' GROUP BY h.owner, h.repo, h.sha, pr.title ORDER BY best_max_speedup DESC LIMIT 50;",
+          "rawSql": "SELECT h.owner || '/' || h.repo AS repository, h.issue_number AS pr, ROUND(MAX(h.max_speedup) FILTER (WHERE h.environment = 'daytona')::numeric, 3) AS daytona_best, ROUND(MAX(h.max_speedup) FILTER (WHERE h.environment = 'docker')::numeric, 3) AS docker_best, ROUND(MAX(h.max_speedup)::numeric, 3) AS best_overall, COUNT(*) FILTER (WHERE h.environment = 'daytona') AS daytona_trials, COUNT(*) FILTER (WHERE h.environment = 'docker') AS docker_trials FROM harbor_runs h WHERE h.status = 'success' GROUP BY h.owner, h.repo, h.issue_number ORDER BY best_overall DESC NULLS LAST LIMIT 50;",
           "format": "table",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {},
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "daytona_best"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1.0
+                    },
+                    {
+                      "color": "green",
+                      "value": 1.05
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       }
     },
     {
       "id": 63,
-      "title": "Publishable Containers",
+      "title": "Publishable Problems",
       "type": "stat",
       "gridPos": {
         "x": 12,
-        "y": 118,
+        "y": 128,
         "w": 6,
         "h": 4
       },
@@ -1588,7 +1574,7 @@
       "type": "stat",
       "gridPos": {
         "x": 18,
-        "y": 118,
+        "y": 128,
         "w": 6,
         "h": 4
       },
@@ -1624,7 +1610,7 @@
       "type": "stat",
       "gridPos": {
         "x": 12,
-        "y": 122,
+        "y": 132,
         "w": 6,
         "h": 4
       },
@@ -1669,7 +1655,7 @@
       "type": "stat",
       "gridPos": {
         "x": 18,
-        "y": 122,
+        "y": 132,
         "w": 6,
         "h": 4
       },
@@ -1692,6 +1678,57 @@
               {
                 "color": "purple",
                 "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 101,
+      "type": "stat",
+      "title": "Live Runners",
+      "gridPos": {
+        "x": 20,
+        "y": 11,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT GREATEST((SELECT COUNT(*)::int FROM runner_progress WHERE total - completed - failed > 0 AND updated_at > now() - interval '15 minutes'), CASE WHEN EXISTS (SELECT 1 FROM error_logs WHERE created_at > now() - interval '5 minutes') THEN 1 ELSE 0 END, CASE WHEN EXISTS (SELECT 1 FROM harbor_runs WHERE ran_at > now() - interval '5 minutes') THEN 1 ELSE 0 END) AS live_runners;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Idle",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
               }
             ]
           }
