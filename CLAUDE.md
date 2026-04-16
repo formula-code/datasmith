@@ -112,13 +112,23 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_RL_MAX_RETRIES`, `DATASMITH_NEIGHBOR_WINDOW_DAYS`,
   `DATASMITH_NEIGHBOR_CAP`.
 
-## Supabase (local)
+## Supabase
 
 fc-data uses a **local Supabase** instance for all persistent state. Connection details live in `tokens.env`:
 
 - `SUPABASE_URL=http://127.0.0.1:54321` (PostgREST API)
 - `SUPABASE_KEY=sb_secret_...` (service-role key)
 - Direct Postgres: `host=127.0.0.1 port=54322 dbname=postgres user=postgres password=postgres`
+
+### Remote access
+
+The Supabase PostgREST API is also available at `https://db.formulacode.org` via a Cloudflare Tunnel, protected by Cloudflare Access service tokens. To connect from a remote machine, set these in `tokens.env`:
+
+- `SUPABASE_URL=https://db.formulacode.org`
+- `DATASMITH_CF_ACCESS_CLIENT_ID` — Cloudflare Access service-token Client ID
+- `DATASMITH_CF_ACCESS_CLIENT_SECRET` — Cloudflare Access service-token Client Secret
+
+When both `DATASMITH_CF_ACCESS_*` vars are set, `get_client()` and `get_async_client()` in `utils/db.py` automatically inject the required headers. See `docs/guide/remote-access.md` for full setup instructions.
 
 ### Key tables
 
