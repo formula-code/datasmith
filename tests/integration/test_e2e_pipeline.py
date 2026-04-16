@@ -15,15 +15,18 @@ class TestE2EPipeline:
 
         mock_supabase_client.table.return_value.execute.return_value = MagicMock(data=[])
 
-        with patch("datasmith.update.pipeline.get_client", return_value=mock_supabase_client):
-            # Run only the publish stage (lightest)
+        with (
+            patch("datasmith.update.pipeline.get_client", return_value=mock_supabase_client),
+            patch("datasmith.utils.db.get_client", return_value=mock_supabase_client),
+        ):
+            # Run only the publish stage (lightest — stage 8)
             calls = []
 
             async def tracked_publish(start, end):
                 calls.append(("publish", start, end))
 
             pipeline._publish = tracked_publish  # type: ignore[assignment]
-            await pipeline.run("2024-01-01", "2024-12-31", stage=7)
+            await pipeline.run("2024-01-01", "2024-12-31", stage=8)
 
         assert len(calls) == 1
         assert calls[0] == ("publish", "2024-01-01", "2024-12-31")
@@ -43,7 +46,10 @@ class TestE2EPipeline:
             ]
         )
 
-        with patch("datasmith.update.pipeline.get_client", return_value=mock_supabase_client):
+        with (
+            patch("datasmith.update.pipeline.get_client", return_value=mock_supabase_client),
+            patch("datasmith.utils.db.get_client", return_value=mock_supabase_client),
+        ):
             mock_supabase_client.table.return_value.execute.return_value = completed_response
             pipeline._run_stage = mock_run_stage  # type: ignore[assignment]
             await pipeline.run("2024-01-01", "2024-12-31", resume=True)

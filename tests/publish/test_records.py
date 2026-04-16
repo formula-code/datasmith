@@ -66,16 +66,26 @@ class TestRecordsFromSupabase:
                 "merged_at": "2024-01-01T00:00:00Z",
             },
         ]
+        fake_harbor_rows = [
+            {
+                "owner": "org",
+                "repo": "repo",
+                "sha": "abc",
+                "max_speedup": 2.0,
+                "status": "success",
+                "environment": "daytona",
+            },
+        ]
 
-        with patch("datasmith.publish.records.fetch_all", return_value=fake_rows) as mock_fetch:
+        with patch("datasmith.publish.records.fetch_all", side_effect=[fake_rows, fake_harbor_rows]) as mock_fetch:
             records = records_from_supabase(start_date="2024-01-01", end_date="2024-12-31")
 
         assert len(records) == 1
         assert records[0].owner == "org"
         assert records[0].task_id == "org__repo-1"
 
-        # Verify fetch_all was called with correct filters
-        call_kwargs = mock_fetch.call_args
-        assert call_kwargs[1]["filters"] == {"is_performance_commit": True}
-        assert call_kwargs[1]["gte_filters"] == {"merged_at": "2024-01-01"}
-        assert call_kwargs[1]["lte_filters"] == {"merged_at": "2024-12-31"}
+        # Verify fetch_all was called with correct filters (first call = pull_requests)
+        first_call_kwargs = mock_fetch.call_args_list[0]
+        assert first_call_kwargs[1]["filters"] == {"is_performance_commit": True}
+        assert first_call_kwargs[1]["gte_filters"] == {"merged_at": "2024-01-01"}
+        assert first_call_kwargs[1]["lte_filters"] == {"merged_at": "2024-12-31"}
