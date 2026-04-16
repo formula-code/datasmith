@@ -10,9 +10,15 @@ import os
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar, cast
 
-from supabase import Client, create_client
+from supabase import Client, ClientOptions, create_client
 
 logger = logging.getLogger(__name__)
+
+# Cloudflare Access service-token credentials. When both are set, every
+# Supabase HTTP request includes the CF-Access-Client-Id / Secret headers
+# so requests can pass through a Cloudflare Access-protected tunnel.
+DATASMITH_CF_ACCESS_CLIENT_ID: str = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_ID", "")
+DATASMITH_CF_ACCESS_CLIENT_SECRET: str = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_SECRET", "")
 
 # Stable primary-key ordering per table, used by ``fetch_all`` to make
 # range-based pagination deterministic. PostgREST/Postgres provide no
@@ -37,6 +43,13 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 _client: Client | None = None
 
+_CF_ACCESS_HEADERS: dict[str, str] = {}
+if DATASMITH_CF_ACCESS_CLIENT_ID and DATASMITH_CF_ACCESS_CLIENT_SECRET:
+    _CF_ACCESS_HEADERS = {
+        "CF-Access-Client-Id": DATASMITH_CF_ACCESS_CLIENT_ID,
+        "CF-Access-Client-Secret": DATASMITH_CF_ACCESS_CLIENT_SECRET,
+    }
+
 
 def get_client() -> Client:
     """Return a singleton Supabase client from env vars."""
@@ -46,7 +59,11 @@ def get_client() -> Client:
         key = os.environ.get("SUPABASE_KEY", "")
         if not url or not key:
             raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
-        _client = create_client(url, key)
+        if _CF_ACCESS_HEADERS:
+            options = ClientOptions(headers=_CF_ACCESS_HEADERS)
+            _client = create_client(url, key, options=options)
+        else:
+            _client = create_client(url, key)
     return _client
 
 
@@ -56,12 +73,15 @@ async def get_async_client() -> Any:
     Imported lazily to avoid import errors when supabase async extras
     are not installed.
     """
-    from supabase import acreate_client
+    from supabase import AsyncClientOptions, acreate_client
 
     url = os.environ.get("SUPABASE_URL", "")
     key = os.environ.get("SUPABASE_KEY", "")
     if not url or not key:
         raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+    if _CF_ACCESS_HEADERS:
+        options = AsyncClientOptions(headers=_CF_ACCESS_HEADERS)
+        return await acreate_client(url, key, options=options)
     return await acreate_client(url, key)
 
 
