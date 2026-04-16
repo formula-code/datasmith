@@ -5,10 +5,33 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import logging
 import os
-from typing import Any, Callable, TypeVar, cast
+from collections.abc import Callable, Sequence
+from typing import Any, TypeVar, cast
 
 from supabase import Client, create_client
+
+logger = logging.getLogger(__name__)
+
+# Stable primary-key ordering per table, used by ``fetch_all`` to make
+# range-based pagination deterministic. PostgREST/Postgres provide no
+# stable ordering without an explicit ORDER BY, so paginating large
+# result sets without one silently drops and duplicates rows — which
+# is exactly how classify_prs and other stages ended up leaving work
+# behind across repeated invocations. Keep entries in sync with the
+# primary keys declared in ``supabase/migrations/``.
+_DEFAULT_ORDER_BY: dict[str, tuple[str, ...]] = {
+    "repositories": ("owner", "repo"),
+    "pull_requests": ("owner", "repo", "issue_number"),
+    "candidate_prs": ("owner", "repo", "issue_number"),
+    "packages": ("owner", "repo", "sha"),
+    "candidate_containers": ("owner", "repo", "sha"),
+    "harbor_runs": ("run_id",),
+    "error_logs": ("id",),
+    "runner_progress": ("runner_id",),
+    "runner_failures": ("id",),
+}
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -64,7 +87,7 @@ def batch_upsert(table: str, rows: list[dict[str, Any]], chunk_size: int = 100) 
     return total
 
 
-def fetch_all(
+def fetch_all(  # noqa: C901
     table: str,
     select: str = "*",
     filters: dict[str, Any] | None = None,
@@ -73,16 +96,32 @@ def fetch_all(
     lte_filters: dict[str, Any] | None = None,
     neq_filters: dict[str, Any] | None = None,
     page_size: int = 1000,
+    order_by: Sequence[str] | str | None = None,
 ) -> list[dict[str, Any]]:
     """Paginate through all rows matching the query.
 
     Supabase/PostgREST caps responses at 1 000 rows by default.
     This helper fetches successive pages using ``range()`` until
     a page returns fewer than *page_size* rows.
+
+    ``order_by`` must specify a stable (unique) key — otherwise
+    Postgres is free to return rows in different orders across
+    pages, silently dropping and duplicating rows. If the caller
+    doesn't pass one, we fall back to ``_DEFAULT_ORDER_BY[table]``
+    (the table's primary key). Tables missing from that map will
+    emit a warning when pagination actually crosses a page boundary.
     """
+    if order_by is None:
+        order_cols: tuple[str, ...] = _DEFAULT_ORDER_BY.get(table, ())
+    elif isinstance(order_by, str):
+        order_cols = (order_by,)
+    else:
+        order_cols = tuple(order_by)
+
     client = get_client()
     rows: list[dict[str, Any]] = []
     offset = 0
+    warned_unstable = False
     while True:
         query = client.table(table).select(select)
         for col, val in (filters or {}).items():
@@ -95,11 +134,21 @@ def fetch_all(
             query = query.lte(col, val)
         for col, val in (neq_filters or {}).items():
             query = query.neq(col, val)
+        for col in order_cols:
+            query = query.order(col)
         resp = query.range(offset, offset + page_size - 1).execute()
         page = cast(list[dict[str, Any]], resp.data or [])
         rows.extend(page)
         if len(page) < page_size:
             break
+        if not order_cols and not warned_unstable:
+            logger.warning(
+                "fetch_all(%r) crossed page boundary without an order_by; "
+                "pagination is non-deterministic and may drop or duplicate rows. "
+                "Add the table's primary key to _DEFAULT_ORDER_BY or pass order_by explicitly.",
+                table,
+            )
+            warned_unstable = True
         offset += page_size
     return rows
 
