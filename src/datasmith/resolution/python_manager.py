@@ -12,6 +12,20 @@ from datasmith.utils import get_logger
 logger = get_logger("resolution.python_manager")
 
 
+PY_RELEASES: dict[tuple[int, int], dt.datetime] = {
+    (3, 7): dt.datetime(2018, 6, 27, tzinfo=dt.UTC),
+    (3, 8): dt.datetime(2019, 10, 14, tzinfo=dt.UTC),
+    (3, 9): dt.datetime(2020, 10, 5, tzinfo=dt.UTC),
+    (3, 10): dt.datetime(2021, 10, 4, tzinfo=dt.UTC),
+    (3, 11): dt.datetime(2022, 10, 24, tzinfo=dt.UTC),
+    (3, 12): dt.datetime(2023, 10, 2, tzinfo=dt.UTC),
+    (3, 13): dt.datetime(2024, 10, 7, tzinfo=dt.UTC),
+    (3, 14): dt.datetime(2025, 10, 7, tzinfo=dt.UTC),
+}
+
+SUPPORTED_PYTHON_VERSIONS: set[tuple[int, int]] = {v for v in PY_RELEASES if v >= (3, 8)}
+
+
 def run_uv(
     args: list[str],
     *,
@@ -69,24 +83,14 @@ def filter_python_versions_by_commit_date(  # noqa: C901
     if not valid_versions:
         return []
 
-    py_releases = {
-        (3, 7): dt.datetime(2018, 6, 27, tzinfo=dt.timezone.utc),
-        (3, 8): dt.datetime(2019, 10, 14, tzinfo=dt.timezone.utc),
-        (3, 9): dt.datetime(2020, 10, 5, tzinfo=dt.timezone.utc),
-        (3, 10): dt.datetime(2021, 10, 4, tzinfo=dt.timezone.utc),
-        (3, 11): dt.datetime(2022, 10, 24, tzinfo=dt.timezone.utc),
-        (3, 12): dt.datetime(2023, 10, 2, tzinfo=dt.timezone.utc),
-        (3, 13): dt.datetime(2024, 10, 7, tzinfo=dt.timezone.utc),
-    }
-
     grace_period = dt.timedelta(days=90)
     filtered = []
     for v in valid_versions:
         version_key = (v[0], v[1])
-        release_date = py_releases.get(version_key)
+        release_date = PY_RELEASES.get(version_key)
 
         if release_date is None:
-            if commit_date < dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc):
+            if commit_date < dt.datetime(2024, 1, 1, tzinfo=dt.UTC):
                 continue
             filtered.append(v)
         elif commit_date >= release_date - grace_period:
@@ -94,7 +98,7 @@ def filter_python_versions_by_commit_date(  # noqa: C901
 
     if not filtered:
         inferred = []
-        for version_key, release_date in sorted(py_releases.items(), reverse=True):
+        for version_key, release_date in sorted(PY_RELEASES.items(), reverse=True):
             if version_key < (3, 8):
                 continue
             if release_date <= commit_date + grace_period:

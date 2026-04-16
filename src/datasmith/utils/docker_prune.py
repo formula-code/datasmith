@@ -11,28 +11,25 @@ from datasmith.utils import get_logger
 
 logger = get_logger("utils.docker_prune")
 
-_DEFAULT_INTERVAL_SEC = 600
+_DEFAULT_INTERVAL_SEC = 7200
 
 
-def _run_prune() -> None:
-    docker = shutil.which("docker")
-    if docker is None:
-        logger.warning("docker binary not found on PATH; skipping builder prune")
-        return
+def _run_prune_cmd(docker: str, args: list[str], label: str) -> None:
     try:
         result = subprocess.run(
-            [docker, "builder", "prune", "-f"],
+            [docker, *args],
             check=False,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
         )
     except subprocess.TimeoutExpired:
-        logger.warning("docker builder prune timed out after 300s")
+        logger.warning("%s timed out after 600s", label)
         return
     if result.returncode != 0:
         logger.warning(
-            "docker builder prune exited %d: %s",
+            "%s exited %d: %s",
+            label,
             result.returncode,
             (result.stderr or result.stdout).strip()[:500],
         )
@@ -42,7 +39,16 @@ def _run_prune() -> None:
         if "Total reclaimed space" in line:
             reclaimed = line.strip()
             break
-    logger.info("docker builder prune: %s", reclaimed or "done")
+    logger.info("%s: %s", label, reclaimed or "done")
+
+
+def _run_prune() -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        logger.warning("docker binary not found on PATH; skipping docker prune")
+        return
+    _run_prune_cmd(docker, ["builder", "prune", "-f"], "docker builder prune")
+    _run_prune_cmd(docker, ["image", "prune", "-f"], "docker image prune")
 
 
 @contextlib.contextmanager

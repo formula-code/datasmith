@@ -47,7 +47,7 @@ def _patch_harbor_trial_name() -> None:
         return self.task.get_task_id().get_name()
 
     TrialConfig.generate_trial_name = _deterministic_trial_name
-    TrialConfig._fc_datasmith_patched = True  # type: ignore[attr-defined]
+    TrialConfig._fc_datasmith_patched = True
 
 
 def _build_verifier_env() -> dict[str, str]:
@@ -77,6 +77,10 @@ def _build_verifier_env() -> dict[str, str]:
         val = os.environ.get(host_key)
         if val:
             env[container_key] = val
+    # lsv_init.py gates snapshot capture on HARBOR_AGENT_NAME=="oracle"; Harbor
+    # itself never sets this. Inline a literal so the two scripts (lsv_init +
+    # test.sh) agree on the agent identity the trial is running.
+    env["HARBOR_AGENT_NAME"] = "oracle"
     return env
 
 
@@ -142,11 +146,18 @@ def _build_job_config(
     from harbor.models.orchestrator_type import OrchestratorType
     from harbor.models.trial.config import AgentConfig, EnvironmentConfig
 
+    # Harbor defaults to 4 GB per trial container (per the task.toml template)
+    # which is too tight for lsv_init on mid/large Python repos — sklearn's
+    # dep-graph walk alone exceeds 4 GB and gets OOM-killed with exit 137.
+    # Bump to 32 GB across the board; the host has 500 GB so there's plenty
+    # of headroom, and smaller repos won't actually use more than they need.
+    MEMORY_MB = 32 * 1024
     if use_daytona:
         environment = EnvironmentConfig(
             type=EnvironmentType.DAYTONA,
             force_build=True,
             delete=True,
+            override_memory_mb=MEMORY_MB,
             kwargs={
                 "auto_stop_interval_mins": 0,
                 "auto_delete_interval_mins": 0,
@@ -157,6 +168,7 @@ def _build_job_config(
             type=EnvironmentType.DOCKER,
             force_build=True,
             delete=True,
+            override_memory_mb=MEMORY_MB,
         )
 
     return JobConfig(
@@ -208,29 +220,108 @@ def _row_from_trial(  # noqa: C901
     n_benchmarks: int | None = None
     status = "failed"
     error_message: str | None = None
+    harbor_exception: str | None = None
 
+    # Harbor can raise ``VerifierTimeoutError`` *after* test.sh has already
+    # written a valid reward.json — the verifier wrapper enforces a
+    # wall-clock budget that includes file-upload/stdout-drain overhead, so
+    # a trial can land a perfectly good reward.json on disk and still get
+    # flagged. In that case we want the success, not the wrapper timeout.
+    # → Check reward.json FIRST and treat trial.exception_info as
+    # decoration (stored as ``harbor_exception`` for post-mortem triage).
     if trial.exception_info is not None:
-        error_message = str(getattr(trial.exception_info, "message", None) or trial.exception_info)
-    elif paths.reward_json_path.exists():
+        harbor_exception = str(getattr(trial.exception_info, "message", None) or trial.exception_info)
+
+    if paths.reward_json_path.exists():
         try:
             reward_payload = json.loads(paths.reward_json_path.read_text())
         except Exception as exc:
             error_message = f"reward.json parse error: {exc}"
+            if harbor_exception:
+                error_message = f"{error_message}; harbor_exception: {harbor_exception}"
         else:
-            speedups = (reward_payload or {}).get("per_benchmark_speedups") or {}
+            payload = reward_payload or {}
+            speedups = payload.get("per_benchmark_speedups") or {}
             if speedups:
                 try:
                     max_speedup = max(float(v) for v in speedups.values())
                 except (TypeError, ValueError) as exc:
                     error_message = f"non-numeric speedup values: {exc}"
-            geomean = (reward_payload or {}).get("lsv_mean_speedup")
-            n_benchmarks = (reward_payload or {}).get("num_valid_benchmarks") or len(speedups) or None
-            if max_speedup is not None:
+            geomean = payload.get("lsv_mean_speedup")
+            n_benchmarks = payload.get("num_valid_benchmarks") or len(speedups) or None
+
+            patch_info = payload.get("patch") or {}
+            patch_applied = patch_info.get("applied")
+            lsv_block = payload.get("lsv") or {}
+            lsv_init = lsv_block.get("init") or {}
+            lsv_init_populated = bool(lsv_init)
+            impactable = len(lsv_init.get("benchmarks_impactable") or [])
+            source_files_covered = lsv_init.get("source_files_covered")
+            lsv_error = payload.get("lsv_error")
+            tests_passed = payload.get("tests_passed")
+            setup = payload.get("setup") or {}
+            setup_exit = setup.get("exit_code")
+            setup_phase = setup.get("failed_phase")
+
+            # Priority order for status classification — most specific wins.
+            # Check setup failures FIRST because a failed setup cascades into
+            # every other failure mode (no dep DB → lsv_measure crashes →
+            # empty benchmarks → reward.json looks like a run produced no
+            # signal). We want the report to name the real root cause.
+            if setup_exit not in (None, 0):
+                if setup_phase == "lsv_init":
+                    status = "lsv_init_failed"
+                    error_message = (
+                        f"lsv_init.py crashed in setup.sh (exit={setup_exit}). "
+                        "Benchmark discovery never completed, so no dep DB was "
+                        "written. Check setup.txt in the trial dir for the "
+                        "underlying ASV/LSV traceback."
+                    )
+                else:
+                    status = "setup_failed"
+                    error_message = f"setup.sh failed in phase '{setup_phase}' (exit={setup_exit})."
+            elif patch_applied is False:
+                status = "patch_failed"
+                error_message = "solve.sh produced no diff vs base_commit"
+            elif lsv_init_populated and impactable == 0 and source_files_covered == 0:
+                # lsv_init ran TO COMPLETION but found zero coverage — a
+                # real repo/LSV compatibility issue, not a crash.
+                status = "lsv_init_empty"
+                error_message = (
+                    "LSV init mapped 0 source files and 0 impactable benchmarks — "
+                    "ASV/LSV could not trace imports into this repo's benchmark suite."
+                )
+            elif max_speedup is not None:
                 status = "success"
+            elif lsv_error:
+                status = "lsv_measure_failed"
+                error_message = lsv_error
             elif not speedups:
                 status = "no_benchmarks"
+
+            if tests_passed is False and status == "success":
+                # Benchmarks ran but tests failed — degrade so publish
+                # doesn't silently gate on a broken suite.
+                status = "tests_failed"
+                error_message = error_message or "tests_passed=False in reward.json"
+
+            # If we used reward.json but Harbor also raised an exception,
+            # keep the reward-derived status as authoritative and tack the
+            # exception onto error_message so it's still visible in triage.
+            if harbor_exception and status != "success":
+                suffix = f" (harbor_exception: {harbor_exception})"
+                error_message = (error_message or "") + suffix
     else:
-        error_message = "reward.json missing"
+        # No reward.json means the trial never completed a verifier pass.
+        # Harbor's exception (if any) is now the only signal we have.
+        if harbor_exception:
+            error_message = f"reward.json missing; harbor_exception: {harbor_exception}"
+            if "VerifierTimeoutError" in harbor_exception or "timeout" in harbor_exception.lower():
+                status = "verifier_timeout"
+            else:
+                status = "harbor_exception"
+        else:
+            error_message = "reward.json missing (no harbor exception recorded)"
 
     return {
         "owner": meta["owner"],
@@ -252,15 +343,46 @@ def _row_from_trial(  # noqa: C901
 
 def _insert_harbor_runs(rows: list[dict[str, Any]], chunk_size: int = 100) -> int:
     """Insert (not upsert) into harbor_runs. Each row is a fresh run with an
-    auto-generated run_id, so upsert semantics don't apply here."""
+    auto-generated run_id, so upsert semantics don't apply here.
+
+    Failure handling: harbor_runs has a foreign key on
+    ``candidate_containers(owner, repo, sha)``. If a PR's container row
+    has been deleted out from under us (e.g. stage 6 rebuilt and the old
+    sha was dropped), the chunk insert raises ``23503`` and we'd lose
+    every other row in the chunk. Retry row-by-row on chunk failure so
+    orphan rows are logged and skipped instead of blowing up the whole
+    stage.
+    """
     if not rows:
         return 0
     client = get_client()
     total = 0
     for i in range(0, len(rows), chunk_size):
         chunk = rows[i : i + chunk_size]
-        client.table("harbor_runs").insert(chunk).execute()
-        total += len(chunk)
+        try:
+            client.table("harbor_runs").insert(chunk).execute()
+            total += len(chunk)
+            continue
+        except Exception as chunk_exc:
+            logger.warning(
+                "harbor_runs chunk insert failed (%s); retrying row-by-row",
+                chunk_exc,
+            )
+        # Fall back to per-row inserts so a single FK violation or other
+        # row-scoped error doesn't drop the rest of the batch.
+        for row in chunk:
+            try:
+                client.table("harbor_runs").insert(row).execute()
+                total += 1
+            except Exception as row_exc:
+                logger.warning(
+                    "harbor_runs orphan row skipped: %s/%s@%s status=%s — %s",
+                    row.get("owner"),
+                    row.get("repo"),
+                    (row.get("sha") or "")[:12],
+                    row.get("status"),
+                    row_exc,
+                )
     return total
 
 
@@ -270,7 +392,7 @@ async def run_harbor_healthcheck(
     task_dir: Path,
     use_daytona: bool = False,
     n_concurrent_trials: int = 4,
-    rounds: int = 4,
+    rounds: int = 2,
     job_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Materialize *items* into *task_dir*, run Harbor's oracle agent on the

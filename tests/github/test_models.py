@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -67,7 +67,7 @@ class TestPR:
             pr.title = "Changed"  # type: ignore[misc]
 
     def test_pr_json_roundtrip(self) -> None:
-        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
         pr = PR(
             repository="org/lib",
             issue_number=99,
@@ -86,7 +86,7 @@ class TestPR:
         assert restored.merged_at == now
 
     def test_to_record_success(self) -> None:
-        now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2024, 1, 1, tzinfo=UTC)
         pr = PR(
             repository="myorg/mylib",
             issue_number=42,

@@ -60,16 +60,19 @@ echo "[final] Discovering ASV benchmarks from ${CONF_NAME:-<unknown>} ..."
 REAL_CONF="$(realpath "$CONF_NAME")"
 CONF_DIR="$(dirname "$REAL_CONF")"
 
-# asv must be run from the directory containing the config
+# asv must be run from the directory containing the config, and Benchmarks.load()
+# resolves `results_dir` relative to the current working directory — so the
+# extract step must also run with cwd == CONF_DIR.  Keep both inside the pushd.
 pushd "$CONF_DIR" > /dev/null
 micromamba run -n "$ENV_NAME" asv machine --yes --config "$REAL_CONF" \
   --machine dockertest --num_cpu 1 --ram 4GB 2>&1 | tail -1 || true
 micromamba run -n "$ENV_NAME" asv run --bench just-discover \
   --config "$REAL_CONF" --python=same --machine=dockertest || true
-popd > /dev/null
 
-# Extract benchmark names from the generated benchmarks.json
-python - "$CONF_NAME" /workspace/repo/asv_benchmarks.txt <<'EXTRACT_EOF' || true
+# Extract benchmark names from the generated benchmarks.json. Using the
+# conda env python (not base) so asv/asv_runner versions match what
+# Benchmarks.load() wrote in the previous step.
+micromamba run -n "$ENV_NAME" python - "$REAL_CONF" /workspace/repo/asv_benchmarks.txt <<'EXTRACT_EOF' || true
 import sys
 from asv.config import Config
 from asv.benchmarks import Benchmarks
@@ -80,6 +83,7 @@ with open(sys.argv[2], "w") as f:
     for b in sorted(bm._all_benchmarks.keys()):
         f.write(b + "\n")
 EXTRACT_EOF
+popd > /dev/null
 
 # Fall back to the pre-computed file if live discovery produced nothing.
 if [ ! -s /workspace/repo/asv_benchmarks.txt ] && [ -n "$FALLBACK_FILE" ] && [ -s "$FALLBACK_FILE" ]; then

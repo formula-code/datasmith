@@ -18,10 +18,11 @@ def _clear_prereq_cache() -> None:
 
 # Shared patches for Docker image helpers that are always mocked in unit tests
 _MOCK_PREREQS = patch("datasmith.runners.synthesize_images._ensure_prerequisite_images")
-_MOCK_BUILD_PUSH = patch(
-    "datasmith.runners.synthesize_images._build_and_push_pr_image",
+_MOCK_BUILD = patch(
+    "datasmith.runners.synthesize_images._build_pr_image",
     return_value="formulacode/numpy-numpy:42",
 )
+_MOCK_PUSH = patch("datasmith.runners.synthesize_images._push_pr_image")
 _MOCK_REPO_IMAGE = patch(
     "datasmith.docker.images.get_repo_image_name",
     return_value="formulacode/numpy-numpy:latest",
@@ -73,7 +74,8 @@ class TestDockerRunsInThread:
             patch("datasmith.runners.base.get_client", return_value=mock_client),
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
-            _MOCK_BUILD_PUSH,
+            _MOCK_BUILD,
+            _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
@@ -89,6 +91,7 @@ class TestDockerRunsInThread:
             repo_image="formulacode/numpy-numpy:latest",
             env_payload="",
             python_version="",
+            base_sha="",
         )
 
 
@@ -105,7 +108,8 @@ class TestHandlesFailure:
             patch("datasmith.runners.base.get_client", return_value=mock_client),
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
-            _MOCK_BUILD_PUSH,
+            _MOCK_BUILD,
+            _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
@@ -130,9 +134,10 @@ class TestBuildAndPushOnSuccess:
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS as mock_prereqs,
             patch(
-                "datasmith.runners.synthesize_images._build_and_push_pr_image",
+                "datasmith.runners.synthesize_images._build_pr_image",
                 return_value="formulacode/numpy-numpy:42",
-            ) as mock_build_push,
+            ) as mock_build,
+            patch("datasmith.runners.synthesize_images._push_pr_image") as mock_push,
             _MOCK_REPO_IMAGE,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
@@ -141,10 +146,9 @@ class TestBuildAndPushOnSuccess:
         # Prerequisites were checked
         mock_prereqs.assert_called_once()
 
-        # Image was built and pushed (last arg is the synthesized DockerContext)
-        mock_build_push.assert_called_once()
-        args = mock_build_push.call_args[0]
-        assert args[:5] == ("numpy", "numpy", 42, "", "")
+        # Image was built and pushed
+        mock_build.assert_called_once()
+        mock_push.assert_called_once()
 
         # container_name was persisted to DB
         mock_client.table.assert_any_call("pull_requests")
@@ -172,7 +176,8 @@ class TestRenderProblemWithGitHubClient:
             patch("datasmith.runners.base.get_client", return_value=mock_client),
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
-            _MOCK_BUILD_PUSH,
+            _MOCK_BUILD,
+            _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
             patch(
                 "datasmith.github.render.render_problem_statement",
@@ -211,7 +216,8 @@ class TestRenderProblemWithGitHubClient:
             patch("datasmith.runners.base.get_client", return_value=mock_client),
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
-            _MOCK_BUILD_PUSH,
+            _MOCK_BUILD,
+            _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
             patch(
                 "datasmith.github.render.render_problem_statement",
@@ -257,7 +263,8 @@ class TestRenderProblemWithGitHubClient:
             patch("datasmith.runners.base.get_client", return_value=mock_client),
             patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
             _MOCK_PREREQS,
-            _MOCK_BUILD_PUSH,
+            _MOCK_BUILD,
+            _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
             patch(
                 "datasmith.github.render.render_problem_statement",

@@ -37,7 +37,12 @@ from .package_filters import (
     resolve_requirements_file,
     split_shell_command,
 )
-from .python_manager import ensure_python_version_available, filter_python_versions_by_commit_date, run_uv
+from .python_manager import (
+    SUPPORTED_PYTHON_VERSIONS,
+    ensure_python_version_available,
+    filter_python_versions_by_commit_date,
+    run_uv,
+)
 
 logger = get_logger("resolution.orchestrator")
 
@@ -85,23 +90,23 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                 bc = getattr(cfg, "build_command", None)
                 ic = getattr(cfg, "install_command", None)
                 if bc:
-                    if isinstance(bc, (list, tuple)):
+                    if isinstance(bc, list | tuple):
                         bc = " && ".join(bc).replace("-mpip", "-m pip")
                     cfg_items.build_commands.add(str(bc))
                 if ic:
-                    if isinstance(ic, (list, tuple)):
+                    if isinstance(ic, list | tuple):
                         ic = " && ".join(ic)
                     cfg_items.install_commands.add(str(ic))
                 mx = getattr(cfg, "matrix", None) or {}
                 for k, v in mx.items():
                     values = cfg_items.matrix.setdefault(k, set())
-                    if isinstance(v, (list, tuple, set)):
+                    if isinstance(v, list | tuple | set):
                         values.update(map(str, v))
                     else:
                         values.add(str(v))
 
             if not cfg_items.pythons:
-                cfg_items.pythons.update({(3, 8), (3, 9), (3, 10), (3, 11), (3, 12)})
+                cfg_items.pythons.update(SUPPORTED_PYTHON_VERSIONS)
 
             # B) Choose Python version candidates
             if (not cfg_items.pythons) or all(py < (3, 8) for py in cfg_items.pythons):

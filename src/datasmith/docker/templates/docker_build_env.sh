@@ -188,27 +188,15 @@ if [[ -z "$IMPORT_NAME" ]]; then
     echo "WARN: Could not determine import name; the pkg stage will fall back to local detection."
 fi
 
-cd_asv_json_dir || { echo "No 'asv.*.json' file found." >&2; exit 1; }
-
-CONF_NAME="$(asv_conf_name || true)"
-if [[ -z "${CONF_NAME:-}" ]]; then
-    echo "No 'asv.*.json' file found." >&2
-    exit 1
-fi
-
-# PY_VERSIONS=$(python - <<PY
-# import asv
-# cfg = asv.config.Config.load("$CONF_NAME")
-# cfg.pythons = [v for v in cfg.pythons if tuple(map(int, v.split('.'))) >= (3,7)]
-# print(" ".join(cfg.pythons))
-# PY
-# )
+# NOTE: asv.*.json discovery is deliberately NOT done here.  Some repos
+# (Qiskit, Dask, Astropy, …) keep their ASV config in a separate benchmark
+# repo that is cloned by docker_build_pkg.sh, which runs after this stage.
+# Gating the env stage on asv.*.json would make those repos unreachable.
 source /etc/profile.d/asv_build_vars.sh || true
 PY_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
 
 if [[ -z "$PY_VERSIONS" ]]; then
-    echo "No Satisfying PY_VERSIONS found in $CONF_NAME" >&2
-    cat "$CONF_NAME" >&2
+    echo "No PY_VERSIONS configured (set PY_VERSION or ASV_PY_VERSIONS)." >&2
     exit 1
 fi
 

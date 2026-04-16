@@ -97,4 +97,5 @@ make grafana-up       # Start Grafana
 make grafana-down     # Stop Grafana
 make grafana-logs     # Tail container logs
 make grafana-migrate  # Apply the grafana_ro database role
+make grafana-tunnel   # Expose Grafana publicly via Cloudflare Tunnel
 ```

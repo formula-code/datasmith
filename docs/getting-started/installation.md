@@ -182,6 +182,28 @@ make check    # Ruff lint + mypy type check
 make test     # pytest
 ```
 
+## Makefile reference
+
+Run `make help` to list all targets. The complete reference:
+
+| Target | Description |
+|--------|-------------|
+| `make install` | Create virtual environment with uv, install pre-commit hooks |
+| `make check` | Run ruff lint, mypy type check, and deptry dependency check |
+| `make test` | Run pytest with coverage |
+| `make build` | Build wheel file |
+| `make clean-build` | Remove build artifacts |
+| `make docker-clean` | Prune dangling Docker images and containers |
+| `make supabase-up` | Start local Supabase instance |
+| `make supabase-down` | Stop local Supabase instance |
+| `make supabase-status` | Show Supabase service status and URLs |
+| `make grafana-migrate` | Apply the `grafana_ro` read-only database role |
+| `make grafana-up` | Start Grafana dashboard (`http://localhost:3001`) |
+| `make grafana-down` | Stop Grafana dashboard |
+| `make grafana-logs` | Tail Grafana container logs |
+| `make grafana-tunnel` | Expose Grafana publicly via Cloudflare Tunnel |
+| `make db-tunnel` | Expose Supabase PostgREST API via Cloudflare Tunnel |
+
 ## Next steps
 
 You're ready to run the pipeline:

@@ -77,7 +77,7 @@ packages = ["src/datasmith"]
 
 [tool.mypy]
 files = ["src"]
-exclude = ["src/datasmith/agents/templates/", "src/datasmith/docker/templates/"]
+exclude = ["src/datasmith/agents/templates/", "src/datasmith/docker/templates/", "src/datasmith/harbor_adapter/template/"]
 disallow_untyped_defs = true
 disallow_any_unimported = true
 no_implicit_optional = true
@@ -85,6 +85,10 @@ check_untyped_defs = true
 warn_return_any = true
 warn_unused_ignores = true
 show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "harbor.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -145,6 +149,9 @@ ignore = [
     "S701",
     # mutable class attr without ClassVar (acceptable for registries)
     "RUF012",
+    # PEP 695 type params require 3.12+; we still test on 3.11
+    "UP046",
+    "UP047",
     # ternary suggestions (readability preference)
     "SIM108",
 ]
@@ -169,10 +176,10 @@ branch = true
 source = ["src"]
 
 [tool.deptry]
-exclude = ["src/datasmith/docker/templates/", "src/datasmith/agents/templates/"]
+exclude = ["src/datasmith/docker/templates/", "src/datasmith/agents/templates/", "src/datasmith/harbor_adapter/template/"]
 ignore = ["DEP003"]
 [tool.deptry.per_rule_ignores]
-DEP001 = ["tomllib"]
+DEP001 = ["tomllib", "tomli"]
 DEP004 = ["pandas"]
 
 [[tool.mypy.overrides]]

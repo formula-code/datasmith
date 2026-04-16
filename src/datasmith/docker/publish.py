@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from python_on_whales import DockerClient
@@ -35,7 +35,7 @@ class DockerHubPublisher:
         self._docker.push(image_tag)
 
     def tag_with_version(self, image_tag: str) -> str:
-        version = datetime.now(tz=timezone.utc).strftime("@%Y-%m")
+        version = datetime.now(tz=UTC).strftime("@%Y-%m")
         new_tag = f"{image_tag}{version}"
         self._docker.tag(image_tag, new_tag)
         return new_tag

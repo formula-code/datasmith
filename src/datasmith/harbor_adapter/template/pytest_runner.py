@@ -735,24 +735,19 @@ def main(args) -> dict:
 if __name__ == "__main__":
     args = parse_args()
     output = main(args)
-    # if output['results']['exit_code'] != 0:
-    if output["results"]["summary"]["total"] == 0:
-        args.extra_args = ""
-        output = main(args)
-    # if output['results']['exit_code'] != 0:
-    if output["results"]["summary"]["total"] == 0:
-        # numpy issues.
-        args.extra_args = (
-            "--import-mode=importlib --ignore=build --ignore=tools/ci -c tox.ini"
-        )
-        output = main(args)
+    # NOTE: previous versions retried on total==0 with different extra_args
+    # (e.g. "-c tox.ini"), which caused pytest to re-discover the entire repo
+    # from cwd and collect unrelated tests (e.g. arrow's dev/test_merge_arrow_pr.py
+    # which imports `jira`). total==0 here legitimately means "no tests mapped
+    # from the PR's changed files" and should be reported as such, not worked
+    # around by scanning the whole tree.
 
-    # Write test results to file for Harbor parser
-    logs_root = Path(
-        os.environ.get("T_BENCH_TASK_LOGS_PATH")
-        or os.environ.get("T_BENCH_CONTAINER_LOGS_PATH")
-        or "/logs"
-    )
+    # Write test results to file for Harbor parser. Must match parser.py's
+    # LOG_DIR default ("/logs/artifacts") so the parser actually finds it —
+    # neither Harbor nor test.sh set T_BENCH_TASK_LOGS_PATH, so the previous
+    # fallback ("/logs") silently diverged from the reader and every failing
+    # test suite was silently recorded as tests_passed=True.
+    logs_root = Path(os.environ.get("T_BENCH_TASK_LOGS_PATH", "/logs/artifacts"))
     logs_root.mkdir(parents=True, exist_ok=True)
     with open(logs_root / "test_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, sort_keys=True)

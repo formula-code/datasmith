@@ -78,6 +78,40 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 - **Build**: hatchling backend, uv for dependency management
 - **CI**: GitHub Actions runs `make check` + tests on Python 3.11 and 3.12
 
+### Documentation
+
+After making a feature change, decide whether the change is significant enough to warrant updating the documentation in `docs/`. Changes that affect user-facing behavior, CLI flags, configuration knobs, pipeline stages, agent backends, or architectural decisions should be reflected in the relevant guide or design doc. Internal refactors, bug fixes, and implementation details generally do not need doc updates unless they change observable behavior.
+
+### Tunable constants
+
+Any module-level constant that is a knob — timeouts, retries, caps, windows,
+concurrency limits, thresholds — **must** be overridable from `tokens.env`
+without a code change. The `datasmith` package auto-loads `tokens.env` at
+import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
+`os.environ.get(...)` at module scope picks up `tokens.env` values.
+
+- **Naming**: prefix every overridable constant and its env variable with
+  `DATASMITH_` so it is globally greppable in both Python and shell env.
+- **Pattern**: read the env var at module top, coerce to the target type,
+  and fall back to a literal default:
+
+  ```python
+  import os
+
+  DATASMITH_RL_MAX_RETRIES: int = int(os.environ.get("DATASMITH_RL_MAX_RETRIES", "3"))
+  DATASMITH_NEIGHBOR_WINDOW_DAYS: int = int(
+      os.environ.get("DATASMITH_NEIGHBOR_WINDOW_DAYS", "60")
+  )
+  ```
+
+- **Scope**: this rule applies to *tunable* knobs. Magic strings that
+  identify protocol fields, schema columns, or on-disk paths are not
+  constants in this sense and should stay as literals.
+- **Existing uses** (non-exhaustive, grep `DATASMITH_` for the full list):
+  `DATASMITH_RL_DEFAULT_PAUSE_S`, `DATASMITH_RL_PAUSE_JITTER_S`,
+  `DATASMITH_RL_MAX_RETRIES`, `DATASMITH_NEIGHBOR_WINDOW_DAYS`,
+  `DATASMITH_NEIGHBOR_CAP`.
+
 ## Supabase (local)
 
 fc-data uses a **local Supabase** instance for all persistent state. Connection details live in `tokens.env`:

@@ -124,6 +124,7 @@ class SandboxRunner:
         pr_context: str,
         prior_attempts: str = "",
         dry_run: bool = False,
+        base_sha: str = "",
     ) -> SandboxResult:
         """Prepare workspace, launch agent, extract results.
 
@@ -146,6 +147,7 @@ class SandboxRunner:
                 python_version=python_version,
                 pr_context=pr_context,
                 prior_attempts=prior_attempts,
+                base_sha=base_sha,
             )
 
             # 2. Init git repo (Codex requirement)
@@ -185,10 +187,15 @@ class SandboxRunner:
         python_version: str,
         pr_context: str,
         prior_attempts: str = "",
+        base_sha: str = "",
     ) -> None:
         """Create the workspace directory structure."""
         task_dir = workspace / "task"
         task_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use base_sha for Docker checkout so the repo is at the
+        # pre-optimization state; fall back to merge_commit_sha for compat.
+        checkout_sha = base_sha or sha
 
         # Copy ALL template files from docker/templates/ into task/
         docker_templates = Path(__file__).parents[1] / "docker" / "templates"
@@ -207,11 +214,12 @@ class SandboxRunner:
                 shutil.copy2(str(src), str(task_dir / fname))
 
         # Render run-tests.sh from Jinja2 template with embedded scripts
-        run_tests_sh = _render_run_tests_sh(docker_templates, base_commit=sha)
+        run_tests_sh = _render_run_tests_sh(docker_templates, base_commit=checkout_sha)
         (task_dir / "run-tests.sh").write_text(run_tests_sh)
 
-        # Generate task.txt
-        task_txt = _generate_task_txt(owner, repo, sha, env_payload, python_version, repo_image)
+        # Generate task.txt — use checkout_sha so Dockerfile.pr checks out
+        # the base commit, not the merge commit.
+        task_txt = _generate_task_txt(owner, repo, checkout_sha, env_payload, python_version, repo_image)
         (task_dir / "task.txt").write_text(task_txt)
 
         # Render AGENTS.md from Jinja2 template
@@ -489,6 +497,7 @@ def verify_context(
     python_version: str,
     context: DockerContext,
     timeout_s: int = 3600,
+    base_sha: str = "",
 ) -> SandboxResult:
     """Build and verify a :class:`DockerContext` without launching an agent.
 
@@ -497,6 +506,10 @@ def verify_context(
     """
     start = time.time()
     docker_templates = Path(__file__).parents[1] / "docker" / "templates"
+
+    # Use base_sha for Docker checkout so the repo is at the
+    # pre-optimization state; fall back to merge_commit_sha for compat.
+    checkout_sha = base_sha or sha
 
     with tempfile.TemporaryDirectory(prefix="verify-ctx-") as tmpdir:
         workspace = Path(tmpdir)
@@ -519,11 +532,12 @@ def verify_context(
                 shutil.copy2(str(src), str(task_dir / fname))
 
         # Render run-tests.sh from Jinja2 template
-        run_tests_sh = _render_run_tests_sh(docker_templates, base_commit=sha)
+        run_tests_sh = _render_run_tests_sh(docker_templates, base_commit=checkout_sha)
         (task_dir / "run-tests.sh").write_text(run_tests_sh)
 
-        # Write task.txt
-        task_txt = _generate_task_txt(owner, repo, sha, env_payload, python_version, repo_image)
+        # Write task.txt — use checkout_sha so Dockerfile.pr checks out
+        # the base commit, not the merge commit.
+        task_txt = _generate_task_txt(owner, repo, checkout_sha, env_payload, python_version, repo_image)
         (task_dir / "task.txt").write_text(task_txt)
 
         # Override with the candidate context's editable scripts

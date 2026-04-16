@@ -7,10 +7,10 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 from git import Commit, Repo
 
@@ -365,7 +365,7 @@ def read_blob_text(commit: Commit, relpath: str, default: str | None = None) -> 
         if data_stream is None:
             return default
         raw_bytes = data_stream.read()
-        if not isinstance(raw_bytes, (bytes, bytearray)):
+        if not isinstance(raw_bytes, bytes | bytearray):
             return default
         return bytes(raw_bytes).decode("utf-8", errors="replace")
     except Exception:

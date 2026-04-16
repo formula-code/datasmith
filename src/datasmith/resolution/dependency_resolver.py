@@ -21,8 +21,8 @@ def strip_ansi(s: str) -> str:
 def rfc3339(ts: dt.datetime) -> str:
     """Convert a datetime to RFC3339 format string."""
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=dt.timezone.utc)
-    return ts.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        ts = ts.replace(tzinfo=dt.UTC)
+    return ts.astimezone(dt.UTC).isoformat().replace("+00:00", "Z")
 
 
 def uv_compile_from_pyproject(

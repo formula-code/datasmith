@@ -14,11 +14,13 @@ from datasmith.agents.installed import (
     CodexResult,
     GeminiAgent,
     NoneAgent,
+    QwenAgent,
     get_agent,
 )
 from datasmith.agents.installed.claude import _parse_claude_stdout
 from datasmith.agents.installed.codex import _parse_codex_stdout
 from datasmith.agents.installed.gemini import _parse_gemini_stdout
+from datasmith.agents.installed.qwen import _parse_qwen_stdout
 
 # ---- AgentResult ----
 
@@ -65,6 +67,12 @@ class TestGetAgent:
         agent = get_agent()
         assert agent.name() == "gemini"
 
+    @patch("shutil.which")
+    def test_falls_back_to_qwen(self, mock_which: MagicMock) -> None:
+        mock_which.side_effect = lambda b: "/usr/bin/qwen" if b == "qwen" else None
+        agent = get_agent()
+        assert agent.name() == "qwen"
+
     @patch("shutil.which", return_value=None)
     def test_raises_when_none_available(self, _mock: MagicMock) -> None:
         with pytest.raises(RuntimeError, match="No installed CLI agent found"):
@@ -104,6 +112,14 @@ class TestIsAvailable:
     @patch("shutil.which", return_value=None)
     def test_gemini_unavailable(self, _mock: MagicMock) -> None:
         assert GeminiAgent().is_available() is False
+
+    @patch("shutil.which", return_value="/usr/bin/qwen")
+    def test_qwen_available(self, _mock: MagicMock) -> None:
+        assert QwenAgent().is_available() is True
+
+    @patch("shutil.which", return_value=None)
+    def test_qwen_unavailable(self, _mock: MagicMock) -> None:
+        assert QwenAgent().is_available() is False
 
 
 # ---- CodexAgent.exec ----
@@ -323,3 +339,66 @@ class TestParseGeminiStdout:
         line = json.dumps({"output": "info"})
         out, _files = _parse_gemini_stdout(line)
         assert out == ["info"]
+
+
+# ---- QwenAgent.exec ----
+
+
+class TestQwenAgent:
+    @patch("datasmith.agents.installed.qwen.run_agent_subprocess")
+    def test_exec_success(self, mock_run: MagicMock) -> None:
+        stdout_lines = [
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Fixed!"}]}}),
+            json.dumps({"type": "tool_use", "name": "edit", "input": {"file_path": "fix.py"}}),
+            json.dumps({"type": "result", "result": "Done"}),
+        ]
+        mock_run.return_value = (0, "\n".join(stdout_lines) + "\n", "", 2.0)
+        result = QwenAgent().exec("fix the build")
+        assert result.success is True
+        assert "Fixed!" in result.output
+        assert "fix.py" in result.files_changed
+
+    @patch("datasmith.agents.installed.qwen.run_agent_subprocess")
+    def test_exec_timeout(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = (-1, '{"type":"assistant","message":"partial"}\n', "timed out", 600.0)
+        result = QwenAgent().exec("slow", timeout=600)
+        assert result.success is False
+        assert result.duration_s == 600.0
+
+    @patch("datasmith.agents.installed.qwen.run_agent_subprocess")
+    def test_exec_not_found(self, mock_run: MagicMock) -> None:
+        mock_run.side_effect = FileNotFoundError()
+        result = QwenAgent().exec("prompt")
+        assert result.success is False
+        assert "not found" in result.error
+
+    @patch("datasmith.agents.installed.qwen.run_agent_subprocess")
+    def test_command_flags(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = (0, "", "", 0.5)
+        QwenAgent().exec("prompt")
+        cmd = mock_run.call_args[0][0]
+        assert "--yolo" in cmd
+        assert "stream-json" in cmd
+
+
+class TestParseQwenStdout:
+    def test_assistant_message(self) -> None:
+        line = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "hello"}]}})
+        out, _files = _parse_qwen_stdout(line)
+        assert out == ["hello"]
+
+    def test_result(self) -> None:
+        line = json.dumps({"type": "result", "result": "All done"})
+        out, _files = _parse_qwen_stdout(line)
+        assert "All done" in out
+
+    def test_think_tag_stripped(self) -> None:
+        line = json.dumps({"type": "result", "result": "thinking...\n</think>\n\nActual output"})
+        out, _files = _parse_qwen_stdout(line)
+        assert out == ["Actual output"]
+        assert "thinking" not in out[0]
+
+    def test_file_change(self) -> None:
+        line = json.dumps({"type": "tool_use", "name": "edit", "input": {"file_path": "a.py"}})
+        _out, files = _parse_qwen_stdout(line)
+        assert files == ["a.py"]

@@ -30,7 +30,7 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --dry-run
 | `--dry-run` | Log what each stage would do without executing | `false` |
 | `--n-concurrent N` | Max concurrent items per runner stage | auto |
 | `--tasks-per-repo N` | Cap tasks per repo for stages 5–6 (useful for large repos) | unlimited |
-| `--agent AGENT` | Agent for stage 6 synthesis: `claude`, `codex`, `gemini`, or `none` | auto-detect |
+| `--agent AGENT` | Agent for stage 6 synthesis: `claude`, `codex`, `gemini`, `qwen`, or `none` | auto-detect |
 | `--force` | Re-process already-completed tasks in stages 5–6 | `false` |
 | `--offline-source PATH` | Import PR data from a Parquet file instead of scraping GitHub (stages 1–2) | — |
 | `--min-stars N` | Minimum GitHub stars for repo discovery in stage 1 | `500` |
@@ -186,7 +186,7 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --force
 
 **Writes to:** `candidate_containers` table (on success), `error_logs` table (every attempt)
 **Runner:** `SynthesizeImagesRunner`
-**Requires:** Docker daemon running, resolved packages (stage 4), rendered problems (stage 5). LLM agent CLI (`claude`, `codex`, or `gemini`) must be on `$PATH` unless `--agent none`.
+**Requires:** Docker daemon running, resolved packages (stage 4), rendered problems (stage 5). LLM agent CLI (`claude`, `codex`, `gemini`, or `qwen`) must be on `$PATH` unless `--agent none`.
 
 !!! warning
     Synthesis can be expensive — each LLM attempt may consume significant tokens and each Docker build takes minutes. Use `--n-concurrent` and `--tasks-per-repo` to control cost. Start with `--agent none` to exhaust cached/similar scripts before using LLM generation.

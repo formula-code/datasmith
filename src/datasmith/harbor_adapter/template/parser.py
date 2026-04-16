@@ -208,10 +208,16 @@ def aggregate_by_hierarchy(per_benchmark: dict[str, float]) -> dict:
 
 
 def load_test_results(log_dir: Path) -> tuple[bool, float, dict]:
-    """Read test_results.json. Returns (tests_passed, success_ratio, raw)."""
+    """Read test_results.json. Returns (tests_passed, success_ratio, raw).
+
+    Missing file returns ``(False, 0.0, {})`` so the caller can distinguish
+    'no pytest data' from 'pytest passed'. This is the inversion of the
+    previous behavior, which defaulted to ``True`` and silently masked
+    every failure mode upstream of pytest.
+    """
     path = log_dir / "test_results.json"
     if not path.exists():
-        return True, 1.0, {}
+        return False, 0.0, {}
 
     raw = json.loads(path.read_text())
     results = raw.get("results", raw)
@@ -227,6 +233,97 @@ def load_test_results(log_dir: Path) -> tuple[bool, float, dict]:
     success_ratio = (total_tests - failed) / total_tests if total_tests > 0 else 1.0
 
     return tests_passed, success_ratio, raw
+
+
+def summarize_pytest(raw: dict) -> dict:
+    """Extract structured pytest counters from test_results.json for the
+    reward dossier. Returns an empty dict if there's no usable content."""
+    if not raw:
+        return {}
+    results = raw.get("results", raw) or {}
+    summary = results.get("summary", {}) or {}
+    tests = results.get("tests", []) or []
+    return {
+        "exit_code": results.get("exit_code"),
+        "total": summary.get("total", 0),
+        "passed": summary.get("passed", 0),
+        "failed": summary.get("failed", 0),
+        "skipped": summary.get("skipped", 0),
+        "error": summary.get("error", 0),
+        "duration_s": results.get("duration"),
+        "selected_nodeids": [t.get("nodeid") for t in tests if t.get("nodeid")],
+        "strategy": raw.get("strategy"),
+        "note": raw.get("note"),
+    }
+
+
+def summarize_snapshots(log_dir: Path) -> dict:
+    """Collect snapshot verify summaries into a single structured block."""
+    out: dict = {"summaries": {}, "passed": True}
+    for match_path in glob_mod.glob(str(log_dir / "summary_*.json")):
+        name = Path(match_path).stem.removeprefix("summary_")
+        try:
+            data = json.loads(Path(match_path).read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        out["summaries"][name] = data
+        if data.get("passed") is False:
+            out["passed"] = False
+    return out
+
+
+def load_patch_info(log_dir: Path) -> dict:
+    path = log_dir / "patch_info.json"
+    if not path.exists():
+        return {"applied": False, "files": 0, "added_lines": 0, "removed_lines": 0}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"applied": False, "files": 0, "added_lines": 0, "removed_lines": 0}
+
+
+def load_setup_status(log_dir: Path) -> dict:
+    """Read setup_status.json written by setup.sh's EXIT trap.
+
+    Missing file means setup.sh never ran the trap (earlier crash, or an
+    old image without the trap baked in). Return a conservative default:
+    exit_code=None so downstream code can treat it as 'unknown' rather
+    than 'succeeded'.
+    """
+    path = log_dir / "setup_status.json"
+    if not path.exists():
+        return {"exit_code": None, "failed_phase": None, "succeeded": None}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"exit_code": None, "failed_phase": None, "succeeded": None}
+
+
+def load_timings(log_dir: Path) -> dict:
+    """Merge setup_timings.json (from setup.sh) and test_timings.json
+    (from test.sh). Missing files contribute no keys."""
+    merged: dict = {}
+    for name in ("setup_timings.json", "test_timings.json"):
+        path = log_dir / name
+        if not path.exists():
+            continue
+        try:
+            merged.update(json.loads(path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return merged
+
+
+def summarize_lsv_init(lsv_results: dict) -> dict:
+    init = (lsv_results or {}).get("init", {}) or {}
+    if not init:
+        return {}
+    return {
+        "benchmarks_discovered": init.get("benchmarks_discovered") or [],
+        "benchmarks_impactable": init.get("benchmarks_impactable") or [],
+        "source_files_covered": init.get("source_files_covered"),
+        "init_time_s": (init.get("timing") or {}).get("total_s"),
+    }
 
 
 def log_snapshot_results(log_dir: Path) -> None:
@@ -255,13 +352,31 @@ def write_reward(
     speedups: dict[str, float],
     speedup_levels: dict,
     tests_passed: bool,
-    snapshots_passed: bool,
+    snapshots: dict,
+    lsv_error: str | None = None,
+    *,
+    patch: dict | None = None,
+    lsv_init_summary: dict | None = None,
+    lsv_measure_raw: dict | None = None,
+    pytest_summary: dict | None = None,
+    timings: dict | None = None,
+    setup_status: dict | None = None,
 ) -> None:
-    """Write reward.json and reward.txt."""
+    """Write reward.json + reward.txt with a structured dossier.
+
+    The top-level gating fields (``num_valid_benchmarks``, ``max_speedup``,
+    ``lsv_mean_speedup``, ``tests_passed``, ``snapshots_passed``,
+    ``lsv_error``) are preserved for back-compat with the publish filter
+    and harbor_healthcheck row builder. Everything else lives in nested
+    sub-blocks so post-mortem triage has the full picture without
+    round-tripping through the trial container."""
     reward_dir.mkdir(parents=True, exist_ok=True)
 
-    # reward.json — keeps current format with agent_advantage fields
+    max_speedup = max(speedups.values()) if speedups else None
+    snapshots_passed = bool((snapshots or {}).get("passed", True))
+
     reward_data = {
+        # ── legacy scalar fields (publish filter, old downstream tools) ──
         "agent_advantage": (advantage_levels["level4"] if advantage_levels else None),
         "agent_advantage_level1": (
             advantage_levels["level1"] if advantage_levels else None
@@ -278,8 +393,27 @@ def write_reward(
         "num_valid_benchmarks": len(speedups),
         "per_benchmark_speedups": speedups,
         "lsv_mean_speedup": speedup_levels["level4"],
+        "max_speedup": max_speedup,
         "tests_passed": tests_passed,
         "snapshots_passed": snapshots_passed,
+        "lsv_error": lsv_error,
+        # ── structured dossier ────────────────────────────────────────────
+        "patch": patch or {},
+        "lsv": {
+            "init": lsv_init_summary or {},
+            "measure": {
+                "selected_count": (lsv_measure_raw or {}).get("selected_count"),
+                "total_count": (lsv_measure_raw or {}).get("total_count"),
+                "skipped_count": (lsv_measure_raw or {}).get("skipped_count"),
+                "time_s": ((lsv_measure_raw or {}).get("timing") or {}).get("total_s"),
+                "measured_count": len(speedups),
+                "error": lsv_error,
+            },
+        },
+        "pytest": pytest_summary or {},
+        "snapshots": snapshots or {},
+        "timings": timings or {},
+        "setup": setup_status or {},
     }
 
     (reward_dir / "reward.json").write_text(json.dumps(reward_data, indent=2))
@@ -289,9 +423,10 @@ def write_reward(
     (reward_dir / "reward.txt").write_text(str(speedup_value))
 
     print(f"[parser] reward.txt = {speedup_value}")
-    print(f"[parser] agent_advantage = {reward_data['agent_advantage']}")
+    print(f"[parser] max_speedup = {max_speedup}")
     print(f"[parser] num_valid_benchmarks = {len(speedups)}")
     print(f"[parser] tests_passed = {tests_passed}")
+    print(f"[parser] patch_applied = {(patch or {}).get('applied')}")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -305,14 +440,39 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Load all sidecars written by setup.sh / test.sh. Each helper returns
+    # an empty/default payload if its file is missing, so a partially-run
+    # trial still produces a well-formed reward.json.
+    patch_info = load_patch_info(LOG_DIR)
+    timings = load_timings(LOG_DIR)
+    snapshot_block = summarize_snapshots(LOG_DIR)
+    setup_status = load_setup_status(LOG_DIR)
+
     # Load LSV results
     lsv_results = load_lsv_results(LSV_DIR)
+    lsv_init_summary = summarize_lsv_init(lsv_results)
     if not lsv_results:
         print("[parser] No LSV results found. Writing zero reward.")
-        write_reward(REWARD_DIR, None, None, {}, {"level4": 0.0}, False, True)
+        write_reward(
+            REWARD_DIR,
+            None,
+            None,
+            {},
+            {"level4": 0.0},
+            False,
+            snapshot_block,
+            patch=patch_info,
+            lsv_init_summary=lsv_init_summary,
+            lsv_measure_raw=None,
+            pytest_summary={},
+            timings=timings,
+            setup_status=setup_status,
+        )
         sys.exit(1)
 
-    benchmarks = lsv_results.get("measure", {}).get("benchmarks", {})
+    measure_results = lsv_results.get("measure", {}) or {}
+    benchmarks = measure_results.get("benchmarks", {}) or {}
+    lsv_error = measure_results.get("error")
 
     # Compute speedups (baseline/current from LSV)
     speedups = compute_per_benchmark_speedups(benchmarks)
@@ -341,8 +501,9 @@ def main() -> None:
         else:
             print("[parser] SUPABASE_URL not set; skipping advantage computation")
 
-    # Load test and snapshot results
-    tests_passed, _, _ = load_test_results(LOG_DIR)
+    # Load test results + summarize pytest into a dossier block.
+    tests_passed, _, test_raw = load_test_results(LOG_DIR)
+    pytest_summary = summarize_pytest(test_raw)
     log_snapshot_results(LOG_DIR)
 
     # Write reward files
@@ -353,8 +514,22 @@ def main() -> None:
         speedups,
         speedup_levels,
         tests_passed,
-        True,
+        snapshot_block,
+        lsv_error=lsv_error,
+        patch=patch_info,
+        lsv_init_summary=lsv_init_summary,
+        lsv_measure_raw=measure_results,
+        pytest_summary=pytest_summary,
+        timings=timings,
+        setup_status=setup_status,
     )
+    if lsv_error:
+        print(f"[parser] lsv_error = {lsv_error}")
+    if setup_status.get("exit_code") not in (None, 0):
+        print(
+            f"[parser] setup_status = failed (exit_code={setup_status.get('exit_code')}, "
+            f"phase={setup_status.get('failed_phase')})"
+        )
 
     print("[parser] Complete.")
 

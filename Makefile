@@ -70,6 +70,10 @@ grafana-logs: ## Tail Grafana container logs
 grafana-tunnel: ## Expose Grafana publicly via Cloudflare Tunnel
 	@cloudflared tunnel run datasmith-grafana
 
+.PHONY: db-tunnel
+db-tunnel: ## Expose Supabase PostgREST API via Cloudflare Tunnel (db.formulacode.org)
+	@cloudflared tunnel run datasmith-db
+
 
 .PHONY: help
 help:

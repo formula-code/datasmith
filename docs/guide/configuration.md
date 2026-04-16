@@ -32,6 +32,36 @@ fc-data is configured primarily through a `tokens.env` file in the repository ro
 | `DOCKERHUB_TOKEN` | DockerHub access token |
 | `HF_TOKEN_PATH` | Path to HuggingFace token file |
 
+### Tunable constants
+
+Any module-level constant that is a knob — timeouts, retries, caps,
+windows, concurrency limits — is overridable from `tokens.env` without a
+code change. Every such variable is prefixed `DATASMITH_` so it is
+globally greppable in both Python and shell env. `tokens.env` is loaded
+at import time by `datasmith/__init__.py`, so setting one of these in the
+file is enough; no export needed.
+
+#### Stage 6: synthesize_images
+
+Rate-limit pause behavior (see [Synthesis → Rate-limit handling](synthesis.md#rate-limit-handling)):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATASMITH_RL_DEFAULT_PAUSE_S` | Fallback pause (seconds) when the agent signals a rate limit but no reset time could be parsed | `3600` |
+| `DATASMITH_RL_PAUSE_JITTER_S` | Grace seconds added to the parsed reset time before workers resume, to ride out clock skew | `30` |
+| `DATASMITH_RL_MAX_RETRIES` | Maximum consecutive rate-limit pauses for a single item before it is marked failed | `3` |
+
+Chronological neighborhood cascade (see [Synthesis → Chronological neighborhood cascade](synthesis.md#chronological-neighborhood-cascade)):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DATASMITH_NEIGHBOR_WINDOW_DAYS` | ± window, in days of PR `created_at`, for enqueuing neighbor PRs after a successful synthesis | `60` |
+| `DATASMITH_NEIGHBOR_CAP` | Hard ceiling on neighbor PRs enqueued per successful item | `40` |
+
+Setting `DATASMITH_NEIGHBOR_CAP=0` disables the cascade entirely — the
+runner then behaves like a pre-cascade fixed-item pool, useful for tight
+unit-style reruns where extra enqueues would confuse progress tracking.
+
 ## Agent backend resolution
 
 The agent configuration (`agents/config.py`) checks environment variables in priority order:
