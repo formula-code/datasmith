@@ -1,72 +1,124 @@
-# Remote Access via Cloudflare Tunnel
+# Remote Access
 
-fc-data stores all persistent state in a local Supabase instance. By
-default this is only reachable from the host machine (`127.0.0.1:54321`).
-A **Cloudflare Tunnel** lets a remote machine run the same fc-data
-pipeline against the same database — no VPN, no open ports, no firewall
-rules.
+The fc-data Supabase instance is not exposed on the public internet. Two paths
+reach it from outside the host:
+
+1. **Full read/write access** over a Cloudflare Tunnel, gated by Cloudflare
+   Access service tokens. Intended for pipeline operators running `fc-data`
+   against the shared database.
+2. **Public read-only access** via the Supabase anon key. Intended for
+   client-side websites that display dataset statistics.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    User["Remote fc-data<br/>(service token)"]
+    Web["Public website<br/>(anon key)"]
+    CFE["Cloudflare Edge<br/>db.formulacode.org"]
+    CFA["Cloudflare Access"]
+    subgraph Host["Host machine"]
+        CFD["cloudflared"]
+        SB["Supabase :54321<br/>PostgREST + RLS"]
+    end
+    User -->|CF-Access headers + service-role key| CFE
+    Web -->|anon key| CFE
+    CFE --> CFA
+    CFA --> CFD
+    CFD --> SB
 ```
-Remote machine                       Host machine
-┌──────────────┐                     ┌──────────────────────┐
-│  fc-data     │── HTTPS ──▶ Cloudflare Edge ──▶ cloudflared │──▶ Supabase
-│  tokens.env: │            (db.formulacode.org)  (tunnel)   │    :54321
-│  SUPABASE_URL│                                             │
-│  CF headers  │  Cloudflare Access                          │
-└──────────────┘  (service-token auth)                       └──────────────────────┘
+
+Cloudflare Access blocks every request at the edge unless it carries a valid
+service token. The anon-key path works because the RLS policies in
+`supabase/migrations/00012_public_read_rls.sql` allow `SELECT` for the `anon`
+role on four tables; writes and all other tables are rejected by RLS.
+
+---
+
+## For users
+
+### Full read/write access
+
+You need two things in `tokens.env`:
+
+```bash
+SUPABASE_URL=https://db.formulacode.org
+SUPABASE_KEY=<service-role key>
+
+DATASMITH_CF_ACCESS_CLIENT_ID=<client id>
+DATASMITH_CF_ACCESS_CLIENT_SECRET=<client secret>
 ```
 
-**Two layers of auth protect the database:**
+Both the service-role key and the Cloudflare Access credentials are issued by
+a maintainer. To request them, [open an issue][issues] asking for remote
+access; include the machine or project you need the credentials for.
 
-1. **Cloudflare Access** — a service token (`CF-Access-Client-Id` /
-   `CF-Access-Client-Secret` headers) must be present on every request
-   or Cloudflare rejects it at the edge before it ever reaches the tunnel.
-2. **Supabase service-role key** — the standard `apikey` header required
-   by PostgREST, unchanged from local usage.
+Verify the connection:
 
-## Prerequisites
+```bash
+fc-data --preflight
+```
 
-- A **Cloudflare account** (free plan is sufficient)
-- A **domain managed by Cloudflare** (e.g., `formulacode.org`)
-- `cloudflared` CLI installed on the **host machine** (the one running Supabase)
+### Public read-only access
 
-## Host machine setup
+Use the Supabase anon key (shown as the "Publishable" key in
+`supabase status`). No tunnel credentials are required; the host is the same.
+
+| Table | Exposed |
+|-------|---------|
+| `repositories` | Repository metadata |
+| `pull_requests` | PR metadata, classification, patches |
+| `candidate_containers` | Successful build scripts per SHA |
+| `harbor_runs` | Benchmark speedup results |
+
+Example:
+
+```js
+const SUPABASE_URL = "https://db.formulacode.org";
+const ANON_KEY = "sb_publishable_...";
+
+const res = await fetch(
+  `${SUPABASE_URL}/rest/v1/repositories?select=owner,repo,stars&order=stars.desc&limit=20`,
+  {
+    headers: {
+      "apikey": ANON_KEY,
+      "Authorization": `Bearer ${ANON_KEY}`,
+    },
+  },
+);
+```
+
+Writes return `HTTP 403: new row violates row-level security policy`.
+
+---
+
+## For developers (host machine setup)
+
+This section covers standing up the tunnel and Access policy. Day-to-day
+operation is in the [Makefile targets](#makefile-targets) at the bottom.
 
 ### 1. Install cloudflared
 
 ```bash
-# Debian / Ubuntu
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
   -o cloudflared.deb
 sudo dpkg -i cloudflared.deb
-
-# Verify
 cloudflared --version
 ```
 
-### 2. Authenticate
+### 2. Authenticate and create the tunnel
 
 ```bash
 cloudflared login
-```
-
-This opens a browser to authorize `cloudflared` with your Cloudflare
-account. Select the domain you want to use (e.g., `formulacode.org`).
-
-### 3. Create a tunnel
-
-```bash
 cloudflared tunnel create datasmith-db
 ```
 
-Note the **Tunnel ID** printed (e.g., `a1b2c3d4-...`). A credentials
-file is saved to `~/.cloudflared/<TUNNEL_ID>.json`.
+Note the printed Tunnel ID. Credentials are saved to
+`~/.cloudflared/<TUNNEL_ID>.json`.
 
-### 4. Configure the tunnel
+### 3. Configure the tunnel
 
-Create `~/.cloudflared/config.yml`:
+`~/.cloudflared/config.yml`:
 
 ```yaml
 tunnel: <TUNNEL_ID>
@@ -78,108 +130,68 @@ ingress:
   - service: http_status:404
 ```
 
-### 5. Create the DNS record
+### 4. DNS record
 
 ```bash
 cloudflared tunnel route dns datasmith-db db.formulacode.org
 ```
 
-This creates a CNAME record pointing `db.formulacode.org` to the tunnel.
-
-### 6. Run the tunnel
+### 5. Run the tunnel
 
 ```bash
-# Using the Makefile target (recommended)
-make db-tunnel
-
-# Or directly
-cloudflared tunnel run datasmith-db
-
-# As a systemd service (persistent, survives reboots)
-sudo cloudflared service install
-sudo systemctl enable cloudflared
-sudo systemctl start cloudflared
+make db-tunnel                        # foreground
+sudo cloudflared service install      # or as a systemd service
+sudo systemctl enable --now cloudflared
 ```
 
-At this point, `https://db.formulacode.org` proxies to your local
-Supabase PostgREST API — but **Cloudflare Access blocks all requests**
-until you create an access policy.
+At this point `https://db.formulacode.org` proxies to local Supabase but
+Cloudflare Access blocks everything until the policy is in place.
 
-## Cloudflare Access setup
+### 6. Cloudflare Access policy
 
-### 1. Create an application
+In [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → Access →
+Applications, add a self-hosted app:
 
-1. Go to [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) →
-   **Access** → **Applications**
-2. Click **Add an application** → **Self-hosted**
-3. Set:
-   - **Application name**: `datasmith-db`
-   - **Session duration**: `24 hours`
-   - **Application domain**: `db.formulacode.org`
-4. Under **Policies**, create a policy:
-   - **Policy name**: `Service Token`
-   - **Action**: Service Auth
-   - **Include**: Service Token (select the token you'll create next)
-5. Save the application
+- Application name: `datasmith-db`
+- Application domain: `db.formulacode.org`
+- Session duration: 24 hours
+- Policy: action `Service Auth`, include the service token below.
 
-### 2. Create a service token
+Then under Access → Service Auth → Service Tokens, create a token (e.g.
+`datasmith-remote`) and copy both the Client ID and Client Secret. The secret
+is only shown once. Hand these to the requesting user along with the
+service-role key.
 
-1. Go to **Access** → **Service Auth** → **Service Tokens**
-2. Click **Create Service Token**
-3. Name it (e.g., `datasmith-remote`)
-4. **Copy both values immediately** — the Client Secret is only shown once:
-   - `CF-Access-Client-Id` (e.g., `abc123.access`)
-   - `CF-Access-Client-Secret` (e.g., `long-secret-string`)
+### 7. Apply the RLS migration
 
-## Remote machine setup
-
-On the remote machine, edit `tokens.env`:
+The anon-key path requires `supabase/migrations/00012_public_read_rls.sql` to
+be applied:
 
 ```bash
-# Point at the tunnel instead of localhost
-SUPABASE_URL=https://db.formulacode.org
-SUPABASE_KEY=your-service-role-key          # Same key as the host machine
-
-# Cloudflare Access service token
-DATASMITH_CF_ACCESS_CLIENT_ID=abc123.access
-DATASMITH_CF_ACCESS_CLIENT_SECRET=long-secret-string
+docker exec supabase_db_<project> psql -U postgres -d postgres \
+  -c "$(cat supabase/migrations/00012_public_read_rls.sql)"
 ```
 
-The `SUPABASE_KEY` is the same service-role key used on the host — it is
-not a Cloudflare credential.
+### How the client picks up the headers
 
-### Verify connectivity
-
-```bash
-fc-data --preflight
-```
-
-The Supabase connection check should show `[OK]`. If it fails:
-
-- **403 Forbidden** — the CF Access headers are missing or the service
-  token is invalid. Double-check `DATASMITH_CF_ACCESS_CLIENT_ID` and
-  `DATASMITH_CF_ACCESS_CLIENT_SECRET`.
-- **502 Bad Gateway** — `cloudflared` is not running on the host machine
-  or Supabase is down. SSH into the host and check
-  `systemctl status cloudflared` and `supabase status`.
-- **Connection refused** — DNS is not resolving. Verify
-  `cloudflared tunnel route dns` was run and the CNAME exists in your
-  Cloudflare DNS dashboard.
-
-## How it works in the code
-
-When `DATASMITH_CF_ACCESS_CLIENT_ID` and `DATASMITH_CF_ACCESS_CLIENT_SECRET`
-are both set, `datasmith.utils.db` automatically injects the
+When both `DATASMITH_CF_ACCESS_CLIENT_ID` and
+`DATASMITH_CF_ACCESS_CLIENT_SECRET` are set, `datasmith.utils.db` injects the
 `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers into every
-Supabase client request via `ClientOptions`. No other code changes are
-needed — every call to `get_client()` or `get_async_client()` picks up
-the headers transparently.
+Supabase client request via `ClientOptions`. When unset, no extra headers are
+added and behavior is identical to local development.
 
-When neither variable is set (the default for local development), no
-extra headers are added and behavior is identical to before.
+### Troubleshooting
 
-## Makefile Targets
+| Symptom | Likely cause |
+|---------|-------------|
+| `403 Forbidden` | Missing or invalid CF Access headers |
+| `502 Bad Gateway` | `cloudflared` not running, or Supabase is down |
+| `Connection refused` | DNS not resolving; check the CNAME was created |
+
+## Makefile targets
 
 ```bash
-make db-tunnel        # Expose Supabase PostgREST API via Cloudflare Tunnel
+make db-tunnel        # Expose Supabase PostgREST via Cloudflare Tunnel
 ```
+
+[issues]: https://github.com/formula-code/datasmith/issues/new

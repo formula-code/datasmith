@@ -224,3 +224,13 @@ PARITY_TODOs.md
 backup
 rebuild
 run_interpreter.py
+run_harbor_single.py
+run_neighbor_synthesis.py
+run_single_synthesis.py
+run_single_synthesis_test.py
+
+# Local artifacts
+.claude/
+.python-version
+backups/
+jobs/
