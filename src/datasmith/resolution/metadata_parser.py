@@ -130,7 +130,7 @@ def parse_setup_py(path: Path) -> CandidateMeta:  # noqa: C901
                 return env[node.id]
             raise ValueError(f"Unknown name {node.id}")
 
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        if isinstance(node, ast.List | ast.Tuple | ast.Set):
             elts = []
             for e in node.elts:
                 elts.append(safe_eval(e, depth + 1))
@@ -138,7 +138,7 @@ def parse_setup_py(path: Path) -> CandidateMeta:  # noqa: C901
 
         if isinstance(node, ast.Dict):
             out: dict[Any, Any] = {}
-            for k, v in zip(node.keys, node.values):
+            for k, v in zip(node.keys, node.values, strict=False):
                 if k is None:
                     raise ValueError("Dict unpacking not allowed here")
                 key = safe_eval(k, depth + 1)
@@ -146,11 +146,11 @@ def parse_setup_py(path: Path) -> CandidateMeta:  # noqa: C901
                 out[key] = val
             return out
 
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.UAdd | ast.USub):
             v = safe_eval(node.operand, depth + 1)
-            if isinstance(v, (int, float)) and isinstance(node.op, ast.USub):
+            if isinstance(v, int | float) and isinstance(node.op, ast.USub):
                 return -v
-            if isinstance(v, (int, float)) and isinstance(node.op, ast.UAdd):
+            if isinstance(v, int | float) and isinstance(node.op, ast.UAdd):
                 return +v
             raise ValueError("Unsupported unary op")
 
@@ -182,7 +182,7 @@ def parse_setup_py(path: Path) -> CandidateMeta:  # noqa: C901
                     out2: dict[Any, Any] = {}
                     if isinstance(seq, list):
                         for item in seq:
-                            if isinstance(item, (list, tuple)) and len(item) == 2:
+                            if isinstance(item, list | tuple) and len(item) == 2:
                                 out2[item[0]] = item[1]
                             else:
                                 raise ValueError("Unsupported dict constructor form")
@@ -209,9 +209,9 @@ def parse_setup_py(path: Path) -> CandidateMeta:  # noqa: C901
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         env[target.id] = val
-                    elif isinstance(target, (ast.Tuple, ast.List)):  # noqa: SIM102
-                        if isinstance(val, (list, tuple)) and len(target.elts) == len(val):
-                            for elt, v in zip(target.elts, val):
+                    elif isinstance(target, ast.Tuple | ast.List):  # noqa: SIM102
+                        if isinstance(val, list | tuple) and len(target.elts) == len(val):
+                            for elt, v in zip(target.elts, val, strict=False):
                                 if isinstance(elt, ast.Name):
                                     env[elt.id] = v
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
@@ -261,15 +261,15 @@ def parse_setup_py(path: Path) -> CandidateMeta:  # noqa: C901
         if isinstance(pyreq, str):
             meta.requires_python = pyreq
         install_requires = setup_kwargs.get("install_requires")
-        if isinstance(install_requires, (list, tuple)):
+        if isinstance(install_requires, list | tuple):
             meta.core_deps.update([x for x in install_requires if isinstance(x, str)])
         extras_require = setup_kwargs.get("extras_require")
         if isinstance(extras_require, dict):
             for k, v in extras_require.items():
-                if isinstance(k, str) and isinstance(v, (list, tuple)):
+                if isinstance(k, str) and isinstance(v, list | tuple):
                     meta.extras[k] = {x for x in v if isinstance(x, str)}
         setup_requires = setup_kwargs.get("setup_requires")
-        if isinstance(setup_requires, (list, tuple)):
+        if isinstance(setup_requires, list | tuple):
             meta.build_requires.update([x for x in setup_requires if isinstance(x, str)])
 
     return meta

@@ -145,6 +145,9 @@ ignore = [
     "S701",
     # mutable class attr without ClassVar (acceptable for registries)
     "RUF012",
+    # PEP 695 type params require 3.12+; we still test on 3.11
+    "UP046",
+    "UP047",
     # ternary suggestions (readability preference)
     "SIM108",
 ]
