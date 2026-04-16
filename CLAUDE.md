@@ -78,6 +78,10 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 - **Build**: hatchling backend, uv for dependency management
 - **CI**: GitHub Actions runs `make check` + tests on Python 3.11 and 3.12
 
+### Documentation
+
+After making a feature change, decide whether the change is significant enough to warrant updating the documentation in `docs/`. Changes that affect user-facing behavior, CLI flags, configuration knobs, pipeline stages, agent backends, or architectural decisions should be reflected in the relevant guide or design doc. Internal refactors, bug fixes, and implementation details generally do not need doc updates unless they change observable behavior.
+
 ### Tunable constants
 
 Any module-level constant that is a knob — timeouts, retries, caps, windows,
