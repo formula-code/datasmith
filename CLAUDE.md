@@ -134,7 +134,7 @@ When both `DATASMITH_CF_ACCESS_*` vars are set, `get_client()` and `get_async_cl
 
 ### Public read-only access (RLS)
 
-Four tables have Row Level Security enabled with `public_read` SELECT-only policies for the `anon` role: `repositories`, `pull_requests`, `candidate_containers`, `harbor_runs`. The service-role key bypasses RLS, so pipeline processes are unaffected. See `supabase/migrations/00012_public_read_rls.sql`.
+Four tables are readable by the `anon` role: `repositories`, `pull_requests`, `candidate_containers`, `harbor_runs`. Migration `00012_public_read_rls.sql` enables RLS with a `public_read` SELECT policy on those tables; migration `00015_revoke_anon_select.sql` revokes Supabase's default broad `anon` `SELECT` grant and re-grants it only on the four, so every other table returns `permission denied`. The service-role key bypasses both layers, so pipeline processes are unaffected. Public anon access is served on `https://api.formulacode.org` (no Cloudflare Access gate); pipeline operators continue to use `https://db.formulacode.org` with CF Access + service-role key.
 
 ### Key tables
 
