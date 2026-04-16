@@ -690,3 +690,19 @@ if __name__ == "__main__":
     print("FORMULACODE_TESTS_END")
     with open("/logs/test_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, sort_keys=True)
+
+    # Propagate pytest's exit code so run-tests.sh (and local_ci.py) can
+    # gate on it.  Without this, the script always exits 0 and broken test
+    # suites silently pass verification.
+    #
+    # Exit code semantics (pytest.ExitCode):
+    #   0 = OK (all passed)          → success
+    #   1 = TESTS_FAILED (some fail) → success (test failures are acceptable;
+    #       they indicate the upstream suite has flaky/broken tests at this
+    #       commit, not that the build is broken)
+    #   2 = INTERRUPTED              → failure (collection errors)
+    #   3 = INTERNAL_ERROR           → failure
+    #   4 = USAGE_ERROR              → failure
+    #   5 = NO_TESTS_COLLECTED       → failure
+    raw_exit = output["results"].get("exit_code", 0)
+    sys.exit(0 if raw_exit in (0, 1) else raw_exit)
