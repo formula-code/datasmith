@@ -11,6 +11,7 @@ structured output.
 | Claude Code | `claude` | `npm install -g @anthropic-ai/claude-code` |
 | Codex | `codex` | `npm install -g @openai/codex` |
 | Gemini CLI | `gemini` | `npm install -g @anthropic-ai/gemini-cli` |
+| Qwen Code | `qwen` | `npm install -g @qwen-code/qwen-code` |
 
 ## Interface contract
 

@@ -9,6 +9,7 @@ from datasmith.agents.installed.claude import ClaudeAgent
 from datasmith.agents.installed.codex import CodexAgent
 from datasmith.agents.installed.gemini import GeminiAgent
 from datasmith.agents.installed.none import NoneAgent
+from datasmith.agents.installed.qwen import QwenAgent
 
 __all__ = [
     "AgentResult",
@@ -18,5 +19,6 @@ __all__ = [
     "GeminiAgent",
     "InstalledAgent",
     "NoneAgent",
+    "QwenAgent",
     "get_agent",
 ]
