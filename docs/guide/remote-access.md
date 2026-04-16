@@ -178,6 +178,65 @@ the headers transparently.
 When neither variable is set (the default for local development), no
 extra headers are added and behavior is identical to before.
 
+## Public read-only access
+
+Four tables are exposed for **unauthenticated read-only** access via
+the Supabase **anon key** (called "Publishable" key in `supabase status`).
+This is intended for public-facing websites that need to display dataset
+statistics without any server-side credentials.
+
+### Tables with public SELECT policies
+
+| Table | What's exposed |
+|-------|---------------|
+| `repositories` | Repository metadata (owner, repo, stars, description) |
+| `pull_requests` | PR metadata, classification, difficulty, patches |
+| `candidate_containers` | Successful build scripts per SHA |
+| `harbor_runs` | Benchmark speedup results per container |
+
+All other tables remain locked down — the anon key cannot read them.
+
+### How it works
+
+Row Level Security (RLS) is enabled on these tables with a `public_read`
+policy that allows `SELECT` for the `anon` role. The service-role key
+(used by the pipeline) bypasses RLS entirely, so active processes are
+unaffected.
+
+The anon key is safe to embed in client-side code — it can only read
+the 4 tables above. Writes are rejected by RLS:
+
+```
+HTTP 403: new row violates row-level security policy
+```
+
+### Frontend usage
+
+```js
+const SUPABASE_URL = "https://api.formulacode.org";
+const ANON_KEY = "sb_publishable_...";  // from `supabase status`
+
+const res = await fetch(
+  `${SUPABASE_URL}/rest/v1/repositories?select=owner,repo,stars&order=stars.desc&limit=20`,
+  {
+    headers: {
+      "apikey": ANON_KEY,
+      "Authorization": `Bearer ${ANON_KEY}`
+    }
+  }
+);
+```
+
+### Migration
+
+The RLS policies are defined in `supabase/migrations/00012_public_read_rls.sql`.
+To apply on a fresh instance:
+
+```bash
+docker exec supabase_db_<project> psql -U postgres -d postgres \
+  -c "$(cat supabase/migrations/00012_public_read_rls.sql)"
+```
+
 ## Makefile Targets
 
 ```bash

@@ -130,6 +130,10 @@ The Supabase PostgREST API is also available at `https://db.formulacode.org` via
 
 When both `DATASMITH_CF_ACCESS_*` vars are set, `get_client()` and `get_async_client()` in `utils/db.py` automatically inject the required headers. See `docs/guide/remote-access.md` for full setup instructions.
 
+### Public read-only access (RLS)
+
+Four tables have Row Level Security enabled with `public_read` SELECT-only policies for the `anon` role: `repositories`, `pull_requests`, `candidate_containers`, `harbor_runs`. The service-role key bypasses RLS, so pipeline processes are unaffected. See `supabase/migrations/00012_public_read_rls.sql`.
+
 ### Key tables
 
 | Table | Purpose | Populated by |
