@@ -9,7 +9,7 @@ The synthesizer follows a strict try-existing-first strategy:
 1. **Check cache** — Look up Supabase for an existing build script for this PR
 2. **Find similar** — Query Supabase for similar scripts from the same repository
 3. **Try similar** — Run each similar script against the verifier chain
-4. **LLM generate** — Fall back to an installed coding agent (Claude Code, Codex, or Gemini)
+4. **LLM generate** — Fall back to an installed coding agent (Claude Code, Codex, Gemini, or Qwen Code)
 5. **Fail** — Log all attempts and return `None`
 
 All attempts are logged to the `build_attempts` table so failed PRs can be retried later with improved prompts or models.
@@ -57,6 +57,7 @@ The synthesizer auto-detects which coding agent CLI is installed:
 | Claude Code | `claude` | Checks `which claude` |
 | Codex | `codex` | Checks `which codex` |
 | Gemini | `gemini` | Checks `which gemini` |
+| Qwen Code | `qwen` | Checks `which qwen` |
 
 The agent runs in a sandboxed workspace with the Docker build context, edits build scripts, runs verification, and iterates until the verifier passes or attempts are exhausted.
 
