@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable
-from typing import Any, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from datasmith.github.models import IssueExpanded
 from datasmith.utils import get_logger

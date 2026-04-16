@@ -9,8 +9,8 @@ import pickle
 import re
 import sqlite3
 import threading
-from collections.abc import Iterator
-from typing import Callable, ParamSpec, TypeVar, cast
+from collections.abc import Callable, Iterator
+from typing import ParamSpec, TypeVar, cast
 
 _cache_lock = threading.Lock()
 _P = ParamSpec("_P")

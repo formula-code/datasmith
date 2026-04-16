@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, ClassVar
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 from datasmith.utils import get_logger, supabase_cached
 

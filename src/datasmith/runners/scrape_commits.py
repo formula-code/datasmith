@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from datasmith.filters import symbolic_compliance
@@ -17,7 +17,7 @@ def _parse_iso(value: str | None) -> datetime | None:
         return None
     # Handle date-only strings like "2024-01-01"
     if "T" not in value:
-        return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(value).replace(tzinfo=UTC)
     # Handle full ISO datetime strings (with or without trailing Z)
     cleaned = value.replace("Z", "+00:00")
     return datetime.fromisoformat(cleaned)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from datasmith.publish.huggingface import HuggingFacePublisher
 from datasmith.publish.records import records_from_supabase
@@ -26,7 +26,7 @@ async def publish_pipeline(
 
     logger.info("Found %d unpublished records", len(records))
 
-    version = f"formulacode@{datetime.now(tz=timezone.utc).strftime('%Y-%m')}"
+    version = f"formulacode@{datetime.now(tz=UTC).strftime('%Y-%m')}"
 
     # DockerHub push (optional)
     if dockerhub_push:
@@ -47,7 +47,7 @@ async def publish_pipeline(
 
     # Mark as published in Supabase
     client = get_client()
-    now = datetime.now(tz=timezone.utc).isoformat()
+    now = datetime.now(tz=UTC).isoformat()
     for record in records:
         try:
             client.table("pull_requests").update({"published_at": now}).eq("owner", record.owner).eq(
