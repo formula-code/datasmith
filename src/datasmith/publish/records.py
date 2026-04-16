@@ -97,7 +97,7 @@ def records_from_supabase(  # noqa: C901
     records: list[FormulaCodeRecord] = []
     for row in rows:
         sha = row.get("merge_commit_sha", "")
-        best = best_speedup.get((row.get("owner"), row.get("repo"), sha))
+        best = best_speedup.get((row.get("owner", ""), row.get("repo", ""), sha))
         if best is None:
             dropped_no_run += 1
             continue

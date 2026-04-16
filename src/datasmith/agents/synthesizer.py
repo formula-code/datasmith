@@ -567,7 +567,7 @@ class Synthesizer:
         }
         try:
             client = get_client()
-            client.table("error_logs").insert(row).execute()
+            client.table("error_logs").insert(row).execute()  # type: ignore[arg-type]
             logger.info(
                 "Logged tamper detection for %s/%s@%s attempt %d: %s",
                 owner,

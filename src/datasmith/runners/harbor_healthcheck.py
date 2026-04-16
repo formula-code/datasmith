@@ -47,7 +47,7 @@ def _patch_harbor_trial_name() -> None:
         return self.task.get_task_id().get_name()
 
     TrialConfig.generate_trial_name = _deterministic_trial_name
-    TrialConfig._fc_datasmith_patched = True  # type: ignore[attr-defined]
+    TrialConfig._fc_datasmith_patched = True
 
 
 def _build_verifier_env() -> dict[str, str]:

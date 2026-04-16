@@ -86,6 +86,10 @@ warn_return_any = true
 warn_unused_ignores = true
 show_error_codes = true
 
+[[tool.mypy.overrides]]
+module = "harbor.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -172,10 +176,10 @@ branch = true
 source = ["src"]
 
 [tool.deptry]
-exclude = ["src/datasmith/docker/templates/", "src/datasmith/agents/templates/"]
+exclude = ["src/datasmith/docker/templates/", "src/datasmith/agents/templates/", "src/datasmith/harbor_adapter/template/"]
 ignore = ["DEP003"]
 [tool.deptry.per_rule_ignores]
-DEP001 = ["tomllib"]
+DEP001 = ["tomllib", "tomli"]
 DEP004 = ["pandas"]
 
 [[tool.mypy.overrides]]
