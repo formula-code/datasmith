@@ -33,7 +33,22 @@ SNAPSHOT_TIMEOUT = os.environ.get("FORMULACODE_SNAPSHOT_TIMEOUT", "30")
 
 
 def detect_source_root() -> Path:
-    """Derive the source package root from /tests/config.json patch headers."""
+    """Derive the source package root from /tests/config.json patch headers.
+
+    Matching strategy (first existing wins):
+
+    1. If the patch touches exactly one non-skip top-level dir AND that dir
+       exists, use it. Handles the common flat layout (``pandas/``,
+       ``numpy/``).
+    2. Otherwise, search for ``<pkg>/__init__.py`` under the repo, skipping
+       well-known non-source dirs. Shortest path wins. Handles src-layout
+       repos where sources live under ``lib/<pkg>`` (contourpy),
+       ``src/<pkg>`` (many modern projects), or ``python/<pkg>``.
+    3. Fall back to ``<pkg>``, ``src/<pkg>``, ``lib/<pkg>``, ``python/<pkg>``
+       in that order.
+    4. Last resort: ``REPO_ROOT / pkg`` (may not exist — LSV will raise a
+       clear error with the path included).
+    """
     config_path = Path("/tests/config.json")
     if not config_path.exists():
         config_path = Path("/workspace/repo/tests/config.json")
@@ -41,22 +56,193 @@ def detect_source_root() -> Path:
     patch = config.get("patch", "")
     paths = re.findall(r"diff --git a/([^ ]+)", patch)
 
-    skip = {"doc", "docs", "test", "tests", ".github", "benchmarks", "asv_bench"}
+    skip = {
+        "doc", "docs", "test", "tests", ".github", "benchmarks", "asv_bench",
+        "ci", "scripts", "examples", "docs_src", "doc_src",
+    }
+    # Dirs that exist as a literal patch root but aren't the actual package —
+    # psygnal ships as src/psygnal, contourpy as lib/contourpy, etc. When the
+    # only non-skip patch root is one of these, skip step 1 and fall through
+    # to the <pkg>/__init__.py search.
+    src_layout_holders = {"src", "lib", "python", "packages"}
     roots = {p.split("/")[0] for p in paths if "/" in p} - skip
 
-    if len(roots) == 1:
-        return REPO_ROOT / roots.pop()
-
     pkg = config.get("repo_name", "").split("/")[-1].replace("-", "_")
-    return REPO_ROOT / pkg
+
+    if len(roots) == 1 and next(iter(roots)) not in src_layout_holders:
+        cand = REPO_ROOT / next(iter(roots))
+        if cand.is_dir():
+            return cand
+
+    if pkg:
+        candidates = sorted(
+            REPO_ROOT.glob(f"**/{pkg}/__init__.py"),
+            key=lambda p: len(p.parts),
+        )
+        for c in candidates:
+            parts = c.relative_to(REPO_ROOT).parts
+            # Reject matches nested inside a skip dir (e.g. benchmarks/pkg/...)
+            if not any(part in skip for part in parts[:-2]):
+                return c.parent
+
+        for layout in ("", "src", "lib", "python"):
+            cand = (REPO_ROOT / layout / pkg) if layout else (REPO_ROOT / pkg)
+            if cand.is_dir():
+                return cand
+
+    return REPO_ROOT / (pkg or "src")
+
+
+def _strip_jsonc(text: str) -> str:
+    """Make JSONC text parseable by ``json.loads``.
+
+    Handles three JSONC features that asv.conf.json files routinely use
+    but stdlib JSON rejects:
+
+    1. ``//`` line comments
+    2. ``/* */`` block comments
+    3. trailing commas before ``}`` or ``]``
+
+    All three must be handled in a **single pass** that tracks whether
+    we're inside a double-quoted string (with backslash escapes), because
+    a naive regex would mangle strings like ``"https://foo"`` (comment
+    regex would strip ``//foo"``) or ``"a, "`` (trailing-comma regex
+    would strip a legitimate comma inside a string).
+
+    Strategy for trailing commas: when we see ``,`` outside a string,
+    peek ahead past whitespace — if the next meaningful character is
+    ``}`` or ``]``, drop the comma. Comments encountered during the peek
+    are treated as whitespace.
+    """
+    n = len(text)
+    out: list[str] = []
+    i = 0
+    in_str = False
+
+    def _next_meaningful(k: int) -> str:
+        """Return the first non-whitespace, non-comment char at or after k,
+        or '' if end of input."""
+        while k < n:
+            c = text[k]
+            if c in " \t\r\n":
+                k += 1
+                continue
+            if c == "/" and k + 1 < n:
+                nx = text[k + 1]
+                if nx == "/":
+                    j = text.find("\n", k + 2)
+                    k = n if j == -1 else j + 1
+                    continue
+                if nx == "*":
+                    j = text.find("*/", k + 2)
+                    k = n if j == -1 else j + 2
+                    continue
+            return c
+        return ""
+
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt == "/":
+                j = text.find("\n", i + 2)
+                i = n if j == -1 else j
+                continue
+            if nxt == "*":
+                j = text.find("*/", i + 2)
+                i = n if j == -1 else j + 2
+                continue
+        if ch == ",":
+            follower = _next_meaningful(i + 1)
+            if follower in ("}", "]"):
+                # Drop the trailing comma; emit nothing.
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _load_jsonc(path: Path) -> dict | None:
+    """Parse a JSON-with-comments file. asv.conf.json files frequently use
+    ``//`` line comments and ``/* */`` block comments (scikit-learn's inner
+    config in particular), which vanilla ``json.loads`` rejects. Strip the
+    comments first, then parse. Returns ``None`` if the file can't be read
+    or the stripped content still isn't valid JSON."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    try:
+        return json.loads(_strip_jsonc(text))
+    except json.JSONDecodeError:
+        return None
 
 
 def find_asv_config() -> Path:
-    """Find the asv.*.json config file in the repo."""
-    matches = glob(str(REPO_ROOT / "**/asv.*.json"), recursive=True)
+    """Find the asv.*.json config file in the repo.
+
+    Some repos (notably scikit-learn) ship multiple asv configs — a stub at
+    the repo root plus the real one under a subdir like ``asv_benchmarks/``.
+    sklearn's repo root also has a legacy empty ``benchmarks/`` directory
+    that matches the outer config's ``benchmark_dir`` but is missing the
+    ``__init__.py`` asv requires, so a simple "is_dir" check picks the
+    wrong config.
+
+    Pick the config whose resolved ``benchmark_dir`` is a *valid* asv
+    benchmark package — i.e. contains ``__init__.py``. Fall back to any
+    existing directory, then to ``matches[0]`` with a warning.
+    """
+    matches = sorted(glob(str(REPO_ROOT / "**/asv.*.json"), recursive=True))
     if not matches:
         print("ERROR: No asv.*.json config found")
         sys.exit(1)
+
+    def _bench_dir_for(cfg_path: Path) -> Path | None:
+        data = _load_jsonc(cfg_path)
+        if data is None:
+            return None
+        bench_rel = data.get("benchmark_dir") or "benchmarks"
+        return (cfg_path.parent / bench_rel).resolve()
+
+    # Pass 1: config whose benchmark_dir has an __init__.py (asv-valid).
+    for match in matches:
+        p = Path(match)
+        bd = _bench_dir_for(p)
+        if bd and bd.is_dir() and (bd / "__init__.py").is_file():
+            print(f"[{_ts()}] [lsv_init] picked asv config: {p} (benchmark_dir={bd})")
+            return p
+
+    # Pass 2: any config whose benchmark_dir exists at all (softer fallback).
+    for match in matches:
+        p = Path(match)
+        bd = _bench_dir_for(p)
+        if bd and bd.is_dir():
+            print(
+                f"[{_ts()}] [lsv_init] WARNING: picked asv config {p} whose "
+                f"benchmark_dir {bd} lacks __init__.py — asv will likely reject it"
+            )
+            return p
+
+    print(
+        f"[{_ts()}] [lsv_init] WARNING: no asv config resolved to a real "
+        f"benchmark_dir; falling back to {matches[0]}"
+    )
     return Path(matches[0])
 
 
