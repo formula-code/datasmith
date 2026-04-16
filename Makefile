@@ -72,7 +72,7 @@ grafana-tunnel: ## Expose Grafana publicly via Cloudflare Tunnel
 
 .PHONY: db-tunnel
 db-tunnel: ## Expose Supabase PostgREST API via Cloudflare Tunnel (db.formulacode.org)
-	@cloudflared tunnel run datasmith-db
+	@cloudflared tunnel --config ~/.cloudflared/config-db.yml run datasmith-db
 
 
 .PHONY: help
