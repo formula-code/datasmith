@@ -16,7 +16,7 @@ classifiers = [
 dependencies = [
     "dspy>=2.6.27",
     "gitpython",
-    "harbor @ file:///mnt/sdd1/atharvas/formulacode/eval_frameworks/harbor",
+    "harbor @ git+https://github.com/formula-code/harbor.git",
     "httpx>=0.27",
     "huggingface-hub>=0.20",
     "jinja2>=3.1.6",
