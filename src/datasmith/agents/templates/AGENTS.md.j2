@@ -1,5 +1,10 @@
 # FormulaCode Docker Build Verification Guide
 
+**Your only job is to make the upstream build, tests, and benchmarks pass by
+fixing real dependency and configuration problems.** Do not create test files,
+benchmark suites, ASV configs, or `/logs/` artifacts — the pipeline validates
+outputs independently and rejects fabricated results.
+
 You are fixing a Docker build context for the FormulaCode dataset. The goal of
 this workspace is to produce a Docker image in which the upstream repository
 **at the base commit** (`{{ sha }}`) builds cleanly, the project package

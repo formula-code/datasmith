@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from datasmith.agents.rate_limit import RateLimitError
+from datasmith.agents.rate_limit import check as check_rate_limit
 from datasmith.agents.sandbox import SandboxResult, verify_context
 from datasmith.agents.tamper_audit import TamperResult, classify_context
 from datasmith.docker.context import DockerContext
@@ -53,6 +55,7 @@ class Synthesizer:
         agent: str | None = None,
         force: bool = False,
         max_aborts: int = 2,
+        max_default_failures_per_repo: int = 3,
     ) -> None:
         self._max_attempts = max_attempts
         self._max_aborts = max_aborts
@@ -60,9 +63,18 @@ class Synthesizer:
         self._agent = agent
         self._force = force
         self._trace: list[SynthesisState] = []
-        # Repos for which TRY_DEFAULT has already run in this pipeline run.
-        # Gated in-memory so we only pay the default-build cost once per repo.
+        # Repos for which TRY_DEFAULT has already SUCCEEDED in this run.
+        # Once any PR succeeds with the default template for a repo, the row
+        # is in `candidate_containers` and later PRs should hit TRY_SIMILAR
+        # (which re-verifies the saved context against a new SHA) instead of
+        # redundantly rebuilding the default template from scratch.
         self._tried_default_repos: set[tuple[str, str]] = set()
+        # Failure counter per repo. If TRY_DEFAULT fails `max_default_failures_per_repo`
+        # times for the same repo, we stop retrying and fall through to LLM_GENERATE
+        # (or fail if agent=none). Prevents burning hours on repos where every PR's
+        # base commit is structurally broken.
+        self._max_default_failures_per_repo = max_default_failures_per_repo
+        self._default_failures: dict[tuple[str, str], int] = {}
 
     @property
     def trace(self) -> list[SynthesisState]:
@@ -79,6 +91,7 @@ class Synthesizer:
         env_payload: str = "",
         python_version: str = "",
         force: bool = False,
+        base_sha: str = "",
     ) -> DockerContext | None:
         """Run the synthesis state machine. Returns DockerContext on success, None on failure."""
         self._trace = []
@@ -108,6 +121,7 @@ class Synthesizer:
                     env_payload=env_payload,
                     python_version=python_version,
                     context=ctx,
+                    base_sha=base_sha,
                 )
                 if result.success:
                     logger.info("Similar context passed for %s/%s#%d", owner, repo, issue_number)
@@ -122,11 +136,43 @@ class Synthesizer:
                     return ctx
                 failed_attempts.append((ctx, result))
 
-        # State: TRY_DEFAULT — attempt a build with the stock template scripts
-        # once per repo per run. If it works, no agent needed; if it doesn't,
-        # the failure trace becomes prior-attempt context for the LLM.
-        if (owner, repo) not in self._tried_default_repos:
-            self._tried_default_repos.add((owner, repo))
+        # State: TRY_DEFAULT — attempt a build with the stock template scripts.
+        #
+        # Concurrency note: a single Synthesizer is shared across N concurrent
+        # workers. The old design checked-and-marked `_tried_default_repos`
+        # before `verify_context` ran, so in a race all workers but one would
+        # short-circuit TRY_DEFAULT even when the first worker's attempt was
+        # still in flight — and a single unlucky SHA failure would doom every
+        # subsequent PR in the same repo.
+        #
+        # New semantics:
+        #   - `_tried_default_repos` marks only SUCCESS. Once any PR succeeds
+        #     with the default template for this repo, the row is in
+        #     `candidate_containers` and later PRs hit TRY_SIMILAR.
+        #   - `_default_failures` counts failures. After
+        #     `max_default_failures_per_repo` consecutive failures we stop
+        #     retrying to avoid burning hours on structurally broken repos
+        #     (e.g. every PR's env_payload is incompatible with the base image).
+        fail_count = self._default_failures.get((owner, repo), 0)
+        already_succeeded = (owner, repo) in self._tried_default_repos
+        too_many_failures = fail_count >= self._max_default_failures_per_repo
+        if already_succeeded:
+            logger.debug(
+                "Skipping TRY_DEFAULT for %s/%s#%d — default already succeeded for this repo",
+                owner,
+                repo,
+                issue_number,
+            )
+        elif too_many_failures:
+            logger.info(
+                "Skipping TRY_DEFAULT for %s/%s#%d — %d prior failures (cap=%d)",
+                owner,
+                repo,
+                issue_number,
+                fail_count,
+                self._max_default_failures_per_repo,
+            )
+        if (not already_succeeded) and (not too_many_failures):
             self._trace.append(SynthesisState.TRY_DEFAULT)
             default_ctx = _load_default_context()
             result = verify_context(
@@ -137,6 +183,7 @@ class Synthesizer:
                 env_payload=env_payload,
                 python_version=python_version,
                 context=default_ctx,
+                base_sha=base_sha,
             )
             if result.success:
                 tamper = classify_context(default_ctx)
@@ -152,9 +199,11 @@ class Synthesizer:
                         tamper.as_list(),
                     )
                     self._log_tamper(owner, repo, sha, issue_number, 0, tamper, "try_default")
+                    self._default_failures[(owner, repo)] = fail_count + 1
                     failed_attempts.append((default_ctx, result))
                 else:
                     logger.info("Default template build succeeded for %s/%s#%d", owner, repo, issue_number)
+                    self._tried_default_repos.add((owner, repo))
                     self._save_context(
                         owner,
                         repo,
@@ -165,6 +214,7 @@ class Synthesizer:
                     )
                     return default_ctx
             else:
+                self._default_failures[(owner, repo)] = fail_count + 1
                 failed_attempts.append((default_ctx, result))
             logger.info(
                 "Default template build failed for %s/%s#%d — feeding trace into LLM priors",
@@ -201,6 +251,7 @@ class Synthesizer:
                 prior_attempts=prior_attempts,
                 issue_number=issue_number,
                 attempt_index=attempt_idx,
+                base_sha=base_sha,
             )
             if generated is not None:
                 tamper = classify_context(generated)
@@ -221,8 +272,11 @@ class Synthesizer:
                         tamper.as_list(),
                     )
                     self._log_tamper(owner, repo, sha, issue_number, attempt_idx, tamper, "llm_generate")
-                    attempt_idx += 1
-                    continue
+                    # Fail-fast: an agent that fabricates artifacts on one
+                    # attempt will almost certainly do it again on the next.
+                    # Break immediately instead of burning another multi-hour
+                    # session on the same PR.
+                    break
                 logger.info(
                     "Sandbox synthesis succeeded for %s/%s#%d (attempt %d)",
                     owner,
@@ -379,6 +433,7 @@ class Synthesizer:
         prior_attempts: str = "",
         issue_number: int = 0,
         attempt_index: int = 0,
+        base_sha: str = "",
     ) -> tuple[DockerContext | None, dict, bool]:
         from datasmith.agents.sandbox import SandboxRunner
 
@@ -393,6 +448,7 @@ class Synthesizer:
             pr_context=pr_context,
             prior_attempts=prior_attempts,
             dry_run=self._dry_run,
+            base_sha=base_sha,
         )
         self._log_attempt(
             owner=owner,
@@ -402,6 +458,16 @@ class Synthesizer:
             attempt_index=attempt_index,
             result=result,
         )
+        # Surface budget exhaustion as a typed exception so the runner can
+        # pause *all* workers until the reset time instead of burning the
+        # remaining attempt budget on what will just be more ~2s failures.
+        is_rl, reset_at = check_rate_limit(result.agent_name, result.raw_agent_output)
+        if is_rl:
+            raise RateLimitError(
+                agent_name=result.agent_name,
+                reset_at=reset_at,
+                message=(f"{result.agent_name} hit usage limit during synthesis for {owner}/{repo}@{sha[:12]}"),
+            )
         ctx = result.docker_context if result.success else None
         return ctx, result.resource_metrics, result.aborted
 
@@ -426,9 +492,16 @@ class Synthesizer:
         # Aborted attempts (agent never produced failure.json or
         # verification_success.json) get a sentinel stage so they're
         # distinguishable from real verifier failures in error_logs.
-        if result.aborted:
-            failure_stage: str | None = "aborted"
+        is_rl, rl_reset = check_rate_limit(result.agent_name, result.raw_agent_output)
+        rl_reset_iso: str | None = rl_reset.isoformat() if (is_rl and rl_reset) else None
+        if is_rl:
+            failure_stage: str | None = "rate_limited"
             error_message: str | None = (
+                f"{result.agent_name} hit weekly/periodic usage limit; reset_at={rl_reset_iso or 'unknown'}"
+            )
+        elif result.aborted:
+            failure_stage = "aborted"
+            error_message = (
                 "Agent exited without running local_ci.py to completion "
                 "(no failure.json or verification_success.json found)."
             )
@@ -451,6 +524,7 @@ class Synthesizer:
             "agent_output": raw_output or None,
             "files_changed": json.dumps(result.files_changed),
             "resource_metrics": result.resource_metrics or None,
+            "rate_limit_reset_at": rl_reset_iso,
             "created_at": timestamp,
         }
         try:
