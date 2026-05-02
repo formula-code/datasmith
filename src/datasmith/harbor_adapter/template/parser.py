@@ -70,57 +70,105 @@ def _supabase_get(url: str, headers: dict) -> dict | list | None:
         return None
 
 
-def fetch_oracle_benchmarks(base_url: str, task_id: str) -> dict[str, float] | None:
-    """Fetch the oracle's per-benchmark timings from Supabase.
+def _datasmith_headers() -> dict[str, str] | None:
+    """Auth headers for datasmith's Supabase. Mirrors lsv_cache_writeback.py.
 
-    1. GET tasks?task_id=eq.{id} to find baseline_run_id
-    2. GET runs?uuid=eq.{baseline_run_id} to get payload
-    3. Extract payload.lsv_results.measure.benchmarks → {name: current_seconds}
-
-    Returns None if no baseline exists or Supabase is unavailable.
+    Returns None if the service key is missing — caller should treat that as
+    "skip oracle advantage computation" rather than fail the trial.
     """
-    key = os.environ.get("SUPABASE_ANON_KEY", "")
-    if not key or not base_url:
+    key = os.environ.get("DATASMITH_SUPABASE_SERVICE_KEY", "")
+    if not key:
         return None
-
     headers = {
         "Authorization": f"Bearer {key}",
         "apikey": key,
         "Accept": "application/json",
+        "User-Agent": "datasmith-parser/1.0",
     }
+    cf_id = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_ID", "")
+    cf_secret = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_SECRET", "")
+    if cf_id and cf_secret:
+        headers["CF-Access-Client-Id"] = cf_id
+        headers["CF-Access-Client-Secret"] = cf_secret
+    return headers
 
-    # Step 1: Get baseline_run_id from tasks table
-    tasks_url = f"{base_url}/rest/v1/tasks?task_id=eq.{task_id}&select=baseline_run_id"
-    tasks = _supabase_get(tasks_url, headers)
-    if not tasks or not isinstance(tasks, list) or len(tasks) == 0:
-        print(f"[parser] No task row found for {task_id}")
+
+def _parse_task_id(task_id: str) -> tuple[str, str, int] | None:
+    """``owner_repo_<issue>`` — same shape as ``records.py`` task_id minting.
+
+    Splits from the right so repo names with underscores still parse.
+    Returns None if the trailing component isn't an integer.
+    """
+    try:
+        *rest, issue_str = task_id.rsplit("_", 1)
+        issue = int(issue_str)
+        head = "_".join(rest)
+        owner, _, repo = head.partition("_")
+        if not owner or not repo:
+            return None
+        return owner, repo, issue
+    except (ValueError, IndexError):
         return None
 
-    baseline_run_id = tasks[0].get("baseline_run_id")
+
+def fetch_oracle_benchmarks(base_url: str, task_id: str) -> dict[str, float] | None:
+    """Fetch the oracle's per-benchmark timings from datasmith Supabase.
+
+    1. Parse task_id → (owner, repo, issue_number).
+    2. GET pull_requests?select=baseline_run_id&owner=eq.X&repo=eq.Y&issue_number=eq.Z
+       to find the promoted oracle run.
+    3. GET harbor_runs?select=reward_payload&run_id=eq.<baseline_run_id>
+       to pull the oracle's reward_payload.
+    4. Extract reward_payload.lsv_results.measure.benchmarks → {name: current_seconds}.
+
+    Returns None if any step lacks data — caller logs and proceeds without
+    advantage computation.
+    """
+    headers = _datasmith_headers()
+    if not headers or not base_url:
+        return None
+
+    parsed = _parse_task_id(task_id)
+    if parsed is None:
+        print(f"[parser] Could not parse task_id {task_id!r} as owner_repo_issue")
+        return None
+    owner, repo, issue_number = parsed
+
+    pr_url = (
+        f"{base_url}/rest/v1/pull_requests"
+        f"?select=baseline_run_id"
+        f"&owner=eq.{owner}&repo=eq.{repo}&issue_number=eq.{issue_number}"
+    )
+    pr_rows = _supabase_get(pr_url, headers)
+    if not pr_rows or not isinstance(pr_rows, list) or len(pr_rows) == 0:
+        print(f"[parser] No pull_requests row for {owner}/{repo}#{issue_number}")
+        return None
+
+    baseline_run_id = pr_rows[0].get("baseline_run_id")
     if not baseline_run_id:
-        print(f"[parser] No baseline_run_id set for task {task_id}")
+        print(f"[parser] No baseline_run_id set for {owner}/{repo}#{issue_number}")
         return None
 
-    # Step 2: Get the baseline run's payload
-    runs_url = f"{base_url}/rest/v1/runs?uuid=eq.{baseline_run_id}&select=payload"
+    runs_url = (
+        f"{base_url}/rest/v1/harbor_runs"
+        f"?select=reward_payload&run_id=eq.{baseline_run_id}"
+    )
     runs = _supabase_get(runs_url, headers)
     if not runs or not isinstance(runs, list) or len(runs) == 0:
-        print(f"[parser] Baseline run {baseline_run_id} not found")
+        print(f"[parser] harbor_runs row {baseline_run_id} not found")
         return None
 
-    payload = runs[0].get("payload", {})
+    payload = runs[0].get("reward_payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
 
-    # Step 3: Extract oracle benchmark timings
     oracle_benchmarks_raw = (
         payload.get("lsv_results", {}).get("measure", {}).get("benchmarks", {})
     )
     if not oracle_benchmarks_raw:
-        print("[parser] Baseline run has no benchmark data in payload")
+        print("[parser] oracle harbor_runs row has no benchmark data in reward_payload")
         return None
 
-    # Extract the "current" time from each benchmark (the oracle's measured time)
     oracle_times = {}
     for name, data in oracle_benchmarks_raw.items():
         current = data.get("current")
@@ -487,8 +535,8 @@ def main() -> None:
         advantages = {name: 0.0 for name in speedups}
         advantage_levels = aggregate_by_hierarchy(advantages)
     else:
-        # Fetch oracle data from Supabase
-        base_url = os.environ.get("SUPABASE_URL", "")
+        # Fetch oracle data from datasmith Supabase
+        base_url = os.environ.get("DATASMITH_SUPABASE_URL", "")
         if base_url:
             oracle_benchmarks = fetch_oracle_benchmarks(base_url, args.task_id)
             if oracle_benchmarks:
@@ -499,7 +547,7 @@ def main() -> None:
             else:
                 print("[parser] Could not fetch oracle data; advantage will be null")
         else:
-            print("[parser] SUPABASE_URL not set; skipping advantage computation")
+            print("[parser] DATASMITH_SUPABASE_URL not set; skipping advantage computation")
 
     # Load test results + summarize pytest into a dossier block.
     tests_passed, _, test_raw = load_test_results(LOG_DIR)

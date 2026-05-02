@@ -12,8 +12,12 @@ vendored ``datasmith.harbor_adapter`` package.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
+import socket
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -21,10 +25,62 @@ from urllib.parse import urlparse
 
 from datasmith.harbor_adapter import FormulaCodeAdapter, to_record
 from datasmith.utils import get_client, get_logger
+from datasmith.utils.db import stable_hash
 
 logger = get_logger("runners.harbor_healthcheck")
 
 MIN_SPEEDUP_GATE = 1.05  # mirrored by publish/records.py
+
+# ── Tunable constants (overridable via tokens.env per CLAUDE.md) ────────────
+# Relative path inside each task's environment/ directory where cached LSV
+# artifacts get staged. The Dockerfile's `COPY cache/ /opt/lsv/cache/`
+# directive bakes this into the image so lsv_init.py can read from
+# /opt/lsv/cache/ at setup-time (Harbor's verifier mount of /tests/ doesn't
+# exist yet during setup.sh).
+DATASMITH_LSV_CACHE_DIRNAME: str = os.environ.get("DATASMITH_LSV_CACHE_DIRNAME", "cache")
+# Stable identifier for the docker host running stage 7 trials. Without an
+# override, falls back to socket.gethostname() — fine on a single dev box,
+# but a CI worker pool should set this explicitly so cache invalidation
+# isn't keyed on whichever runner happened to pick up the job.
+DATASMITH_DOCKER_HOST_ID: str = os.environ.get("DATASMITH_DOCKER_HOST_ID", socket.gethostname())
+# Daytona machine class string baked into the resource_signature for daytona
+# runs. The Harbor SDK doesn't expose a "current machine class" attribute, so
+# we treat this as an operator-supplied tag.
+DATASMITH_DAYTONA_MACHINE_CLASS: str = os.environ.get("DATASMITH_DAYTONA_MACHINE_CLASS", "default")
+# Supabase Storage bucket holding per-PR `.lightspeed_deps.db` files.
+DATASMITH_LSV_DEPS_BUCKET: str = os.environ.get("DATASMITH_LSV_DEPS_BUCKET", "lsv-deps")
+# Supabase Storage bucket holding per-PR oracle snapshot tarballs (the runner
+# uploads these after a successful daytona oracle trial; the URL is recorded
+# at ``pull_requests.snapshot_storage_url``).
+DATASMITH_LSV_SNAPSHOTS_BUCKET: str = os.environ.get("DATASMITH_LSV_SNAPSHOTS_BUCKET", "lsv-snapshots")
+# Supabase Storage bucket holding per-trial run-artifacts tarballs
+# (agent/, verifier/, artifacts/ — staged in-container then uploaded by the
+# runner). URL recorded at ``harbor_runs.artifacts_storage_url``.
+DATASMITH_RUNS_BUCKET: str = os.environ.get("DATASMITH_RUNS_BUCKET", "runs")
+# Hard wall-clock cap (seconds) per Harbor trial — both verifier and agent
+# phases. Default 12h. Bumped from 4h after observing legitimate multi-hour
+# `lsv_measure` work on large benchmark suites (contourpy#368: 2894
+# benchmarks x 2 rounds = 5+ hours just for the measurement pass). Note that
+# Harbor's `_verify_with_retry` has @retry(stop_after_attempt(2), retry on
+# VerifierTimeoutError), which doubles the effective per-trial cap to 24h —
+# our `DATASMITH_HARBOR_JOB_TIMEOUT_S` wrapper below puts a real ceiling on
+# that.
+DATASMITH_HARBOR_TRIAL_TIMEOUT_S: float = float(os.environ.get("DATASMITH_HARBOR_TRIAL_TIMEOUT_S", "43200"))
+# Hard wall-clock cap (seconds) for the entire `Job.run()` call. Above this
+# the runner cancels the asyncio task, gives a brief cleanup grace, and
+# falls through to harvest whatever per-trial result.json files made it to
+# disk. Default = 1.1x trial timeout so a single retry by Harbor's verifier
+# decorator gets terminated cleanly. n_concurrent_trials > 1 doesn't widen
+# this — wall-clock is bounded by the slowest trial, not the sum.
+DATASMITH_HARBOR_JOB_TIMEOUT_S: float = float(
+    os.environ.get("DATASMITH_HARBOR_JOB_TIMEOUT_S", str(DATASMITH_HARBOR_TRIAL_TIMEOUT_S * 1.1))
+)
+# Memory cap (MB) per Harbor trial. Daytona accounts cap each sandbox at
+# 8 GB (DaytonaAuthorizationError otherwise); the docker host typically has
+# enough headroom to run lsv_init on large Python repos, so docker defaults
+# to 32 GB. Tune via env vars when scaling up.
+DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA", "8192"))
+DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER", "32768"))
 
 
 def _patch_harbor_trial_name() -> None:
@@ -50,38 +106,224 @@ def _patch_harbor_trial_name() -> None:
     TrialConfig._fc_datasmith_patched = True
 
 
-def _build_verifier_env() -> dict[str, str]:
-    """Emit SUPABASE_* entries for Harbor's own Supabase project, read from
-    the HARBOR_-prefixed env vars in tokens.env.
+def _build_base_verifier_env() -> dict[str, str]:
+    """Emit datasmith-Supabase creds for the in-container cache writeback path.
 
-    Unlike oracle_run.py (which emits ``${VAR:-}`` shell-expansion refs that
-    resolve from the host env at trial launch), we inline literal values.
-    The reason: datasmith's own ``SUPABASE_URL`` / ``SUPABASE_KEY`` point at
-    its local Supabase instance and must stay pointed there for the rest of
-    the pipeline. Baking Harbor's creds directly into each task.toml keeps
-    the two projects cleanly separated and avoids host env swapping around
-    ``Job.run()``.
+    ``lsv_cache_writeback.py`` and ``parser.py:fetch_oracle_benchmarks``
+    both target datasmith's Supabase (``pull_requests``, ``harbor_runs``,
+    ``lsv_baseline_cache``). The legacy Harbor-Supabase upload path
+    (``upload.py``) was removed — see migration 00016 + the harbor_adapter
+    refactor — so we no longer forward ``HARBOR_SUPABASE_*`` here.
 
-    The resulting values land in the per-task ``[verifier.env]`` section,
-    which Harbor copies into each trial container as ``SUPABASE_URL`` /
-    ``SUPABASE_ANON_KEY`` / ``SUPABASE_SERVICE_KEY`` — the names
-    ``upload.py`` inside the container expects.
+    Service-role key bypasses RLS, which is required for upserts.
+    ``db.formulacode.org`` is gated by Cloudflare Access, so we also forward
+    the service-token headers when set (see CLAUDE.md remote-access).
+
+    The ``HARBOR_AGENT_NAME`` env var is no longer set here — the adapter
+    bakes it into setup.sh and test.sh's render_env at task-materialization
+    time, sourced from ``FormulaCodeRecord.harbor_agent_name``.
     """
-    mapping = {
-        "SUPABASE_URL": "HARBOR_SUPABASE_URL",
-        "SUPABASE_ANON_KEY": "HARBOR_SUPABASE_ANON_KEY",
-        "SUPABASE_SERVICE_KEY": "HARBOR_SUPABASE_SERVICE_KEY",
-    }
     env: dict[str, str] = {}
-    for container_key, host_key in mapping.items():
-        val = os.environ.get(host_key)
-        if val:
-            env[container_key] = val
-    # lsv_init.py gates snapshot capture on HARBOR_AGENT_NAME=="oracle"; Harbor
-    # itself never sets this. Inline a literal so the two scripts (lsv_init +
-    # test.sh) agree on the agent identity the trial is running.
-    env["HARBOR_AGENT_NAME"] = "oracle"
+    ds_url = os.environ.get("SUPABASE_URL")
+    ds_key = os.environ.get("SUPABASE_KEY")
+    if ds_url:
+        env["DATASMITH_SUPABASE_URL"] = ds_url
+    if ds_key:
+        env["DATASMITH_SUPABASE_SERVICE_KEY"] = ds_key
+    for k in ("DATASMITH_CF_ACCESS_CLIENT_ID", "DATASMITH_CF_ACCESS_CLIENT_SECRET"):
+        v = os.environ.get(k)
+        if v:
+            env[k] = v
     return env
+
+
+def _resolve_image_digest(container_name: str | None) -> str:
+    """Best-effort resolve the registry digest for ``container_name``.
+
+    Returns the digest string (``sha256:…``) on success, or the literal
+    ``container_name`` (or ``""``) on failure. The digest is purely an input
+    to ``resource_signature`` — failure to resolve just makes the signature
+    coarser, not wrong, so we never raise.
+    """
+    if not container_name:
+        return ""
+    # ``docker manifest inspect`` works against the local docker daemon's
+    # registry credentials and prints JSON containing per-arch digests; for
+    # signature stability we just hash the whole blob.
+    try:
+        out = subprocess.run(
+            ["docker", "manifest", "inspect", container_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return f"manifest:{stable_hash(out.stdout.strip())[:16]}"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return container_name
+
+
+def _read_host_cpu_mem() -> dict[str, Any]:
+    """Read CPU model / count / memory from /proc on the runner host.
+
+    These end up in resource_signature for *docker* runs (where the runner
+    host == trial host). Daytona runs ignore them — the daytona machine class
+    is the relevant invariant there, and we can't see inside the sandbox from
+    here. Best-effort; missing values become empty strings / zeros.
+    """
+    cpu_model = ""
+    cpu_count = 0
+    total_mem_bytes = 0
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name") and not cpu_model:
+                cpu_model = line.split(":", 1)[1].strip()
+                break
+        cpu_count = os.cpu_count() or 0
+    except OSError as exc:
+        logger.debug("could not read /proc/cpuinfo: %s", exc)
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                # MemTotal:       65802252 kB
+                total_mem_bytes = int(line.split()[1]) * 1024
+                break
+    except OSError as exc:
+        logger.debug("could not read /proc/meminfo: %s", exc)
+    return {"cpu_model": cpu_model, "cpu_count": cpu_count, "mem_bytes": total_mem_bytes}
+
+
+def _compute_resource_attrs(
+    *,
+    use_daytona: bool,
+    container_name: str | None,
+    image_digest: str,
+) -> dict[str, Any]:
+    """Raw resource columns describing the trial-host environment.
+
+    Used for both the cache lookup (multi-column exact match against
+    ``lsv_baseline_cache``) and the env-vars passed to the in-container
+    writeback. Storing raw columns instead of a hash means we can later
+    relax matching (e.g. ignore CPU model) without rewriting every cached
+    row's signature.
+
+    Daytona zeroes the docker-only fields (and vice versa) rather than
+    skipping them entirely — keeps every row's PK shape uniform so the
+    upsert ``on_conflict`` list never has to branch.
+    """
+    cpu_mem = _read_host_cpu_mem() if not use_daytona else None
+    return {
+        "env": "daytona" if use_daytona else "docker",
+        "container_name": container_name or "",
+        "image_digest": image_digest,
+        "machine_class": DATASMITH_DAYTONA_MACHINE_CLASS if use_daytona else "",
+        "docker_host_id": "" if use_daytona else DATASMITH_DOCKER_HOST_ID,
+        "cpu_model": "" if cpu_mem is None else cpu_mem["cpu_model"],
+        "cpu_count": 0 if cpu_mem is None else cpu_mem["cpu_count"],
+        "mem_bytes": 0 if cpu_mem is None else cpu_mem["mem_bytes"],
+    }
+
+
+def _fetch_lsv_cache(
+    client: Any,
+    *,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    attrs: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Look up cached deps DB Storage URL + baseline timings for this PR.
+
+    The deps DB URL lives on ``pull_requests.lsv_deps_db_url`` (per-PR,
+    structural). Baselines live on ``lsv_baseline_cache`` keyed by raw
+    resource columns. Either may be ``None`` if no matching row exists.
+    Service-role client bypasses RLS.
+    """
+    deps_db_url: str | None = None
+    baselines: dict[str, Any] | None = None
+    try:
+        resp = (
+            client.table("pull_requests")
+            .select("lsv_deps_db_url")
+            .eq("owner", owner)
+            .eq("repo", repo)
+            .eq("issue_number", issue_number)
+            .limit(1)
+            .execute()
+        )
+        if resp.data:
+            deps_db_url = resp.data[0].get("lsv_deps_db_url") or None
+    except Exception as exc:
+        logger.warning(
+            "pull_requests.lsv_deps_db_url lookup failed for %s/%s#%s: %s",
+            owner,
+            repo,
+            issue_number,
+            exc,
+        )
+
+    try:
+        q = (
+            client.table("lsv_baseline_cache")
+            .select("baselines")
+            .eq("owner", owner)
+            .eq("repo", repo)
+            .eq("issue_number", issue_number)
+        )
+        for k, v in attrs.items():
+            q = q.eq(k, v)
+        resp = q.limit(1).execute()
+        if resp.data:
+            baselines = resp.data[0].get("baselines") or None
+    except Exception as exc:
+        logger.warning(
+            "lsv_baseline_cache lookup failed for %s/%s#%s attrs=%s: %s",
+            owner,
+            repo,
+            issue_number,
+            attrs,
+            exc,
+        )
+
+    return deps_db_url, baselines
+
+
+def _stage_lsv_cache_files(
+    client: Any,
+    cache_dir: Path,
+    *,
+    deps_db_url: str | None,
+    baselines: dict[str, Any] | None,
+) -> tuple[bool, bool]:
+    """Drop cached deps DB and baselines into ``cache_dir``.
+
+    The Dockerfile's ``COPY cache/ /opt/lsv/cache/`` then bakes them into
+    the image at build time, where lsv_init.py can find them at setup-time.
+    Returns ``(deps_staged, baselines_staged)``.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    deps_ok = False
+    baselines_ok = False
+
+    if deps_db_url:
+        # deps_db_url is a Storage object key (not a public URL).
+        try:
+            blob = client.storage.from_(DATASMITH_LSV_DEPS_BUCKET).download(deps_db_url)
+            (cache_dir / "lightspeed_deps.db").write_bytes(blob)
+            deps_ok = True
+        except Exception as exc:
+            logger.warning("LSV deps DB download failed (key=%s): %s", deps_db_url, exc)
+
+    if baselines:
+        try:
+            (cache_dir / "baselines.json").write_text(json.dumps(baselines))
+            baselines_ok = True
+        except Exception as exc:
+            logger.warning("LSV baselines JSON write failed: %s", exc)
+
+    return deps_ok, baselines_ok
 
 
 def _materialize_tasks(
@@ -89,12 +331,21 @@ def _materialize_tasks(
     task_dir: Path,
     *,
     rounds: int,
+    use_daytona: bool,
 ) -> dict[str, dict[str, Any]]:
     """Write one Harbor task directory per PR. Returns a mapping from
     ``task_id`` (the directory name Harbor sees) back to the datasmith row
-    metadata we need when inserting harbor_runs."""
+    metadata we need when inserting harbor_runs.
+
+    Per-task work also stages any cached LSV deps DB / baselines into
+    ``<task>/environment/cache/`` so lsv_init can short-circuit
+    ``initialize_diffcheck``, and bakes the resource signature into the
+    verifier env so the in-container writeback knows which cache row to
+    upsert when the cache misses.
+    """
     adapter = FormulaCodeAdapter(harbor_tasks_root=task_dir, force=True)
-    verifier_env = _build_verifier_env() or None
+    base_env = _build_base_verifier_env()
+    client = get_client()
 
     task_id_map: dict[str, dict[str, Any]] = {}
     for pr in items:
@@ -108,22 +359,90 @@ def _materialize_tasks(
                 pr.get("issue_number"),
             )
             continue
+
+        owner = pr["owner"]
+        repo = pr["repo"]
+        issue_number = pr["issue_number"]
+        container_name = pr.get("container_name")
+
+        image_digest = _resolve_image_digest(container_name)
+        attrs = _compute_resource_attrs(
+            use_daytona=use_daytona,
+            container_name=container_name,
+            image_digest=image_digest,
+        )
+        deps_db_url, baselines = _fetch_lsv_cache(
+            client,
+            owner=owner,
+            repo=repo,
+            issue_number=issue_number,
+            attrs=attrs,
+        )
+
+        # Per-task verifier_env: base creds + agent name + cache identity.
+        # The lsv_cache_writeback.py script (run from test.sh after lsv_measure)
+        # reads these raw resource columns to know which cache row to upsert
+        # on miss (the table's PK is keyed on the same columns).
+        verifier_env = dict(base_env)
+        verifier_env["LSV_TASK_ID"] = rec.task_id
+        verifier_env["LSV_DEPS_BUCKET"] = DATASMITH_LSV_DEPS_BUCKET
+        verifier_env["LSV_ENV"] = attrs["env"]
+        verifier_env["LSV_CONTAINER_NAME"] = attrs["container_name"]
+        verifier_env["LSV_IMAGE_DIGEST"] = attrs["image_digest"]
+        verifier_env["LSV_MACHINE_CLASS"] = attrs["machine_class"]
+        verifier_env["LSV_DOCKER_HOST_ID"] = attrs["docker_host_id"]
+        verifier_env["LSV_CPU_MODEL"] = attrs["cpu_model"]
+        verifier_env["LSV_CPU_COUNT"] = str(attrs["cpu_count"])
+        verifier_env["LSV_MEM_BYTES"] = str(attrs["mem_bytes"])
+
+        # Vars that test.sh actually needs at runtime. We inline these as
+        # `export` lines in the rendered test.sh because Harbor's daytona
+        # exec does not propagate task.toml [verifier.env] to test.sh's
+        # process env (verified empirically — even HARBOR_AGENT_NAME and
+        # SUPABASE_URL come through unset). The verifier_env above stays
+        # in task.toml for any Harbor-internal consumer that does honor it.
+        # Filter to non-empty values so empty docker-only fields on daytona
+        # runs don't pollute the rendered script with `export X=''` lines.
+        test_render_env = {k: v for k, v in verifier_env.items() if v}
+
         try:
             adapter.generate_task(
                 rec,
                 run_pytest=True,
                 rounds=rounds,
                 verifier_env=verifier_env,
+                test_render_env=test_render_env,
+                timeout_sec=DATASMITH_HARBOR_TRIAL_TIMEOUT_S,
             )
         except Exception:
             logger.exception("generate_task failed for %s", rec.task_id)
             continue
+
+        # Stage cached files AFTER generate_task creates the directory tree.
+        # The adapter pre-creates an empty environment/cache/ (so the Dockerfile
+        # COPY directive always has something to copy); we drop hits into that
+        # same directory.
+        cache_dir = task_dir / rec.task_id / "environment" / DATASMITH_LSV_CACHE_DIRNAME
+        deps_staged, baselines_staged = _stage_lsv_cache_files(
+            client,
+            cache_dir,
+            deps_db_url=deps_db_url,
+            baselines=baselines,
+        )
+        if deps_staged or baselines_staged:
+            logger.info(
+                "LSV cache stage hit for %s: deps=%s baselines=%s",
+                rec.task_id,
+                deps_staged,
+                baselines_staged,
+            )
+
         task_id_map[rec.task_id] = {
-            "owner": pr["owner"],
-            "repo": pr["repo"],
+            "owner": owner,
+            "repo": repo,
             "sha": pr["merge_commit_sha"],
-            "issue_number": pr["issue_number"],
-            "container_name": pr.get("container_name"),
+            "issue_number": issue_number,
+            "container_name": container_name,
         }
     return task_id_map
 
@@ -149,15 +468,16 @@ def _build_job_config(
     # Harbor defaults to 4 GB per trial container (per the task.toml template)
     # which is too tight for lsv_init on mid/large Python repos — sklearn's
     # dep-graph walk alone exceeds 4 GB and gets OOM-killed with exit 137.
-    # Bump to 32 GB across the board; the host has 500 GB so there's plenty
-    # of headroom, and smaller repos won't actually use more than they need.
-    MEMORY_MB = 32 * 1024
+    # Daytona caps each sandbox at 8 GB on standard accounts (any larger
+    # request fails fast with DaytonaAuthorizationError), so the two
+    # environments need different headroom — tune via the
+    # DATASMITH_HARBOR_TRIAL_MEMORY_MB_* env vars.
     if use_daytona:
         environment = EnvironmentConfig(
             type=EnvironmentType.DAYTONA,
             force_build=True,
             delete=True,
-            override_memory_mb=MEMORY_MB,
+            override_memory_mb=DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA,
             kwargs={
                 "auto_stop_interval_mins": 0,
                 "auto_delete_interval_mins": 0,
@@ -168,7 +488,7 @@ def _build_job_config(
             type=EnvironmentType.DOCKER,
             force_build=True,
             delete=True,
-            override_memory_mb=MEMORY_MB,
+            override_memory_mb=DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER,
         )
 
     return JobConfig(
@@ -323,7 +643,27 @@ def _row_from_trial(  # noqa: C901
         else:
             error_message = "reward.json missing (no harbor exception recorded)"
 
+    # Compute pytest_success_ratio from the in-container reward payload, if
+    # the verifier ran pytest. parser.py writes the structured counters under
+    # the top-level ``"pytest"`` key (parser.summarize_pytest); fields:
+    # total / passed / failed / skipped / error.
+    pytest_success_ratio: float | None = None
+    if reward_payload:
+        pytest_block = reward_payload.get("pytest") or {}
+        try:
+            total = int(pytest_block.get("total", 0) or 0)
+            failed = int(pytest_block.get("failed", 0) or 0)
+            err = int(pytest_block.get("error", 0) or 0)
+            if total > 0:
+                pytest_success_ratio = (total - failed - err) / total
+        except (TypeError, ValueError):
+            pytest_success_ratio = None
+
     return {
+        # Generate run_id client-side so we can update pull_requests.baseline_run_id
+        # without re-fetching after insert. The schema's gen_random_uuid() default
+        # is preserved as a fallback for any caller that doesn't pre-set this.
+        "run_id": str(uuid.uuid4()),
         "owner": meta["owner"],
         "repo": meta["repo"],
         "sha": meta["sha"],
@@ -331,14 +671,170 @@ def _row_from_trial(  # noqa: C901
         "container_name": meta["container_name"],
         "environment": environment,
         "agent_name": "oracle",
+        # Match the legacy `runs` schema where the oracle is its own model.
+        "model_name": "oracle",
+        "model_agent_signature": "oracle:oracle",
         "status": status,
         "max_speedup": max_speedup,
         "geomean_speedup": geomean,
         "n_benchmarks": n_benchmarks,
         "wallclock_sec": wallclock,
         "reward_payload": reward_payload,
+        "pytest_success_ratio": pytest_success_ratio,
         "error_message": error_message,
     }
+
+
+def _upload_run_artifacts_for_row(
+    client: Any,
+    row: dict[str, Any],
+    *,
+    job_dir: Path,
+) -> str | None:
+    """If this trial produced a `verifier/run_artifacts.tar.gz` (staged by
+    test.sh), upload it to the ``runs`` Storage bucket and return the object
+    key. Caller writes the key to ``harbor_runs.artifacts_storage_url``.
+
+    Returns ``None`` on miss / failure — never raises. Same plumbing as
+    ``_upload_snapshot_for_row``. The tarball staging happens in test.sh
+    after parser.py runs; if test.sh never reached that point (e.g.
+    lsv_init_failed), no tarball exists and we skip cleanly."""
+    task_id = f"{row['owner']}_{row['repo']}_{row['issue_number']}"
+    candidate = job_dir / task_id / "verifier" / "run_artifacts.tar.gz"
+    if not candidate.exists() or candidate.stat().st_size == 0:
+        return None
+
+    # Object key includes run_id so re-runs get new keys (vs. snapshot upload
+    # which is per-PR; snapshots are oracle-deterministic, run artifacts are
+    # not — preserving each run's logs is the whole point).
+    run_id = row.get("run_id") or uuid.uuid4().hex
+    object_key = f"{row['owner']}__{row['repo']}__{row['issue_number']}/{run_id}.tar.gz"
+    try:
+        blob = candidate.read_bytes()
+        client.storage.from_(DATASMITH_RUNS_BUCKET).upload(
+            path=object_key,
+            file=blob,
+            file_options={"content-type": "application/gzip", "upsert": "true"},
+        )
+        logger.info(
+            "Uploaded run artifacts for %s/%s#%s (%d bytes) → %s/%s",
+            row["owner"],
+            row["repo"],
+            row["issue_number"],
+            len(blob),
+            DATASMITH_RUNS_BUCKET,
+            object_key,
+        )
+        return object_key
+    except Exception as exc:
+        logger.warning(
+            "Run-artifacts upload failed for %s/%s#%s: %s",
+            row["owner"],
+            row["repo"],
+            row["issue_number"],
+            exc,
+        )
+        return None
+
+
+def _upload_snapshot_for_row(
+    client: Any,
+    row: dict[str, Any],
+    *,
+    job_dir: Path,
+) -> str | None:
+    """If this trial produced a `verifier/oracle_snapshots.tar.gz`, upload it
+    to Supabase Storage and return the object key (caller then writes it to
+    ``pull_requests.snapshot_storage_url``).
+
+    Returns ``None`` on miss / failure — never raises. The runner-side path
+    only works if Harbor exfiltrated the verifier dir (the trial's mounted
+    /logs/verifier/). When sandbox setup fails before test.sh runs (common
+    when the upstream image isn't published yet), no tarball gets written
+    and we just skip."""
+    task_id = f"{row['owner']}_{row['repo']}_{row['issue_number']}"
+    candidate = job_dir / task_id / "verifier" / "oracle_snapshots.tar.gz"
+    if not candidate.exists() or candidate.stat().st_size == 0:
+        return None
+
+    object_key = f"{row['owner']}__{row['repo']}__{row['issue_number']}/oracle.tar.gz"
+    try:
+        blob = candidate.read_bytes()
+        # supabase-py's storage.from_(bucket).upload doesn't support upsert
+        # by default; pass file_options to overwrite an existing object so a
+        # re-run of the same PR replaces the prior tarball.
+        client.storage.from_(DATASMITH_LSV_SNAPSHOTS_BUCKET).upload(
+            path=object_key,
+            file=blob,
+            file_options={"content-type": "application/gzip", "upsert": "true"},
+        )
+        logger.info(
+            "Uploaded oracle snapshots for %s/%s#%s (%d bytes) → %s/%s",
+            row["owner"],
+            row["repo"],
+            row["issue_number"],
+            len(blob),
+            DATASMITH_LSV_SNAPSHOTS_BUCKET,
+            object_key,
+        )
+        return object_key
+    except Exception as exc:
+        logger.warning(
+            "Snapshot upload failed for %s/%s#%s: %s",
+            row["owner"],
+            row["repo"],
+            row["issue_number"],
+            exc,
+        )
+        return None
+
+
+def _update_baseline_pointers(
+    rows: list[dict[str, Any]],
+    *,
+    environment: str,
+    job_dir: Path,
+) -> None:
+    """For every successful daytona oracle run, point its PR's
+    ``pull_requests.baseline_run_id`` at this run, and (best-effort) upload
+    the snapshot tarball + populate ``snapshot_storage_url``.
+
+    Docker rows are intentionally *not* eligible — the publish gate (stage 8)
+    runs against daytona only, and we don't want a flaky local docker
+    iteration to overwrite a leaderboard pointer.
+    """
+    if environment != "daytona":
+        return
+    successful = [r for r in rows if r.get("status") == "success" and r.get("run_id")]
+    if not successful:
+        return
+
+    client = get_client()
+    targets: list[dict[str, Any]] = []
+    for r in successful:
+        target: dict[str, Any] = {
+            "owner": r["owner"],
+            "repo": r["repo"],
+            "issue_number": r["issue_number"],
+            "baseline_run_id": r["run_id"],
+        }
+        snapshot_key = _upload_snapshot_for_row(client, r, job_dir=job_dir)
+        if snapshot_key:
+            target["snapshot_storage_url"] = snapshot_key
+        targets.append(target)
+
+    # ``upsert`` with the natural PK does a partial update because PostgREST
+    # treats absent columns as "do not modify" — exactly what we want.
+    try:
+        client.table("pull_requests").upsert(targets, on_conflict="owner,repo,issue_number").execute()
+        snap_n = sum(1 for t in targets if "snapshot_storage_url" in t)
+        logger.info(
+            "Updated pull_requests for %d oracle runs (%d with snapshot URL)",
+            len(targets),
+            snap_n,
+        )
+    except Exception as exc:
+        logger.warning("Baseline pointer upsert failed: %s", exc)
 
 
 def _insert_harbor_runs(rows: list[dict[str, Any]], chunk_size: int = 100) -> int:
@@ -411,7 +907,7 @@ async def run_harbor_healthcheck(
     if job_name is None:
         job_name = f"fc-healthcheck-{uuid.uuid4().hex[:8]}"
 
-    task_id_map = _materialize_tasks(items, task_dir, rounds=rounds)
+    task_id_map = _materialize_tasks(items, task_dir, rounds=rounds, use_daytona=use_daytona)
     if not task_id_map:
         logger.warning("No tasks materialized — skipping Harbor dispatch")
         return []
@@ -431,18 +927,46 @@ async def run_harbor_healthcheck(
         n_concurrent_trials,
     )
 
-    await Job(config).run()
+    # Wrap Job.run() with a hard wall-clock cap. Harbor's per-trial verifier
+    # has its own asyncio.wait_for(timeout=verifier_timeout_sec), but
+    # `_verify_with_retry` is decorated `@retry(stop_after_attempt(2),
+    # retry_if_exception_type(VerifierTimeoutError))`, doubling the effective
+    # cap to 2x per-trial. There is no upstream lever for that retry, so we
+    # bound the whole thing here. asyncio.shield prevents the inner task from
+    # being cancelled until we actually decide to cancel it (otherwise
+    # wait_for would re-raise CancelledError synchronously without giving
+    # trials a chance to write result.json). After cancellation we give a
+    # short cleanup grace so per-trial _cleanup_and_finalize blocks can run.
+    job_task = asyncio.create_task(Job(config).run())
+    timed_out = False
+    try:
+        await asyncio.wait_for(asyncio.shield(job_task), timeout=DATASMITH_HARBOR_JOB_TIMEOUT_S)
+    except TimeoutError:
+        # Not logger.exception: the TimeoutError carries no useful traceback
+        # (it's raised by wait_for itself, not the underlying task), and the
+        # message + job_name + cap are the actionable signal for operators.
+        logger.error(  # noqa: TRY400
+            "Harbor job '%s' exceeded wall-clock cap %.0fs; cancelling and harvesting partial results",
+            job_name,
+            DATASMITH_HARBOR_JOB_TIMEOUT_S,
+        )
+        job_task.cancel()
+        with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(job_task, timeout=300.0)
+        timed_out = True
 
     # Harbor's Job.run() returns a JobResult whose `trial_results` field is
     # never populated (job.py:380-435 — only the stats summary is bubbled up;
     # per-trial TrialResult objects are written to per-trial result.json files
-    # on disk and otherwise dropped). Walk those files ourselves.
+    # on disk and otherwise dropped). Walk those files ourselves — completed
+    # trials still produce rows even when the job hit the wall-clock cap.
     from harbor.models.trial.result import TrialResult
 
     rows: list[dict[str, Any]] = []
     job_dir = config.jobs_dir / job_name
     trial_result_paths = sorted(job_dir.glob("*/result.json"))
     logger.info("Walking %d per-trial result.json files under %s", len(trial_result_paths), job_dir)
+    artifacts_client = get_client()  # service-role; cheap singleton inside this fn
     for path in trial_result_paths:
         try:
             trial = TrialResult.model_validate_json(path.read_text())
@@ -451,6 +975,9 @@ async def run_harbor_healthcheck(
             continue
         row = _row_from_trial(trial, task_id_map, environment=environment)
         if row is not None:
+            artifacts_key = _upload_run_artifacts_for_row(artifacts_client, row, job_dir=job_dir)
+            if artifacts_key:
+                row["artifacts_storage_url"] = artifacts_key
             rows.append(row)
 
     n_success = sum(1 for r in rows if r["status"] == "success")
@@ -460,13 +987,25 @@ async def run_harbor_healthcheck(
         if r["status"] == "success" and r["max_speedup"] is not None and r["max_speedup"] >= MIN_SPEEDUP_GATE
     )
     logger.info(
-        "Harbor job '%s' done: %d/%d trials succeeded, %d >= %.2fx gate",
+        "Harbor job '%s' done: %d/%d trials succeeded, %d >= %.2fx gate%s",
         job_name,
         n_success,
         len(rows),
         n_fast,
         MIN_SPEEDUP_GATE,
+        " (job timed out)" if timed_out else "",
     )
 
     _insert_harbor_runs(rows)
+    if timed_out:
+        # Half-cancelled jobs can produce technically-successful trials that
+        # we don't trust enough to promote as the per-PR baseline pointer.
+        # Skip both the snapshot upload and the pull_requests pointer update
+        # — the harbor_runs rows are still recorded for triage.
+        logger.warning(
+            "Harbor job '%s' timed out; skipping baseline pointer + snapshot upload",
+            job_name,
+        )
+    else:
+        _update_baseline_pointers(rows, environment=environment, job_dir=job_dir)
     return rows

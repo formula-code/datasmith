@@ -4,6 +4,12 @@ Called from setup.sh before the agent runs. Creates a LightspeedSession,
 runs initialize_diffcheck to build the dependency database and baseline
 timing, then captures a snapshot of the benchmark environment.
 
+If the datasmith runner pre-staged cached LSV state at
+``/opt/lsv/cache/`` (deps DB and/or baseline timings), we load it before
+calling ``initialize_diffcheck(force=False)`` so LSV short-circuits the
+expensive survey + baseline pass. The hit/miss decisions are recorded in
+``lsv_cache_state.json`` for the post-trial writeback to consult.
+
 Usage:
     python /tests/lsv_init.py [--rounds N]
 """
@@ -14,6 +20,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -30,6 +37,17 @@ OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
 SNAPSHOT_DIR = Path(os.environ.get("SNAPSHOT_DIR", "/logs/artifacts/.snapshots"))
 SNAPSHOT_FILTER = os.environ.get("FORMULACODE_SNAPSHOT_FILTER", r".*")
 SNAPSHOT_TIMEOUT = os.environ.get("FORMULACODE_SNAPSHOT_TIMEOUT", "30")
+
+# Datasmith runner pre-stages cached LSV state at /opt/lsv/cache/ via the
+# Dockerfile's `COPY cache/` directive. Empty / non-existent => cache miss.
+LSV_CACHE_DIR = Path("/opt/lsv/cache")
+CACHED_DEPS_DB = LSV_CACHE_DIR / "lightspeed_deps.db"
+CACHED_BASELINES = LSV_CACHE_DIR / "baselines.json"
+# Oracle's snapshot-tool output (baseline.json + per-benchmark .pkl files).
+# For non-oracle agent runs, the caller pre-extracts the oracle snapshot
+# tarball here; lsv_init copies the contents into SNAPSHOT_DIR so test.sh's
+# `snapshot-tool verify` step finds the oracle baseline to diff against.
+CACHED_SNAPSHOTS_DIR = LSV_CACHE_DIR / "snapshots"
 
 
 def detect_source_root() -> Path:
@@ -68,27 +86,35 @@ def detect_source_root() -> Path:
     roots = {p.split("/")[0] for p in paths if "/" in p} - skip
 
     pkg = config.get("repo_name", "").split("/")[-1].replace("-", "_")
+    # On case-sensitive filesystems (Linux), repos like microsoft/Qcodes or
+    # numpy/NumPy ship the package directory in lowercase even though the
+    # GitHub repo name is mixed-case. Try both spellings for the glob and
+    # fallback-path probes.
+    pkg_variants: list[str] = []
+    for candidate in (pkg, pkg.lower()):
+        if candidate and candidate not in pkg_variants:
+            pkg_variants.append(candidate)
 
     if len(roots) == 1 and next(iter(roots)) not in src_layout_holders:
         cand = REPO_ROOT / next(iter(roots))
         if cand.is_dir():
             return cand
 
-    if pkg:
-        candidates = sorted(
-            REPO_ROOT.glob(f"**/{pkg}/__init__.py"),
-            key=lambda p: len(p.parts),
-        )
-        for c in candidates:
+    if pkg_variants:
+        all_candidates: list[Path] = []
+        for variant in pkg_variants:
+            all_candidates.extend(REPO_ROOT.glob(f"**/{variant}/__init__.py"))
+        for c in sorted(all_candidates, key=lambda p: len(p.parts)):
             parts = c.relative_to(REPO_ROOT).parts
             # Reject matches nested inside a skip dir (e.g. benchmarks/pkg/...)
             if not any(part in skip for part in parts[:-2]):
                 return c.parent
 
-        for layout in ("", "src", "lib", "python"):
-            cand = (REPO_ROOT / layout / pkg) if layout else (REPO_ROOT / pkg)
-            if cand.is_dir():
-                return cand
+        for variant in pkg_variants:
+            for layout in ("", "src", "lib", "python"):
+                cand = (REPO_ROOT / layout / variant) if layout else (REPO_ROOT / variant)
+                if cand.is_dir():
+                    return cand
 
     return REPO_ROOT / (pkg or "src")
 
@@ -315,13 +341,69 @@ def main() -> None:
 
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
 
+    # ── Stage runner-pre-fetched cache, if any ──────────────────────────
+    # The datasmith runner queries lsv_dep_cache + lsv_baseline_cache before
+    # Job.run() and drops hits into /opt/lsv/cache/. We slot them into the
+    # session's expected location so initialize_diffcheck(force=False) can
+    # short-circuit. Misses fall through to a full survey + timing pass and
+    # are written back by lsv_cache_writeback.py at end-of-test.
+    deps_was_cached = False
+    baselines_was_cached = False
+    if CACHED_DEPS_DB.exists() and CACHED_DEPS_DB.stat().st_size > 0:
+        session.deps_db_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(CACHED_DEPS_DB, session.deps_db_path)
+        deps_was_cached = True
+        print(f"[{_ts()}] [lsv_init] cache: staged deps DB from {CACHED_DEPS_DB}")
+    if CACHED_BASELINES.exists() and CACHED_BASELINES.stat().st_size > 0 and deps_was_cached:
+        try:
+            payload = json.loads(CACHED_BASELINES.read_text())
+            n = session.load_baselines(payload)
+            baselines_was_cached = True
+            print(f"[{_ts()}] [lsv_init] cache: loaded {n} baselines from {CACHED_BASELINES}")
+        except Exception as exc:
+            print(f"[{_ts()}] [lsv_init] cache: load_baselines failed ({exc}); falling through")
+
+    # ── Stage oracle snapshots for agent runs ──────────────────────────
+    # Oracle runs CAPTURE snapshots (snapshot-tool baseline) and the runner
+    # exfils them to Storage. Agent runs need to RESUME from those snapshots
+    # so `snapshot-tool verify` (test.sh) can diff the agent's behavior
+    # against the oracle baseline. The caller pre-extracts the oracle
+    # tarball into CACHED_SNAPSHOTS_DIR; we copy the contents into
+    # SNAPSHOT_DIR before snapshot-tool runs.
+    snapshots_was_cached = False
+    snapshot_agent = os.environ.get("HARBOR_AGENT_NAME", "").lower()
+    if snapshot_agent != "oracle" and CACHED_SNAPSHOTS_DIR.is_dir():
+        try:
+            staged = 0
+            SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            for src in CACHED_SNAPSHOTS_DIR.rglob("*"):
+                if src.is_file():
+                    dst = SNAPSHOT_DIR / src.relative_to(CACHED_SNAPSHOTS_DIR)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(src, dst)
+                    staged += 1
+            if staged > 0:
+                snapshots_was_cached = True
+                print(
+                    f"[{_ts()}] [lsv_init] cache: staged {staged} snapshot files "
+                    f"from {CACHED_SNAPSHOTS_DIR} -> {SNAPSHOT_DIR}"
+                )
+        except Exception as exc:
+            print(f"[{_ts()}] [lsv_init] cache: snapshot stage failed ({exc}); falling through")
+
     # Run initialize_diffcheck
     print("=" * 64)
-    print(f"[{_ts()}] [phase] LSV initialize_diffcheck")
+    print(f"[{_ts()}] [phase] LSV initialize_diffcheck (force={not (deps_was_cached and baselines_was_cached)})")
     print("=" * 64)
 
     init_result = session.initialize_diffcheck(
-        source_root=source_root, force=True, rounds=args.rounds
+        # force=False makes LSV skip both survey + timing if every benchmark
+        # already has a baseline row. Without a cache hit, the path through
+        # initialize_diffcheck is identical to the previous force=True
+        # invocation (survey + measure both run).
+        source_root=source_root,
+        force=False,
+        rounds=args.rounds,
     )
 
     print(
@@ -346,6 +428,17 @@ def main() -> None:
         "timing": dataclasses.asdict(init_result.timing),
     }
     (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(init_data, indent=2))
+
+    # Marker for lsv_cache_writeback.py — it inspects this to decide which
+    # cache rows to upsert. Both true => no writeback needed (full hit);
+    # any false => write that part back so the next run hits the cache.
+    cache_state = {
+        "deps_was_cached": deps_was_cached,
+        "baselines_was_cached": baselines_was_cached,
+        "snapshots_was_cached": snapshots_was_cached,
+        "deps_db_path": str(session.deps_db_path),
+    }
+    (OUTPUT_DIR / "lsv_cache_state.json").write_text(json.dumps(cache_state, indent=2))
 
     # Snapshot capture (oracle only — production runs download pre-built snapshots)
     agent_name = os.environ.get("HARBOR_AGENT_NAME", "").lower()

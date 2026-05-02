@@ -9,8 +9,9 @@ export TASK_ID
 
 # Harbor's [verifier.env] section only reaches test.sh, not setup.sh, so we
 # bake the agent name directly into setup.sh at render time. lsv_init.py
-# reads this to decide whether to capture the oracle snapshot baseline.
-export HARBOR_AGENT_NAME="oracle"
+# reads this to decide whether to capture the oracle snapshot baseline (vs.
+# stage a pre-fetched one for an agent-evaluation run).
+export HARBOR_AGENT_NAME="{{ harbor_agent_name }}"
 
 setup_start=$(date +%s)
 # Track which phase we're currently in so the exit trap can report WHERE
