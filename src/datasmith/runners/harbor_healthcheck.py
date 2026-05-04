@@ -51,8 +51,9 @@ DATASMITH_DAYTONA_MACHINE_CLASS: str = os.environ.get("DATASMITH_DAYTONA_MACHINE
 DATASMITH_LSV_DEPS_BUCKET: str = os.environ.get("DATASMITH_LSV_DEPS_BUCKET", "lsv-deps")
 # Supabase Storage bucket holding per-PR oracle snapshot tarballs (the runner
 # uploads these after a successful daytona oracle trial; the URL is recorded
-# at ``pull_requests.snapshot_storage_url``).
-DATASMITH_LSV_SNAPSHOTS_BUCKET: str = os.environ.get("DATASMITH_LSV_SNAPSHOTS_BUCKET", "lsv-snapshots")
+# at ``pull_requests.snapshot_storage_url``). Snapshots are produced by
+# snapshot-tester (independent of LSV), so the bucket is named accordingly.
+DATASMITH_SNAPSHOTS_BUCKET: str = os.environ.get("DATASMITH_SNAPSHOTS_BUCKET", "snapshots")
 # Supabase Storage bucket holding per-trial run-artifacts tarballs
 # (agent/, verifier/, artifacts/ — staged in-container then uploaded by the
 # runner). URL recorded at ``harbor_runs.artifacts_storage_url``.
@@ -708,7 +709,7 @@ def _upload_snapshot_for_row(
         # supabase-py's storage.from_(bucket).upload doesn't support upsert
         # by default; pass file_options to overwrite an existing object so a
         # re-run of the same PR replaces the prior tarball.
-        client.storage.from_(DATASMITH_LSV_SNAPSHOTS_BUCKET).upload(
+        client.storage.from_(DATASMITH_SNAPSHOTS_BUCKET).upload(
             path=object_key,
             file=blob,
             file_options={"content-type": "application/gzip", "upsert": "true"},
@@ -719,7 +720,7 @@ def _upload_snapshot_for_row(
             row["repo"],
             row["issue_number"],
             len(blob),
-            DATASMITH_LSV_SNAPSHOTS_BUCKET,
+            DATASMITH_SNAPSHOTS_BUCKET,
             object_key,
         )
         return object_key

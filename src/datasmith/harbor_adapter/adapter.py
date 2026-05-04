@@ -357,7 +357,7 @@ def fetch_oracle_artifacts(
     cf_access_id: str | None = None,
     cf_access_secret: str | None = None,
     deps_bucket: str = "lsv-deps",
-    snapshots_bucket: str = "lsv-snapshots",
+    snapshots_bucket: str = "snapshots",
 ) -> OracleArtifacts | None:
     """Pull oracle's resource-independent cached artifacts (deps DB + snapshot tarball).
 
