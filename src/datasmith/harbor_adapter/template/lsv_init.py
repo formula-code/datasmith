@@ -4,11 +4,24 @@ Called from setup.sh before the agent runs. Creates a LightspeedSession,
 runs initialize_diffcheck to build the dependency database and baseline
 timing, then captures a snapshot of the benchmark environment.
 
-If the datasmith runner pre-staged cached LSV state at
-``/opt/lsv/cache/`` (deps DB and/or baseline timings), we load it before
-calling ``initialize_diffcheck(force=False)`` so LSV short-circuits the
-expensive survey + baseline pass. The hit/miss decisions are recorded in
-``lsv_cache_state.json`` for the post-trial writeback to consult.
+Cache layers, in priority order:
+  * deps DB    — resource-independent. Pre-staged by the runner into
+                 ``/opt/lsv/cache/lightspeed_deps.db`` if available.
+  * baselines  — resource-keyed. Fetched from datasmith Supabase
+                 (``lsv_baseline_cache``) at runtime using the in-container
+                 cpu_count + mem_bytes reads, since those describe the
+                 actual sandbox (Harbor's cgroup-enforced limits) rather
+                 than the runner host. Staging at build time would be
+                 wrong for Daytona (heterogeneous physical hosts under
+                 one ``machine_class``).
+  * snapshots  — resource-independent. Pre-staged by the runner into
+                 ``/opt/lsv/cache/snapshots/`` for non-oracle agent runs.
+
+The hit/miss decisions are recorded in ``lsv_cache_state.json`` for the
+post-trial writeback to consult, and the resolved attrs are written to
+``lsv_resource_attrs.json`` so ``lsv_cache_writeback.py`` reads identical
+values without re-deriving from env (which round-trips through shlex.quote
+and was previously responsible for ``''`` vs ``""`` cache-row duplication).
 
 Usage:
     python /tests/lsv_init.py [--rounds N]
@@ -23,9 +36,13 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
+from typing import Any
 
 
 def _ts() -> str:
@@ -42,12 +59,119 @@ SNAPSHOT_TIMEOUT = os.environ.get("FORMULACODE_SNAPSHOT_TIMEOUT", "30")
 # Dockerfile's `COPY cache/` directive. Empty / non-existent => cache miss.
 LSV_CACHE_DIR = Path("/opt/lsv/cache")
 CACHED_DEPS_DB = LSV_CACHE_DIR / "lightspeed_deps.db"
-CACHED_BASELINES = LSV_CACHE_DIR / "baselines.json"
 # Oracle's snapshot-tool output (baseline.json + per-benchmark .pkl files).
 # For non-oracle agent runs, the caller pre-extracts the oracle snapshot
 # tarball here; lsv_init copies the contents into SNAPSHOT_DIR so test.sh's
 # `snapshot-tool verify` step finds the oracle baseline to diff against.
 CACHED_SNAPSHOTS_DIR = LSV_CACHE_DIR / "snapshots"
+
+
+# ── Resource-attr helpers ────────────────────────────────────────────────
+# The 7-attr cache key for `lsv_baseline_cache` is built entirely from env
+# vars the runner inlines into setup.sh's render_env. We deliberately do NOT
+# read /proc inside the sandbox: empirically, /proc/cpuinfo and
+# /proc/meminfo show the underlying *host* (Daytona's physical machine —
+# 64 cores / 810 GB on the box that ran our smoke), not the cgroup-limited
+# sandbox. The runner's view of "what we asked Harbor to pin" (cpus and
+# memory_mb passed to task.toml) is the only stable source of truth.
+
+def _read_resource_attrs() -> dict[str, Any]:
+    """Build the 7-attr cache key for this trial from runner-set env vars.
+
+    All seven values come from the runner via setup.sh's render_env block.
+    cpu_count + mem_bytes describe what the runner *asked* Harbor to pin
+    (not what /proc reports inside the container).
+    """
+    def _int(v: str) -> int:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "env": os.environ.get("LSV_ENV", ""),
+        "container_name": os.environ.get("LSV_CONTAINER_NAME", ""),
+        "image_digest": os.environ.get("LSV_IMAGE_DIGEST", ""),
+        "machine_class": os.environ.get("LSV_MACHINE_CLASS", ""),
+        "docker_host_id": os.environ.get("LSV_DOCKER_HOST_ID", ""),
+        "cpu_count": _int(os.environ.get("LSV_CPU_COUNT", "")),
+        "mem_bytes": _int(os.environ.get("LSV_MEM_BYTES", "")),
+    }
+
+
+def _datasmith_headers() -> dict[str, str] | None:
+    """Auth headers for datasmith Supabase. Mirrors lsv_cache_writeback.py."""
+    key = os.environ.get("DATASMITH_SUPABASE_SERVICE_KEY", "")
+    if not key:
+        return None
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "apikey": key,
+        "Accept": "application/json",
+        "User-Agent": "datasmith-lsv-init/1.0",
+    }
+    cf_id = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_ID", "")
+    cf_secret = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_SECRET", "")
+    if cf_id and cf_secret:
+        headers["CF-Access-Client-Id"] = cf_id
+        headers["CF-Access-Client-Secret"] = cf_secret
+    return headers
+
+
+def _parse_task_id(task_id: str) -> tuple[str, str, int] | None:
+    """``owner_repo_<issue>`` parsing — split-from-the-right so repos with
+    underscores still parse. Returns None on malformed task_id."""
+    try:
+        *rest, issue_str = task_id.rsplit("_", 1)
+        issue = int(issue_str)
+        head = "_".join(rest)
+        owner, _, repo = head.partition("_")
+        if not owner or not repo:
+            return None
+        return owner, repo, issue
+    except (ValueError, IndexError):
+        return None
+
+
+def _fetch_baselines_from_cache(attrs: dict[str, Any]) -> dict[str, Any] | None:
+    """Query datasmith Supabase ``lsv_baseline_cache`` for an exact-match row.
+
+    Returns the cached ``baselines`` JSONB blob, or None on miss / config /
+    network failure (callers fall through to a full survey).
+    """
+    base_url = os.environ.get("DATASMITH_SUPABASE_URL", "")
+    headers = _datasmith_headers()
+    task_id = os.environ.get("LSV_TASK_ID", "")
+    if not base_url or not headers or not task_id:
+        print(f"[{_ts()}] [lsv_init] cache: skip baseline lookup (creds/task_id missing)")
+        return None
+    parsed = _parse_task_id(task_id)
+    if parsed is None:
+        print(f"[{_ts()}] [lsv_init] cache: could not parse LSV_TASK_ID={task_id!r}")
+        return None
+    owner, repo, issue = parsed
+
+    qs = [
+        "select=baselines",
+        f"owner=eq.{urllib.parse.quote(owner)}",
+        f"repo=eq.{urllib.parse.quote(repo)}",
+        f"issue_number=eq.{issue}",
+    ]
+    for k, v in attrs.items():
+        qs.append(f"{k}=eq.{urllib.parse.quote(str(v))}")
+    url = f"{base_url}/rest/v1/lsv_baseline_cache?" + "&".join(qs)
+    if not url.startswith(("https://", "http://")):
+        return None
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            rows = json.loads(resp.read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        print(f"[{_ts()}] [lsv_init] cache: baseline lookup failed ({exc})")
+        return None
+    if not rows:
+        return None
+    return rows[0].get("baselines") or None
 
 
 def detect_source_root() -> Path:
@@ -341,12 +465,26 @@ def main() -> None:
 
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
 
-    # ── Stage runner-pre-fetched cache, if any ──────────────────────────
-    # The datasmith runner queries lsv_dep_cache + lsv_baseline_cache before
-    # Job.run() and drops hits into /opt/lsv/cache/. We slot them into the
-    # session's expected location so initialize_diffcheck(force=False) can
-    # short-circuit. Misses fall through to a full survey + timing pass and
-    # are written back by lsv_cache_writeback.py at end-of-test.
+    # ── Resolve resource attrs + persist for writeback ──────────────────
+    # Read /proc-derived fields here so cpu_count and mem_bytes describe
+    # the actual sandbox (Harbor's cgroup limits) rather than the runner
+    # host. Persist to a JSON file so lsv_cache_writeback.py uses identical
+    # values without going through the env-var → shlex.quote round-trip
+    # that previously caused ``''`` vs ``""`` cache-row duplication.
+    resource_attrs = _read_resource_attrs()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (OUTPUT_DIR / "lsv_resource_attrs.json").write_text(
+        json.dumps(resource_attrs, indent=2)
+    )
+    print(
+        f"[{_ts()}] [lsv_init] resource_attrs: env={resource_attrs['env']!r} "
+        f"machine_class={resource_attrs['machine_class']!r} "
+        f"docker_host_id={resource_attrs['docker_host_id']!r} "
+        f"cpu_count={resource_attrs['cpu_count']} "
+        f"mem_bytes={resource_attrs['mem_bytes']}"
+    )
+
+    # ── Cache layer 1: deps DB (resource-independent, runner-pre-staged) ──
     deps_was_cached = False
     baselines_was_cached = False
     if CACHED_DEPS_DB.exists() and CACHED_DEPS_DB.stat().st_size > 0:
@@ -354,14 +492,21 @@ def main() -> None:
         shutil.copy(CACHED_DEPS_DB, session.deps_db_path)
         deps_was_cached = True
         print(f"[{_ts()}] [lsv_init] cache: staged deps DB from {CACHED_DEPS_DB}")
-    if CACHED_BASELINES.exists() and CACHED_BASELINES.stat().st_size > 0 and deps_was_cached:
-        try:
-            payload = json.loads(CACHED_BASELINES.read_text())
-            n = session.load_baselines(payload)
-            baselines_was_cached = True
-            print(f"[{_ts()}] [lsv_init] cache: loaded {n} baselines from {CACHED_BASELINES}")
-        except Exception as exc:
-            print(f"[{_ts()}] [lsv_init] cache: load_baselines failed ({exc}); falling through")
+
+    # ── Cache layer 2: baselines (resource-keyed, fetched at runtime) ────
+    # Resource-keyed means we can only look these up after we've read /proc
+    # — the runner can't pre-stage because it doesn't know the sandbox
+    # specs. Same datasmith Supabase project as lsv_cache_writeback writes
+    # back to.
+    if deps_was_cached:
+        cached_baselines = _fetch_baselines_from_cache(resource_attrs)
+        if cached_baselines:
+            try:
+                n = session.load_baselines(cached_baselines)
+                baselines_was_cached = True
+                print(f"[{_ts()}] [lsv_init] cache: loaded {n} baselines from lsv_baseline_cache")
+            except Exception as exc:
+                print(f"[{_ts()}] [lsv_init] cache: load_baselines failed ({exc}); falling through")
 
     # ── Stage oracle snapshots for agent runs ──────────────────────────
     # Oracle runs CAPTURE snapshots (snapshot-tool baseline) and the runner

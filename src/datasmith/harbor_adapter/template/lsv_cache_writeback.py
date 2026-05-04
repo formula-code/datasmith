@@ -149,7 +149,6 @@ def _patch_pr_deps_url(
     if our PR row is somehow missing."""
     payload = {
         "lsv_deps_db_url": deps_db_url,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     headers = {
         **_service_headers(),
@@ -203,7 +202,7 @@ _BASELINE_PK_COLS = (
     "owner", "repo", "issue_number",
     "env", "container_name", "image_digest",
     "machine_class", "docker_host_id",
-    "cpu_model", "cpu_count", "mem_bytes",
+    "cpu_count", "mem_bytes",
 )
 
 
@@ -218,8 +217,8 @@ def _upsert_baseline_cache_row(
 ) -> None:
     """Upsert one row into ``lsv_baseline_cache`` keyed on the raw resource
     columns. ``attrs`` must contain all of: env, container_name, image_digest,
-    machine_class, docker_host_id, cpu_model, cpu_count, mem_bytes. The PK
-    spans every PK column so on_conflict has to enumerate them all."""
+    machine_class, docker_host_id, cpu_count, mem_bytes. The PK spans every
+    PK column so on_conflict has to enumerate them all."""
     row = {
         "owner": owner,
         "repo": repo,
@@ -260,14 +259,6 @@ def _env_summary() -> str:
         "DATASMITH_CF_ACCESS_CLIENT_ID",
         "DATASMITH_CF_ACCESS_CLIENT_SECRET",
         "LSV_TASK_ID",
-        "LSV_ENV",
-        "LSV_CONTAINER_NAME",
-        "LSV_IMAGE_DIGEST",
-        "LSV_MACHINE_CLASS",
-        "LSV_DOCKER_HOST_ID",
-        "LSV_CPU_MODEL",
-        "LSV_CPU_COUNT",
-        "LSV_MEM_BYTES",
         "LSV_DEPS_BUCKET",
         "FORMULACODE_NO_UPLOAD",
     ]
@@ -278,11 +269,45 @@ def _env_summary() -> str:
     return ", ".join(parts)
 
 
+_RESOURCE_ATTRS_PATH = LSV_DIR / "lsv_resource_attrs.json"
+
+
 def _read_resource_attrs() -> dict[str, Any]:
-    """Read the eight raw resource columns from env. Empty/zero defaults are
-    fine — the cache table's PK uses ''/0 placeholders for fields that don't
-    apply to the current env (e.g. machine_class for docker, cpu_count for
-    daytona). Coercing here keeps the upsert payload typed correctly."""
+    """Load the cache key attrs from the JSON file lsv_init.py wrote.
+
+    Single source of truth — both lookup (in lsv_init) and upsert (here)
+    use identical values. Removes the env-var → shell-quote → env-var
+    round-trip that previously produced ``''``-vs-``""`` cache-row
+    duplication for empty fields like ``machine_class`` on docker.
+    """
+    if not _RESOURCE_ATTRS_PATH.exists():
+        print(
+            f"[{_ts()}] [cache_writeback] WARNING: {_RESOURCE_ATTRS_PATH} missing — "
+            "lsv_init.py likely didn't complete; falling back to LSV_* env vars"
+        )
+        return _read_resource_attrs_from_env()
+    try:
+        attrs: dict[str, Any] = json.loads(_RESOURCE_ATTRS_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[{_ts()}] [cache_writeback] WARNING: {_RESOURCE_ATTRS_PATH} unreadable ({exc})")
+        return _read_resource_attrs_from_env()
+    # Coerce numeric fields defensively in case the JSON encoded them as strings.
+    for k in ("cpu_count", "mem_bytes"):
+        try:
+            attrs[k] = int(attrs.get(k, 0))
+        except (TypeError, ValueError):
+            attrs[k] = 0
+    return attrs
+
+
+def _read_resource_attrs_from_env() -> dict[str, Any]:
+    """Fallback when ``lsv_resource_attrs.json`` is missing — read all 7
+    cache-key fields from env vars directly. Same logic as
+    ``lsv_init.py:_read_resource_attrs``. We do NOT fall back to /proc:
+    cpu_count/mem_bytes inside the sandbox reflect the *host* (Daytona's
+    physical machine, not the cgroup-pinned 2/8), which would write the
+    wrong key.
+    """
     def _int(v: str) -> int:
         try:
             return int(v)
@@ -295,9 +320,8 @@ def _read_resource_attrs() -> dict[str, Any]:
         "image_digest":   os.environ.get("LSV_IMAGE_DIGEST", ""),
         "machine_class":  os.environ.get("LSV_MACHINE_CLASS", ""),
         "docker_host_id": os.environ.get("LSV_DOCKER_HOST_ID", ""),
-        "cpu_model":      os.environ.get("LSV_CPU_MODEL", ""),
-        "cpu_count":      _int(os.environ.get("LSV_CPU_COUNT", "0")),
-        "mem_bytes":      _int(os.environ.get("LSV_MEM_BYTES", "0")),
+        "cpu_count":      _int(os.environ.get("LSV_CPU_COUNT", "")),
+        "mem_bytes":      _int(os.environ.get("LSV_MEM_BYTES", "")),
     }
 
 

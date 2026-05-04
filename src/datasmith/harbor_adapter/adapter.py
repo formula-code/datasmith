@@ -45,17 +45,24 @@ class FormulaCodeRecord:
 class OracleArtifacts:
     """Pre-fetched oracle cache contents for an agent-evaluation run.
 
-    The caller (Harbor's CLI, fc-data, etc.) downloads these from datasmith
-    Supabase (PostgREST + Storage) and hands them to ``generate_task`` /
-    ``_stage_oracle_cache``, which writes them into the task's
-    ``environment/cache/`` directory so the Dockerfile's ``COPY cache``
-    bakes them into the image. ``lsv_init.py`` then loads deps + baselines
-    and copies the snapshot files into ``SNAPSHOT_DIR`` for ``snapshot-tool
-    verify`` to diff against.
+    Both fields are *resource-independent*: the deps DB is the asv
+    test-to-source-file map (same on every machine), and the snapshots
+    tarball holds the pickled benchmark/lexer state at the patched commit.
+    The caller downloads these from datasmith Supabase and hands them to
+    ``generate_task`` / ``_stage_oracle_cache``, which writes them into the
+    task's ``environment/cache/`` directory so the Dockerfile's
+    ``COPY cache`` bakes them into the image.
+
+    Baselines, by contrast, are *resource-keyed* (per cpu_count + mem_bytes
+    + machine_class + docker_host_id) and can't be pre-staged at image-build
+    time. ``lsv_init.py`` fetches them at runtime via PostgREST against
+    ``lsv_baseline_cache`` using the cache identity the runner pinned and
+    inlined into setup.sh's render_env (LSV_CPU_COUNT / LSV_MEM_BYTES are
+    what we *asked Harbor for*, since /proc inside the sandbox shows host
+    specs not cgroup limits — see harbor_healthcheck:_resource_limits).
     """
 
     deps_db_bytes: bytes
-    baselines_json: dict[str, Any]
     snapshots_tarball_bytes: bytes
 
 
@@ -205,6 +212,7 @@ class FormulaCodeAdapter:
         rec: FormulaCodeRecord,
         paths: HarborTaskPaths,
         rounds: int = 1,
+        setup_render_env: dict[str, str] | None = None,
     ) -> None:
         """Generate solution files (solve.sh, setup.sh)."""
         # solve.sh
@@ -220,25 +228,29 @@ class FormulaCodeAdapter:
             rounds=rounds,
             extra_setup_commands=extra_setup_commands,
             harbor_agent_name=rec.harbor_agent_name,
+            render_env=setup_render_env,
         )
         setup_sh_path = paths.tests_dir / "setup.sh"
         setup_sh_path.write_text(setup_sh_content)
         setup_sh_path.chmod(0o755)
 
     def _stage_oracle_cache(self, paths: HarborTaskPaths, artifacts: OracleArtifacts) -> None:
-        """Drop oracle's deps DB, baselines, and snapshot files into ``cache/``.
+        """Drop oracle's deps DB and snapshot files into ``cache/``.
 
         The Dockerfile's ``COPY cache /opt/lsv/cache`` directive bakes the
         directory into the image at build time. ``lsv_init.py`` then loads
-        deps + baselines into the LightspeedSession and copies the snapshot
+        the deps DB into the LightspeedSession and copies the snapshot
         files into ``SNAPSHOT_DIR`` so ``snapshot-tool verify`` can diff the
-        agent's behavior against the oracle baseline.
+        agent's behavior against the oracle baseline. Baselines are NOT
+        pre-staged here — they're resource-keyed and lsv_init.py fetches
+        them at runtime via PostgREST against ``lsv_baseline_cache`` using
+        the cache identity (cpu_count, mem_bytes, etc.) the runner pinned
+        and rendered into setup.sh's env.
         """
         cache_dir = paths.environment_dir / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         (cache_dir / "lightspeed_deps.db").write_bytes(artifacts.deps_db_bytes)
-        (cache_dir / "baselines.json").write_text(json.dumps(artifacts.baselines_json))
 
         snapshots_dir = cache_dir / "snapshots"
         snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +270,7 @@ class FormulaCodeAdapter:
         rounds: int = 1,
         verifier_env: dict[str, str] | None = None,
         test_render_env: dict[str, str] | None = None,
+        setup_render_env: dict[str, str] | None = None,
         oracle_artifacts: OracleArtifacts | None = None,
     ) -> Path:
         """Generate a complete Harbor task directory for the given FormulaCodeRecord.
@@ -285,7 +298,7 @@ class FormulaCodeAdapter:
         self._write_task_toml(rec, paths, timeout_sec, cpus, memory, storage, verifier_env=verifier_env)
         self._write_environment_files(rec, paths)
         self._write_test_files(rec, paths, run_pytest, rounds, test_render_env=test_render_env)
-        self._write_solution_files(rec, paths, rounds)
+        self._write_solution_files(rec, paths, rounds, setup_render_env=setup_render_env)
 
         return out_dir
 
@@ -339,7 +352,6 @@ def fetch_oracle_artifacts(
     owner: str,
     repo: str,
     issue_number: int,
-    resource_attrs: dict[str, Any],
     datasmith_supabase_url: str,
     datasmith_supabase_service_key: str,
     cf_access_id: str | None = None,
@@ -347,14 +359,14 @@ def fetch_oracle_artifacts(
     deps_bucket: str = "lsv-deps",
     snapshots_bucket: str = "lsv-snapshots",
 ) -> OracleArtifacts | None:
-    """Pull oracle's cached artifacts (deps DB, baselines, snapshot tarball).
+    """Pull oracle's resource-independent cached artifacts (deps DB + snapshot tarball).
 
-    Returns ``None`` if any piece is missing — the caller decides whether to
-    fall back to a full oracle run or fail-fast. ``resource_attrs`` must
-    match the keys on ``lsv_baseline_cache``: env, container_name,
-    image_digest, machine_class, docker_host_id, cpu_model, cpu_count,
-    mem_bytes (zero/empty values are valid for the dimensions that don't
-    apply to the caller's environment).
+    Returns ``None`` if either piece is missing — the caller decides whether
+    to fall back to a full oracle run or fail-fast. Baselines are fetched
+    by ``lsv_init.py`` from inside the sandbox using cache-key attrs the
+    runner injects via render_env (``LSV_CPU_COUNT``/``LSV_MEM_BYTES``
+    derived from what we ask Harbor to pin via task.toml), so the cache key
+    matches what the runner pinned rather than what /proc reports.
     """
     headers = _datasmith_headers(datasmith_supabase_service_key, cf_access_id, cf_access_secret)
 
@@ -376,22 +388,6 @@ def fetch_oracle_artifacts(
     if not deps_db_key or not snapshot_key:
         return None
 
-    baseline_url = f"{datasmith_supabase_url}/rest/v1/lsv_baseline_cache?select=baselines"
-    baseline_url += f"&owner=eq.{urllib.parse.quote(owner)}"
-    baseline_url += f"&repo=eq.{urllib.parse.quote(repo)}"
-    baseline_url += f"&issue_number=eq.{issue_number}"
-    for k, v in resource_attrs.items():
-        baseline_url += f"&{k}=eq.{urllib.parse.quote(str(v))}"
-    try:
-        baseline_rows = _http_get_json(baseline_url, headers)
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-        return None
-    if not baseline_rows:
-        return None
-    baselines_json = baseline_rows[0].get("baselines") or {}
-    if not baselines_json:
-        return None
-
     deps_url = f"{datasmith_supabase_url}/storage/v1/object/{deps_bucket}/{deps_db_key}"
     snap_url = f"{datasmith_supabase_url}/storage/v1/object/{snapshots_bucket}/{snapshot_key}"
     try:
@@ -402,6 +398,5 @@ def fetch_oracle_artifacts(
 
     return OracleArtifacts(
         deps_db_bytes=deps_bytes,
-        baselines_json=baselines_json,
         snapshots_tarball_bytes=snap_bytes,
     )

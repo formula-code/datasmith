@@ -81,6 +81,12 @@ DATASMITH_HARBOR_JOB_TIMEOUT_S: float = float(
 # to 32 GB. Tune via env vars when scaling up.
 DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA", "8192"))
 DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER", "32768"))
+# CPU cap per Harbor trial. Daytona pins this exactly (cgroup quota). Docker
+# trials inherit the same cgroup limit via docker-compose deploy.resources.
+# Used both as task.toml's `cpus` value AND as `LSV_CPU_COUNT` in the cache
+# key, so all trials within a machine_class hit the same baseline row.
+DATASMITH_HARBOR_TRIAL_CPUS_DAYTONA: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_CPUS_DAYTONA", "2"))
+DATASMITH_HARBOR_TRIAL_CPUS_DOCKER: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_CPUS_DOCKER", "2"))
 
 
 def _patch_harbor_trial_name() -> None:
@@ -165,84 +171,53 @@ def _resolve_image_digest(container_name: str | None) -> str:
     return container_name
 
 
-def _read_host_cpu_mem() -> dict[str, Any]:
-    """Read CPU model / count / memory from /proc on the runner host.
-
-    These end up in resource_signature for *docker* runs (where the runner
-    host == trial host). Daytona runs ignore them — the daytona machine class
-    is the relevant invariant there, and we can't see inside the sandbox from
-    here. Best-effort; missing values become empty strings / zeros.
-    """
-    cpu_model = ""
-    cpu_count = 0
-    total_mem_bytes = 0
-    try:
-        for line in Path("/proc/cpuinfo").read_text().splitlines():
-            if line.startswith("model name") and not cpu_model:
-                cpu_model = line.split(":", 1)[1].strip()
-                break
-        cpu_count = os.cpu_count() or 0
-    except OSError as exc:
-        logger.debug("could not read /proc/cpuinfo: %s", exc)
-    try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            if line.startswith("MemTotal:"):
-                # MemTotal:       65802252 kB
-                total_mem_bytes = int(line.split()[1]) * 1024
-                break
-    except OSError as exc:
-        logger.debug("could not read /proc/meminfo: %s", exc)
-    return {"cpu_model": cpu_model, "cpu_count": cpu_count, "mem_bytes": total_mem_bytes}
-
-
 def _compute_resource_attrs(
     *,
     use_daytona: bool,
     container_name: str | None,
     image_digest: str,
+    cpus: int,
+    memory_mb: int,
 ) -> dict[str, Any]:
-    """Raw resource columns describing the trial-host environment.
+    """Build the full 7-attr ``lsv_baseline_cache`` cache key.
 
-    Used for both the cache lookup (multi-column exact match against
-    ``lsv_baseline_cache``) and the env-vars passed to the in-container
-    writeback. Storing raw columns instead of a hash means we can later
-    relax matching (e.g. ignore CPU model) without rewriting every cached
-    row's signature.
+    All seven values come from the runner — what we *ask* Harbor to pin via
+    task.toml. cpu_count + mem_bytes deliberately mirror the cgroup limits
+    we configure (not what /proc inside the sandbox reports — empirically
+    /proc shows the underlying Daytona host's full hardware, not the
+    sandbox's pinned 2/8). Identical reasoning for docker, where the
+    runner is the host so it knows what it pinned.
 
-    Daytona zeroes the docker-only fields (and vice versa) rather than
-    skipping them entirely — keeps every row's PK shape uniform so the
-    upsert ``on_conflict`` list never has to branch.
+    The runner ships these via setup.sh's render_env so lsv_init.py sees
+    identical values inside the container.
     """
-    cpu_mem = _read_host_cpu_mem() if not use_daytona else None
     return {
         "env": "daytona" if use_daytona else "docker",
         "container_name": container_name or "",
         "image_digest": image_digest,
         "machine_class": DATASMITH_DAYTONA_MACHINE_CLASS if use_daytona else "",
         "docker_host_id": "" if use_daytona else DATASMITH_DOCKER_HOST_ID,
-        "cpu_model": "" if cpu_mem is None else cpu_mem["cpu_model"],
-        "cpu_count": 0 if cpu_mem is None else cpu_mem["cpu_count"],
-        "mem_bytes": 0 if cpu_mem is None else cpu_mem["mem_bytes"],
+        "cpu_count": cpus,
+        "mem_bytes": memory_mb * 1024 * 1024,
     }
 
 
-def _fetch_lsv_cache(
+def _fetch_pr_deps_db_url(
     client: Any,
     *,
     owner: str,
     repo: str,
     issue_number: int,
-    attrs: dict[str, Any],
-) -> tuple[str | None, dict[str, Any] | None]:
-    """Look up cached deps DB Storage URL + baseline timings for this PR.
+) -> str | None:
+    """Look up the cached deps DB Storage URL for this PR.
 
-    The deps DB URL lives on ``pull_requests.lsv_deps_db_url`` (per-PR,
-    structural). Baselines live on ``lsv_baseline_cache`` keyed by raw
-    resource columns. Either may be ``None`` if no matching row exists.
-    Service-role client bypasses RLS.
+    The deps DB lives on ``pull_requests.lsv_deps_db_url`` and is
+    resource-independent (it's the asv-derived test-to-source-file map),
+    so the runner can pre-stage it via the Dockerfile's ``COPY cache/``
+    directive. Baseline timings have moved to an in-container fetch
+    (lsv_init.py queries lsv_baseline_cache once cpu_count and mem_bytes
+    are known from inside the sandbox).
     """
-    deps_db_url: str | None = None
-    baselines: dict[str, Any] | None = None
     try:
         resp = (
             client.table("pull_requests")
@@ -254,7 +229,8 @@ def _fetch_lsv_cache(
             .execute()
         )
         if resp.data:
-            deps_db_url = resp.data[0].get("lsv_deps_db_url") or None
+            url: str | None = resp.data[0].get("lsv_deps_db_url") or None
+            return url
     except Exception as exc:
         logger.warning(
             "pull_requests.lsv_deps_db_url lookup failed for %s/%s#%s: %s",
@@ -263,67 +239,30 @@ def _fetch_lsv_cache(
             issue_number,
             exc,
         )
-
-    try:
-        q = (
-            client.table("lsv_baseline_cache")
-            .select("baselines")
-            .eq("owner", owner)
-            .eq("repo", repo)
-            .eq("issue_number", issue_number)
-        )
-        for k, v in attrs.items():
-            q = q.eq(k, v)
-        resp = q.limit(1).execute()
-        if resp.data:
-            baselines = resp.data[0].get("baselines") or None
-    except Exception as exc:
-        logger.warning(
-            "lsv_baseline_cache lookup failed for %s/%s#%s attrs=%s: %s",
-            owner,
-            repo,
-            issue_number,
-            attrs,
-            exc,
-        )
-
-    return deps_db_url, baselines
+    return None
 
 
-def _stage_lsv_cache_files(
+def _stage_lsv_deps_db(
     client: Any,
     cache_dir: Path,
     *,
     deps_db_url: str | None,
-    baselines: dict[str, Any] | None,
-) -> tuple[bool, bool]:
-    """Drop cached deps DB and baselines into ``cache_dir``.
+) -> bool:
+    """Drop the cached deps DB into ``cache_dir`` (resource-independent).
 
-    The Dockerfile's ``COPY cache/ /opt/lsv/cache/`` then bakes them into
-    the image at build time, where lsv_init.py can find them at setup-time.
-    Returns ``(deps_staged, baselines_staged)``.
+    The Dockerfile's ``COPY cache/ /opt/lsv/cache/`` then bakes it into
+    the image at build time. Returns whether the file was staged.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    deps_ok = False
-    baselines_ok = False
-
-    if deps_db_url:
-        # deps_db_url is a Storage object key (not a public URL).
-        try:
-            blob = client.storage.from_(DATASMITH_LSV_DEPS_BUCKET).download(deps_db_url)
-            (cache_dir / "lightspeed_deps.db").write_bytes(blob)
-            deps_ok = True
-        except Exception as exc:
-            logger.warning("LSV deps DB download failed (key=%s): %s", deps_db_url, exc)
-
-    if baselines:
-        try:
-            (cache_dir / "baselines.json").write_text(json.dumps(baselines))
-            baselines_ok = True
-        except Exception as exc:
-            logger.warning("LSV baselines JSON write failed: %s", exc)
-
-    return deps_ok, baselines_ok
+    if not deps_db_url:
+        return False
+    try:
+        blob = client.storage.from_(DATASMITH_LSV_DEPS_BUCKET).download(deps_db_url)
+        (cache_dir / "lightspeed_deps.db").write_bytes(blob)
+        return True
+    except Exception as exc:
+        logger.warning("LSV deps DB download failed (key=%s): %s", deps_db_url, exc)
+        return False
 
 
 def _materialize_tasks(
@@ -366,23 +305,31 @@ def _materialize_tasks(
         container_name = pr.get("container_name")
 
         image_digest = _resolve_image_digest(container_name)
+        # Per-task resource pinning. Defaults uniform per env; future per-task
+        # overrides (e.g. apache/arrow needing 8 cpus / 32 GB) can branch on
+        # owner/repo/issue here without breaking the cache-key invariant —
+        # different attrs deliberately produce a different cache row.
+        cpus = DATASMITH_HARBOR_TRIAL_CPUS_DAYTONA if use_daytona else DATASMITH_HARBOR_TRIAL_CPUS_DOCKER
+        memory_mb = DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA if use_daytona else DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER
         attrs = _compute_resource_attrs(
             use_daytona=use_daytona,
             container_name=container_name,
             image_digest=image_digest,
+            cpus=cpus,
+            memory_mb=memory_mb,
         )
-        deps_db_url, baselines = _fetch_lsv_cache(
+        deps_db_url = _fetch_pr_deps_db_url(
             client,
             owner=owner,
             repo=repo,
             issue_number=issue_number,
-            attrs=attrs,
         )
 
-        # Per-task verifier_env: base creds + agent name + cache identity.
-        # The lsv_cache_writeback.py script (run from test.sh after lsv_measure)
-        # reads these raw resource columns to know which cache row to upsert
-        # on miss (the table's PK is keyed on the same columns).
+        # Per-task verifier_env: base creds + full cache identity. We thread
+        # cpu_count/mem_bytes through here too so lsv_init.py and
+        # lsv_cache_writeback.py read identical values via setup.sh / test.sh
+        # render_env (Harbor's [verifier.env] does not reach setup.sh's
+        # process env on daytona — see render_env workaround below).
         verifier_env = dict(base_env)
         verifier_env["LSV_TASK_ID"] = rec.task_id
         verifier_env["LSV_DEPS_BUCKET"] = DATASMITH_LSV_DEPS_BUCKET
@@ -391,27 +338,33 @@ def _materialize_tasks(
         verifier_env["LSV_IMAGE_DIGEST"] = attrs["image_digest"]
         verifier_env["LSV_MACHINE_CLASS"] = attrs["machine_class"]
         verifier_env["LSV_DOCKER_HOST_ID"] = attrs["docker_host_id"]
-        verifier_env["LSV_CPU_MODEL"] = attrs["cpu_model"]
         verifier_env["LSV_CPU_COUNT"] = str(attrs["cpu_count"])
         verifier_env["LSV_MEM_BYTES"] = str(attrs["mem_bytes"])
 
-        # Vars that test.sh actually needs at runtime. We inline these as
-        # `export` lines in the rendered test.sh because Harbor's daytona
-        # exec does not propagate task.toml [verifier.env] to test.sh's
+        # Vars that test.sh + setup.sh actually need at runtime. We inline
+        # these as `export` lines in the rendered scripts because Harbor's
+        # daytona exec does not propagate task.toml [verifier.env] to the
         # process env (verified empirically — even HARBOR_AGENT_NAME and
-        # SUPABASE_URL come through unset). The verifier_env above stays
-        # in task.toml for any Harbor-internal consumer that does honor it.
+        # SUPABASE_URL come through unset). The verifier_env above stays in
+        # task.toml for any Harbor-internal consumer that does honor it.
         # Filter to non-empty values so empty docker-only fields on daytona
         # runs don't pollute the rendered script with `export X=''` lines.
         test_render_env = {k: v for k, v in verifier_env.items() if v}
+        # setup.sh runs lsv_init.py, which needs the cache identity + the
+        # datasmith Supabase creds to query lsv_baseline_cache. Same dict;
+        # rendered at task-generation time.
+        setup_render_env = dict(test_render_env)
 
         try:
             adapter.generate_task(
                 rec,
                 run_pytest=True,
                 rounds=rounds,
+                cpus=cpus,
+                memory=f"{memory_mb}M",
                 verifier_env=verifier_env,
                 test_render_env=test_render_env,
+                setup_render_env=setup_render_env,
                 timeout_sec=DATASMITH_HARBOR_TRIAL_TIMEOUT_S,
             )
         except Exception:
@@ -420,22 +373,14 @@ def _materialize_tasks(
 
         # Stage cached files AFTER generate_task creates the directory tree.
         # The adapter pre-creates an empty environment/cache/ (so the Dockerfile
-        # COPY directive always has something to copy); we drop hits into that
-        # same directory.
+        # COPY directive always has something to copy); we drop the deps DB
+        # into that same directory. Baselines are NOT pre-staged — they're
+        # resource-keyed and the runner doesn't know the sandbox specs;
+        # lsv_init.py fetches them at runtime via PostgREST.
         cache_dir = task_dir / rec.task_id / "environment" / DATASMITH_LSV_CACHE_DIRNAME
-        deps_staged, baselines_staged = _stage_lsv_cache_files(
-            client,
-            cache_dir,
-            deps_db_url=deps_db_url,
-            baselines=baselines,
-        )
-        if deps_staged or baselines_staged:
-            logger.info(
-                "LSV cache stage hit for %s: deps=%s baselines=%s",
-                rec.task_id,
-                deps_staged,
-                baselines_staged,
-            )
+        deps_staged = _stage_lsv_deps_db(client, cache_dir, deps_db_url=deps_db_url)
+        if deps_staged:
+            logger.info("LSV cache stage hit for %s: deps_db", rec.task_id)
 
         task_id_map[rec.task_id] = {
             "owner": owner,

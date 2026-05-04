@@ -195,6 +195,7 @@ def render_run_setup_sh(
     rounds: int = 1,
     extra_setup_commands: str = "",
     harbor_agent_name: str = "oracle",
+    render_env: dict[str, str] | None = None,
 ) -> str:
     """Render setup.sh with task metadata and extra setup commands.
 
@@ -202,6 +203,10 @@ def render_run_setup_sh(
     ``lsv_init.py`` can branch on oracle vs. agent runs without depending on
     Harbor's ``[verifier.env]`` propagation, which empirically doesn't reach
     setup.sh on daytona.
+
+    ``render_env`` is the same daytona workaround used in test.sh: a small
+    dict of vars (LSV cache identity, datasmith Supabase creds, resource
+    limits) that get inlined as ``export`` lines so lsv_init.py sees them.
     """
     return _render_template(
         "setup.sh",
@@ -209,4 +214,5 @@ def render_run_setup_sh(
         rounds=rounds,
         extra_setup_commands=extra_setup_commands or "",
         harbor_agent_name=harbor_agent_name,
+        render_env=render_env or {},
     )

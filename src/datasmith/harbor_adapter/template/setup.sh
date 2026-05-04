@@ -13,6 +13,14 @@ export TASK_ID
 # stage a pre-fetched one for an agent-evaluation run).
 export HARBOR_AGENT_NAME="{{ harbor_agent_name }}"
 
+# ── Datasmith creds + LSV cache identity (rendered by runner) ────────────
+# Same render_env workaround as test.sh — Harbor's [verifier.env] does not
+# reach setup.sh's process env on daytona, so we inline the small set of
+# vars lsv_init.py needs (LSV_*, DATASMITH_*) as `export` lines.
+{% for k, v in render_env.items() -%}
+export {{ k }}={{ v|shell_quote }}
+{% endfor %}
+
 setup_start=$(date +%s)
 # Track which phase we're currently in so the exit trap can report WHERE
 # setup crashed, not just the exit code. Updated at every phase boundary
