@@ -1,0 +1,19 @@
+model_list:
+  - model_name: gemma-4-31b
+    litellm_params:
+      model: openai/google/gemma-4-31B-it
+      api_base: http://127.0.0.1:8123/v1
+      api_key: dummy
+
+  - model_name: model-b
+    litellm_params:
+      model: openai/placeholder-model-b
+      api_base: http://127.0.0.1:8124/v1
+      api_key: dummy
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 600

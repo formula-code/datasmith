@@ -132,6 +132,10 @@ The Supabase PostgREST API is also available at `https://db.formulacode.org` via
 
 When both `DATASMITH_CF_ACCESS_*` vars are set, `get_client()` and `get_async_client()` in `utils/db.py` automatically inject the required headers. See `docs/guide/remote-access.md` for full setup instructions.
 
+### Model proxy
+
+Local vLLM servers (8123, 8124) are exposed via a LiteLLM proxy on `https://model.formulacode.org` (OpenAI-compatible, Bearer-auth via `LITELLM_MASTER_KEY` or scoped virtual keys). LiteLLM runs in DB-backed mode against the `litellm` database in the local Supabase Postgres, which enables the admin UI at `/ui/`, virtual keys, and spend logs. Persistent venv at `.venv-litellm/` (set up by `make model-proxy-install`); `make model-tunnel` starts LiteLLM (`infra/litellm.config.yaml`) and `cloudflared` (`datasmith-model` tunnel) together. See `docs/guide/model-proxy.md`.
+
 ### Public read-only access (RLS)
 
 Four tables are readable by the `anon` role: `repositories`, `pull_requests`, `candidate_containers`, `harbor_runs`. Migration `00012_public_read_rls.sql` enables RLS with a `public_read` SELECT policy on those tables; migration `00015_revoke_anon_select.sql` revokes Supabase's default broad `anon` `SELECT` grant and re-grants it only on the four, so every other table returns `permission denied`. The service-role key bypasses both layers, so pipeline processes are unaffected. Public anon access is served on `https://api.formulacode.org` (no Cloudflare Access gate); pipeline operators continue to use `https://db.formulacode.org` with CF Access + service-role key.
