@@ -74,6 +74,39 @@ grafana-tunnel: ## Expose Grafana publicly via Cloudflare Tunnel
 db-tunnel: ## Expose Supabase PostgREST API via Cloudflare Tunnel (db.formulacode.org)
 	@cloudflared tunnel --config ~/.cloudflared/config-db.yml run datasmith-db
 
+LITELLM_VENV := .venv-litellm
+
+.PHONY: model-proxy-install
+model-proxy-install: $(LITELLM_VENV)/.installed ## Set up the persistent venv used by model-tunnel
+
+$(LITELLM_VENV)/.installed:
+	@echo "Creating $(LITELLM_VENV) and installing litellm[proxy] + prisma"
+	@uv venv $(LITELLM_VENV) --python 3.12 --quiet --allow-existing
+	@uv pip install --quiet --python $(LITELLM_VENV)/bin/python 'litellm[proxy]' prisma
+	@echo "Running prisma generate against LiteLLM's bundled schema"
+	@SCHEMA=$$($(LITELLM_VENV)/bin/python -c "import litellm, os; print(os.path.join(os.path.dirname(litellm.__file__),'proxy','schema.prisma'))"); \
+	    VENV_BIN=$$(realpath $(LITELLM_VENV)/bin); \
+	    cd $(LITELLM_VENV) && PATH="$$VENV_BIN:$$PATH" prisma generate --schema=$$SCHEMA
+	@touch $@
+
+.PHONY: model-tunnel
+model-tunnel: $(LITELLM_VENV)/.installed ## Start LiteLLM proxy + Cloudflare Tunnel for vLLM (model.formulacode.org)
+	@set -eu; \
+	set -a; . ./tokens.env; set +a; \
+	REPO_ROOT=$$(pwd); \
+	( cd "$$REPO_ROOT/$(LITELLM_VENV)" && \
+	      exec "$$REPO_ROOT/$(LITELLM_VENV)/bin/litellm" \
+	          --config "$$REPO_ROOT/infra/litellm.config.yaml" \
+	          --port 4100 --host 127.0.0.1 ) & \
+	LITELLM_PID=$$!; \
+	trap 'kill $$LITELLM_PID 2>/dev/null || true; wait $$LITELLM_PID 2>/dev/null || true' EXIT INT TERM; \
+	until curl -fsS http://127.0.0.1:4100/health/liveliness >/dev/null 2>&1; do \
+	    if ! kill -0 $$LITELLM_PID 2>/dev/null; then echo "litellm exited before becoming ready" >&2; exit 1; fi; \
+	    sleep 1; \
+	done; \
+	echo "litellm ready on :4100 (pid $$LITELLM_PID); starting cloudflared"; \
+	cloudflared tunnel --config ~/.cloudflared/config-model.yml run datasmith-model
+
 
 .PHONY: help
 help:
