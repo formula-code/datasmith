@@ -8,12 +8,16 @@ Cache layers, in priority order:
   * deps DB    — resource-independent. Pre-staged by the runner into
                  ``/opt/lsv/cache/lightspeed_deps.db`` if available.
   * baselines  — resource-keyed. Fetched from datasmith Supabase
-                 (``lsv_baseline_cache``) at runtime using the in-container
-                 cpu_count + mem_bytes reads, since those describe the
-                 actual sandbox (Harbor's cgroup-enforced limits) rather
-                 than the runner host. Staging at build time would be
-                 wrong for Daytona (heterogeneous physical hosts under
-                 one ``machine_class``).
+                 (``lsv_baseline_cache``) at runtime. The cache key blends
+                 runner-supplied attrs (cpu_count + mem_bytes — what we
+                 *asked Harbor to pin* via task.toml's cgroup limits)
+                 with one in-sandbox-detected attr: ``detected_cpu_model``,
+                 read from /proc/cpuinfo. The detected model captures
+                 Daytona's heterogeneous physical hosts within a single
+                 ``machine_class`` (the scheduler routes identical
+                 (cpu, mem) requests to multiple EPYC SKUs), which would
+                 otherwise pollute baselines across hardware. Staging at
+                 build time would be wrong for the same reason.
   * snapshots  — resource-independent. Pre-staged by the runner into
                  ``/opt/lsv/cache/snapshots/`` for non-oracle agent runs.
 
@@ -67,20 +71,47 @@ CACHED_SNAPSHOTS_DIR = LSV_CACHE_DIR / "snapshots"
 
 
 # ── Resource-attr helpers ────────────────────────────────────────────────
-# The 7-attr cache key for `lsv_baseline_cache` is built entirely from env
-# vars the runner inlines into setup.sh's render_env. We deliberately do NOT
-# read /proc inside the sandbox: empirically, /proc/cpuinfo and
-# /proc/meminfo show the underlying *host* (Daytona's physical machine —
-# 64 cores / 810 GB on the box that ran our smoke), not the cgroup-limited
-# sandbox. The runner's view of "what we asked Harbor to pin" (cpus and
-# memory_mb passed to task.toml) is the only stable source of truth.
+# The cache key for `lsv_baseline_cache` is 7 runner-supplied attrs +
+# 1 in-sandbox-detected attr. Runner-supplied attrs come from env vars the
+# runner inlines into setup.sh's render_env; cpu_count + mem_bytes there
+# describe what the runner *asked* Harbor to pin via cgroup limits, since
+# /proc/cpuinfo and /proc/meminfo inside the sandbox report the underlying
+# physical *host* (Daytona's 64-core / 810-GB hardware), not the limit.
+#
+# detected_cpu_model is the one attr we DO read from /proc inside the
+# sandbox: model name is exactly the host-level value we want, since
+# Daytona's `default` machine_class fans the same (cpu, mem) request out
+# to multiple EPYC SKUs (9254 / 9334 / 9354P), and we need to avoid
+# replaying baselines across hardware that benchmarks differently.
+
+_MODEL_RE = re.compile(r"^model name\s*:\s*(.+)$", re.MULTILINE)
+
+
+def _detect_cpu_model() -> str:
+    """Read CPU model name from /proc/cpuinfo inside the sandbox.
+
+    Returns the first ``model name`` field's value (e.g.
+    ``"AMD EPYC 9354P 32-Core Processor"``), or ``""`` if the file is
+    unreadable / lacks the field. Mirrors the parsing in
+    ``scripts/probe_daytona_cpu.py``.
+    """
+    try:
+        text = Path("/proc/cpuinfo").read_text()
+    except OSError:
+        return ""
+    m = _MODEL_RE.search(text)
+    return m.group(1).strip() if m else ""
+
 
 def _read_resource_attrs() -> dict[str, Any]:
-    """Build the 7-attr cache key for this trial from runner-set env vars.
+    """Build the 8-attr cache key for this trial.
 
-    All seven values come from the runner via setup.sh's render_env block.
+    Seven attrs come from the runner via setup.sh's render_env block;
     cpu_count + mem_bytes describe what the runner *asked* Harbor to pin
-    (not what /proc reports inside the container).
+    (not what /proc reports inside the container). The eighth attr,
+    ``detected_cpu_model``, is read from /proc/cpuinfo inside the sandbox
+    so the cache key separates baselines captured on different physical
+    hosts within the same machine_class.
     """
     def _int(v: str) -> int:
         try:
@@ -96,6 +127,7 @@ def _read_resource_attrs() -> dict[str, Any]:
         "docker_host_id": os.environ.get("LSV_DOCKER_HOST_ID", ""),
         "cpu_count": _int(os.environ.get("LSV_CPU_COUNT", "")),
         "mem_bytes": _int(os.environ.get("LSV_MEM_BYTES", "")),
+        "detected_cpu_model": _detect_cpu_model(),
     }
 
 
@@ -466,11 +498,11 @@ def main() -> None:
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
 
     # ── Resolve resource attrs + persist for writeback ──────────────────
-    # Read /proc-derived fields here so cpu_count and mem_bytes describe
-    # the actual sandbox (Harbor's cgroup limits) rather than the runner
-    # host. Persist to a JSON file so lsv_cache_writeback.py uses identical
-    # values without going through the env-var → shlex.quote round-trip
-    # that previously caused ``''`` vs ``""`` cache-row duplication.
+    # Build the 8-attr cache key (7 runner-supplied via env + 1 detected
+    # from /proc inside this sandbox) and persist to a JSON file so
+    # lsv_cache_writeback.py uses identical values without re-deriving
+    # from env (which round-trips through shlex.quote and was previously
+    # responsible for ``''`` vs ``""`` cache-row duplication).
     resource_attrs = _read_resource_attrs()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "lsv_resource_attrs.json").write_text(
@@ -481,7 +513,8 @@ def main() -> None:
         f"machine_class={resource_attrs['machine_class']!r} "
         f"docker_host_id={resource_attrs['docker_host_id']!r} "
         f"cpu_count={resource_attrs['cpu_count']} "
-        f"mem_bytes={resource_attrs['mem_bytes']}"
+        f"mem_bytes={resource_attrs['mem_bytes']} "
+        f"detected_cpu_model={resource_attrs['detected_cpu_model']!r}"
     )
 
     # ── Cache layer 1: deps DB (resource-independent, runner-pre-staged) ──

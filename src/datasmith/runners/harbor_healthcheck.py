@@ -180,7 +180,7 @@ def _compute_resource_attrs(
     cpus: int,
     memory_mb: int,
 ) -> dict[str, Any]:
-    """Build the full 7-attr ``lsv_baseline_cache`` cache key.
+    """Build the runner-supplied portion of the ``lsv_baseline_cache`` key.
 
     All seven values come from the runner — what we *ask* Harbor to pin via
     task.toml. cpu_count + mem_bytes deliberately mirror the cgroup limits
@@ -190,7 +190,11 @@ def _compute_resource_attrs(
     runner is the host so it knows what it pinned.
 
     The runner ships these via setup.sh's render_env so lsv_init.py sees
-    identical values inside the container.
+    identical values inside the container. lsv_init.py adds an eighth
+    attr — ``detected_cpu_model`` — read from /proc/cpuinfo inside the
+    sandbox, which captures the physical-host SKU Daytona scheduled this
+    trial onto. We deliberately do not compute that here because the
+    runner has no visibility into which physical host Daytona will pick.
     """
     return {
         "env": "daytona" if use_daytona else "docker",

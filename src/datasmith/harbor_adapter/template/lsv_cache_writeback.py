@@ -117,6 +117,20 @@ def _upload_deps_db(
     with sqlite3.connect(stripped) as con:
         con.execute("DELETE FROM baseline")
         con.commit()
+        # LSV runs the deps DB in WAL mode (PRAGMA journal_mode=WAL), so the
+        # DELETE above lands in a `.db-wal` sidecar — `commit()` marks it
+        # durable but doesn't fold it back into the main file, and SQLite's
+        # default heuristics don't auto-checkpoint on close for a WAL this
+        # small. We then upload `stripped.read_bytes()` (the main file only;
+        # Storage has no notion of sidecars), so a downstream trial that
+        # downloads the blob sees the *pre-DELETE* 140 baseline rows. That
+        # silently re-introduces foreign baselines and makes
+        # `initialize_diffcheck(force=False)` short-circuit the per-env
+        # timing pass — exactly the cross-host pollution this strip is
+        # supposed to prevent. TRUNCATE checkpoint folds the WAL into the
+        # main file *and* zeroes the WAL, so the bytes we read are the
+        # actually-stripped state.
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     owner, repo, issue = _parse_task_id(os.environ["LSV_TASK_ID"])
     object_key = f"{owner}__{repo}__{issue}.sqlite"
@@ -203,6 +217,7 @@ _BASELINE_PK_COLS = (
     "env", "container_name", "image_digest",
     "machine_class", "docker_host_id",
     "cpu_count", "mem_bytes",
+    "detected_cpu_model",
 )
 
 
@@ -217,8 +232,8 @@ def _upsert_baseline_cache_row(
 ) -> None:
     """Upsert one row into ``lsv_baseline_cache`` keyed on the raw resource
     columns. ``attrs`` must contain all of: env, container_name, image_digest,
-    machine_class, docker_host_id, cpu_count, mem_bytes. The PK spans every
-    PK column so on_conflict has to enumerate them all."""
+    machine_class, docker_host_id, cpu_count, mem_bytes, detected_cpu_model.
+    The PK spans every PK column so on_conflict has to enumerate them all."""
     row = {
         "owner": owner,
         "repo": repo,
@@ -301,12 +316,19 @@ def _read_resource_attrs() -> dict[str, Any]:
 
 
 def _read_resource_attrs_from_env() -> dict[str, Any]:
-    """Fallback when ``lsv_resource_attrs.json`` is missing — read all 7
-    cache-key fields from env vars directly. Same logic as
-    ``lsv_init.py:_read_resource_attrs``. We do NOT fall back to /proc:
-    cpu_count/mem_bytes inside the sandbox reflect the *host* (Daytona's
-    physical machine, not the cgroup-pinned 2/8), which would write the
-    wrong key.
+    """Fallback when ``lsv_resource_attrs.json`` is missing — read the
+    runner-supplied cache-key fields from env vars directly. Same logic
+    as ``lsv_init.py:_read_resource_attrs`` for the env-sourced attrs.
+
+    We do NOT fall back to /proc for cpu_count/mem_bytes: inside the
+    sandbox they reflect the *host* (Daytona's physical machine, not the
+    cgroup-pinned 2/8), which would write the wrong key.
+
+    ``detected_cpu_model`` has no env-var equivalent — it is only
+    populated via ``lsv_resource_attrs.json`` written by lsv_init.py
+    after reading /proc/cpuinfo inside the sandbox. When this fallback
+    path runs, lsv_init didn't complete, so we leave the field empty
+    and accept that the row goes to the empty-string slot.
     """
     def _int(v: str) -> int:
         try:
@@ -315,13 +337,14 @@ def _read_resource_attrs_from_env() -> dict[str, Any]:
             return 0
 
     return {
-        "env":            os.environ.get("LSV_ENV", ""),
-        "container_name": os.environ.get("LSV_CONTAINER_NAME", ""),
-        "image_digest":   os.environ.get("LSV_IMAGE_DIGEST", ""),
-        "machine_class":  os.environ.get("LSV_MACHINE_CLASS", ""),
-        "docker_host_id": os.environ.get("LSV_DOCKER_HOST_ID", ""),
-        "cpu_count":      _int(os.environ.get("LSV_CPU_COUNT", "")),
-        "mem_bytes":      _int(os.environ.get("LSV_MEM_BYTES", "")),
+        "env":                os.environ.get("LSV_ENV", ""),
+        "container_name":     os.environ.get("LSV_CONTAINER_NAME", ""),
+        "image_digest":       os.environ.get("LSV_IMAGE_DIGEST", ""),
+        "machine_class":      os.environ.get("LSV_MACHINE_CLASS", ""),
+        "docker_host_id":     os.environ.get("LSV_DOCKER_HOST_ID", ""),
+        "cpu_count":          _int(os.environ.get("LSV_CPU_COUNT", "")),
+        "mem_bytes":          _int(os.environ.get("LSV_MEM_BYTES", "")),
+        "detected_cpu_model": "",
     }
 
 
