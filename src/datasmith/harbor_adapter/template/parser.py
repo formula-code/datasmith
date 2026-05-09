@@ -1,9 +1,24 @@
-"""Reward computation from LSV benchmark results.
+"""Reward computation + harbor_runs persistence.
 
 Reads lsv_results.json (produced by lsv_measure.py), computes per-benchmark
 speedups (baseline/current from LSV), fetches oracle benchmark timings from
 Supabase to compute advantage ((oracle_time - agent_time) / agent_time),
-and writes reward.json + reward.txt.
+writes reward.json + reward.txt, and then performs all post-trial Supabase
+persistence end-to-end:
+
+  * Classifies trial status (setup/patch/lsv/tests) from the reward dossier.
+  * Inserts a ``harbor_runs`` row keyed on a sandbox-generated ``run_id``.
+  * Uploads ``/logs/verifier/run_artifacts.tar.gz`` to the ``runs`` bucket
+    and PATCHes ``harbor_runs.artifacts_storage_url`` with the object key.
+  * For oracle daytona success: uploads ``oracle_snapshots.tar.gz`` to the
+    ``snapshots`` bucket and PATCHes ``pull_requests`` with the new
+    ``baseline_run_id`` + ``snapshot_storage_url``.
+  * Writes ``/logs/verifier/run_id.txt`` last as a sentinel so the runner's
+    failure-path sweep can tell which trials it must NOT re-write rows for.
+
+Was previously a runner-side responsibility (datasmith.runners.harbor_healthcheck)
+— moved here so ``harbor trials start`` and SkyRL get parity with ``fc-data``
+without going through the datasmith runner.
 
 Usage:
     python /tests/parser.py --task-id ID [--agent-key KEY]
@@ -19,6 +34,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 LOG_DIR = Path(os.environ.get("T_BENCH_TASK_LOGS_PATH", "/logs/artifacts"))
@@ -409,7 +425,7 @@ def write_reward(
     pytest_summary: dict | None = None,
     timings: dict | None = None,
     setup_status: dict | None = None,
-) -> None:
+) -> dict:
     """Write reward.json + reward.txt with a structured dossier.
 
     The top-level gating fields (``num_valid_benchmarks``, ``max_speedup``,
@@ -475,6 +491,381 @@ def write_reward(
     print(f"[parser] num_valid_benchmarks = {len(speedups)}")
     print(f"[parser] tests_passed = {tests_passed}")
     print(f"[parser] patch_applied = {(patch or {}).get('applied')}")
+    return reward_data
+
+
+# ── Status classification ────────────────────────────────────────────────────
+# Verbatim translation of harbor_healthcheck:_row_from_trial's classification
+# block. Same priority order — setup failures cascade so they win over every
+# downstream symptom; patch_failed before lsv_init_empty because no patch
+# means no measurement; tests_failed degrades a successful row.
+
+
+def classify_status(reward: dict) -> tuple[str, str | None]:
+    """Return ``(status, error_message)`` from the reward dossier.
+
+    Inputs come straight out of ``write_reward()``'s dict, so this
+    re-uses the in-process payload — no JSON round-trip.
+    """
+    setup = reward.get("setup") or {}
+    setup_exit = setup.get("exit_code")
+    setup_phase = setup.get("failed_phase")
+    if setup_exit not in (None, 0):
+        if setup_phase == "lsv_init":
+            return (
+                "lsv_init_failed",
+                f"lsv_init.py crashed in setup.sh (exit={setup_exit}). "
+                "Benchmark discovery never completed, so no dep DB was "
+                "written. Check setup.txt in the trial dir for the "
+                "underlying ASV/LSV traceback.",
+            )
+        return (
+            "setup_failed",
+            f"setup.sh failed in phase '{setup_phase}' (exit={setup_exit}).",
+        )
+
+    patch = reward.get("patch") or {}
+    if patch.get("applied") is False:
+        return "patch_failed", "solve.sh produced no diff vs base_commit"
+
+    lsv_init = (reward.get("lsv") or {}).get("init") or {}
+    impactable = len(lsv_init.get("benchmarks_impactable") or [])
+    source_files_covered = lsv_init.get("source_files_covered")
+    if lsv_init and impactable == 0 and source_files_covered == 0:
+        return (
+            "lsv_init_empty",
+            "LSV init mapped 0 source files and 0 impactable benchmarks — "
+            "ASV/LSV could not trace imports into this repo's benchmark suite.",
+        )
+
+    max_speedup = reward.get("max_speedup")
+    if max_speedup is not None:
+        if reward.get("tests_passed") is False:
+            return "tests_failed", "tests_passed=False in reward.json"
+        return "success", None
+
+    lsv_error = reward.get("lsv_error")
+    if lsv_error:
+        return "lsv_measure_failed", str(lsv_error)
+
+    if not reward.get("per_benchmark_speedups"):
+        return "no_benchmarks", None
+
+    return "failed", None
+
+
+def pytest_success_ratio(reward: dict) -> float | None:
+    pytest_block = reward.get("pytest") or {}
+    try:
+        total = int(pytest_block.get("total", 0) or 0)
+        failed = int(pytest_block.get("failed", 0) or 0)
+        err = int(pytest_block.get("error", 0) or 0)
+        if total > 0:
+            return (total - failed - err) / total
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+# ── Supabase persistence ─────────────────────────────────────────────────────
+# Stdlib-only PostgREST + Storage. Each helper returns silently on auth/config
+# misses so a forgotten env var degrades to "no row written" rather than
+# crashing the whole verifier — the runner's failure-path sweep then notices
+# the missing run_id.txt sentinel and writes a row from result.json.
+
+
+def _supabase_request(
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    *,
+    data: bytes | None = None,
+    content_type: str | None = None,
+    timeout: float = 60.0,
+) -> tuple[int, bytes]:
+    """One-shot HTTP for PostgREST/Storage. Returns ``(status, body)`` and
+    never raises on HTTP error — caller decides how to handle 4xx/5xx so
+    we can swallow FK violations (PostgREST 23503 on candidate_containers
+    orphans) the same way the legacy runner did."""
+    if content_type:
+        headers = {**headers, "Content-Type": content_type}
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        body = b""
+        try:
+            body = exc.read()
+        except Exception:
+            pass
+        return exc.code, body
+    except urllib.error.URLError as exc:
+        print(f"[parser] Supabase request transport error: {exc}")
+        return 0, b""
+
+
+def _service_headers() -> dict[str, str] | None:
+    """Service-role headers for datasmith Supabase. Returns None if creds
+    aren't set (e.g. FORMULACODE_NO_UPLOAD path); caller skips persistence."""
+    key = os.environ.get("DATASMITH_SUPABASE_SERVICE_KEY", "")
+    if not key:
+        return None
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "apikey": key,
+        "User-Agent": "datasmith-parser/1.0",
+    }
+    cf_id = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_ID", "")
+    cf_secret = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_SECRET", "")
+    if cf_id and cf_secret:
+        headers["CF-Access-Client-Id"] = cf_id
+        headers["CF-Access-Client-Secret"] = cf_secret
+    return headers
+
+
+def _build_harbor_runs_row(
+    *,
+    run_id: str,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    reward: dict,
+) -> dict:
+    """Map reward payload + env vars into a harbor_runs row dict."""
+    status, error_message = classify_status(reward)
+    speedups = reward.get("per_benchmark_speedups") or {}
+    n_benchmarks = reward.get("num_valid_benchmarks") or len(speedups) or None
+    timings = reward.get("timings") or {}
+    wallclock = timings.get("test_total_s")
+
+    agent_name = os.environ.get("HARBOR_AGENT_NAME") or os.environ.get("LSV_AGENT_NAME") or "oracle"
+    model_name = os.environ.get("LSV_MODEL_NAME") or agent_name
+
+    return {
+        "run_id": run_id,
+        "owner": owner,
+        "repo": repo,
+        "sha": os.environ.get("LSV_SHA", ""),
+        "issue_number": issue_number,
+        "container_name": os.environ.get("LSV_CONTAINER_NAME", "") or None,
+        "environment": os.environ.get("LSV_ENV", ""),
+        "agent_name": agent_name,
+        "model_name": model_name,
+        "model_agent_signature": f"{agent_name}:{model_name}",
+        "status": status,
+        "max_speedup": reward.get("max_speedup"),
+        "geomean_speedup": reward.get("lsv_mean_speedup"),
+        "n_benchmarks": n_benchmarks,
+        "wallclock_sec": wallclock,
+        "reward_payload": reward,
+        "pytest_success_ratio": pytest_success_ratio(reward),
+        "error_message": error_message,
+    }
+
+
+def _insert_harbor_run(base_url: str, headers: dict[str, str], row: dict) -> bool:
+    """POST one row to harbor_runs. Idempotent via on_conflict=run_id (the
+    sandbox-generated UUID is the PK). Returns True on success."""
+    on_conflict = "run_id"
+    url = f"{base_url}/rest/v1/harbor_runs?on_conflict={on_conflict}"
+    post_headers = {
+        **headers,
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    status, body = _supabase_request(
+        url, "POST", post_headers,
+        data=json.dumps(row).encode(),
+        content_type="application/json",
+    )
+    if 200 <= status < 300:
+        print(f"[parser] inserted harbor_runs row run_id={row['run_id']} status={row['status']}")
+        return True
+    # PostgREST returns 409 with code 23503 for FK violations against
+    # candidate_containers — orphan PR, no candidate_containers row. Same
+    # graceful skip the legacy runner did at harbor_healthcheck:825.
+    text = body.decode(errors="replace")
+    if status == 409 and "23503" in text:
+        print(
+            f"[parser] harbor_runs orphan row skipped: {row['owner']}/{row['repo']}@"
+            f"{(row.get('sha') or '')[:12]} status={row['status']} (no candidate_containers row)"
+        )
+        return False
+    print(f"[parser] harbor_runs insert failed: HTTP {status} body={text[:300]!r}")
+    return False
+
+
+def _patch_harbor_run(
+    base_url: str,
+    headers: dict[str, str],
+    *,
+    run_id: str,
+    fields: dict,
+) -> bool:
+    """PATCH one column on the just-inserted harbor_runs row (typically
+    ``artifacts_storage_url`` after the tarball uploads)."""
+    url = f"{base_url}/rest/v1/harbor_runs?run_id=eq.{run_id}"
+    patch_headers = {**headers, "Prefer": "return=minimal"}
+    status, body = _supabase_request(
+        url, "PATCH", patch_headers,
+        data=json.dumps(fields).encode(),
+        content_type="application/json",
+    )
+    if 200 <= status < 300:
+        return True
+    print(f"[parser] harbor_runs PATCH failed: HTTP {status} body={body.decode(errors='replace')[:300]!r}")
+    return False
+
+
+def _upload_storage(
+    base_url: str,
+    headers: dict[str, str],
+    *,
+    bucket: str,
+    object_key: str,
+    blob: bytes,
+    content_type: str = "application/gzip",
+) -> bool:
+    """Upload to Supabase Storage with upsert. Returns True on success."""
+    url = f"{base_url}/storage/v1/object/{bucket}/{object_key}"
+    upload_headers = {**headers, "x-upsert": "true"}
+    status, body = _supabase_request(
+        url, "POST", upload_headers,
+        data=blob,
+        content_type=content_type,
+        timeout=300.0,
+    )
+    if 200 <= status < 300:
+        print(f"[parser] uploaded {len(blob)} bytes → {bucket}/{object_key}")
+        return True
+    print(f"[parser] storage upload {bucket}/{object_key} failed: HTTP {status} body={body.decode(errors='replace')[:300]!r}")
+    return False
+
+
+def _patch_pull_request_baseline(
+    base_url: str,
+    headers: dict[str, str],
+    *,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    baseline_run_id: str,
+    snapshot_storage_url: str | None,
+) -> bool:
+    """Promote this run as the PR's oracle baseline pointer. PATCHes
+    ``pull_requests.baseline_run_id`` and (when present) ``snapshot_storage_url``
+    so stage 8 publish + future agent runs use this oracle as the comparison
+    point. Daytona-success-only — see ``_persist_supabase`` for the gate."""
+    payload: dict = {"baseline_run_id": baseline_run_id}
+    if snapshot_storage_url:
+        payload["snapshot_storage_url"] = snapshot_storage_url
+    url = (
+        f"{base_url}/rest/v1/pull_requests"
+        f"?owner=eq.{owner}&repo=eq.{repo}&issue_number=eq.{issue_number}"
+    )
+    patch_headers = {**headers, "Prefer": "return=minimal"}
+    status, body = _supabase_request(
+        url, "PATCH", patch_headers,
+        data=json.dumps(payload).encode(),
+        content_type="application/json",
+    )
+    if 200 <= status < 300:
+        print(
+            f"[parser] PATCH pull_requests {owner}/{repo}#{issue_number}: "
+            f"baseline_run_id={baseline_run_id[:8]}…"
+            + (f" + snapshot_storage_url" if snapshot_storage_url else "")
+        )
+        return True
+    print(f"[parser] pull_requests PATCH failed: HTTP {status} body={body.decode(errors='replace')[:300]!r}")
+    return False
+
+
+def persist_supabase(
+    *,
+    run_id: str,
+    task_id: str,
+    reward: dict,
+) -> bool:
+    """End-to-end Supabase persistence for one trial.
+
+    Returns True iff the harbor_runs row landed; the run_id.txt sentinel
+    (written by ``main()`` after this returns) gates whether the runner's
+    sweep treats the trial as already-persisted.
+    """
+    base_url = os.environ.get("DATASMITH_SUPABASE_URL", "").rstrip("/")
+    headers = _service_headers()
+    if not base_url or not headers:
+        print("[parser] persist: SKIP (DATASMITH_SUPABASE_* not set)")
+        return False
+    if os.environ.get("FORMULACODE_NO_UPLOAD"):
+        print("[parser] persist: SKIP (FORMULACODE_NO_UPLOAD set)")
+        return False
+
+    parsed = _parse_task_id(task_id)
+    if parsed is None:
+        print(f"[parser] persist: SKIP (could not parse task_id {task_id!r})")
+        return False
+    owner, repo, issue_number = parsed
+
+    row = _build_harbor_runs_row(
+        run_id=run_id, owner=owner, repo=repo, issue_number=issue_number, reward=reward,
+    )
+
+    if not _insert_harbor_run(base_url, headers, row):
+        return False
+
+    # Run-artifacts tarball — upload + PATCH the row's URL column. Best-effort:
+    # a missing / empty tarball just means we leave artifacts_storage_url null.
+    runs_bucket = os.environ.get("DATASMITH_RUNS_BUCKET", "runs")
+    artifacts_path = Path("/logs/verifier/run_artifacts.tar.gz")
+    if artifacts_path.exists() and artifacts_path.stat().st_size > 0:
+        artifacts_key = f"{owner}__{repo}__{issue_number}/{run_id}.tar.gz"
+        try:
+            blob = artifacts_path.read_bytes()
+        except OSError as exc:
+            print(f"[parser] run_artifacts read failed: {exc}")
+        else:
+            if _upload_storage(
+                base_url, headers,
+                bucket=runs_bucket, object_key=artifacts_key, blob=blob,
+            ):
+                _patch_harbor_run(
+                    base_url, headers,
+                    run_id=run_id, fields={"artifacts_storage_url": artifacts_key},
+                )
+
+    # Snapshot tarball + pull_requests baseline pointer — oracle daytona
+    # success only. Mirrors the runner's _update_baseline_pointers gate
+    # (harbor_healthcheck:756). Docker rows are intentionally not eligible:
+    # publish (stage 8) gates against daytona only, and we don't want a flaky
+    # local docker iteration to overwrite a leaderboard pointer.
+    is_oracle = row["agent_name"] == "oracle"
+    is_daytona = row["environment"] == "daytona"
+    is_success = row["status"] == "success"
+    if is_oracle and is_daytona and is_success:
+        snapshots_bucket = os.environ.get("DATASMITH_SNAPSHOTS_BUCKET", "snapshots")
+        snapshot_path = Path("/logs/verifier/oracle_snapshots.tar.gz")
+        snapshot_key: str | None = None
+        if snapshot_path.exists() and snapshot_path.stat().st_size > 0:
+            try:
+                blob = snapshot_path.read_bytes()
+            except OSError as exc:
+                print(f"[parser] oracle_snapshots read failed: {exc}")
+                blob = b""
+            if blob and _upload_storage(
+                base_url, headers,
+                bucket=snapshots_bucket,
+                object_key=f"{owner}__{repo}__{issue_number}/oracle.tar.gz",
+                blob=blob,
+            ):
+                snapshot_key = f"{owner}__{repo}__{issue_number}/oracle.tar.gz"
+        _patch_pull_request_baseline(
+            base_url, headers,
+            owner=owner, repo=repo, issue_number=issue_number,
+            baseline_run_id=run_id,
+            snapshot_storage_url=snapshot_key,
+        )
+    return True
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -499,9 +890,15 @@ def main() -> None:
     # Load LSV results
     lsv_results = load_lsv_results(LSV_DIR)
     lsv_init_summary = summarize_lsv_init(lsv_results)
+
+    # Generate run_id ONCE here — persist_supabase uses it as the harbor_runs
+    # PK, the sentinel file at /logs/verifier/run_id.txt uses it to tell the
+    # runner's failure-path sweep "this trial already wrote a row."
+    run_id = str(uuid.uuid4())
+
     if not lsv_results:
         print("[parser] No LSV results found. Writing zero reward.")
-        write_reward(
+        reward = write_reward(
             REWARD_DIR,
             None,
             None,
@@ -516,6 +913,12 @@ def main() -> None:
             timings=timings,
             setup_status=setup_status,
         )
+        # Even on the no-results path we still try to land a harbor_runs
+        # row (status will classify as setup_failed / lsv_init_empty / etc.)
+        # so the trial appears in dashboards. If persistence lands, write
+        # the sentinel before exiting non-zero.
+        if persist_supabase(run_id=run_id, task_id=args.task_id, reward=reward):
+            (REWARD_DIR / "run_id.txt").write_text(run_id)
         sys.exit(1)
 
     measure_results = lsv_results.get("measure", {}) or {}
@@ -555,7 +958,7 @@ def main() -> None:
     log_snapshot_results(LOG_DIR)
 
     # Write reward files
-    write_reward(
+    reward = write_reward(
         REWARD_DIR,
         advantages,
         advantage_levels,
@@ -578,6 +981,16 @@ def main() -> None:
             f"[parser] setup_status = failed (exit_code={setup_status.get('exit_code')}, "
             f"phase={setup_status.get('failed_phase')})"
         )
+
+    # End-to-end Supabase persistence: harbor_runs INSERT, run_artifacts
+    # upload, snapshot upload + pull_requests pointer update (oracle daytona
+    # success only). Sentinel last so a partial failure doesn't poison the
+    # runner sweep's "already wrote" check.
+    if persist_supabase(run_id=run_id, task_id=args.task_id, reward=reward):
+        (REWARD_DIR / "run_id.txt").write_text(run_id)
+        print(f"[parser] wrote run_id.txt sentinel (run_id={run_id})")
+    else:
+        print("[parser] persistence skipped/failed — runner sweep will handle this trial")
 
     print("[parser] Complete.")
 

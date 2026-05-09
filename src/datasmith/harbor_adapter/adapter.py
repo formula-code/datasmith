@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
+import subprocess
 import tarfile
 import urllib.error
 import urllib.parse
@@ -19,6 +21,37 @@ from datasmith.harbor_adapter.utils import (
     render_task_toml,
     render_test_sh,
 )
+
+
+def _resolve_image_digest(container_name: str | None) -> str:
+    """Best-effort resolve a stable identifier for ``container_name``.
+
+    Returns a ``manifest:<hash>`` string on success, the literal
+    ``container_name`` if ``docker manifest inspect`` is unavailable or the
+    image isn't pushed yet, or ``""`` if no name was supplied. The result
+    is part of the ``lsv_baseline_cache`` PK; failure to resolve just makes
+    the key coarser, never wrong, so we never raise. Was previously
+    ``runners.harbor_healthcheck._resolve_image_digest`` — moved here so a
+    direct ``adapter.generate_task()`` caller (SkyRL, harbor CLI) gets the
+    same behavior the fc-data runner produces, without duplicating the
+    docker shell-out.
+    """
+    if not container_name:
+        return ""
+    try:
+        out = subprocess.run(
+            ["docker", "manifest", "inspect", container_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return container_name
+    if out.returncode != 0 or not out.stdout.strip():
+        return container_name
+    digest = hashlib.sha256(out.stdout.strip().encode()).hexdigest()[:16]
+    return f"manifest:{digest}"
 
 
 @dataclass
@@ -280,25 +313,70 @@ class FormulaCodeAdapter:
         the resulting image short-circuits the LSV survey + snapshot-capture
         passes. Required for non-oracle agent runs; ignored (but harmless)
         for oracle runs.
+
+        The adapter auto-populates four keys into the render_env dicts that
+        the in-sandbox parser/lsv_init/lsv_cache_writeback rely on:
+          * ``LSV_IMAGE_DIGEST`` — resolved via ``docker manifest inspect``
+          * ``LSV_SHA``         — from ``rec.gt_hash`` (the merge_commit_sha)
+          * ``HARBOR_AGENT_NAME`` — from ``rec.harbor_agent_name``
+          * ``LSV_AGENT_NAME``  — same as HARBOR_AGENT_NAME (parser writes
+            this into ``harbor_runs.agent_name``)
+        Caller-supplied keys win on conflict — the runner can still override
+        e.g. LSV_IMAGE_DIGEST when it has a stable docker_host_id-derived
+        identifier handy. SkyRL / direct ``harbor trials start`` callers
+        get the auto-populated values for free.
         """
         out_dir = self.out_root / rec.task_id
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create harbor task paths
         paths = HarborTaskPaths(out_dir)
 
-        # Copy static template files
         self._copy_template_files(paths)
 
         if oracle_artifacts is not None:
             self._stage_oracle_cache(paths, oracle_artifacts)
 
-        # Generate all task files
+        adapter_defaults = {
+            "LSV_IMAGE_DIGEST": _resolve_image_digest(rec.container_name),
+            "LSV_SHA": rec.gt_hash,
+            "HARBOR_AGENT_NAME": rec.harbor_agent_name,
+            "LSV_AGENT_NAME": rec.harbor_agent_name,
+        }
+
+        def _merge_defaults(supplied: dict[str, str] | None) -> dict[str, str]:
+            merged = {k: v for k, v in adapter_defaults.items() if v}
+            if supplied:
+                merged.update(supplied)  # caller wins
+            return merged
+
+        merged_verifier_env = _merge_defaults(verifier_env)
+        merged_test_render_env = _merge_defaults(test_render_env)
+        merged_setup_render_env = _merge_defaults(setup_render_env)
+
         self._write_instruction_md(rec, paths)
-        self._write_task_toml(rec, paths, timeout_sec, cpus, memory, storage, verifier_env=verifier_env)
+        self._write_task_toml(
+            rec,
+            paths,
+            timeout_sec,
+            cpus,
+            memory,
+            storage,
+            verifier_env=merged_verifier_env,
+        )
         self._write_environment_files(rec, paths)
-        self._write_test_files(rec, paths, run_pytest, rounds, test_render_env=test_render_env)
-        self._write_solution_files(rec, paths, rounds, setup_render_env=setup_render_env)
+        self._write_test_files(
+            rec,
+            paths,
+            run_pytest,
+            rounds,
+            test_render_env=merged_test_render_env,
+        )
+        self._write_solution_files(
+            rec,
+            paths,
+            rounds,
+            setup_render_env=merged_setup_render_env,
+        )
 
         return out_dir
 

@@ -35,6 +35,10 @@ AGENT_KEY="$(printf '%s' "${AGENT_MODEL_NAME_INPUT}" | tr '[:upper:]' '[:lower:]
 if [ -z "${AGENT_KEY}" ]; then
   AGENT_KEY="agent"
 fi
+# Raw model name (e.g. "openai/gemma-4-31b") flows from harbor's verifier
+# command line ($1) — parser.py writes it to harbor_runs.model_name. AGENT_KEY
+# above is the filesystem-safe normalized form; we keep both.
+export LSV_MODEL_NAME="${AGENT_MODEL_NAME_INPUT}"
 
 LOG_DIR="/logs/artifacts"
 REWARD_DIR="/logs/verifier"
@@ -162,24 +166,19 @@ timings = {
 pathlib.Path(log_dir, "test_timings.json").write_text(json.dumps(timings))
 PYEOF
 
-# ── Parser: compute reward ───────────────────────────────────────────────
-echo "[$(ts)] [test] Computing reward..."
-python /opt/lsv/parser.py --task-id "${TASK_ID}" --agent-key "${AGENT_KEY}"
-
-# ── Stage run artifacts for runner exfil ─────────────────────────────────
-# /logs/artifacts/ is NOT downloaded by Harbor by default — only
-# /logs/verifier/ is — so tar everything we want into the verifier dir and
-# the runner picks it up after Job.run() and uploads to the `runs` bucket.
-# Excludes pickles (huge), the deps DB (cached separately via
-# lsv_cache_writeback), the snapshot tarball (uploaded separately by the
-# runner), and this tarball itself (avoid pathological recursion).
-echo "[$(ts)] [test] Staging run artifacts for exfiltration..."
+# ── Stage run artifacts for parser to upload ────────────────────────────
+# Tar BEFORE invoking the parser so the parser can upload the resulting
+# tarball to the `runs` bucket as part of its harbor_runs row write
+# (parser.py owns all post-trial Supabase persistence). Excludes pickles
+# (huge), the deps DB (cached separately via lsv_cache_writeback), the
+# snapshot tarball (uploaded by parser too), and this tarball itself
+# (avoid pathological recursion).
+echo "[$(ts)] [test] Staging run artifacts for upload..."
 ARTIFACT_STAGE="$(mktemp -d)"
 trap 'rm -rf "${ARTIFACT_STAGE}"' EXIT
 mkdir -p "${ARTIFACT_STAGE}/agent" "${ARTIFACT_STAGE}/verifier" "${ARTIFACT_STAGE}/artifacts"
 cp -r /logs/agent/. "${ARTIFACT_STAGE}/agent/" 2>/dev/null || true
 cp /logs/verifier/test-stdout.txt "${ARTIFACT_STAGE}/verifier/" 2>/dev/null || true
-cp /logs/verifier/reward.* "${ARTIFACT_STAGE}/verifier/" 2>/dev/null || true
 cp -r /logs/artifacts/. "${ARTIFACT_STAGE}/artifacts/" 2>/dev/null || true
 tar -czf /logs/verifier/run_artifacts.tar.gz \
   --exclude='*.pkl' --exclude='*.pkl.gz' \
@@ -189,9 +188,13 @@ tar -czf /logs/verifier/run_artifacts.tar.gz \
   -C "${ARTIFACT_STAGE}" . \
   2>&1 || echo "WARNING: run_artifacts tar failed (non-fatal)"
 
-# Per-trial result + artifact tarball uploads happen runner-side in
-# datasmith (or Harbor's own post-processing) — the in-container
-# /opt/lsv/upload.py path was a legacy direct-write to Harbor's old
-# Supabase project and has been removed.
+# ── Parser: compute reward + persist harbor_runs row ────────────────────
+# parser.py writes /logs/verifier/reward.{json,txt}, inserts the harbor_runs
+# row, uploads the tarball above to the `runs` bucket, and (oracle daytona
+# success only) uploads the snapshot tarball + updates pull_requests
+# pointers. Writes /logs/verifier/run_id.txt as a sentinel so the runner's
+# post-trial sweep can tell which trials it must NOT re-write rows for.
+echo "[$(ts)] [test] Computing reward + persisting harbor_runs..."
+python /opt/lsv/parser.py --task-id "${TASK_ID}" --agent-key "${AGENT_KEY}"
 
 echo "[$(ts)] [test] Complete."
