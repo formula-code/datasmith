@@ -13,7 +13,7 @@ def _make_record(**kwargs):
         "owner": "test-org",
         "repo": "test-repo",
         "issue_number": 42,
-        "task_id": "test-org__test-repo-42",
+        "task_id": 42,
         "gt_hash": "abc123",
         "base_commit": "def456",
     }
@@ -23,7 +23,7 @@ def _make_record(**kwargs):
 
 class TestRecordsToParquet:
     def test_roundtrip(self):
-        records = [_make_record(), _make_record(issue_number=43, task_id="test-org__test-repo-43")]
+        records = [_make_record(), _make_record(issue_number=43, task_id=43)]
         data = records_to_parquet(records)
         assert len(data) > 0
         restored = records_from_parquet(data)
@@ -45,9 +45,9 @@ class TestRecordsToParquet:
         table = pq.read_table(io.BytesIO(data))
         assert table.num_rows == 1
 
-    def test_task_id_format(self):
+    def test_task_id_is_issue_number(self):
         r = _make_record()
-        assert r.task_id == "test-org__test-repo-42"
+        assert r.task_id == r.issue_number == 42
 
     def test_required_fields_validation(self):
         with pytest.raises((TypeError, Exception)):
@@ -82,7 +82,7 @@ class TestRecordsFromSupabase:
 
         assert len(records) == 1
         assert records[0].owner == "org"
-        assert records[0].task_id == "org__repo-1"
+        assert records[0].task_id == 1
 
         # Verify fetch_all was called with correct filters (first call = pull_requests)
         first_call_kwargs = mock_fetch.call_args_list[0]

@@ -34,9 +34,9 @@ def _patch_harbor_trial_name() -> None:
     ``f"{task_name[:32]}__{ShortUUID().random(length=7)}"`` (see
     ``harbor/models/trial/config.py``), which makes trial directories
     non-deterministic across runs and defeats simple re-triage. We want the
-    directory under ``jobs/<job_name>/`` to be exactly our ``task_id``
-    (``owner_repo_prnumber``) so a second run of the same task lands in the
-    same path. Override at import time — only affects this process.
+    directory under ``jobs/<job_name>/`` to be exactly the task name
+    (``owner__repo__issue_number``) so a second run of the same task lands
+    in the same path. Override at import time — only affects this process.
     """
     from harbor.models.trial.config import TrialConfig
 
@@ -90,9 +90,9 @@ def _materialize_tasks(
     *,
     rounds: int,
 ) -> dict[str, dict[str, Any]]:
-    """Write one Harbor task directory per PR. Returns a mapping from
-    ``task_id`` (the directory name Harbor sees) back to the datasmith row
-    metadata we need when inserting harbor_runs."""
+    """Write one Harbor task directory per PR. Returns a mapping from the
+    Harbor task directory name back to the datasmith row metadata we need
+    when inserting harbor_runs."""
     adapter = FormulaCodeAdapter(harbor_tasks_root=task_dir, force=True)
     verifier_env = _build_verifier_env() or None
 
@@ -116,9 +116,9 @@ def _materialize_tasks(
                 verifier_env=verifier_env,
             )
         except Exception:
-            logger.exception("generate_task failed for %s", rec.task_id)
+            logger.exception("generate_task failed for %s/%s#%d", rec.owner, rec.repo, rec.issue_number)
             continue
-        task_id_map[rec.task_id] = {
+        task_id_map[rec.task_dir_name] = {
             "owner": pr["owner"],
             "repo": pr["repo"],
             "sha": pr["merge_commit_sha"],
@@ -201,10 +201,10 @@ def _row_from_trial(  # noqa: C901
     trial can't be mapped back to a datasmith PR."""
     from harbor.models.trial.paths import TrialPaths
 
-    task_id = trial.task_id.get_name()
-    meta = task_id_map.get(task_id)
+    task_name = trial.task_id.get_name()
+    meta = task_id_map.get(task_name)
     if meta is None:
-        logger.warning("Trial %s has no matching datasmith PR — skipping row", task_id)
+        logger.warning("Trial %s has no matching datasmith PR — skipping row", task_name)
         return None
 
     trial_dir = _trial_dir_from_uri(trial.trial_uri)

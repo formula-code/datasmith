@@ -14,7 +14,7 @@ def _make_record(**kwargs):
         "owner": "test-org",
         "repo": "test-repo",
         "issue_number": 42,
-        "task_id": "test-org__test-repo-42",
+        "task_id": 42,
         "gt_hash": "abc123",
     }
     defaults.update(kwargs)

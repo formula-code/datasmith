@@ -6,7 +6,7 @@ Supabase to compute advantage ((oracle_time - agent_time) / agent_time),
 and writes reward.json + reward.txt.
 
 Usage:
-    python /tests/parser.py --task-id ID [--agent-key KEY]
+    python /tests/parser.py --owner OWNER --repo REPO --issue-number N [--agent-key KEY]
 """
 
 from __future__ import annotations
@@ -70,10 +70,12 @@ def _supabase_get(url: str, headers: dict) -> dict | list | None:
         return None
 
 
-def fetch_oracle_benchmarks(base_url: str, task_id: str) -> dict[str, float] | None:
+def fetch_oracle_benchmarks(
+    base_url: str, owner: str, repo: str, issue_number: int
+) -> dict[str, float] | None:
     """Fetch the oracle's per-benchmark timings from Supabase.
 
-    1. GET tasks?task_id=eq.{id} to find baseline_run_id
+    1. GET tasks?owner=eq.{}&repo=eq.{}&issue_number=eq.{} to find baseline_run_id
     2. GET runs?uuid=eq.{baseline_run_id} to get payload
     3. Extract payload.lsv_results.measure.benchmarks → {name: current_seconds}
 
@@ -89,16 +91,19 @@ def fetch_oracle_benchmarks(base_url: str, task_id: str) -> dict[str, float] | N
         "Accept": "application/json",
     }
 
+    task_filter = f"owner=eq.{owner}&repo=eq.{repo}&issue_number=eq.{issue_number}"
+    task_label = f"{owner}/{repo}#{issue_number}"
+
     # Step 1: Get baseline_run_id from tasks table
-    tasks_url = f"{base_url}/rest/v1/tasks?task_id=eq.{task_id}&select=baseline_run_id"
+    tasks_url = f"{base_url}/rest/v1/tasks?{task_filter}&select=baseline_run_id"
     tasks = _supabase_get(tasks_url, headers)
     if not tasks or not isinstance(tasks, list) or len(tasks) == 0:
-        print(f"[parser] No task row found for {task_id}")
+        print(f"[parser] No task row found for {task_label}")
         return None
 
     baseline_run_id = tasks[0].get("baseline_run_id")
     if not baseline_run_id:
-        print(f"[parser] No baseline_run_id set for task {task_id}")
+        print(f"[parser] No baseline_run_id set for task {task_label}")
         return None
 
     # Step 2: Get the baseline run's payload
@@ -434,7 +439,9 @@ def write_reward(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute reward from LSV results")
-    parser.add_argument("--task-id", required=True, help="Task identifier")
+    parser.add_argument("--owner", required=True, help="Repository owner")
+    parser.add_argument("--repo", required=True, help="Repository name")
+    parser.add_argument("--issue-number", required=True, type=int, help="PR number")
     parser.add_argument(
         "--agent-key", default="agent", help="Agent key (e.g., oracle, terminus-2)"
     )
@@ -490,7 +497,9 @@ def main() -> None:
         # Fetch oracle data from Supabase
         base_url = os.environ.get("SUPABASE_URL", "")
         if base_url:
-            oracle_benchmarks = fetch_oracle_benchmarks(base_url, args.task_id)
+            oracle_benchmarks = fetch_oracle_benchmarks(
+                base_url, args.owner, args.repo, args.issue_number
+            )
             if oracle_benchmarks:
                 advantages = compute_per_benchmark_advantages(
                     benchmarks, oracle_benchmarks

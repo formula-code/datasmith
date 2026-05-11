@@ -76,6 +76,7 @@ STAGES = [
     "synthesize_images",
     "harbor_healthcheck",
     "publish",
+    "scrape_benchmark_source",
 ]
 
 
@@ -244,6 +245,8 @@ class Pipeline:
             await self._harbor_healthcheck(start_date, end_date)
         elif stage_name == "publish":
             await self._publish(start_date, end_date)
+        elif stage_name == "scrape_benchmark_source":
+            await self._scrape_benchmark_source(start_date, end_date)
 
     async def _scrape_repos(self) -> None:
         from datasmith.github.client import GitHubClient
@@ -759,6 +762,43 @@ class Pipeline:
         from datasmith.publish.pipeline import publish_pipeline
 
         await publish_pipeline(start_date, end_date)
+
+    async def _scrape_benchmark_source(self, start_date: str, end_date: str) -> None:
+        # Pull every (owner, repo, sha) we've successfully synthesized a container
+        # for. We don't filter by date — the website wants the full corpus of
+        # benchmark sources, and bench source rarely changes per commit, so
+        # re-scraping is mostly a no-op on the upsert path.
+        rows = fetch_all("candidate_containers", select="owner, repo, sha")
+
+        # Dedup by (owner, repo) — one SHA per repo is enough to populate the
+        # benchmark_codes rows; ASV bench files rarely diverge across commits
+        # within a single repo and we always keep the newest scrape via the
+        # last_scraped column.
+        seen: set[tuple[str, str]] = set()
+        items: list[dict[str, Any]] = []
+        for r in rows:
+            key = (r["owner"], r["repo"])
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"owner": r["owner"], "repo": r["repo"], "sha": r["sha"]})
+
+        logger.info("Scraping benchmark source for %d repos", len(items))
+
+        if self._dry_run:
+            self._log_dry_run_summary(
+                "scrape_benchmark_source",
+                items,
+                extra={"Date range": f"{start_date} to {end_date}"},
+            )
+            return
+
+        from datasmith.runners.scrape_benchmark_source import ScrapeBenchmarkSourceRunner
+
+        runner = ScrapeBenchmarkSourceRunner(
+            **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
+        )
+        await runner.run(items)
 
     def _get_completed_stages(self) -> list[str]:
         try:

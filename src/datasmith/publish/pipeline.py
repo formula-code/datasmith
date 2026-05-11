@@ -54,7 +54,7 @@ async def publish_pipeline(
                 "repo", record.repo
             ).eq("issue_number", record.issue_number).execute()
         except Exception:
-            logger.warning("Failed to mark %s as published", record.task_id)
+            logger.warning("Failed to mark %s/%s#%d as published", record.owner, record.repo, record.issue_number)
 
     logger.info("Published %d records as %s", len(records), version)
     return len(records)
