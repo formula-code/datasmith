@@ -165,7 +165,7 @@ class PR(Issue):
             owner=self.owner,
             repo=self.repo,
             issue_number=self.issue_number,
-            task_id=f"{self.owner}__{self.repo}-{self.issue_number}",
+            task_id=self.issue_number,
             gt_hash=self.merge_commit_sha,
             base_commit=self.base_sha,
             date=self.merged_at,
@@ -194,7 +194,7 @@ class FormulaCodeRecord(BaseModel):
     owner: str
     repo: str
     issue_number: int
-    task_id: str
+    task_id: int  # mirror of issue_number; the canonical id is (owner, repo, issue_number)
     gt_hash: str = ""
     base_commit: str = ""
     date: datetime | None = None

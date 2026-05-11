@@ -100,7 +100,7 @@ class TestPR:
         assert record.owner == "myorg"
         assert record.repo == "mylib"
         assert record.issue_number == 42
-        assert record.task_id == "myorg__mylib-42"
+        assert record.task_id == 42
         assert record.gt_hash == "sha123"
         assert record.base_commit == "base456"
         assert record.date == now
@@ -268,7 +268,7 @@ class TestFormulaCodeRecord:
             owner="org",
             repo="lib",
             issue_number=1,
-            task_id="org__lib-1",
+            task_id=1,
             gt_hash="abc",
             patch="diff content",
         )

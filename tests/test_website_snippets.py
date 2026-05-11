@@ -558,11 +558,11 @@ class TestPipelineSnippets:
         args = _parse(["--start-date", "2026-02-01", "--end-date", "2026-03-01", "--stage", "5", "--stage", "6"])
         assert args.stage == [5, 6]
 
-    def test_pipeline_has_8_stages(self) -> None:
-        """Website documents 8 pipeline stages."""
+    def test_pipeline_has_9_stages(self) -> None:
+        """Website documents 9 pipeline stages."""
         from datasmith.update.pipeline import STAGES
 
-        assert len(STAGES) == 8
+        assert len(STAGES) == 9
 
 
 # ---------------------------------------------------------------------------

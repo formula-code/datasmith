@@ -19,7 +19,9 @@ from datasmith.harbor_adapter.utils import (
 class FormulaCodeRecord:
     container_name: str  # repo_name-{base_sha}:final
     patch: str  # diff(base_sha, merge_sha)
-    task_id: str  # repo_name_{ID}
+    owner: str  # repository owner (canonical id is (owner, repo, issue_number))
+    repo: str  # repository name
+    issue_number: int  # PR number; the canonical row identifier
     gt_hash: str  # merge_sha
     base_commit: str  # base_sha
     instructions: str
@@ -27,6 +29,24 @@ class FormulaCodeRecord:
     classification: str | None = None  # classification
     difficulty: str = "hard"  # difficulty level
     repo_name: str | None = None
+
+    @property
+    def task_id(self) -> int:
+        """Single-column join key (= issue_number). Repo qualifier is implicit."""
+        return self.issue_number
+
+    @property
+    def task_dir_name(self) -> str:
+        """Filesystem-safe name used as Harbor's task / trial directory.
+
+        Harbor discovers tasks by scanning ``LocalDatasetConfig.path`` for
+        ``task.toml`` files (flat or one-level deep) and uses the parent
+        directory name as the trial name. We can't nest by ``owner/repo`` or
+        Harbor's task IDs become unique-per-issue but ambiguous-across-repos.
+        The triple-segment string keeps each trial dir globally unique while
+        staying within Harbor's flat-discovery contract.
+        """
+        return f"{self.owner}__{self.repo}__{self.issue_number}"
 
 
 class HarborTaskPaths:
@@ -130,7 +150,9 @@ class FormulaCodeAdapter:
         # test.sh
         test_sh_content = render_test_sh(
             base_commit=rec.base_commit,
-            task_id=rec.task_id,
+            owner=rec.owner,
+            repo=rec.repo,
+            issue_number=rec.issue_number,
             run_pytest=run_pytest,
             rounds=rounds,
         )
@@ -146,6 +168,7 @@ class FormulaCodeAdapter:
         # up with identical content; Harbor's later upload_dir() either overwrites
         # with the same bytes or merges harmlessly.
         cfg = rec.__dict__.copy()
+        cfg["task_id"] = rec.task_id  # surface the property so legacy readers see it
         cfg_json = json.dumps(cfg, indent=2)
         (paths.tests_dir / "config.json").write_text(cfg_json)
         (paths.environment_dir / "config.json").write_text(cfg_json)
@@ -166,7 +189,9 @@ class FormulaCodeAdapter:
         # setup.sh
         extra_setup_commands = ""
         setup_sh_content = render_run_setup_sh(
-            task_id=rec.task_id,
+            owner=rec.owner,
+            repo=rec.repo,
+            issue_number=rec.issue_number,
             rounds=rounds,
             extra_setup_commands=extra_setup_commands,
         )
@@ -186,7 +211,7 @@ class FormulaCodeAdapter:
         verifier_env: dict[str, str] | None = None,
     ) -> Path:
         """Generate a complete Harbor task directory for the given FormulaCodeRecord."""
-        out_dir = self.out_root / rec.task_id
+        out_dir = self.out_root / rec.task_dir_name
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Create harbor task paths
