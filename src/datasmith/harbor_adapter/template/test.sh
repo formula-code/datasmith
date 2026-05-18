@@ -45,6 +45,26 @@ REWARD_DIR="/logs/verifier"
 
 mkdir -p "${LOG_DIR}" "${LOG_DIR}/.snapshots" "${LOG_DIR}/lsv" "${REWARD_DIR}"
 
+# ── Idempotency guard: harbor verifier.py duplicate-exec workaround ──────
+# The pinned harbor (~/.venv/.../harbor/verifier/verifier.py) has a
+# duplicated `await self._environment.exec(...)` block (lines 132 + 157,
+# with a re-declared command_parts at line 137 — a copy-paste artifact)
+# that runs test.sh TWICE per verify() call. The first run does the full
+# work and parser.py writes /logs/verifier/run_id.txt as a sentinel. The
+# second invocation overwrites reward.json + writes a duplicate harbor_runs
+# row + doubles trial wallclock (~8 min wasted per trial on networkx#8148).
+#
+# If the sentinel already exists, an earlier test.sh in this same trial has
+# completed end-to-end. Exit 0 immediately so the duplicated exec is a
+# no-op — preserves the first run's reward.json and avoids the duplicate
+# parser write. The harbor-side fix is a single-block verify() (already
+# present in the source-tree harbor at ../harbor); this guard makes us
+# robust to whichever harbor version is pinned in the venv.
+if [ -f "${REWARD_DIR}/run_id.txt" ] && [ -s "${REWARD_DIR}/run_id.txt" ]; then
+  echo "[$(ts)] [test] run_id.txt sentinel present (run_id=$(cat "${REWARD_DIR}/run_id.txt")) — earlier test.sh in this verifier window already completed. Skipping (harbor duplicate-exec workaround)."
+  exit 0
+fi
+
 test_start=$(date +%s)
 
 # ── Capture patch + detect whether solve.sh actually applied anything ────

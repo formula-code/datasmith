@@ -391,7 +391,7 @@ def summarize_lsv_init(lsv_results: dict) -> dict:
 
 
 def log_snapshot_results(log_dir: Path) -> None:
-    """Log snapshot verification results. Regressions are informational only."""
+    """Log snapshot verification results. Regressions zero out reward.txt for agent runs."""
     regressions = []
     for match_path in glob_mod.glob(str(log_dir / "summary_*.json")):
         try:
@@ -401,7 +401,7 @@ def log_snapshot_results(log_dir: Path) -> None:
         except (json.JSONDecodeError, OSError):
             continue
     if regressions:
-        print(f"[parser] Snapshot regressions detected (informational): {regressions}")
+        print(f"[parser] Snapshot regressions detected (reward zeroed for agent runs): {regressions}")
     else:
         print("[parser] Snapshot verification passed (or not run).")
 
@@ -425,6 +425,7 @@ def write_reward(
     pytest_summary: dict | None = None,
     timings: dict | None = None,
     setup_status: dict | None = None,
+    is_oracle: bool = False,
 ) -> dict:
     """Write reward.json + reward.txt with a structured dossier.
 
@@ -482,8 +483,11 @@ def write_reward(
 
     (reward_dir / "reward.json").write_text(json.dumps(reward_data, indent=2))
 
-    # reward.txt — float speedup geometric mean
+    # reward.txt — LSV geomean speedup, zeroed out on correctness regressions.
+    # Oracle runs are exempt: they capture baselines and aren't being graded.
     speedup_value = speedup_levels["level4"] if speedup_levels else 0.0
+    if not is_oracle and (not tests_passed or not snapshots_passed):
+        speedup_value = 0.0
     (reward_dir / "reward.txt").write_text(str(speedup_value))
 
     print(f"[parser] reward.txt = {speedup_value}")
@@ -896,6 +900,8 @@ def main() -> None:
     # runner's failure-path sweep "this trial already wrote a row."
     run_id = str(uuid.uuid4())
 
+    is_oracle = args.agent_key == "oracle"
+
     if not lsv_results:
         print("[parser] No LSV results found. Writing zero reward.")
         reward = write_reward(
@@ -912,6 +918,7 @@ def main() -> None:
             pytest_summary={},
             timings=timings,
             setup_status=setup_status,
+            is_oracle=is_oracle,
         )
         # Even on the no-results path we still try to land a harbor_runs
         # row (status will classify as setup_failed / lsv_init_empty / etc.)
@@ -973,6 +980,7 @@ def main() -> None:
         pytest_summary=pytest_summary,
         timings=timings,
         setup_status=setup_status,
+        is_oracle=is_oracle,
     )
     if lsv_error:
         print(f"[parser] lsv_error = {lsv_error}")
