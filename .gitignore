@@ -235,3 +235,6 @@ run_single_synthesis_test.py
 .python-version
 backups/
 jobs/
+FLOWCHART.md
+WORKFLOW.md
+google*.html
