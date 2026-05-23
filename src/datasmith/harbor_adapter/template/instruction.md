@@ -24,6 +24,13 @@ cd $ROOT_PATH && /opt/conda/envs/${ENV_NAME}/bin/asv profile \
 cat $ASV_BENCHMARKS
 ```
 
+**Profile before you optimize.** Use `asv profile` or `python -m cProfile` on a small
+reproducer to understand which arguments actually reach the hot function — static code reading
+alone will mislead you. The hot call site may pass very different arguments than you expect.
+
+**Do not modify** benchmark configuration files (e.g. `asv.conf.json`) or any files under the
+`benchmarking/` directory — these are required by the evaluator.
+
 ## Task Requirements
 - Analyze the codebase and identify performance bottlenecks
 - Implement optimizations to improve benchmark performance

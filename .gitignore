@@ -234,3 +234,4 @@ run_single_synthesis_test.py
 .python-version
 backups/
 jobs/
+blacklist.txt
