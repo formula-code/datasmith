@@ -27,11 +27,13 @@ def to_record(pr: dict[str, Any]) -> FormulaCodeRecord:
     """
     owner = pr["owner"]
     repo = pr["repo"]
-    issue_number = pr["issue_number"]
+    issue_number = int(pr["issue_number"])
     return FormulaCodeRecord(
         container_name=str(pr.get("container_name") or ""),
         patch=str(pr.get("patch") or ""),
-        task_id=f"{owner}_{repo}_{issue_number}",
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
         gt_hash=str(pr.get("merge_commit_sha") or ""),
         base_commit=str(pr.get("base_sha") or ""),
         instructions=str(pr.get("rendered_problem") or ""),

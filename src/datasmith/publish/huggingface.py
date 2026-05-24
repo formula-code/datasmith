@@ -87,10 +87,10 @@ Performance optimization benchmark dataset.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| task_id | string | Unique task identifier (owner__repo-issue_number) |
 | owner | string | Repository owner |
 | repo | string | Repository name |
-| issue_number | int | PR number |
+| issue_number | int | PR number; the canonical row identity is (owner, repo, issue_number) |
+| task_id | int | Mirror of `issue_number` for single-column joins |
 | gt_hash | string | Ground truth merge commit SHA |
 | base_commit | string | Base commit SHA |
 | date | string | Merge date |

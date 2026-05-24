@@ -4,8 +4,13 @@ cd /workspace/repo || exit 1
 
 ts() { date -u "+%Y-%m-%dT%H:%M:%SZ"; }
 
-TASK_ID="{{ task_id }}"
-export TASK_ID
+OWNER="{{ owner }}"
+REPO="{{ repo }}"
+ISSUE_NUMBER="{{ issue_number }}"
+# TASK_ID retained as a single-column alias (= issue_number) for back-compat
+# with anything that still reads $TASK_ID. The canonical id is the triple.
+TASK_ID="${ISSUE_NUMBER}"
+export OWNER REPO ISSUE_NUMBER TASK_ID
 
 # Harbor's [verifier.env] section only reaches test.sh, not setup.sh, so we
 # bake the agent name directly into setup.sh at render time. lsv_init.py

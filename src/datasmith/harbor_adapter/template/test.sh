@@ -17,8 +17,11 @@ eval "$(micromamba shell hook --shell=bash)"
 micromamba activate "$ENV_NAME" || true
 set -u
 
-TASK_ID="{{ task_id }}"
-export TASK_ID
+OWNER="{{ owner }}"
+REPO="{{ repo }}"
+ISSUE_NUMBER="{{ issue_number }}"
+TASK_ID="${ISSUE_NUMBER}"
+export OWNER REPO ISSUE_NUMBER TASK_ID
 
 # ── Datasmith creds + LSV cache identity (rendered by runner) ────────────
 # Harbor's daytona environment doesn't reliably propagate `[verifier.env]`
@@ -216,5 +219,6 @@ tar -czf /logs/verifier/run_artifacts.tar.gz \
 # post-trial sweep can tell which trials it must NOT re-write rows for.
 echo "[$(ts)] [test] Computing reward + persisting harbor_runs..."
 python /opt/lsv/parser.py --task-id "${TASK_ID}" --agent-key "${AGENT_KEY}"
+
 
 echo "[$(ts)] [test] Complete."

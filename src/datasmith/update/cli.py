@@ -23,6 +23,7 @@ _STAGE_DESCRIPTIONS = {
     6: "synthesize_images  — Generate Docker build contexts for confirmed performance commits",
     7: "harbor_healthcheck — Run synthesized containers through Harbor oracle; record speedups to harbor_runs",
     8: "publish            — Build, verify, and publish Docker images to DockerHub",
+    9: "scrape_benchmark_source — Extract ASV benchmark source code into benchmark_codes (website data sync)",
 }
 
 
@@ -55,7 +56,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         action="append",
         metavar="N",
-        help="Run only stage N (1-8); repeat to run multiple stages (e.g. --stage 1 --stage 2)",
+        help="Run only stage N (1-9); repeat to run multiple stages (e.g. --stage 1 --stage 2)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Log what each stage would do without executing")
     parser.add_argument(

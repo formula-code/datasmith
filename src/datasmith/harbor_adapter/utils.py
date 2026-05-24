@@ -162,7 +162,9 @@ def render_dockerfile(base_image: str) -> str:
 
 def render_test_sh(
     base_commit: str,
-    task_id: str,
+    owner: str,
+    repo: str,
+    issue_number: int,
     run_pytest: bool = True,
     rounds: int = 1,
     render_env: dict[str, str] | None = None,
@@ -177,7 +179,9 @@ def render_test_sh(
     return _render_template(
         "test.sh",
         base_commit=base_commit,
-        task_id=task_id,
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
         run_pytest=run_pytest,
         rounds=rounds,
         render_env=render_env or {},
@@ -191,7 +195,9 @@ def render_solution_sh(solution_patch: str) -> str:
 
 def render_run_setup_sh(
     *,
-    task_id: str,
+    owner: str,
+    repo: str,
+    issue_number: int,
     rounds: int = 1,
     extra_setup_commands: str = "",
     harbor_agent_name: str = "oracle",
@@ -210,7 +216,9 @@ def render_run_setup_sh(
     """
     return _render_template(
         "setup.sh",
-        task_id=task_id,
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
         rounds=rounds,
         extra_setup_commands=extra_setup_commands or "",
         harbor_agent_name=harbor_agent_name,

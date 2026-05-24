@@ -21,7 +21,7 @@ Was previously a runner-side responsibility (datasmith.runners.harbor_healthchec
 without going through the datasmith runner.
 
 Usage:
-    python /tests/parser.py --task-id ID [--agent-key KEY]
+    python /tests/parser.py --owner OWNER --repo REPO --issue-number N [--agent-key KEY]
 """
 
 from __future__ import annotations
@@ -107,6 +107,7 @@ def _datasmith_headers() -> dict[str, str] | None:
         headers["CF-Access-Client-Id"] = cf_id
         headers["CF-Access-Client-Secret"] = cf_secret
     return headers
+
 
 
 def _parse_task_id(task_id: str) -> tuple[str, str, int] | None:
@@ -877,7 +878,9 @@ def persist_supabase(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute reward from LSV results")
-    parser.add_argument("--task-id", required=True, help="Task identifier")
+    parser.add_argument("--owner", required=True, help="Repository owner")
+    parser.add_argument("--repo", required=True, help="Repository name")
+    parser.add_argument("--issue-number", required=True, type=int, help="PR number")
     parser.add_argument(
         "--agent-key", default="agent", help="Agent key (e.g., oracle, terminus-2)"
     )
@@ -948,7 +951,9 @@ def main() -> None:
         # Fetch oracle data from datasmith Supabase
         base_url = os.environ.get("DATASMITH_SUPABASE_URL", "")
         if base_url:
-            oracle_benchmarks = fetch_oracle_benchmarks(base_url, args.task_id)
+            oracle_benchmarks = fetch_oracle_benchmarks(
+                base_url, args.owner, args.repo, args.issue_number
+            )
             if oracle_benchmarks:
                 advantages = compute_per_benchmark_advantages(
                     benchmarks, oracle_benchmarks

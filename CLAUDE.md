@@ -62,6 +62,7 @@ fc-data --stage 7 --harbor-limit 10                                    # Smoke t
 6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
 7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
 8. **publish** — Build, verify, and publish Docker images to DockerHub. Only publishes PRs with at least one successful **Daytona** `harbor_runs` row whose `max_speedup >= 1.05`.
+9. **scrape_benchmark_source** — For each `(owner, repo)` in `candidate_containers`, check out the repo at its container SHA, AST-parse every ASV-style benchmark function under the repo's `benchmark_dir`, and upsert one row per `(owner, repo, benchmark_without_params)` into `benchmark_codes` for the FormulaCode website's data sync.
 
 ### Dataset verification (`dataset/`)
 
@@ -112,7 +113,8 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
 - **Existing uses** (non-exhaustive, grep `DATASMITH_` for the full list):
   `DATASMITH_RL_DEFAULT_PAUSE_S`, `DATASMITH_RL_PAUSE_JITTER_S`,
   `DATASMITH_RL_MAX_RETRIES`, `DATASMITH_NEIGHBOR_WINDOW_DAYS`,
-  `DATASMITH_NEIGHBOR_CAP`.
+  `DATASMITH_NEIGHBOR_CAP`, `DATASMITH_BENCH_SCRAPE_MAX_FILE_BYTES`,
+  `DATASMITH_BENCH_SCRAPE_DIRS`.
 
 ## Supabase
 
@@ -138,7 +140,7 @@ Local vLLM servers (8123, 8124) are exposed via a LiteLLM proxy on `https://mode
 
 ### Public read-only access (RLS)
 
-Four tables are readable by the `anon` role: `repositories`, `pull_requests`, `candidate_containers`, `harbor_runs`. Migration `00012_public_read_rls.sql` enables RLS with a `public_read` SELECT policy on those tables; migration `00015_revoke_anon_select.sql` revokes Supabase's default broad `anon` `SELECT` grant and re-grants it only on the four, so every other table returns `permission denied`. The service-role key bypasses both layers, so pipeline processes are unaffected. Public anon access is served on `https://api.formulacode.org` (no Cloudflare Access gate); pipeline operators continue to use `https://db.formulacode.org` with CF Access + service-role key.
+Six tables are readable by the `anon` role: `repositories`, `pull_requests`, `candidate_containers`, `harbor_runs`, `benchmark_information`, `benchmark_codes`. Migration `00012_public_read_rls.sql` enables RLS with a `public_read` SELECT policy on the original four; migration `00016_benchmark_information.sql` adds the same policy to `benchmark_information`; migration `00017_benchmark_codes.sql` adds it to `benchmark_codes`. Migration `00015_revoke_anon_select.sql` revokes Supabase's default broad `anon` `SELECT` grant and re-grants it only on the public set, so every other table returns `permission denied`. The service-role key bypasses both layers, so pipeline processes are unaffected. Public anon access is served on `https://api.formulacode.org` (no Cloudflare Access gate); pipeline operators continue to use `https://db.formulacode.org` with CF Access + service-role key.
 
 ### Key tables
 
@@ -148,6 +150,8 @@ Four tables are readable by the `anon` role: `repositories`, `pull_requests`, `c
 | `packages` | Resolved `env_payload` (pinned deps) and `python_version` per commit | Stage 4 |
 | `candidate_containers` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA | Stage 6 (on success) |
 | `harbor_runs` | One row per Harbor oracle trial for a synthesized container: `max_speedup`, `geomean_speedup`, `n_benchmarks`, `wallclock_sec`, `reward_payload`, `status`. One-to-many FK on `candidate_containers(owner, repo, sha)`. | Stage 7 |
+| `benchmark_information` | Per-benchmark speedup measurements from terminal-bench eval runs: one row per (run, owner/repo/issue, benchmark, agent, model). `speedup` is `(agent/nop)/(oracle/nop)` so 1.0 = parity with the human expert. `benchmark_type` (`time`/`mem`/`peakmem`/`track`) is a generated column derived from the ASV naming convention. Loaded out-of-band via `scripts/load_benchmark_information.py`. | (manual) |
+| `benchmark_codes` | One row per `(owner, repo, benchmark_without_params)` carrying the Python source of each ASV benchmark function plus its setup. Joined to `benchmark_information` on `(owner, repo, benchmark_name)` by the FormulaCode website. | Stage 9 |
 | `error_logs` | Per-attempt synthesis results: agent output, failure stage/return code, error messages | Stage 6 (`Synthesizer._log_attempt`) |
 | `runner_progress` | Live progress counters (total/completed/failed) per pipeline run | `BaseRunner` (all stages) |
 | `runner_failures` | One row per item failure with error message + traceback | `BaseRunner._log_failure` |
@@ -169,6 +173,21 @@ conn.cursor().execute(open('supabase/migrations/00007_error_logs.sql').read())
 ### Querying
 
 Use `datasmith.utils.db.fetch_all(table, select=..., filters=..., gte_filters=..., ...)` for paginated reads, or `get_client()` for direct Supabase client access.
+
+### Level aggregation
+
+Per-benchmark speedups are rolled up into four levels via **geometric mean** in `src/datasmith/harbor_adapter/template/parser.py` (`geometric_mean()` + `aggregate_by_hierarchy()`):
+
+- **level1** — identity, one entry per benchmark (`module.Class.method`)
+- **level2** — grouped by `module.Class` (drop the last dotted segment), geomean within each group
+- **level3** — grouped by `module` (top dotted segment), geomean within each group
+- **level4** — a single overall geomean across every benchmark
+
+`benchmark_information.benchmark_name` is already param-stripped (e.g. `benchmarks.ConstructorsSuite.time_point`), so consumers can replicate the rollup locally without re-parsing. The FormulaCode website CSV's `1-Params` row is equivalent to datasmith's `level1`; the four upper website rows map onto `level2`/`level3`/`level4` modulo column naming.
+
+### Task identity
+
+The canonical identifier for one PR / one task is the tuple `(owner, repo, issue_number)`. Tables that need a single-column join key expose a `task_id` field whose value equals `issue_number`; never construct it as a derived string. `candidate_containers.task_id` is a STORED generated column (see migration `00019_candidate_containers_task_id.sql`).
 
 ## Environment setup
 

@@ -110,7 +110,7 @@ def records_from_supabase(  # noqa: C901
                     owner=row["owner"],
                     repo=row["repo"],
                     issue_number=row["issue_number"],
-                    task_id=f"{row['owner']}__{row['repo']}-{row['issue_number']}",
+                    task_id=int(row["issue_number"]),
                     gt_hash=sha,
                     base_commit=row.get("base_sha", ""),
                     date=row.get("merged_at"),

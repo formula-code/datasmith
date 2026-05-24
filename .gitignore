@@ -236,3 +236,6 @@ run_single_synthesis_test.py
 backups/
 jobs/
 blacklist.txt
+FLOWCHART.md
+WORKFLOW.md
+google*.html

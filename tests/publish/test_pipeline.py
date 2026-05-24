@@ -21,7 +21,7 @@ class TestPublishPipeline:
         mock_record.owner = "org"
         mock_record.repo = "repo"
         mock_record.issue_number = 1
-        mock_record.task_id = "org__repo-1"
+        mock_record.task_id = 1
         mock_record.container_name = ""
 
         with (
@@ -40,9 +40,7 @@ class TestPublishPipeline:
         assert count == 0
 
     async def test_returns_record_count(self):
-        records = [
-            MagicMock(owner="o", repo="r", issue_number=i, task_id=f"o__r-{i}", container_name="") for i in range(5)
-        ]
+        records = [MagicMock(owner="o", repo="r", issue_number=i, task_id=i, container_name="") for i in range(5)]
 
         mock_client = MagicMock()
         mock_table = MagicMock()

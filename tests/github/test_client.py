@@ -175,7 +175,7 @@ class TestAstropyPR16222:
         record = pr.to_record()
         assert record is not None
         assert record.gt_hash == "1ff8068f4378c64c15dc7a37cfd05e6ad1d69f93"
-        assert record.task_id == "astropy__astropy-16222"
+        assert record.task_id == 16222
 
         await client.close()
 
