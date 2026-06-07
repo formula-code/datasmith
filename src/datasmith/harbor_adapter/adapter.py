@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2, rmtree
+
+DATASMITH_LSV_ROUNDS: int = int(os.environ.get("DATASMITH_LSV_ROUNDS", "5"))
 
 from datasmith.harbor_adapter.utils import (
     render_dockerfile,
@@ -207,7 +210,7 @@ class FormulaCodeAdapter:
         cpus: int = 2,
         memory: str = "4G",
         storage: str = "10G",
-        rounds: int = 1,
+        rounds: int = DATASMITH_LSV_ROUNDS,
         verifier_env: dict[str, str] | None = None,
     ) -> Path:
         """Generate a complete Harbor task directory for the given FormulaCodeRecord."""
