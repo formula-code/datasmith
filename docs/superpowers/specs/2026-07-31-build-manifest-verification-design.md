@@ -158,6 +158,7 @@ the container has been run. Only the merged object is persisted to Supabase.
   },
   "verify": {                                 // merged by local_ci.py post-run
     "test_duration_s": 412.6, "test_timed_out": false,
+    "timeout_s": 3600,                        // the limit actually in force
     "pytest_collect_ok": true, "pytest_failed_at_base": 0
   }
 }
@@ -272,6 +273,33 @@ without a code change, read at module scope with a literal fallback:
 
 `/opt/formulacode/build_manifest.json` is an on-disk protocol path, not a tunable knob, and
 stays a literal.
+
+#### Configuring the test timeout
+
+`DATASMITH_VERIFY_TEST_TIMEOUT_S` is the one knob most likely to need tuning per repo or per
+run, so it is settable at three levels, most specific winning:
+
+| Level | How | Use |
+|---|---|---|
+| global | `DATASMITH_VERIFY_TEST_TIMEOUT_S=5400` in `tokens.env` | changes the default everywhere |
+| per-run | `fc-data --stage 6 --test-timeout 5400`; `python dataset/verify.py --test-timeout 5400` | one batch, no config edit |
+| per-call | `run_tests(tag, timeout=5400)` | tests and programmatic callers |
+
+Read once at module scope with a literal `3600` fallback, per `CLAUDE.md`:
+
+```python
+DATASMITH_VERIFY_TEST_TIMEOUT_S: int = int(
+    os.environ.get("DATASMITH_VERIFY_TEST_TIMEOUT_S", "3600")
+)
+```
+
+**The effective value is recorded in `verify.timeout_s`.** Whatever limit a run actually used
+is written into the manifest next to `test_duration_s` and `test_timed_out`. Without this,
+`test_duration_s: 719.6` is uninterpretable after the fact — you cannot tell a genuine
+719-second run from one killed at a 720s limit, which is exactly the ambiguity that hid the
+619 rows. Recording the limit alongside the duration makes every future row self-describing,
+and lets `--calibrate` distinguish "finished" from "hit the ceiling" without guessing which
+ceiling was in force.
 
 ## Removing `verifiers.py`
 
