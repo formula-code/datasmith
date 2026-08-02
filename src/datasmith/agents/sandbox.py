@@ -37,6 +37,7 @@ _IMMUTABLE_FILES = (
     "Dockerfile.pr",
     "docker_build_base.sh",
     "docker_build_final.sh",
+    "emit_manifest.py",
     "profile.sh",
     "run-tests.sh",
     "entrypoint.sh",
