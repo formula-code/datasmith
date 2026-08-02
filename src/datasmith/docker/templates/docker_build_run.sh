@@ -127,14 +127,23 @@ EOF
 # NOTE: BENCHMARK_DEST is not set anywhere in the current template pipeline
 # (docker_build_pkg.sh is agent-synthesized per-repo, outside Task 3's
 # scope); if/when that layer starts exporting it via asv_build_vars.sh,
-# this breadcrumb picks it up automatically. Until then it degrades
-# gracefully to `benchmark_dest_present_post_clean=0` / benchmark_dest=null.
+# this breadcrumb picks it up automatically.
+#
+# IMPORTANT: only emit benchmark_dest_present_post_clean when $BENCHMARK_DEST
+# is actually set. manifest.py's benchmark_dest_missing invariant is FATAL
+# and distinguishes "key absent" (None -> skipped) from "key present and
+# False" (fails). Unconditionally emitting 0 here -- which is what happens
+# on every build today, since nothing sets BENCHMARK_DEST yet -- would turn
+# a should-be-skipped invariant into a permanent fatal failure on every
+# single build once the evaluator is wired into local_ci.py::verify().
 _BENCH_DEST="${BENCHMARK_DEST:-}"
-if [ -n "$_BENCH_DEST" ] && [ -f "/workspace/repo/$_BENCH_DEST" ]; then
-    fc_note benchmark_dest_present_post_clean=1
-    fc_note benchmark_dest="$_BENCH_DEST"
-else
-    fc_note benchmark_dest_present_post_clean=0
+if [ -n "$_BENCH_DEST" ]; then
+    if [ -f "/workspace/repo/$_BENCH_DEST" ]; then
+        fc_note benchmark_dest_present_post_clean=1
+        fc_note benchmark_dest="$_BENCH_DEST"
+    else
+        fc_note benchmark_dest_present_post_clean=0
+    fi
 fi
 
 # Remove the setup script so the agent doesn't see it
