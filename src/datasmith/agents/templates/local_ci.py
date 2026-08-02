@@ -332,6 +332,67 @@ def run_tests(
     return True, stdout, stderr, rc
 
 
+_TESTS_BLOCK_RE = re.compile(r"FORMULACODE_TESTS_START\s*\n(.*?)\nFORMULACODE_TESTS_END", re.DOTALL)
+
+
+def _parse_test_summary(stdout: str) -> dict:
+    """Extract the JSON object run-tests.sh prints between
+    FORMULACODE_TESTS_START / FORMULACODE_TESTS_END.
+
+    That block's shape varies by which code path produced it (see
+    run-tests.sh and docker/templates/pytest_runner.py):
+      - a normal pytest run prints pytest_runner.py's flat summary dict
+        (total/passed/failed/skipped/xfailed/xpassed/error/rerun/warnings)
+      - the no-ASV-benchmarks early exit prints the same flat shape with
+        hardcoded zeros
+      - a run_pytest=False template config prints an unrelated
+        {"results": {"exit_code": ..., "details": ...}} shape carrying
+        neither "failed" nor "error"
+
+    Returns ``{}`` for a missing block, malformed JSON, or a top level that
+    isn't a JSON object -- callers must treat every field as independently
+    present-or-absent, never guess a value for it.
+    """
+    m = _TESTS_BLOCK_RE.search(stdout)
+    if not m:
+        return {}
+    try:
+        parsed = json.loads(m.group(1).strip())
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _pytest_verify_fields(stdout: str) -> dict:
+    """Derive ``verify.pytest_collect_ok`` / ``verify.pytest_failed_at_base``
+    from run_tests()'s captured stdout.
+
+    pytest_runner.py's ``summary["error"]`` is incremented both by
+    ``pytest_collectreport`` (a genuine broken-import/collection failure --
+    the class of failure invariant #7 exists to catch, see
+    docs/superpowers/specs/2026-07-31-build-manifest-verification-design.md)
+    and by per-test setup/teardown errors (``pytest_runtest_logreport``).
+    The printed block carries no separate collection-only counter, so
+    "error > 0" is the closest available signal without a second read of
+    /logs/test_results.json inside the container. A field is set only when
+    its source key is present and coerces cleanly; otherwise it's omitted
+    so the corresponding invariant is skipped rather than guessed.
+    """
+    summary = _parse_test_summary(stdout)
+    fields: dict = {}
+    if "error" in summary:
+        try:
+            fields["pytest_collect_ok"] = int(summary["error"]) == 0
+        except (TypeError, ValueError):
+            pass
+    if "failed" in summary:
+        try:
+            fields["pytest_failed_at_base"] = int(summary["failed"])
+        except (TypeError, ValueError):
+            pass
+    return fields
+
+
 def _check_file_integrity(task_dir: Path) -> str | None:
     """Verify that immutable files haven't been modified since workspace setup.
 
@@ -406,6 +467,12 @@ def _c_collect(b: dict, v: dict) -> bool | None:
 # form would treat "not yet populated" as a violation, which is precisely
 # the inversion this task exists to prevent.
 _FATAL_INVARIANTS = (
+    # Unreachable via verify()'s own control flow: run_tests() already
+    # returns ok=False on timeout, and verify() returns before
+    # check_fatal_invariants runs in that path. Retained (not dead code)
+    # because the merged manifest -- including this field -- is persisted
+    # and re-evaluated downstream by datasmith.docker.manifest.evaluate_invariants,
+    # which has no such short-circuit.
     ("test_timed_out", _c_timed_out),
     ("discovered_n_zero", _c_discovered_n),
     ("benchmark_dest_missing", _c_dest_present),
@@ -530,13 +597,13 @@ def verify(task_dir: Path) -> bool:
     # Merge post-run observations into the sealed manifest, then gate.
     manifest = read_manifest_from_image(tag)
     if manifest is not None:
-        manifest.setdefault("verify", {}).update(
-            {
-                "test_duration_s": metrics.get("test_duration_s"),
-                "test_timed_out": metrics.get("test_timed_out"),
-                "timeout_s": metrics.get("timeout_s"),
-            }
-        )
+        verify_fields = {
+            "test_duration_s": metrics.get("test_duration_s"),
+            "test_timed_out": metrics.get("test_timed_out"),
+            "timeout_s": metrics.get("timeout_s"),
+        }
+        verify_fields.update(_pytest_verify_fields(stdout))
+        manifest.setdefault("verify", {}).update(verify_fields)
         metrics["build_manifest"] = manifest
 
     if not ok:
