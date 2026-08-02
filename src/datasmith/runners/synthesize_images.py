@@ -178,6 +178,7 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
         "docker_build_pkg.sh",
         "docker_build_run.sh",
         "docker_build_final.sh",
+        "emit_manifest.py",
         "profile.sh",
         "run-tests.sh",
         "entrypoint.sh",
