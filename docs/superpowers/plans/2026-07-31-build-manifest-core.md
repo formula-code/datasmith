@@ -722,10 +722,15 @@ if __name__ == "__main__":
 Run: `uv run pytest tests/docker/test_emit_manifest.py -v`
 Expected: PASS — 11 passed
 
-- [ ] **Step 5: Verify lint and types**
+- [ ] **Step 5: Verify the sealer runs standalone**
 
-Run: `uv run ruff check src/datasmith/docker/templates/emit_manifest.py`
-Expected: no errors
+`src/datasmith/docker/templates/` is in ruff's `extend-exclude` with `force-exclude = true`
+and in mypy's `exclude`, so linting this path is a no-op — do not expect lint coverage here.
+The template directories are excluded precisely because these files execute outside the
+installed package. Verify it runs instead:
+
+Run: `uv run python src/datasmith/docker/templates/emit_manifest.py --notes /dev/null --out /tmp/m.json && cat /tmp/m.json`
+Expected: `[emit_manifest] sealed /tmp/m.json`, then JSON with `"schema_version": 1` and every `build` field `null`
 
 - [ ] **Step 6: Commit**
 
