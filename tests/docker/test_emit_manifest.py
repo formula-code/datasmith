@@ -35,6 +35,26 @@ class TestParseNotes:
         m = _load()
         assert m.parse_notes([]) == {}
 
+    def test_valid_line_after_malformed_line_is_parsed(self):
+        """Prove partial degradation: one malformed line does not skip valid ones."""
+        m = _load()
+        notes = m.parse_notes([
+            '{"k": "discovered_n", "v": "1"}',
+            '{"invalid json"',  # Malformed
+            '{"k": "cpu_cap", "v": "8"}',
+        ])
+        assert notes["discovered_n"] == "1"
+        assert notes["cpu_cap"] == "8"
+
+    def test_deeply_nested_json_does_not_crash(self):
+        """Malformed input (deeply nested) must not crash parse_notes."""
+        m = _load()
+        # Create deeply nested structure to trigger RecursionError
+        nested = '{"k": "x"' + (", " * 10000)
+        notes = m.parse_notes([nested, '{"k": "valid", "v": "yes"}'])
+        # The deeply nested one should be skipped, but the valid one parsed
+        assert notes == {"valid": "yes"}
+
 
 class TestBuildBlock:
     def test_coerces_declared_types(self):
@@ -68,6 +88,12 @@ class TestBuildBlock:
         block = m.build_block({"discovered_n": "not-a-number"}, {})
         assert block["discovered_n"] is None
 
+    def test_infinity_int_becomes_none_not_crash(self):
+        """Infinity from env vars (e.g. cpu_cap=inf) must not crash."""
+        m = _load()
+        block = m.build_block({"cpu_cap": "inf"}, {})
+        assert block["cpu_cap"] is None
+
 
 class TestMain:
     def test_writes_manifest_with_empty_verify_block(self, tmp_path):
@@ -94,3 +120,19 @@ class TestMain:
         assert rc == 0
         written = json.loads(out.read_text())
         assert written["build"]["discovered_n"] is None
+
+    def test_invalid_utf8_in_notes_file_still_writes_manifest(self, tmp_path):
+        """A notes file with truncated/invalid UTF-8 must not crash main()."""
+        m = _load()
+        notes = tmp_path / "notes.jsonl"
+        # Write valid JSON, then truncate with invalid UTF-8 byte sequence
+        notes.write_bytes(b'{"k": "discovered_n", "v": "3"}\n\xff\xfe')
+        out = tmp_path / "build_manifest.json"
+
+        rc = m.main(["--notes", str(notes), "--out", str(out)])
+
+        assert rc == 0
+        written = json.loads(out.read_text())
+        assert written["schema_version"] == 1
+        # The valid line should be parsed, invalid bytes replaced
+        assert written["build"]["discovered_n"] == 3

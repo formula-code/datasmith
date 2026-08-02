@@ -52,7 +52,7 @@ def parse_notes(lines: list[str]) -> dict[str, str]:
             continue
         try:
             rec = json.loads(line)
-        except (ValueError, TypeError):
+        except Exception:  # noqa: BLE001 Must not fail the build on malformed input
             continue
         if isinstance(rec, dict) and "k" in rec:
             notes[str(rec["k"])] = "" if rec.get("v") is None else str(rec["v"])
@@ -64,7 +64,7 @@ def _as_int(raw: str | None) -> int | None:
         return None
     try:
         return int(float(raw))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):  # noqa: Must not fail the build
         return None
 
 
@@ -127,9 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        with open(args.notes, encoding="utf-8") as fh:
+        with open(args.notes, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
-    except OSError:
+    except OSError:  # noqa: Must not fail the build if notes file cannot be read
         lines = []
 
     manifest = {
