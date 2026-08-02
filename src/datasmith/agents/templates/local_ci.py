@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess as sp
 import sys
@@ -39,6 +40,13 @@ _IMMUTABLE_FILES = (
     "run-tests.sh",
     "entrypoint.sh",
     "task.txt",
+)
+
+# Verification test timeout. 720 was the historical default and silently
+# passed ~34% of builds because a timeout was scored as success; 3600 matches
+# every other timeout in the tree and dataset/CLAUDE.md.
+DATASMITH_VERIFY_TEST_TIMEOUT_S: int = int(
+    os.environ.get("DATASMITH_VERIFY_TEST_TIMEOUT_S", "3600")
 )
 
 
@@ -286,25 +294,37 @@ def _run_container_with_timeout(
     return timed_out, stdout, stderr, rc
 
 
-def run_tests(image_tag: str, timeout: int = 720, metrics: dict | None = None) -> tuple[bool, str, str, int]:
+def run_tests(
+    image_tag: str,
+    timeout: int | None = None,
+    metrics: dict | None = None,
+) -> tuple[bool, str, str, int]:
     """Run /run-tests.sh inside the built image.
 
-    The contract is intentionally simple: we trust /run-tests.sh's exit code.
-    A non-zero exit means the underlying tool (pytest, asv, etc.) failed and
-    its raw stdout/stderr will be surfaced to the agent verbatim through
-    failure.json so they can read the real error and fix it.
+    A host-side timeout is a FAILURE.  It previously returned success, which
+    meant a container killed at the limit was indistinguishable from one that
+    passed — that inversion silently verified ~34% of candidate_containers.
 
-    Two structural special cases:
-      - host-side timeout → treated as success (long benchmark runs are OK)
-      - rc == 78 (EX_CONFIG) or the FORMULACODE_NO_BENCHMARKS sentinel → the
-        repo has no ASV benchmark suite at this commit; this is a task-level
-        unsuitability, not a fixable bug.
+    rc == 78 (EX_CONFIG) or the FORMULACODE_NO_BENCHMARKS sentinel still means
+    the repo has no ASV suite at this commit: task-level unsuitability, not a
+    fixable bug.
     """
+    limit = DATASMITH_VERIFY_TEST_TIMEOUT_S if timeout is None else timeout
     timed_out, stdout, stderr, rc = _run_container_with_timeout(
-        image_tag, ["/run-tests.sh", "--all"], timeout, metrics=metrics
+        image_tag, ["/run-tests.sh", "--all"], limit, metrics=metrics
     )
+    if metrics is not None:
+        metrics["timeout_s"] = limit
+        metrics["test_timed_out"] = timed_out
     if timed_out:
-        return True, stdout, f"Tests timed out after {timeout}s (treated as success)", rc
+        return (
+            False,
+            stdout,
+            f"Tests exceeded the {limit}s limit and were killed. Raise "
+            f"DATASMITH_VERIFY_TEST_TIMEOUT_S or --test-timeout if this repo "
+            f"legitimately needs longer.",
+            rc,
+        )
     if rc == 78 or "FORMULACODE_NO_BENCHMARKS" in stdout:
         return False, stdout, "No ASV benchmarks discovered — task cannot be used in FormulaCode", rc
     if rc != 0:
@@ -345,6 +365,101 @@ def _check_file_integrity(task_dir: Path) -> str | None:
         parts.append(f"Deleted: {', '.join(deleted)}")
     parts.append("Revert your changes to these files and try again.")
     return "\n".join(parts)
+
+
+# ── Build manifest (mirrors datasmith.docker.manifest) ───────────────────
+# local_ci.py runs in the sandbox without datasmith installed, so the fatal
+# invariant set is duplicated here.  tests/docker/test_manifest.py
+# ::TestLocalCiSync fails if the two drift apart.
+_MANIFEST_PATH = "/opt/formulacode/build_manifest.json"
+
+
+def _c_timed_out(b: dict, v: dict) -> bool | None:
+    return None if v.get("test_timed_out") is None else v["test_timed_out"] is False
+
+
+def _c_discovered_n(b: dict, v: dict) -> bool | None:
+    return None if b.get("discovered_n") is None else b["discovered_n"] > 0
+
+
+def _c_dest_present(b: dict, v: dict) -> bool | None:
+    key = "benchmark_dest_present_post_clean"
+    return None if b.get(key) is None else bool(b[key])
+
+
+def _c_init_present(b: dict, v: dict) -> bool | None:
+    key = "benchmark_dir_init_present"
+    return None if b.get(key) is None else bool(b[key])
+
+
+def _c_secrets(b: dict, v: dict) -> bool | None:
+    return None if b.get("secrets_scan_clean") is None else bool(b["secrets_scan_clean"])
+
+
+def _c_collect(b: dict, v: dict) -> bool | None:
+    return None if v.get("pytest_collect_ok") is None else bool(v["pytest_collect_ok"])
+
+
+# Every check returns True (holds), False (violated), or None (inputs absent
+# -> skipped, per check_fatal_invariants below).  This mirrors the three-
+# valued _c_* functions in datasmith.docker.manifest exactly -- a bool()-only
+# form would treat "not yet populated" as a violation, which is precisely
+# the inversion this task exists to prevent.
+_FATAL_INVARIANTS = (
+    ("test_timed_out", _c_timed_out),
+    ("discovered_n_zero", _c_discovered_n),
+    ("benchmark_dest_missing", _c_dest_present),
+    ("benchmark_init_missing", _c_init_present),
+    ("head_commit_drift", lambda b, v: _shas_match(b.get("head_at_seal"), b.get("declared_commit"))),
+    ("secrets_present", _c_secrets),
+    ("pytest_collect_failed", _c_collect),
+)
+
+
+def _shas_match(a: str | None, b: str | None) -> bool | None:
+    if not a or not b:
+        return None
+    n = min(len(a), len(b))
+    return a[:n] == b[:n]
+
+
+def read_manifest_from_image(image_tag: str) -> dict | None:
+    """Read the sealed manifest out of a built image, or None if absent."""
+    try:
+        out = sp.run(  # noqa: S603
+            ["docker", "run", "--rm", "--entrypoint", "cat", image_tag, _MANIFEST_PATH],  # noqa: S607
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, sp.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    try:
+        parsed = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def check_fatal_invariants(manifest: dict | None) -> list[str]:
+    """Return the ids of violated FATAL invariants. Empty means clean.
+
+    An invariant whose inputs are absent is skipped, so an image built before
+    manifests existed yields no violations rather than spurious failures.
+    """
+    if not manifest:
+        return []
+    build = manifest.get("build") or {}
+    verify_block = manifest.get("verify") or {}
+    violations = []
+    for inv_id, check in _FATAL_INVARIANTS:
+        try:
+            result = check(build, verify_block)
+        except Exception:  # noqa: BLE001 - a broken check must not fail the build
+            continue
+        if result is False:
+            violations.append(inv_id)
+    return violations
 
 
 def verify(task_dir: Path) -> bool:
@@ -409,12 +524,33 @@ def verify(task_dir: Path) -> bool:
         _write_failure(task_dir, "build", stderr=str(e), metrics=metrics)
         return False
 
-    # Tests — mandatory, no skip option (profile.sh runs inside run-tests.sh)
+    # Tests — mandatory, no skip option
     ok, stdout, stderr, rc = run_tests(tag, metrics=metrics)
+
+    # Merge post-run observations into the sealed manifest, then gate.
+    manifest = read_manifest_from_image(tag)
+    if manifest is not None:
+        manifest.setdefault("verify", {}).update(
+            {
+                "test_duration_s": metrics.get("test_duration_s"),
+                "test_timed_out": metrics.get("test_timed_out"),
+                "timeout_s": metrics.get("timeout_s"),
+            }
+        )
+        metrics["build_manifest"] = manifest
+
     if not ok:
         print(f"Tests failed for {task_dir.name}")
         _write_failure(task_dir, "tests", stdout=stdout, stderr=stderr, rc=rc, metrics=metrics)
         return False
+
+    violations = check_fatal_invariants(manifest)
+    if violations:
+        detail = "Build manifest invariant violations: " + ", ".join(violations)
+        print(detail)
+        _write_failure(task_dir, "invariants", stdout=stdout, stderr=detail, rc=1, metrics=metrics)
+        return False
+
     print(f"Tests passed for {task_dir.name}")
 
     _write_success(task_dir, tag, metrics=metrics)
@@ -430,11 +566,21 @@ def main() -> None:
         default=Path("task"),
         help="Task directory (default: task/)",
     )
+    parser.add_argument(
+        "--test-timeout",
+        type=int,
+        default=None,
+        help="Override DATASMITH_VERIFY_TEST_TIMEOUT_S for this run (seconds)",
+    )
     args = parser.parse_args()
 
     if not args.task.exists():
         print(f"Task directory not found: {args.task}")
         sys.exit(1)
+
+    if args.test_timeout is not None:
+        global DATASMITH_VERIFY_TEST_TIMEOUT_S
+        DATASMITH_VERIFY_TEST_TIMEOUT_S = args.test_timeout
 
     ok = verify(args.task)
     sys.exit(0 if ok else 1)

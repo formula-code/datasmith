@@ -202,3 +202,30 @@ class TestEvaluateInvariants:
         report = evaluate_invariants(m)
         assert "reward_formula_unknown" in report.skipped
         assert "reward_formula_unknown" not in report.warnings
+
+
+class TestLocalCiSync:
+    """local_ci.py runs in the sandbox without datasmith installed, so it
+    carries its own copy of the evaluator.  These guard the duplication."""
+
+    def _local_ci_source(self) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).parents[2] / "src" / "datasmith" / "agents" / "templates" / "local_ci.py").read_text()
+
+    def test_timeout_is_no_longer_treated_as_success(self):
+        src = self._local_ci_source()
+        assert "treated as success" not in src
+
+    def test_timeout_default_is_configurable(self):
+        src = self._local_ci_source()
+        assert "DATASMITH_VERIFY_TEST_TIMEOUT_S" in src
+        assert '"3600"' in src
+
+    def test_every_fatal_invariant_id_is_known_to_local_ci(self):
+        from datasmith.docker.manifest import INVARIANTS
+
+        src = self._local_ci_source()
+        for inv in INVARIANTS:
+            if inv.severity == "fatal":
+                assert inv.id in src, f"local_ci.py is missing fatal invariant {inv.id}"
