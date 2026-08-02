@@ -155,11 +155,19 @@ def _c_dilution(b: dict, v: dict) -> bool | None:
 
 
 def _c_reward_formula(b: dict, v: dict) -> bool | None:
-    return None if not _present(b, "reward_formula_id") else True
+    # Deferred: comparison against the parser.py hash lands in a later plan.
+    # Returns None until reward_formula_id is populated; the actual comparison
+    # will validate it matches whichever build context parser was baked in.
+    return None
 
 
 def _c_image_identity(b: dict, v: dict) -> bool | None:
-    return _present(b, "image_digest") and _present(b, "lsv_sha")
+    # Supplied by a later plan's publish path; skip if not yet populated.
+    has_digest = _present(b, "image_digest")
+    has_lsv = _present(b, "lsv_sha")
+    if not has_digest and not has_lsv:
+        return None  # Both absent, skipped
+    return bool(has_digest and has_lsv)  # Both present: True, one present: False (warn)
 
 
 INVARIANTS: tuple[Invariant, ...] = (

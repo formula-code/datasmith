@@ -110,3 +110,95 @@ class TestEvaluateInvariants:
         assert report.ok is True
         assert "test_timed_out" in report.skipped
         assert "discovered_n_zero" not in report.skipped
+
+    # ── Additional coverage for untested fatal invariants ──
+
+    def test_benchmark_dest_missing_is_fatal(self):
+        m = _good_manifest()
+        m["build"]["benchmark_dest_present_post_clean"] = False
+        report = evaluate_invariants(m)
+        assert report.ok is False
+        assert "benchmark_dest_missing" in report.fatal
+
+    def test_benchmark_init_missing_is_fatal(self):
+        m = _good_manifest()
+        m["build"]["benchmark_dir_init_present"] = False
+        report = evaluate_invariants(m)
+        assert report.ok is False
+        assert "benchmark_init_missing" in report.fatal
+
+    def test_secrets_present_is_fatal(self):
+        m = _good_manifest()
+        m["build"]["secrets_scan_clean"] = False
+        report = evaluate_invariants(m)
+        assert report.ok is False
+        assert "secrets_present" in report.fatal
+
+    def test_pytest_collect_failed_is_fatal(self):
+        m = _good_manifest()
+        m["verify"]["pytest_collect_ok"] = False
+        report = evaluate_invariants(m)
+        assert report.ok is False
+        assert "pytest_collect_failed" in report.fatal
+
+    # ── Additional coverage for untested warning invariants ──
+
+    def test_pins_drift_warns_when_missing_from_resolved(self):
+        """Requested package not in resolved set is a warning."""
+        m = _good_manifest()
+        m["build"]["pins_requested"] = ["scipy<=1.10"]
+        m["build"]["pins_resolved"] = ["numpy==1.24.0"]
+        report = evaluate_invariants(m)
+        assert report.ok is True
+        assert "pins_drift" in report.warnings
+
+    def test_pins_passes_when_in_resolved(self):
+        """All requested packages appear in resolved set."""
+        m = _good_manifest()
+        m["build"]["pins_requested"] = ["scipy<=1.10"]
+        m["build"]["pins_resolved"] = ["scipy==1.10.1"]
+        report = evaluate_invariants(m)
+        assert "pins_drift" not in report.warnings
+        assert "pins_drift" not in report.fatal
+
+    def test_base_tests_failing_is_warning(self):
+        m = _good_manifest()
+        m["verify"]["pytest_failed_at_base"] = 1
+        report = evaluate_invariants(m)
+        assert report.ok is True
+        assert "base_tests_failing" in report.warnings
+
+    # ── Tests for deferred invariants (now skipped, not warned) ──
+
+    def test_image_identity_both_absent_skips(self):
+        """When both image_digest and lsv_sha are absent, skip."""
+        m = _good_manifest()
+        del m["build"]["image_digest"]
+        del m["build"]["lsv_sha"]
+        report = evaluate_invariants(m)
+        assert "image_identity_missing" in report.skipped
+        assert "image_identity_missing" not in report.warnings
+
+    def test_image_identity_one_present_warns(self):
+        """When only one of image_digest or lsv_sha is present, warn."""
+        m = _good_manifest()
+        del m["build"]["lsv_sha"]
+        report = evaluate_invariants(m)
+        assert report.ok is True
+        assert "image_identity_missing" in report.warnings
+
+    def test_reward_formula_absent_skips(self):
+        """When reward_formula_id is absent, skip (deferred check)."""
+        m = _good_manifest()
+        del m["build"]["reward_formula_id"]
+        report = evaluate_invariants(m)
+        assert "reward_formula_unknown" in report.skipped
+        assert "reward_formula_unknown" not in report.warnings
+
+    def test_reward_formula_present_skips(self):
+        """When reward_formula_id is present, still skip (deferred comparison)."""
+        m = _good_manifest()
+        m["build"]["reward_formula_id"] = "case3-unclamped-v1"
+        report = evaluate_invariants(m)
+        assert "reward_formula_unknown" in report.skipped
+        assert "reward_formula_unknown" not in report.warnings
