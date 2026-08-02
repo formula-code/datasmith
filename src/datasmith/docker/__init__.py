@@ -7,6 +7,11 @@ from datasmith.docker.images import (
     get_pr_image_name,
     get_repo_image_name,
 )
+from datasmith.docker.manifest import (
+    InvariantReport,
+    evaluate_invariants,
+    read_build_manifest,
+)
 from datasmith.docker.publish import DockerHubPublisher
 from datasmith.docker.verifiers import (
     MultiObjVerifier,
@@ -20,12 +25,15 @@ __all__ = [
     "DockerContext",
     "DockerHubPublisher",
     "ImageManager",
+    "InvariantReport",
     "MultiObjVerifier",
     "ProfileVerifier",
     "PytestVerifier",
     "SmokeVerifier",
     "VerifyResult",
+    "evaluate_invariants",
     "get_base_image_name",
     "get_pr_image_name",
     "get_repo_image_name",
+    "read_build_manifest",
 ]
