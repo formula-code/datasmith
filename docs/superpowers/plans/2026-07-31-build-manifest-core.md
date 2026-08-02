@@ -849,6 +849,15 @@ fi
 fc_note cpu_cap="${LOKY_MAX_CPU_COUNT:-${N_JOBS_MAX:-}}"
 fc_note rounds="${DATASMITH_LSV_ROUNDS:-5}"
 
+# Identity, derived from the repo's own remote. Purely descriptive — no invariant
+# depends on these — but without them a manifest cannot be attributed to a task
+# when read back out of a published image.
+_ORIGIN="$(git -C /workspace/repo remote get-url origin 2>/dev/null || true)"
+if [ -n "$_ORIGIN" ]; then
+    fc_note owner="$(printf '%s' "$_ORIGIN" | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')"
+    fc_note repo="$(printf '%s' "$_ORIGIN" | sed -E 's#.*/([^/]+?)(\.git)?$#\1#')"
+fi
+
 # Scan every baked script for credential literals.  grep -q returns 1 on no
 # match, which is the clean case.
 if grep -rqE 'sb_secret_|service_role|SUPABASE_[A-Z_]*KEY=[A-Za-z0-9]' \
@@ -959,6 +968,42 @@ RUN chmod +x /docker_build_final.sh \
     /docker_build_final.sh /tmp/asv_benchmarks_fallback.txt; \
     python3 /emit_manifest.py || true
 ```
+
+Additionally, record the **declared** commit in the `env` stage, immediately after the
+checkout that uses it. Change lines 6-10 from:
+
+```dockerfile
+ARG COMMIT_SHA
+ARG ENV_PAYLOAD="[]"
+ARG PY_VERSION=""
+RUN git checkout "$COMMIT_SHA"
+LABEL vcs.ref="$COMMIT_SHA"
+```
+
+to:
+
+```dockerfile
+ARG COMMIT_SHA
+ARG ENV_PAYLOAD="[]"
+ARG PY_VERSION=""
+RUN git checkout "$COMMIT_SHA"
+LABEL vcs.ref="$COMMIT_SHA"
+
+# Record the DECLARED commit from the build arg — the authoritative statement of
+# what this image is supposed to be. head_commit_drift later compares the HEAD
+# introspected at seal time against this value. It must come from the build arg,
+# never from `git rev-parse`: comparing HEAD against HEAD is tautological and the
+# invariant would be structurally incapable of ever firing.
+# Written directly rather than via fc_note because ARGs do not cross FROM
+# boundaries, so this must happen here, in the stage where COMMIT_SHA is in scope.
+RUN mkdir -p /opt/formulacode \
+ && python3 -c 'import json,sys; print(json.dumps({"k":"declared_commit","v":sys.argv[1]}))' \
+      "$COMMIT_SHA" >> /opt/formulacode/notes.jsonl || true
+```
+
+**Why this is required:** without it, `declared_commit` is never emitted, so the FATAL
+invariant `head_commit_drift` compares against `null`, skips permanently, and one of the
+seven gates is dead. This was caught by the Task 2 review as a cross-task gap.
 
 Two deliberate choices about the separators, both preserving existing behaviour:
 
