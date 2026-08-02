@@ -46,13 +46,12 @@ class TestParseNotes:
         assert notes["discovered_n"] == "1"
         assert notes["cpu_cap"] == "8"
 
-    def test_deeply_nested_json_does_not_crash(self):
-        """Malformed input (deeply nested) must not crash parse_notes."""
+    def test_recursion_error_line_is_skipped_not_fatal(self):
+        """RecursionError from deeply nested JSON must not crash parse_notes."""
         m = _load()
-        # Create deeply nested structure to trigger RecursionError
-        nested = '{"k": "x"' + (", " * 10000)
-        notes = m.parse_notes([nested, '{"k": "valid", "v": "yes"}'])
-        # The deeply nested one should be skipped, but the valid one parsed
+        # Deeply nested JSON triggers RecursionError in json.loads
+        notes = m.parse_notes(["[" * 100000, '{"k": "valid", "v": "yes"}'])
+        # The recursion-error line is skipped, but the valid line is parsed
         assert notes == {"valid": "yes"}
 
 
