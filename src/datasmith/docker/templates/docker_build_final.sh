@@ -129,7 +129,13 @@ fc_note rounds="${DATASMITH_LSV_ROUNDS:-5}"
 _ORIGIN="$(git -C /workspace/repo remote get-url origin 2>/dev/null || true)"
 if [ -n "$_ORIGIN" ]; then
     fc_note owner="$(printf '%s' "$_ORIGIN" | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')"
-    fc_note repo="$(printf '%s' "$_ORIGIN" | sed -E 's#.*/([^/]+?)(\.git)?$#\1#')"
+    # NOTE: was `sed -E 's#.*/([^/]+?)(\.git)?$#\1#'`. POSIX ERE (sed -E) has no
+    # non-greedy quantifier, so the `?` on `[^/]+?` is a silent no-op: `[^/]+`
+    # greedily consumes "requests.git" whole and `(\.git)?` matches nothing,
+    # leaving the .git suffix in `repo` on every build (verified below).
+    # `basename ... .git` strips the suffix unconditionally and correctly, with
+    # no regex to get wrong.
+    fc_note repo="$(basename "$_ORIGIN" .git)"
 fi
 
 # Scan every baked script for credential literals.  grep -q returns 1 on no
