@@ -23,8 +23,30 @@ def _docker_available() -> bool:
 requires_docker = pytest.mark.skipif(not _docker_available(), reason="docker unavailable")
 
 
+@pytest.fixture
+def image_tag():
+    """Yields a factory that registers image tags for teardown removal.
+
+    ``docker rmi`` runs in a ``finally``-equivalent (fixture teardown), so a
+    tag is cleaned up even when the test body raises or an assertion fails
+    partway through — the failure path is exactly the one that matters most,
+    since a genuine regression reappearing would otherwise leak an image on
+    every retry.
+    """
+    tags: list[str] = []
+
+    def _register(tag: str) -> str:
+        tags.append(tag)
+        return tag
+
+    yield _register
+
+    for tag in tags:
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
+
+
 @requires_docker
-def test_timeout_now_fails_verification(tmp_path, monkeypatch):
+def test_timeout_now_fails_verification(tmp_path, monkeypatch, image_tag):
     """The regression that would have caught all 619 rows.
 
     Builds an image whose /run-tests.sh sleeps past the limit and asserts
@@ -40,9 +62,9 @@ def test_timeout_now_fails_verification(tmp_path, monkeypatch):
             ENTRYPOINT ["/bin/sh"]
         """)
     )
-    tag = "fc-test-timeout:local"
+    tag = image_tag("fc-test-timeout:local")
     subprocess.run(
-        ["docker", "build", "--network=host", "-t", tag, str(tmp_path)],
+        ["docker", "build", "-t", tag, str(tmp_path)],
         check=True,
         capture_output=True,
         timeout=300,
@@ -66,11 +88,9 @@ def test_timeout_now_fails_verification(tmp_path, monkeypatch):
     assert metrics["test_timed_out"] is True
     assert metrics["timeout_s"] == 5
 
-    subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
-
 
 @requires_docker
-def test_sealer_produces_a_readable_manifest(tmp_path):
+def test_sealer_produces_a_readable_manifest(tmp_path, image_tag):
     """emit_manifest.py seals breadcrumbs into a manifest inside an image."""
     from datasmith.docker.manifest import evaluate_invariants
 
@@ -87,9 +107,9 @@ def test_sealer_produces_a_readable_manifest(tmp_path):
              && python3 /emit_manifest.py
         """)
     )
-    tag = "fc-test-sealer:local"
+    tag = image_tag("fc-test-sealer:local")
     subprocess.run(
-        ["docker", "build", "--network=host", "-t", tag, str(tmp_path)],
+        ["docker", "build", "-t", tag, str(tmp_path)],
         check=True,
         capture_output=True,
         timeout=600,
@@ -113,5 +133,3 @@ def test_sealer_produces_a_readable_manifest(tmp_path):
     report = evaluate_invariants(manifest)
     assert "test_timed_out" in report.skipped
     assert "discovered_n_zero" not in report.fatal
-
-    subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
