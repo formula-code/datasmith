@@ -5,6 +5,9 @@ cd /workspace/repo || exit 1
 
 source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
+# Defense in depth: never let a bare `fc_note ...` call abort this script
+# under `set -euo pipefail` if the profile.d helper failed to source.
+command -v fc_note >/dev/null 2>&1 || fc_note() { :; }
 
 ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
@@ -119,6 +122,29 @@ export ASV_PY_VERSIONS="$ASV_PY_VERSIONS"
 export HEAD_SHA=$HEAD_SHA
 EOF
 
+# Record whether the injected benchmark survived repo lockdown.  These are
+# the facts that catch "git clean wiped the benchmark" before a trial does.
+# NOTE: BENCHMARK_DEST is not set anywhere in the current template pipeline
+# (docker_build_pkg.sh is agent-synthesized per-repo, outside Task 3's
+# scope); if/when that layer starts exporting it via asv_build_vars.sh,
+# this breadcrumb picks it up automatically.
+#
+# IMPORTANT: only emit benchmark_dest_present_post_clean when $BENCHMARK_DEST
+# is actually set. manifest.py's benchmark_dest_missing invariant is FATAL
+# and distinguishes "key absent" (None -> skipped) from "key present and
+# False" (fails). Unconditionally emitting 0 here -- which is what happens
+# on every build today, since nothing sets BENCHMARK_DEST yet -- would turn
+# a should-be-skipped invariant into a permanent fatal failure on every
+# single build once the evaluator is wired into local_ci.py::verify().
+_BENCH_DEST="${BENCHMARK_DEST:-}"
+if [ -n "$_BENCH_DEST" ]; then
+    if [ -f "/workspace/repo/$_BENCH_DEST" ]; then
+        fc_note benchmark_dest_present_post_clean=1
+        fc_note benchmark_dest="$_BENCH_DEST"
+    else
+        fc_note benchmark_dest_present_post_clean=0
+    fi
+fi
 
 # Remove the setup script so the agent doesn't see it
 rm -- "$0"
