@@ -154,12 +154,18 @@ class TestEvaluateInvariants:
         assert report.ok is False
         assert "benchmark_dest_missing" in report.fatal
 
-    def test_benchmark_init_missing_is_fatal(self):
+    def test_benchmark_init_missing_is_warning(self):
+        """warn, not fatal: see the comment on this Invariant in manifest.py.
+        Build-time this check is either a false-positive gate (repos that
+        legitimately lack __init__.py) or tautological (if we create it
+        unconditionally); the meaningful comparison is trial-time against
+        the sealed value, which lands in a later plan."""
         m = _good_manifest()
         m["build"]["benchmark_dir_init_present"] = False
         report = evaluate_invariants(m)
-        assert report.ok is False
-        assert "benchmark_init_missing" in report.fatal
+        assert report.ok is True
+        assert "benchmark_init_missing" in report.warnings
+        assert "benchmark_init_missing" not in report.fatal
 
     def test_secrets_present_is_fatal(self):
         m = _good_manifest()
@@ -300,10 +306,11 @@ class TestLocalCiSync:
             (good, None),  # everything passing
         ]
 
+        # One case per fatal invariant (currently six -- see
+        # datasmith.docker.manifest.INVARIANTS), each violated in isolation.
         for build_key, build_value, inv_id in (
             ("discovered_n", 0, "discovered_n_zero"),
             ("benchmark_dest_present_post_clean", False, "benchmark_dest_missing"),
-            ("benchmark_dir_init_present", False, "benchmark_init_missing"),
             ("head_at_seal", "deadbeef0000", "head_commit_drift"),
             ("secrets_scan_clean", False, "secrets_present"),
         ):
@@ -318,6 +325,15 @@ class TestLocalCiSync:
             m = copy.deepcopy(good)
             m["verify"][verify_key] = verify_value
             cases.append((m, inv_id))
+
+        # benchmark_init_missing is warn-severity, not fatal (see the
+        # comment on that Invariant in manifest.py) -- this case proves
+        # BOTH implementations agree it produces zero fatal violations, so
+        # a future accidental re-promotion to fatal on only one side is
+        # still caught by the parity assertion below.
+        m = copy.deepcopy(good)
+        m["build"]["benchmark_dir_init_present"] = False
+        cases.append((m, None))
 
         for case, want_id in cases:
             manifest_fatal = evaluate_invariants(case or None).fatal

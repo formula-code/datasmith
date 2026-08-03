@@ -448,11 +448,6 @@ def _c_dest_present(b: dict, v: dict) -> bool | None:
     return None if b.get(key) is None else bool(b[key])
 
 
-def _c_init_present(b: dict, v: dict) -> bool | None:
-    key = "benchmark_dir_init_present"
-    return None if b.get(key) is None else bool(b[key])
-
-
 def _c_secrets(b: dict, v: dict) -> bool | None:
     return None if b.get("secrets_scan_clean") is None else bool(b["secrets_scan_clean"])
 
@@ -476,7 +471,12 @@ _FATAL_INVARIANTS = (
     ("test_timed_out", _c_timed_out),
     ("discovered_n_zero", _c_discovered_n),
     ("benchmark_dest_missing", _c_dest_present),
-    ("benchmark_init_missing", _c_init_present),
+    # benchmark_init_missing is intentionally NOT here: it is warn-severity
+    # in datasmith.docker.manifest (build-time it's either a false-positive
+    # gate on repos that legitimately lack __init__.py, or tautological if
+    # we create it unconditionally -- see the comment on that Invariant for
+    # the full reasoning). Do not add it back without also flipping
+    # manifest.py's severity, or the parity test below will catch the drift.
     ("head_commit_drift", lambda b, v: _shas_match(b.get("head_at_seal"), b.get("declared_commit"))),
     ("secrets_present", _c_secrets),
     ("pytest_collect_failed", _c_collect),
