@@ -99,6 +99,7 @@ class SandboxResult:
     agent_name: str = ""
     files_changed: list[str] = field(default_factory=list)
     resource_metrics: dict = field(default_factory=dict)
+    build_manifest: dict | None = None
     env_payload_override: str | None = None
     aborted: bool = False
     """True when the agent exited without ever producing failure.json or
@@ -396,6 +397,7 @@ class SandboxRunner:
 
         # Extract resource_metrics from whichever JSON file was written
         resource_metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
+        build_manifest = _extract_build_manifest(success_file, failure_file, failure_json)
 
         # An "aborted" attempt is one where the agent exited without producing
         # either result file. Distinct from a real verifier failure: the
@@ -411,6 +413,7 @@ class SandboxRunner:
             agent_name=agent_name,
             files_changed=codex_result.files_changed,
             resource_metrics=resource_metrics,
+            build_manifest=build_manifest,
             env_payload_override=env_payload_override if success else None,
             aborted=aborted,
         )
@@ -440,6 +443,17 @@ def _extract_resource_metrics(
         if isinstance(metrics, dict):
             return metrics
     return {}
+
+
+def _extract_build_manifest(success_file: Path, failure_file: Path, failure_json: dict | None) -> dict | None:
+    """Pull ``build_manifest`` out of the verification JSON files.
+
+    It travels inside ``resource_metrics`` because local_ci.py writes it
+    there, reusing the existing plumbing rather than adding a channel.
+    """
+    metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
+    manifest = (metrics or {}).get("build_manifest")
+    return manifest if isinstance(manifest, dict) else None
 
 
 def _generate_task_txt(
@@ -588,6 +602,7 @@ def verify_context(
                 logger.debug("Failed to parse failure.json in verify_context")
 
         resource_metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
+        build_manifest = _extract_build_manifest(success_file, failure_file, failure_json)
 
         return SandboxResult(
             success=success,
@@ -596,6 +611,7 @@ def verify_context(
             duration_s=time.time() - start,
             agent_output=output,
             resource_metrics=resource_metrics,
+            build_manifest=build_manifest,
         )
 
 
