@@ -1735,6 +1735,151 @@
         },
         "overrides": []
       }
+    },
+    {
+      "type": "row",
+      "title": "Dataset Composition",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 172,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 71,
+      "title": "Fix Size Distribution (lines changed)",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 173,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "WITH pr_size AS (SELECT (SELECT COALESCE(SUM((e->>'additions')::int + (e->>'deletions')::int),0) FROM jsonb_array_elements(file_changes) e) AS lines_changed FROM pull_requests WHERE is_performance_commit AND file_changes IS NOT NULL) SELECT bucket, COUNT(*) AS prs FROM (SELECT CASE WHEN lines_changed < 10 THEN '1. <10' WHEN lines_changed < 50 THEN '2. 10-50' WHEN lines_changed < 200 THEN '3. 50-200' WHEN lines_changed < 1000 THEN '4. 200-1000' ELSE '5. 1000+' END AS bucket FROM pr_size) t GROUP BY bucket ORDER BY bucket;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "xTickLabelMaxLength": 0,
+        "xTickLabelSpacing": 0,
+        "axisCenteredZero": false,
+        "axisBorderShow": false
+      }
+    },
+    {
+      "id": 72,
+      "title": "Fix Size by Difficulty (median)",
+      "type": "table",
+      "gridPos": {
+        "x": 8,
+        "y": 173,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "WITH pr_size AS (SELECT COALESCE(difficulty,'unset') AS difficulty, (SELECT COALESCE(SUM((e->>'additions')::int + (e->>'deletions')::int),0) FROM jsonb_array_elements(file_changes) e) AS lines_changed, jsonb_array_length(file_changes) AS files_touched FROM pull_requests WHERE is_performance_commit AND file_changes IS NOT NULL) SELECT difficulty, COUNT(*) AS prs, ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY lines_changed)) AS median_lines, ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY files_touched)) AS median_files FROM pr_size GROUP BY difficulty ORDER BY CASE difficulty WHEN 'easy' THEN 1 WHEN 'medium' THEN 2 WHEN 'hard' THEN 3 WHEN 'unknown' THEN 4 ELSE 5 END;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "median_lines"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 100
+                    },
+                    {
+                      "color": "red",
+                      "value": 500
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 73,
+      "title": "Optimization Type by Difficulty",
+      "type": "barchart",
+      "gridPos": {
+        "x": 16,
+        "y": 173,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "supabase-pg",
+        "type": "postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "WITH base AS (SELECT COALESCE(difficulty,'unset') AS difficulty, REPLACE(COALESCE(classification,'unclassified'),'_',' ') AS opt FROM pull_requests WHERE is_performance_commit AND classification IS DISTINCT FROM 'legacy-verified') SELECT difficulty, COUNT(*) FILTER (WHERE opt='remove or reduce work') AS \"remove/reduce work\", COUNT(*) FILTER (WHERE opt='use better algorithm') AS \"better algorithm\", COUNT(*) FILTER (WHERE opt='use lower level system') AS \"lower level system\", COUNT(*) FILTER (WHERE opt='cache and reuse') AS \"cache & reuse\", COUNT(*) FILTER (WHERE opt='use better data structure and layout') AS \"data structure/layout\", COUNT(*) FILTER (WHERE opt='micro optimizations') AS \"micro optimizations\", COUNT(*) FILTER (WHERE opt='use parallelization') AS \"parallelization\", COUNT(*) FILTER (WHERE opt='do it earlier batch throttle') AS \"earlier/batch/throttle\", COUNT(*) FILTER (WHERE opt NOT IN ('remove or reduce work','use better algorithm','use lower level system','cache and reuse','use better data structure and layout','micro optimizations','use parallelization','do it earlier batch throttle')) AS \"other\" FROM base GROUP BY difficulty ORDER BY CASE difficulty WHEN 'easy' THEN 1 WHEN 'medium' THEN 2 WHEN 'hard' THEN 3 WHEN 'unknown' THEN 4 ELSE 5 END;",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "stacking": "normal",
+        "xField": "difficulty"
+      }
     }
   ]
 }
