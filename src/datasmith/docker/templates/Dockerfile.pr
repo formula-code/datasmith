@@ -9,6 +9,17 @@ ARG PY_VERSION=""
 RUN git checkout "$COMMIT_SHA"
 LABEL vcs.ref="$COMMIT_SHA"
 
+# Record the DECLARED commit from the build arg — the authoritative statement of
+# what this image is supposed to be. head_commit_drift later compares the HEAD
+# introspected at seal time against this value. It must come from the build arg,
+# never from `git rev-parse`: comparing HEAD against HEAD is tautological and the
+# invariant would be structurally incapable of ever firing.
+# Written directly rather than via fc_note because ARGs do not cross FROM
+# boundaries, so this must happen here, in the stage where COMMIT_SHA is in scope.
+RUN mkdir -p /opt/formulacode \
+ && python3 -c 'import json,sys; print(json.dumps({"k":"declared_commit","v":sys.argv[1]}))' \
+      "$COMMIT_SHA" >> /opt/formulacode/notes.jsonl || true
+
 COPY docker_build_env.sh /workspace/repo/docker_build_env.sh
 RUN chmod +x /workspace/repo/docker_build_env.sh && \
     echo "${ENV_PAYLOAD}" > /tmp/env_payload.json && \
@@ -37,6 +48,9 @@ ARG BENCHMARKS=""
 ARG BUILD_SCRIPT=""
 
 COPY docker_build_final.sh /docker_build_final.sh
+COPY emit_manifest.py /emit_manifest.py
 RUN chmod +x /docker_build_final.sh \
     && printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks_fallback.txt; \
-    /docker_build_final.sh /tmp/asv_benchmarks_fallback.txt;
+    /docker_build_final.sh /tmp/asv_benchmarks_fallback.txt; rc=$?; \
+    python3 /emit_manifest.py || true; \
+    exit $rc

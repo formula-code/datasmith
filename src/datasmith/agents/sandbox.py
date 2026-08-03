@@ -37,6 +37,7 @@ _IMMUTABLE_FILES = (
     "Dockerfile.pr",
     "docker_build_base.sh",
     "docker_build_final.sh",
+    "emit_manifest.py",
     "profile.sh",
     "run-tests.sh",
     "entrypoint.sh",
@@ -206,6 +207,7 @@ class SandboxRunner:
             "docker_build_pkg.sh",
             "docker_build_run.sh",
             "docker_build_final.sh",
+            "emit_manifest.py",
             "profile.sh",
             "entrypoint.sh",
         ):
@@ -524,6 +526,7 @@ def verify_context(
             "docker_build_pkg.sh",
             "docker_build_run.sh",
             "docker_build_final.sh",
+            "emit_manifest.py",
             "profile.sh",
             "entrypoint.sh",
         ):

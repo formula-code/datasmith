@@ -115,6 +115,7 @@ class TestPrepareWorkspace:
         assert (task_dir / "docker_build_pkg.sh").exists()
         assert (task_dir / "docker_build_run.sh").exists()
         assert (task_dir / "docker_build_final.sh").exists()
+        assert (task_dir / "emit_manifest.py").exists()
         assert (task_dir / "profile.sh").exists()
         assert (task_dir / "run-tests.sh").exists()
         assert (task_dir / "entrypoint.sh").exists()
@@ -162,6 +163,7 @@ class TestPrepareWorkspace:
             "Dockerfile.pr",
             "docker_build_base.sh",
             "docker_build_final.sh",
+            "emit_manifest.py",
             "profile.sh",
             "run-tests.sh",
             "entrypoint.sh",
