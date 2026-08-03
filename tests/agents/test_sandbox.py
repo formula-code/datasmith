@@ -12,6 +12,7 @@ from datasmith.agents.sandbox import (
     SandboxResult,
     SandboxRunner,
     _compute_immutable_hashes,
+    _extract_build_manifest,
     _extract_resource_metrics,
     _generate_task_txt,
     _render_agents_md,
@@ -39,6 +40,7 @@ class TestSandboxResult:
         assert r.duration_s == 0.0
         assert r.agent_output == ""
         assert r.resource_metrics == {}
+        assert r.build_manifest is None
         assert r.env_payload_override is None
 
     def test_with_env_payload_override(self) -> None:
@@ -376,6 +378,62 @@ class TestExtractResourceMetrics:
 
         assert result.success is False
         assert result.resource_metrics == metrics
+
+
+class TestExtractBuildManifest:
+    """build_manifest rides inside resource_metrics — see local_ci.py's verify()."""
+
+    def test_from_success_file(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        manifest = {"schema_version": 1, "build": {"discovered_n": 3}, "verify": {}}
+        metrics = {"build_duration_s": 12.5, "build_manifest": manifest}
+        success.write_text(json.dumps({"local_image": "t", "resource_metrics": metrics}))
+
+        assert _extract_build_manifest(success, failure, None) == manifest
+
+    def test_from_failure_json(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        manifest = {"schema_version": 1, "build": {}, "verify": {}}
+        failure_data = {"stage": "tests", "resource_metrics": {"build_manifest": manifest}}
+
+        assert _extract_build_manifest(success, failure, failure_data) == manifest
+
+    def test_none_when_absent(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        success.write_text(json.dumps({"local_image": "t", "resource_metrics": {"build_duration_s": 1.0}}))
+
+        assert _extract_build_manifest(success, failure, None) is None
+
+    def test_none_when_not_a_dict(self, tmp_path: Path) -> None:
+        """A malformed build_manifest (e.g. a string) is ignored rather than propagated."""
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        success.write_text(json.dumps({"local_image": "t", "resource_metrics": {"build_manifest": "not-a-dict"}}))
+
+        assert _extract_build_manifest(success, failure, None) is None
+
+    def test_extract_results_includes_build_manifest(self, tmp_path: Path) -> None:
+        """_extract_results populates SandboxResult.build_manifest from success JSON."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        manifest = {"schema_version": 1, "build": {"discovered_n": 5}, "verify": {"test_timed_out": False}}
+        metrics = {"build_duration_s": 10.0, "build_manifest": manifest}
+        (task_dir / "verification_success.json").write_text(
+            json.dumps({"local_image": "test:latest", "resource_metrics": metrics})
+        )
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash")
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "ok"
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.build_manifest == manifest
 
 
 class TestSandboxRunnerRun:

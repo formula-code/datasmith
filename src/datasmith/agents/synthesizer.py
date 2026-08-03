@@ -11,6 +11,7 @@ from datasmith.agents.rate_limit import check as check_rate_limit
 from datasmith.agents.sandbox import SandboxResult, verify_context
 from datasmith.agents.tamper_audit import TamperResult, classify_context
 from datasmith.docker.context import DockerContext
+from datasmith.docker.manifest import evaluate_invariants
 from datasmith.utils import get_client, get_logger
 
 logger = get_logger("agents.synthesizer")
@@ -132,6 +133,7 @@ class Synthesizer:
                         issue_number,
                         ctx,
                         resource_metrics=result.resource_metrics,
+                        build_manifest=result.build_manifest,
                     )
                     return ctx
                 failed_attempts.append((ctx, result))
@@ -211,6 +213,7 @@ class Synthesizer:
                         issue_number,
                         default_ctx,
                         resource_metrics=result.resource_metrics,
+                        build_manifest=result.build_manifest,
                     )
                     return default_ctx
             else:
@@ -240,7 +243,7 @@ class Synthesizer:
         attempt_idx = 0
         abort_count = 0
         while attempt_idx < self._max_attempts:
-            generated, metrics, aborted = self._sandbox_generate(
+            generated, metrics, build_manifest, aborted = self._sandbox_generate(
                 owner=owner,
                 repo=repo,
                 sha=sha,
@@ -284,7 +287,15 @@ class Synthesizer:
                     issue_number,
                     attempt_idx + 1,
                 )
-                self._save_context(owner, repo, sha, issue_number, generated, resource_metrics=metrics)
+                self._save_context(
+                    owner,
+                    repo,
+                    sha,
+                    issue_number,
+                    generated,
+                    resource_metrics=metrics,
+                    build_manifest=build_manifest,
+                )
                 return generated
             if aborted and abort_count < self._max_aborts:
                 abort_count += 1
@@ -434,7 +445,7 @@ class Synthesizer:
         issue_number: int = 0,
         attempt_index: int = 0,
         base_sha: str = "",
-    ) -> tuple[DockerContext | None, dict, bool]:
+    ) -> tuple[DockerContext | None, dict, dict | None, bool]:
         from datasmith.agents.sandbox import SandboxRunner
 
         runner = SandboxRunner(agent=self._agent)
@@ -469,7 +480,7 @@ class Synthesizer:
                 message=(f"{result.agent_name} hit usage limit during synthesis for {owner}/{repo}@{sha[:12]}"),
             )
         ctx = result.docker_context if result.success else None
-        return ctx, result.resource_metrics, result.aborted
+        return ctx, result.resource_metrics, result.build_manifest, result.aborted
 
     def _log_attempt(
         self,
@@ -588,12 +599,17 @@ class Synthesizer:
         ctx: DockerContext,
         resource_metrics: dict | None = None,
         env_payload_override: str | None = None,
+        build_manifest: dict | None = None,
     ) -> None:
         """Persist the agent-edited scripts to the ``candidate_containers`` table.
 
         Saves ``build_pkg_sh``, ``build_run_sh``, and ``build_env_sh``.
         When the agent also modified the env payload, ``env_payload_override``
-        is persisted to the ``env_payload`` column.
+        is persisted to the ``env_payload`` column. ``build_manifest`` — the
+        sealed build facts merged with verify-time observations — is
+        persisted as-is; ``manifest_warnings`` is derived from it via
+        ``evaluate_invariants`` (warn-severity invariant ids only, since the
+        manifest itself carries no precomputed invariant report).
         """
         if not sha:
             return
@@ -611,6 +627,11 @@ class Synthesizer:
             row["resource_metrics"] = resource_metrics
         if env_payload_override:
             row["env_payload"] = env_payload_override
+        if build_manifest:
+            row["build_manifest"] = build_manifest
+            warnings = evaluate_invariants(build_manifest).warnings
+            if warnings:
+                row["manifest_warnings"] = warnings
         client.table("candidate_containers").upsert(row).execute()
         logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
 
