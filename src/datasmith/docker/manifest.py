@@ -170,9 +170,50 @@ def _c_image_identity(b: dict, v: dict) -> bool | None:
     return bool(has_digest and has_lsv)  # Both present: True, one present: False (warn)
 
 
+# Fields in the build block that do NOT come from an `fc_note` breadcrumb, so
+# they are populated even when `fc_note` is a total no-op (pre-manifest base
+# images, before docker_build_base.sh wrote /etc/profile.d/asv_utils.sh):
+#   - declared_commit is written directly into notes.jsonl by Dockerfile.pr,
+#     because ARGs don't cross FROM boundaries and it must exist before the
+#     stage where fc_note would even be defined.
+#   - head_at_seal and nproc are introspected directly off the image by
+#     emit_manifest.py's _introspect() (git rev-parse / os.cpu_count()), never
+#     via a breadcrumb call site.
+# Excluding them here is the whole point of manifest_empty: without the
+# exclusion, a fully broken build (every fc_note call silently a no-op) would
+# still show these three as non-null and look indistinguishable from a
+# healthy build whose other invariants legitimately skipped.
+_NON_BREADCRUMB_BUILD_FIELDS = frozenset({"declared_commit", "head_at_seal", "nproc"})
+
+
+def _c_manifest_empty(b: dict, v: dict) -> bool | None:
+    """Fires when no fc_note breadcrumb reached the sealer.
+
+    An all-null build block (every fc_note call site silently swallowed by
+    the `fc_note() { :; }` fallback because the image predates
+    docker_build_base.sh writing /etc/profile.d/asv_utils.sh) is otherwise
+    indistinguishable from a healthy build whose invariants legitimately
+    skipped -- nothing else in this module detects that difference.
+    """
+    if not b:
+        return None  # no build block at all -- pre-manifest-image case, already ok=None
+    breadcrumb_values = [val for key, val in b.items() if key not in _NON_BREADCRUMB_BUILD_FIELDS]
+    return any(val is not None for val in breadcrumb_values)
+
+
 INVARIANTS: tuple[Invariant, ...] = (
     Invariant("test_timed_out", "fatal", _c_timeout, "run_tests did not hit its timeout"),
     Invariant("discovered_n_zero", "fatal", _c_discovered, "at least one ASV benchmark discovered"),
+    # INERT pending a producer for BENCHMARK_DEST: docker_build_run.sh only
+    # emits benchmark_dest_present_post_clean when $BENCHMARK_DEST is
+    # non-empty, and nothing anywhere in this tree sets that variable today
+    # (docker_build_pkg.sh is agent-synthesized per-repo and out of scope).
+    # The conditional emission is deliberate -- an unconditional 0 would
+    # hard-fail every build -- so this check returns None (skipped) on every
+    # build until BENCHMARK_DEST has a producer. The value is expected to
+    # come from the per-task override record once one exists. Kept fatal and
+    # registered rather than removed: the check itself is correct, only the
+    # input is missing.
     Invariant("benchmark_dest_missing", "fatal", _c_dest_present, "benchmark survives git clean"),
     # warn, not fatal: at build time this check cannot be a useful gate either
     # way. If we don't create __init__.py, repos that legitimately lack one
@@ -186,7 +227,15 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant("benchmark_init_missing", "warn", _c_init_present, "benchmark dir has __init__.py"),
     Invariant("head_commit_drift", "fatal", _c_head_drift, "HEAD matches the declared commit"),
     Invariant("secrets_present", "fatal", _c_secrets, "no credential literals in baked scripts"),
-    Invariant("pytest_collect_failed", "fatal", _c_collect, "pytest collection succeeds at base"),
+    # Downgraded from fatal: pytest_runner.py's summary["error"] is incremented
+    # by BOTH genuine pytest_collectreport failures and ordinary per-test
+    # setup/teardown errors (pytest_runtest_logreport), and only the flat
+    # summary reaches local_ci.py -- the two are indistinguishable today. As
+    # fatal, a single fixture teardown error anywhere in a full-suite run
+    # would hard-fail the build. Returns to fatal once len(results["errors"])
+    # is read from /logs/test_results.json (already written by
+    # pytest_runner.py), which separates collection errors from test errors.
+    Invariant("pytest_collect_failed", "warn", _c_collect, "pytest collection succeeds at base"),
     Invariant("discovery_fallback_used", "warn", _c_fallback, "live discovery did not fall back"),
     Invariant("pins_drift", "warn", _c_pins, "requested pins appear in the resolved set"),
     Invariant("cpu_cap_unset", "warn", _c_cpu_cap, "worker count is capped"),
@@ -194,6 +243,7 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant("dilution_ratio", "warn", _c_dilution, "discovered count is near expected"),
     Invariant("reward_formula_unknown", "warn", _c_reward_formula, "reward formula is identified"),
     Invariant("image_identity_missing", "warn", _c_image_identity, "image digest and lsv sha recorded"),
+    Invariant("manifest_empty", "warn", _c_manifest_empty, "build breadcrumbs (fc_note) reached the sealer"),
 )
 
 

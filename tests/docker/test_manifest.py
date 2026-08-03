@@ -174,12 +174,18 @@ class TestEvaluateInvariants:
         assert report.ok is False
         assert "secrets_present" in report.fatal
 
-    def test_pytest_collect_failed_is_fatal(self):
+    def test_pytest_collect_failed_is_warning(self):
+        """Downgraded from fatal: pytest_runner.py's summary["error"] mixes
+        genuine collection failures with ordinary per-test setup/teardown
+        errors, and only the flat summary reaches local_ci.py -- see the
+        comment on this Invariant in manifest.py. Returns to fatal once
+        len(results["errors"]) is read from /logs/test_results.json."""
         m = _good_manifest()
         m["verify"]["pytest_collect_ok"] = False
         report = evaluate_invariants(m)
-        assert report.ok is False
-        assert "pytest_collect_failed" in report.fatal
+        assert report.ok is True
+        assert "pytest_collect_failed" in report.warnings
+        assert "pytest_collect_failed" not in report.fatal
 
     # ── Additional coverage for untested warning invariants ──
 
@@ -242,6 +248,89 @@ class TestEvaluateInvariants:
         report = evaluate_invariants(m)
         assert "reward_formula_unknown" in report.skipped
         assert "reward_formula_unknown" not in report.warnings
+
+    # ── manifest_empty: distinguishes "breadcrumbs never reached the sealer"
+    # from "invariants legitimately skipped" ──
+
+    def test_manifest_empty_warns_when_build_block_is_all_null(self):
+        """Every fc_note call site fell back to a no-op (pre-manifest base
+        image): the build block comes out all-null and manifest_empty must
+        fire so it isn't mistaken for a healthy build with nothing to check."""
+        m = {
+            "build": {
+                "owner": None,
+                "repo": None,
+                "declared_commit": None,
+                "head_at_seal": None,
+                "nproc": None,
+                "discovered_n": None,
+                "benchmark_dest_present_post_clean": None,
+                "secrets_scan_clean": None,
+                "pins_requested": None,
+            },
+            "verify": {},
+        }
+        report = evaluate_invariants(m)
+        assert report.ok is True  # warn, not fatal
+        assert "manifest_empty" in report.warnings
+
+    def test_manifest_empty_does_not_fire_with_one_breadcrumb_value(self):
+        """A single breadcrumb-sourced value is enough to prove fc_note ran."""
+        m = {
+            "build": {
+                "declared_commit": None,
+                "head_at_seal": None,
+                "nproc": None,
+                "discovered_n": 3,
+            },
+            "verify": {},
+        }
+        report = evaluate_invariants(m)
+        assert "manifest_empty" not in report.warnings
+        assert "manifest_empty" not in report.fatal
+
+    def test_manifest_empty_not_fooled_by_falsy_but_present_zero(self):
+        """discovered_n=0 and secrets_scan_clean=False are meaningful, present
+        values -- a future `any(b.values())` refactor would treat them as
+        absent and warn spuriously. Pin the `is not None` semantics."""
+        m = {
+            "build": {
+                "declared_commit": None,
+                "head_at_seal": None,
+                "nproc": None,
+                "discovered_n": 0,
+            },
+            "verify": {},
+        }
+        report = evaluate_invariants(m)
+        assert "manifest_empty" not in report.warnings
+
+    def test_manifest_empty_fires_when_only_introspected_fields_present(self):
+        """The exact broken state: declared_commit (written directly by
+        Dockerfile.pr) and head_at_seal/nproc (introspected by
+        emit_manifest.py) are populated even when fc_note never fires, so
+        they must not count as evidence breadcrumbs reached the sealer."""
+        m = {
+            "build": {
+                "declared_commit": "c8b8086",
+                "head_at_seal": "c8b8086",
+                "nproc": 8,
+            },
+            "verify": {},
+        }
+        report = evaluate_invariants(m)
+        assert report.ok is True
+        assert "manifest_empty" in report.warnings
+
+    def test_manifest_empty_skips_when_no_build_block_at_all(self):
+        m = {"verify": {"test_timed_out": False}}
+        report = evaluate_invariants(m)
+        assert "manifest_empty" in report.skipped
+        assert "manifest_empty" not in report.warnings
+
+    def test_manifest_empty_clean_on_good_manifest(self):
+        report = evaluate_invariants(_good_manifest())
+        assert "manifest_empty" not in report.warnings
 
 
 class TestLocalCiSync:
@@ -306,7 +395,7 @@ class TestLocalCiSync:
             (good, None),  # everything passing
         ]
 
-        # One case per fatal invariant (currently six -- see
+        # One case per fatal invariant (currently five -- see
         # datasmith.docker.manifest.INVARIANTS), each violated in isolation.
         for build_key, build_value, inv_id in (
             ("discovered_n", 0, "discovered_n_zero"),
@@ -318,10 +407,7 @@ class TestLocalCiSync:
             m["build"][build_key] = build_value
             cases.append((m, inv_id))
 
-        for verify_key, verify_value, inv_id in (
-            ("test_timed_out", True, "test_timed_out"),
-            ("pytest_collect_ok", False, "pytest_collect_failed"),
-        ):
+        for verify_key, verify_value, inv_id in (("test_timed_out", True, "test_timed_out"),):
             m = copy.deepcopy(good)
             m["verify"][verify_key] = verify_value
             cases.append((m, inv_id))
@@ -333,6 +419,14 @@ class TestLocalCiSync:
         # still caught by the parity assertion below.
         m = copy.deepcopy(good)
         m["build"]["benchmark_dir_init_present"] = False
+        cases.append((m, None))
+
+        # pytest_collect_failed is warn-severity, not fatal (downgraded --
+        # see the comment on that Invariant in manifest.py and on _c_collect
+        # in local_ci.py) -- same proof-of-agreement pattern as
+        # benchmark_init_missing above.
+        m = copy.deepcopy(good)
+        m["verify"]["pytest_collect_ok"] = False
         cases.append((m, None))
 
         for case, want_id in cases:

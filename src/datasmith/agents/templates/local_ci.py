@@ -454,6 +454,16 @@ def _c_secrets(b: dict, v: dict) -> bool | None:
 
 
 def _c_collect(b: dict, v: dict) -> bool | None:
+    # Not wired into _FATAL_INVARIANTS below: pytest_collect_failed is warn
+    # severity in datasmith.docker.manifest (pytest_runner.py's
+    # summary["error"] mixes genuine collection failures with ordinary
+    # per-test setup/teardown errors, and only the flat summary reaches this
+    # file, so the two are indistinguishable here). Kept, not deleted, so
+    # datasmith.docker.manifest.evaluate_invariants -- which re-evaluates the
+    # merged manifest downstream with no such gap -- still has a local_ci.py
+    # equivalent to diff against. Returns to _FATAL_INVARIANTS once
+    # len(results["errors"]) is read from /logs/test_results.json (already
+    # written by pytest_runner.py) to separate the two failure classes.
     return None if v.get("pytest_collect_ok") is None else bool(v["pytest_collect_ok"])
 
 
@@ -471,6 +481,11 @@ _FATAL_INVARIANTS = (
     # which has no such short-circuit.
     ("test_timed_out", _c_timed_out),
     ("discovered_n_zero", _c_discovered_n),
+    # INERT pending a producer for BENCHMARK_DEST: see the matching comment
+    # on this Invariant in datasmith.docker.manifest -- nothing in this tree
+    # sets $BENCHMARK_DEST yet, so this check returns None (skipped) on
+    # every build. Kept registered rather than removed; the value is
+    # expected to come from the per-task override record once one exists.
     ("benchmark_dest_missing", _c_dest_present),
     # benchmark_init_missing is intentionally NOT here: it is warn-severity
     # in datasmith.docker.manifest (build-time it's either a false-positive
@@ -480,7 +495,11 @@ _FATAL_INVARIANTS = (
     # manifest.py's severity, or the parity test below will catch the drift.
     ("head_commit_drift", lambda b, v: _shas_match(b.get("head_at_seal"), b.get("declared_commit"))),
     ("secrets_present", _c_secrets),
-    ("pytest_collect_failed", _c_collect),
+    # pytest_collect_failed is intentionally NOT here: it is warn-severity in
+    # datasmith.docker.manifest (see the comment on _c_collect above and on
+    # that Invariant in manifest.py). Do not add it back without also
+    # flipping manifest.py's severity, or the parity test below will catch
+    # the drift.
 )
 
 
