@@ -186,6 +186,13 @@ class TestBuildWiring:
         assert "rc=$?" in final_stage
         assert "exit $rc" in final_stage
 
+        # A second `rc=$?` after the sealer would silently reassign rc to the
+        # sealer's own exit status, undoing the `|| true` fail-open and
+        # reintroducing exactly the bug this test exists to catch (a
+        # reviewer constructed a passing edit that did this:
+        # `docker_build_final.sh ...; rc=$?; python3 /emit_manifest.py; rc=$?; exit $rc`).
+        assert final_stage.count("rc=$?") == 1
+
         # Ordering: script runs -> status captured -> sealer runs (fail-open) -> captured status re-exits.
         script_idx = final_stage.index("docker_build_final.sh /tmp")
         capture_idx = final_stage.index("rc=$?")
