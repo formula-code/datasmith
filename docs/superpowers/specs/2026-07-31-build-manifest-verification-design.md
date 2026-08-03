@@ -188,7 +188,7 @@ trial. Severity: **FATAL** fails the step; *warn* is recorded and surfaced, non-
 | 1 | `verify.test_timed_out == false` | FATAL | ASV terminal hang; joblib 128-worker timeout; **the 619 rows** |
 | 2 | `discovered_n > 0` | FATAL | promotes the existing sentinel to a recorded fact |
 | 3 | `benchmark_dest_present_post_clean` | FATAL | joblib benchmark + `asv_benchmarks.txt` wiped by `git clean` |
-| 4 | `benchmark_dir_init_present` | FATAL | h11 `__init__.py` deletion (20–30% of trials) |
+| 4 | `benchmark_dir_init_present` | warn¹ | h11 `__init__.py` deletion (20–30% of trials) |
 | 5 | `head_at_seal == declared_commit` | FATAL | checkout drift; underpins #15 |
 | 6 | `secrets_scan_clean` | FATAL | `sb_secret_…` inlined into every may18 `test.sh`/`setup.sh` |
 | 7 | `verify.pytest_collect_ok` | FATAL | broken-import class of failures |
@@ -199,6 +199,13 @@ trial. Severity: **FATAL** fails the step; *warn* is recorded and surfaced, non-
 | 12 | `discovered_n / expected_n` ≤ ratio max | warn | dilution smell, pre-measurement |
 | 13 | `reward_formula_id` matches canonical | warn | **pvlib's clamped parser shipping inside the image** |
 | 14 | `image_digest` + `lsv_sha` present | warn | the `:latest` trap; Group-6 loose end |
+
+¹ Downgraded from FATAL after Task 5 review: at build time this check cannot be a useful
+gate either way. Not creating `__init__.py` hard-fails repos that legitimately lack one;
+creating it unconditionally makes the check tautological. Its real value is at trial time
+— the build seals `benchmark_dir_init_present` here, and a later trial finding the file
+gone means the agent deleted it, which is the actual failure mode this row's "catches"
+column describes. That comparison lands in a later plan; until then this row stays warn.
 
 ### Trial-time — asserted in `harbor_adapter/template/parser.py`, echoed into `reward.json`
 

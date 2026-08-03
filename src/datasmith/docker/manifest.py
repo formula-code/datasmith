@@ -174,7 +174,16 @@ INVARIANTS: tuple[Invariant, ...] = (
     Invariant("test_timed_out", "fatal", _c_timeout, "run_tests did not hit its timeout"),
     Invariant("discovered_n_zero", "fatal", _c_discovered, "at least one ASV benchmark discovered"),
     Invariant("benchmark_dest_missing", "fatal", _c_dest_present, "benchmark survives git clean"),
-    Invariant("benchmark_init_missing", "fatal", _c_init_present, "benchmark dir has __init__.py"),
+    # warn, not fatal: at build time this check cannot be a useful gate either
+    # way. If we don't create __init__.py, repos that legitimately lack one
+    # get hard-failed; if we create it unconditionally, the check always
+    # passes and is tautological (the same dead-check pattern this plan has
+    # already hit more than once). Its real value is at TRIAL time: the
+    # build seals benchmark_dir_init_present here, and a later trial finding
+    # the file gone means the agent deleted it -- that comparison is the
+    # actual failure mode the spec cites, and it lands in a later plan. Do
+    # not "restore" this to fatal without that trial-time comparison existing.
+    Invariant("benchmark_init_missing", "warn", _c_init_present, "benchmark dir has __init__.py"),
     Invariant("head_commit_drift", "fatal", _c_head_drift, "HEAD matches the declared commit"),
     Invariant("secrets_present", "fatal", _c_secrets, "no credential literals in baked scripts"),
     Invariant("pytest_collect_failed", "fatal", _c_collect, "pytest collection succeeds at base"),
