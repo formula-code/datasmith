@@ -531,7 +531,10 @@ class Pipeline:
 
     async def _synthesize_images(self, start_date: str, end_date: str) -> None:
         query_kwargs: dict[str, Any] = {
-            "select": "owner, repo, issue_number, merge_commit_sha, base_sha, title, body, created_at, rendered_problem",
+            "select": (
+                "owner, repo, issue_number, merge_commit_sha, base_sha, patch, "
+                "title, body, created_at, rendered_problem"
+            ),
             "filters": {"is_performance_commit": True, "is_performance_commit_symbolic": True},
             "neq_filters": {"merge_commit_sha": ""},
             "gte_filters": {"created_at": start_date},
@@ -598,6 +601,9 @@ class Pipeline:
                 "issue_number": r["issue_number"],
                 "sha": sha,
                 "base_sha": r.get("base_sha", ""),
+                # The oracle patch, shipped into the synthesis workspace so
+                # measure.sh can prove the container measures a speedup.
+                "patch": r.get("patch", "") or "",
                 "title": r.get("title", ""),
                 "body": r.get("body", ""),
                 "created_at": r.get("created_at"),

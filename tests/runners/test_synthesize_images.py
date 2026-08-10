@@ -92,6 +92,7 @@ class TestDockerRunsInThread:
             env_payload="",
             python_version="",
             base_sha="",
+            solution_patch="",
         )
 
 
@@ -284,3 +285,21 @@ class TestRenderProblemWithGitHubClient:
         assert len(issues_arg) == 1
         assert issues_arg[0].number == 99
         assert issues_arg[0].title == "Slow sort"
+
+
+class TestPatchSelection:
+    def test_patch_is_in_the_pull_requests_select(self):
+        from pathlib import Path
+
+        src = (Path(__file__).parents[2] / "src" / "datasmith" / "runners" / "synthesize_images.py").read_text()
+        select_lines = [ln for ln in src.splitlines() if "merge_commit_sha, base_sha" in ln]
+        assert select_lines, "could not find the pull_requests select"
+        assert any("patch" in ln for ln in select_lines), "select does not fetch `patch`"
+
+    def test_pipeline_select_agrees(self):
+        from pathlib import Path
+
+        src = (Path(__file__).parents[2] / "src" / "datasmith" / "update" / "pipeline.py").read_text()
+        select_lines = [ln for ln in src.splitlines() if "merge_commit_sha, base_sha" in ln]
+        assert select_lines, "could not find the pull_requests select in pipeline.py"
+        assert any("patch" in ln for ln in select_lines), "pipeline select does not fetch `patch`"

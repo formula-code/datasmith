@@ -38,10 +38,14 @@ _IMMUTABLE_FILES = (
     "docker_build_base.sh",
     "docker_build_final.sh",
     "emit_manifest.py",
+    "measure.sh",
+    "apply_oracle_patch.py",
+    "emit_measure.py",
     "profile.sh",
     "run-tests.sh",
     "entrypoint.sh",
     "task.txt",
+    "solution.patch",
 )
 
 
@@ -127,6 +131,7 @@ class SandboxRunner:
         prior_attempts: str = "",
         dry_run: bool = False,
         base_sha: str = "",
+        solution_patch: str = "",
     ) -> SandboxResult:
         """Prepare workspace, launch agent, extract results.
 
@@ -150,6 +155,7 @@ class SandboxRunner:
                 pr_context=pr_context,
                 prior_attempts=prior_attempts,
                 base_sha=base_sha,
+                solution_patch=solution_patch,
             )
 
             # 2. Init git repo (Codex requirement)
@@ -190,6 +196,7 @@ class SandboxRunner:
         pr_context: str,
         prior_attempts: str = "",
         base_sha: str = "",
+        solution_patch: str = "",
     ) -> None:
         """Create the workspace directory structure."""
         task_dir = workspace / "task"
@@ -209,10 +216,22 @@ class SandboxRunner:
             "docker_build_run.sh",
             "docker_build_final.sh",
             "emit_manifest.py",
+            "measure.sh",
+            "apply_oracle_patch.py",
+            "emit_measure.py",
             "profile.sh",
             "entrypoint.sh",
         ):
             src = docker_templates / fname
+            if src.exists():
+                shutil.copy2(str(src), str(task_dir / fname))
+
+        # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
+        # trial path — copied, never forked, so a change to LSV selection
+        # affects stage 6 and stage 7 identically.
+        lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template"
+        for fname in ("lsv_init.py", "lsv_measure.py", "parser.py"):
+            src = lsv_templates / fname
             if src.exists():
                 shutil.copy2(str(src), str(task_dir / fname))
 
@@ -224,6 +243,14 @@ class SandboxRunner:
         # the base commit, not the merge commit.
         task_txt = _generate_task_txt(owner, repo, checkout_sha, env_payload, python_version, repo_image)
         (task_dir / "task.txt").write_text(task_txt)
+
+        # The oracle patch, mounted read-only into the measure container by
+        # local_ci.py.  Always written — even empty — because `docker run -v`
+        # creates a DIRECTORY at a mount source that does not exist, which
+        # apply_oracle_patch.py then cannot read.  It is deliberately NOT a
+        # Dockerfile.pr COPY target: a published image carrying the oracle
+        # solution would be readable by the agent under evaluation.
+        (task_dir / "solution.patch").write_text(solution_patch or "")
 
         # Render AGENTS.md from Jinja2 template
         agents_md = _render_agents_md(
@@ -514,6 +541,7 @@ def verify_context(
     context: DockerContext,
     timeout_s: int = 3600,
     base_sha: str = "",
+    solution_patch: str = "",
 ) -> SandboxResult:
     """Build and verify a :class:`DockerContext` without launching an agent.
 
@@ -541,10 +569,22 @@ def verify_context(
             "docker_build_run.sh",
             "docker_build_final.sh",
             "emit_manifest.py",
+            "measure.sh",
+            "apply_oracle_patch.py",
+            "emit_measure.py",
             "profile.sh",
             "entrypoint.sh",
         ):
             src = docker_templates / fname
+            if src.exists():
+                shutil.copy2(str(src), str(task_dir / fname))
+
+        # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
+        # trial path — copied, never forked, so a change to LSV selection
+        # affects stage 6 and stage 7 identically.
+        lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template"
+        for fname in ("lsv_init.py", "lsv_measure.py", "parser.py"):
+            src = lsv_templates / fname
             if src.exists():
                 shutil.copy2(str(src), str(task_dir / fname))
 
@@ -556,6 +596,14 @@ def verify_context(
         # the base commit, not the merge commit.
         task_txt = _generate_task_txt(owner, repo, checkout_sha, env_payload, python_version, repo_image)
         (task_dir / "task.txt").write_text(task_txt)
+
+        # The oracle patch, mounted read-only into the measure container by
+        # local_ci.py.  Always written — even empty — because `docker run -v`
+        # creates a DIRECTORY at a mount source that does not exist, which
+        # apply_oracle_patch.py then cannot read.  It is deliberately NOT a
+        # Dockerfile.pr COPY target: a published image carrying the oracle
+        # solution would be readable by the agent under evaluation.
+        (task_dir / "solution.patch").write_text(solution_patch or "")
 
         # Override with the candidate context's editable scripts
         if context.build_pkg_sh:

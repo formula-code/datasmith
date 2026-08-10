@@ -240,7 +240,9 @@ def _fetch_neighbor_items(
 
     rows = fetch_all(
         "pull_requests",
-        select=("owner, repo, issue_number, merge_commit_sha, base_sha, title, body, created_at, rendered_problem"),
+        select=(
+            "owner, repo, issue_number, merge_commit_sha, base_sha, patch, title, body, created_at, rendered_problem"
+        ),
         filters={
             "owner": owner,
             "repo": repo,
@@ -298,6 +300,9 @@ def _fetch_neighbor_items(
             "issue_number": r["issue_number"],
             "sha": sha,
             "base_sha": r.get("base_sha", ""),
+            # The oracle patch, shipped into the synthesis workspace so
+            # measure.sh can prove the container measures a speedup.
+            "patch": r.get("patch", "") or "",
             "title": r.get("title", ""),
             "body": r.get("body", ""),
             "created_at": r.get("created_at"),
@@ -501,6 +506,7 @@ class SynthesizeImagesRunner(BaseRunner):
 
         sha = item.get("sha", "")
         base_sha = item.get("base_sha", "")
+        solution_patch = item.get("patch", "") or ""
         env_payload = item.get("env_payload", "")
 
         from datasmith.docker.images import get_repo_image_name
@@ -519,6 +525,7 @@ class SynthesizeImagesRunner(BaseRunner):
             env_payload=env_payload,
             python_version=py_version,
             base_sha=base_sha,
+            solution_patch=solution_patch,
         )
 
         if ctx is None:

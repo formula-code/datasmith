@@ -885,3 +885,59 @@ class TestBuildStageDetection:
         _write_failure(tmp_path, stage, stdout=build_stdout, stderr="", rc=1)
         failure = json.loads((tmp_path / "failure.json").read_text())
         assert failure["stage"] == "env"
+
+
+class TestSolutionPatchPlumbing:
+    def _prepare(self, tmp_path, **kw):
+        from datasmith.agents.sandbox import SandboxRunner
+
+        runner = SandboxRunner()
+        runner._prepare_workspace(
+            workspace=tmp_path,
+            owner="o",
+            repo="r",
+            sha="s" * 40,
+            repo_image="img",
+            env_payload="[]",
+            python_version="3.11",
+            pr_context="ctx",
+            base_sha="b" * 40,
+            **kw,
+        )
+
+    def test_prepare_workspace_writes_solution_patch(self, tmp_path):
+        self._prepare(tmp_path, solution_patch="diff --git a/x b/x\n")
+        assert (tmp_path / "task" / "solution.patch").read_text() == "diff --git a/x b/x\n"
+
+    def test_absent_patch_writes_an_empty_file_not_nothing(self, tmp_path):
+        """local_ci.py mounts this path unconditionally; a missing file makes
+        `docker run -v` create a DIRECTORY at the mount point, which the
+        applier then cannot read."""
+        self._prepare(tmp_path)
+        p = tmp_path / "task" / "solution.patch"
+        assert p.exists()
+        assert p.read_text() == ""
+
+    def test_solution_patch_is_immutable(self):
+        from datasmith.agents.sandbox import _IMMUTABLE_FILES
+
+        assert "solution.patch" in _IMMUTABLE_FILES
+
+    def test_solution_patch_is_hashed_for_integrity(self, tmp_path):
+        import json
+
+        self._prepare(tmp_path, solution_patch="diff --git a/x b/x\n")
+        hashes = json.loads((tmp_path / ".immutable_hashes.json").read_text())
+        assert "solution.patch" in hashes
+
+    def test_measure_scripts_are_copied_into_the_task_dir(self, tmp_path):
+        self._prepare(tmp_path)
+        for name in (
+            "measure.sh",
+            "apply_oracle_patch.py",
+            "emit_measure.py",
+            "lsv_init.py",
+            "lsv_measure.py",
+            "parser.py",
+        ):
+            assert (tmp_path / "task" / name).exists(), name

@@ -93,6 +93,7 @@ class Synthesizer:
         python_version: str = "",
         force: bool = False,
         base_sha: str = "",
+        solution_patch: str = "",
     ) -> DockerContext | None:
         """Run the synthesis state machine. Returns DockerContext on success, None on failure."""
         self._trace = []
@@ -123,6 +124,7 @@ class Synthesizer:
                     python_version=python_version,
                     context=ctx,
                     base_sha=base_sha,
+                    solution_patch=solution_patch,
                 )
                 if result.success:
                     logger.info("Similar context passed for %s/%s#%d", owner, repo, issue_number)
@@ -186,6 +188,7 @@ class Synthesizer:
                 python_version=python_version,
                 context=default_ctx,
                 base_sha=base_sha,
+                solution_patch=solution_patch,
             )
             if result.success:
                 tamper = classify_context(default_ctx)
@@ -255,6 +258,7 @@ class Synthesizer:
                 issue_number=issue_number,
                 attempt_index=attempt_idx,
                 base_sha=base_sha,
+                solution_patch=solution_patch,
             )
             if generated is not None:
                 tamper = classify_context(generated)
@@ -445,6 +449,7 @@ class Synthesizer:
         issue_number: int = 0,
         attempt_index: int = 0,
         base_sha: str = "",
+        solution_patch: str = "",
     ) -> tuple[DockerContext | None, dict, dict | None, bool]:
         from datasmith.agents.sandbox import SandboxRunner
 
@@ -460,6 +465,7 @@ class Synthesizer:
             prior_attempts=prior_attempts,
             dry_run=self._dry_run,
             base_sha=base_sha,
+            solution_patch=solution_patch,
         )
         self._log_attempt(
             owner=owner,
