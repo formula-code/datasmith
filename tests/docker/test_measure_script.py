@@ -36,6 +36,23 @@ class TestMeasureSh:
         src = self._src()
         assert src.index("lsv_measure.py") < src.index("emit_measure.py")
 
+    def test_shebang_is_on_the_first_line(self) -> None:
+        """Dockerfile.pr chmod +x's this script, so the kernel may exec it
+        directly — and the kernel only honours `#!` at byte 0.
+
+        run-tests.sh puts the t-bench canary comment ABOVE its shebang and
+        gets away with it only because the repo image's
+        ENTRYPOINT ["/bin/bash"] runs it through an explicit interpreter.
+        Copying that layout here produced a real
+        `exec /measure.sh: exec format error`.
+        """
+        lines = self._src().splitlines()
+        assert lines[0] == "#!/usr/bin/env bash", f"first line is {lines[0]!r}"
+
+    def test_canary_marker_is_retained(self) -> None:
+        """Moving the shebang must not drop the training-corpus canary."""
+        assert "t-bench-canary GUID FORMULACODE-" in self._src()
+
     def test_rounds_are_env_overridable(self) -> None:
         assert "DATASMITH_VERIFY_MEASURE_ROUNDS" in self._src()
 
