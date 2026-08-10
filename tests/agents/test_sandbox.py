@@ -941,3 +941,70 @@ class TestSolutionPatchPlumbing:
             "parser.py",
         ):
             assert (tmp_path / "task" / name).exists(), name
+
+
+class TestEveryCopySourceReachesTheTaskDir:
+    """A COPY source missing from the task dir breaks the build before the
+    container can measure anything.
+
+    Driven off Dockerfile.pr's actual COPY directives rather than a
+    hand-written list: adding a COPY without updating the copy lists fails
+    here immediately. There are THREE independent producers of a task
+    directory (SandboxRunner._prepare_workspace, verify_context, and
+    _fill_missing_scripts) and they each carry their own list, so each is
+    checked.
+    """
+
+    def _copy_sources(self, task_dir) -> list[str]:
+        sources: list[str] = []
+        for line in (task_dir / "Dockerfile.pr").read_text().splitlines():
+            s = line.strip()
+            if s.upper().startswith("COPY "):
+                parts = s.split()[1:]
+                sources.extend(p for p in parts[:-1] if not p.startswith("--"))
+        assert sources, "no COPY directives parsed — this guard would pass vacuously"
+        return sources
+
+    def test_prepare_workspace_supplies_every_copy_source(self, tmp_path):
+        from datasmith.agents.sandbox import SandboxRunner
+
+        SandboxRunner()._prepare_workspace(
+            workspace=tmp_path,
+            owner="o",
+            repo="r",
+            sha="a" * 40,
+            repo_image="img",
+            env_payload="[]",
+            python_version="3.11",
+            pr_context="ctx",
+            base_sha="b" * 40,
+        )
+        task = tmp_path / "task"
+        have = {p.name for p in task.iterdir()}
+        missing = [n for n in self._copy_sources(task) if n not in have]
+        assert not missing, f"Dockerfile.pr COPYs files _prepare_workspace never writes: {missing}"
+
+    def test_fill_missing_scripts_supplies_every_copy_source(self, tmp_path):
+        from datasmith.runners.synthesize_images import _fill_missing_scripts
+
+        _fill_missing_scripts(str(tmp_path), base_commit="deadbeef")
+        have = {p.name for p in tmp_path.iterdir()}
+        missing = [n for n in self._copy_sources(tmp_path) if n not in have]
+        assert not missing, f"Dockerfile.pr COPYs files _fill_missing_scripts never writes: {missing}"
+
+    def test_verify_contexts_copy_list_matches_prepare_workspaces(self):
+        """verify_context duplicates _prepare_workspace's copy list. Nothing
+        else keeps the two in sync, and TRY_SIMILAR goes through
+        verify_context — so drift silently breaks that path only."""
+        import re
+        from pathlib import Path
+
+        src = (Path(__file__).parents[2] / "src" / "datasmith" / "agents" / "sandbox.py").read_text()
+        tuples = re.findall(r"for fname in \(\n(.*?)\n        \):", src, re.DOTALL)
+        assert len(tuples) == 2, f"expected 2 template copy lists in sandbox.py, found {len(tuples)}"
+        parsed = [sorted(re.findall(r'"([^"]+)"', block)) for block in tuples]
+        assert parsed[0] == parsed[1], f"copy lists have drifted: {parsed[0]} vs {parsed[1]}"
+
+        lsv_tuples = re.findall(r'for fname in \("lsv_init\.py".*?\):', src)
+        assert len(lsv_tuples) == 2, f"expected 2 LSV copy loops, found {len(lsv_tuples)}"
+        assert lsv_tuples[0] == lsv_tuples[1]
