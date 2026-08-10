@@ -176,3 +176,27 @@ class TestOutputContract:
         ])
         assert rc == 0
         assert "FORMULACODE_MEASURE_START" in capsys.readouterr().out
+
+
+class TestLsvUnavailable:
+    def test_lsv_error_is_reported_as_measure_error(self):
+        """A failed LSV install must read as 'LSV unavailable', not as
+        'this container cannot measure'. docker_build_final.sh installs it
+        with `|| true`, so a network blip yields an image with no LSV."""
+        m = _load()
+        fns = m.load_parser_fns(str(_PARSER))
+        b = m.measure_block(_lsv({}), _patch_info(), "sha", 2, *fns, "LSV unavailable: boom")
+        assert "LSV unavailable" in b["measure_error"]
+        assert b["benchmarks_measured_n"] == 0
+
+    def test_real_lsv_error_wins_over_the_availability_probe(self):
+        m = _load()
+        fns = m.load_parser_fns(str(_PARSER))
+        b = m.measure_block(_lsv({}, error="measure_impacted raised"), _patch_info(), "s", 2, *fns, "unavailable")
+        assert b["measure_error"] == "measure_impacted raised"
+
+    def test_no_lsv_error_leaves_measure_error_none(self):
+        m = _load()
+        fns = m.load_parser_fns(str(_PARSER))
+        b = m.measure_block(_lsv({}), _patch_info(), "sha", 2, *fns, "")
+        assert b["measure_error"] is None

@@ -16,25 +16,35 @@ class TestMeasureSh:
     def _src(self) -> str:
         return (_T / "measure.sh").read_text()
 
+    def _at(self, needle: str) -> int:
+        """Index of an INVOCATION, not a comment mention of the same name.
+
+        The ordering assertions below originally matched bare filenames like
+        "lsv_init.py", whose first occurrence is a comment near the top of
+        the script -- so swapping the real commands would have left them
+        green. Anchoring on the absolute paths the script actually executes
+        makes them test what they claim to.
+        """
+        src = self._src()
+        idx = src.index(needle)
+        assert idx >= 0
+        return idx
+
     def test_captures_base_sha_before_applying_the_patch(self) -> None:
         """Provenance depends on ordering: the sha must be read before
         anything touches the tree."""
-        src = self._src()
-        assert src.index("git rev-parse HEAD") < src.index("apply_oracle_patch.py")
+        assert self._at("git rev-parse HEAD") < self._at("/apply_oracle_patch.py")
 
     def test_measures_baseline_before_applying_the_patch(self) -> None:
         """The failure this guards is shapely's: baselines measured AFTER
         the patch, which collapses every speedup to ~1.0."""
-        src = self._src()
-        assert src.index("lsv_init.py") < src.index("apply_oracle_patch.py")
+        assert self._at("/opt/lsv/lsv_init.py") < self._at("/apply_oracle_patch.py")
 
     def test_measures_impact_after_applying_the_patch(self) -> None:
-        src = self._src()
-        assert src.index("apply_oracle_patch.py") < src.index("lsv_measure.py")
+        assert self._at("/apply_oracle_patch.py") < self._at("/opt/lsv/lsv_measure.py")
 
     def test_emits_the_block_last(self) -> None:
-        src = self._src()
-        assert src.index("lsv_measure.py") < src.index("emit_measure.py")
+        assert self._at("/opt/lsv/lsv_measure.py") < self._at("/emit_measure.py")
 
     def test_shebang_is_on_the_first_line(self) -> None:
         """Dockerfile.pr chmod +x's this script, so the kernel may exec it
@@ -55,6 +65,15 @@ class TestMeasureSh:
 
     def test_rounds_are_env_overridable(self) -> None:
         assert "DATASMITH_VERIFY_MEASURE_ROUNDS" in self._src()
+
+    def test_lsv_availability_is_probed_and_reported(self) -> None:
+        """docker_build_final.sh installs LSV with `|| true`, so a build can
+        succeed with no LSV. Without an explicit probe, that is
+        indistinguishable from a container that genuinely cannot measure."""
+        src = self._src()
+        assert "asv.contrib.lightspeed" in src
+        assert "--lsv-error" in src
+        assert self._at("LSV_ERR=") < self._at("/opt/lsv/lsv_init.py")
 
     def test_snapshot_capture_is_disabled(self) -> None:
         """lsv_init.py runs snapshot-tool only when HARBOR_AGENT_NAME is

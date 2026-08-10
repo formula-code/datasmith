@@ -128,6 +128,28 @@ class TestMeasureTimeout:
         assert ok is True
         assert metrics["measure_timed_out"] is False
 
+    def test_missing_measure_script_is_named_explicitly(self, monkeypatch):
+        """Pre-existing images have no /measure.sh (bash exits 127). The
+        agent cannot fix that by editing build scripts, so the message must
+        say so instead of reading as a generic measurement failure."""
+        m = _load(monkeypatch)
+        monkeypatch.setattr(
+            m,
+            "_run_container_with_timeout",
+            lambda image, cmd, timeout, metrics=None, mounts=None: (
+                False,
+                "",
+                "bash: /measure.sh: No such file or directory",
+                127,
+            ),
+        )
+        ok, _out, err, rc = m.run_measure("old-image", "/tmp/p.patch", metrics={})
+        assert ok is False
+        assert rc == 127
+        assert "no /measure.sh" in err
+        assert "Rebuild" in err
+        assert "cannot be fixed by editing" in err
+
     def test_default_timeout_is_env_overridable(self):
         src = _LOCAL_CI.read_text()
         assert "DATASMITH_VERIFY_MEASURE_TIMEOUT_S" in src

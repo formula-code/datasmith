@@ -351,7 +351,7 @@ obvious. The plan must hit every one:
 | Risk | Mitigation |
 |---|---|
 | New FATAL gates reject containers that pass today, at an unknown rate | Chosen deliberately over a warn-first rollout. The rate is observable after the first stage-6 run via `manifest_warnings` and `error_logs.failure_stage='measure'`; a follow-up can tune thresholds. |
-| LSV install fails (network, upstream break) at build time | The install failure surfaces in `docker_build_final.sh` at build, not silently at measure time. If `lsv_init` cannot import `asv.contrib.lightspeed`, `measure_error` is set and `benchmarks_measured_n` is 0 → `asv_exec_failed` fires. It fails closed. |
+| LSV install fails (network, upstream break) at build time | The install is `\|\| true` — a build must never fail on an install adjacent to instrumentation — so it does **not** surface at build time. `measure.sh` therefore probes `import asv.contrib.lightspeed` before measuring and sets `measure_error` to an explicit "LSV unavailable" message. `benchmarks_measured_n` is then 0 and `asv_exec_failed` fires FATAL, so it fails closed, but the operator and the agent see "LSV was not installed" rather than "this container cannot measure" — without the probe the agent would burn attempts fixing a build that was never broken. |
 | Verify wall-clock grows ~14 min median per task | `run_measure` runs only after build and pytest both pass. Bounded by a FATAL 3600 s timeout. |
 | `harbor_adapter/template/` files now have a second consumer | Documented here and in `docs/design/components/datasmith.docker.md`. They are copied, not forked; a change to `lsv_init.py` affects both paths by design. |
 

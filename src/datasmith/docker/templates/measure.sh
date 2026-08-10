@@ -54,6 +54,18 @@ fi
 BASE_SHA="$(git rev-parse HEAD 2>/dev/null || echo '')"
 echo "[measure] base sha: ${BASE_SHA}"
 
+# ── 1b. Is LSV actually here? ────────────────────────────────────────────
+# docker_build_final.sh installs formula-code/lsv with `|| true` (a build must
+# never fail on an install adjacent to instrumentation). So a network blip
+# yields an image with no LSV, lsv_init/lsv_measure then produce nothing, and
+# asv_exec_failed fires FATAL -- correct, but it reads as "this container
+# cannot measure" when the truth is "LSV was not installed". Name it.
+LSV_ERR=""
+if ! "${PY_RUN[@]}" -c "import asv.contrib.lightspeed" >/dev/null 2>&1; then
+  LSV_ERR="LSV unavailable: asv.contrib.lightspeed is not importable. The install in docker_build_final.sh is best-effort (|| true) and did not take. This is an image-build problem, not a benchmark problem."
+  echo "[measure] WARNING: ${LSV_ERR}"
+fi
+
 # ── 2. Baseline at the base commit ───────────────────────────────────────
 echo "[measure] LSV init (rounds=${ROUNDS}) ..."
 "${PY_RUN[@]}" /opt/lsv/lsv_init.py --rounds "$ROUNDS" || \
@@ -80,6 +92,7 @@ echo "[measure] LSV measure (rounds=${ROUNDS}) ..."
   --patch-info "$PATCH_INFO" \
   --parser /opt/lsv/parser.py \
   --base-sha "$BASE_SHA" \
-  --rounds "$ROUNDS"
+  --rounds "$ROUNDS" \
+  --lsv-error "$LSV_ERR"
 
 exit 0

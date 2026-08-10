@@ -463,6 +463,21 @@ def run_measure(
             f"needs longer.",
             rc,
         )
+    if rc == 127:
+        # bash exits 127 for "command not found". Every image built before
+        # measurability verification existed has no /measure.sh, and no edit
+        # to docker_build_pkg.sh or docker_build_run.sh can fix that -- so
+        # say so, rather than letting the agent burn attempts on a build
+        # that was never broken.
+        return (
+            False,
+            stdout,
+            "This image has no /measure.sh: it was built before measurability "
+            "verification existed. Rebuild it from the current build context "
+            "(which ships measure.sh). This is NOT a build-script problem and "
+            "cannot be fixed by editing docker_build_pkg.sh or docker_build_run.sh.",
+            rc,
+        )
     if rc != 0:
         return False, stdout, stderr, rc
     return True, stdout, stderr, rc

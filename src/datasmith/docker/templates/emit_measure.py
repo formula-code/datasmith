@@ -87,8 +87,16 @@ def measure_block(
     rounds: int,
     speedups_fn,
     geomean_fn,
+    lsv_error: str = "",
 ) -> dict:
-    """Derive every measurement fact from the LSV + patch artifacts."""
+    """Derive every measurement fact from the LSV + patch artifacts.
+
+    ``lsv_error`` is set by measure.sh when ``asv.contrib.lightspeed`` is not
+    importable.  Without it, a failed LSV install (installed with ``|| true``
+    so it can never fail a build) is indistinguishable from a container that
+    genuinely cannot measure -- and the agent burns attempts fixing a build
+    that was never broken.
+    """
     init = lsv.get("init") or {}
     measure = lsv.get("measure") or {}
     benchmarks = measure.get("benchmarks") or {}
@@ -115,7 +123,7 @@ def measure_block(
     return {
         "measure_ran": True,
         "measure_rounds": rounds,
-        "measure_error": measure.get("error"),
+        "measure_error": measure.get("error") or (lsv_error or None),
         "base_sha_measured": base_sha or None,
         "patch_present": patch_info.get("present"),
         "patch_applied": patch_info.get("applied"),
@@ -136,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--parser", default=DEFAULT_PARSER)
     ap.add_argument("--base-sha", default="")
     ap.add_argument("--rounds", type=int, default=0)
+    ap.add_argument("--lsv-error", default="")
     args = ap.parse_args(argv)
 
     speedups_fn, geomean_fn = load_parser_fns(args.parser)
@@ -146,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         args.rounds,
         speedups_fn,
         geomean_fn,
+        args.lsv_error,
     )
 
     print(START)
