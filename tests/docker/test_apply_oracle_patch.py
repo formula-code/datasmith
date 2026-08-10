@@ -103,9 +103,13 @@ class TestFilterPatch:
         assert dropped == 0
 
     def test_text_without_any_diff_header_does_not_raise(self):
+        """Content before the first `diff --git` header is preamble and must
+        pass through untouched — dropping it would corrupt the patch."""
         m = _load()
-        out, dropped = m.filter_patch("this is not a diff\nat all\n", ["benchmarks/"])
+        text = "this is not a diff\nat all\n"
+        out, dropped = m.filter_patch(text, ["benchmarks/"])
         assert dropped == 0
+        assert out == text
 
 
 class TestMain:
