@@ -49,7 +49,15 @@ ARG BUILD_SCRIPT=""
 
 COPY docker_build_final.sh /docker_build_final.sh
 COPY emit_manifest.py /emit_manifest.py
-RUN chmod +x /docker_build_final.sh \
+# Measurability: measure.sh runs at container-run time (never at build time),
+# so nothing here needs an fc_note breadcrumb or a base-image rebuild.
+# solution.patch is deliberately NOT copied — it is mounted at run time so
+# the oracle solution never enters a published image.
+COPY measure.sh /measure.sh
+COPY apply_oracle_patch.py /apply_oracle_patch.py
+COPY emit_measure.py /emit_measure.py
+COPY lsv_init.py lsv_measure.py parser.py /opt/lsv/
+RUN chmod +x /docker_build_final.sh /measure.sh \
     && printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks_fallback.txt; \
     /docker_build_final.sh /tmp/asv_benchmarks_fallback.txt; rc=$?; \
     python3 /emit_manifest.py || true; \

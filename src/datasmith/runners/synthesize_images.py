@@ -170,6 +170,10 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
     from pathlib import Path
 
     templates = Path(__file__).parents[1] / "docker" / "templates"
+    # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
+    # trial path — copied, never forked, so a change to LSV selection
+    # affects stage 6 and stage 7 identically.
+    lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template"
 
     # Every file that Dockerfile.pr references via COPY
     required = [
@@ -179,10 +183,14 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
         "docker_build_run.sh",
         "docker_build_final.sh",
         "emit_manifest.py",
+        "measure.sh",
+        "apply_oracle_patch.py",
+        "emit_measure.py",
         "profile.sh",
         "run-tests.sh",
         "entrypoint.sh",
     ]
+    lsv_required = ["lsv_init.py", "lsv_measure.py", "parser.py"]
 
     for fname in required:
         target = os.path.join(context_dir, fname)
@@ -197,6 +205,14 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
             src = templates / fname
             if src.exists():
                 shutil.copy2(str(src), target)
+
+    for fname in lsv_required:
+        target = os.path.join(context_dir, fname)
+        if os.path.exists(target):
+            continue
+        src = lsv_templates / fname
+        if src.exists():
+            shutil.copy2(str(src), target)
 
 
 # Lock to serialize prerequisite image builds (base + repo) across threads.

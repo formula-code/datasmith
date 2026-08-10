@@ -51,6 +51,10 @@ micromamba activate "$ENV_NAME" || true
 set -u
 
 micromamba run -n "$ENV_NAME" uv pip install git+https://github.com/formula-code/snapshot-tester.git || true
+# LSV powers measure.sh's impacted-benchmark selection at container-run time.
+# Installed here (per-build, NOT in the cached base image) so the same
+# selector runs at stage 6 as at stage 7, where harbor's setup.sh installs it.
+micromamba run -n "$ENV_NAME" uv pip install --no-cache git+https://github.com/formula-code/lsv.git || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade coverage || true
 
 # ── Discover ASV benchmarks ──────────────────────────────────────────
