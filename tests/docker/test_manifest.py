@@ -70,6 +70,21 @@ def _good_manifest() -> dict:
             "timeout_s": 3600,
             "pytest_collect_ok": True,
             "pytest_failed_at_base": 0,
+            "measure_ran": True,
+            "measure_timed_out": False,
+            "measure_timeout_s": 3600,
+            "measure_duration_s": 812.4,
+            "measure_error": None,
+            "base_sha_measured": "c8b8086",
+            "patch_present": True,
+            "patch_applied": True,
+            "patch_files_changed": 7,
+            "patch_paths_excluded": 0,
+            "benchmarks_impactable_n": 140,
+            "benchmarks_measured_n": 12,
+            "benchmarks_degenerate_n": 0,
+            "geomean_speedup": 1.34,
+            "max_speedup": 2.10,
         },
     }
 
@@ -351,6 +366,26 @@ class TestLocalCiSync:
         assert "DATASMITH_VERIFY_TEST_TIMEOUT_S" in src
         assert '"3600"' in src
 
+    def test_measure_timeout_default_is_configurable(self):
+        src = self._local_ci_source()
+        assert "DATASMITH_VERIFY_MEASURE_TIMEOUT_S" in src
+        assert '"3600"' in src
+
+    def test_measure_step_runs_after_tests_pass(self):
+        """Ordering guard: measure must not run on a container whose pytest
+        already failed -- that would burn ~14 minutes per doomed attempt.
+
+        Scoped to verify()'s body, not the whole module: `def run_measure(`
+        is defined above verify(), so a whole-file index comparison would
+        pass vacuously regardless of call order.
+        """
+        src = self._local_ci_source()
+        body = src.split("def verify(task_dir: Path) -> bool:", 1)[1]
+        assert "run_measure(" in body, "verify() never calls run_measure"
+        assert body.index("run_tests(") < body.index("run_measure(")
+        # and the tests-failed early return must come before the measure call
+        assert body.index('_write_failure(task_dir, "tests"') < body.index("run_measure(")
+
     def test_every_fatal_invariant_id_is_known_to_local_ci(self):
         from datasmith.docker.manifest import INVARIANTS
 
@@ -407,7 +442,12 @@ class TestLocalCiSync:
             m["build"][build_key] = build_value
             cases.append((m, inv_id))
 
-        for verify_key, verify_value, inv_id in (("test_timed_out", True, "test_timed_out"),):
+        for verify_key, verify_value, inv_id in (
+            ("test_timed_out", True, "test_timed_out"),
+            ("measure_timed_out", True, "measure_timed_out"),
+            ("benchmarks_measured_n", 0, "asv_exec_failed"),
+            ("patch_applied", False, "oracle_patch_failed"),
+        ):
             m = copy.deepcopy(good)
             m["verify"][verify_key] = verify_value
             cases.append((m, inv_id))
@@ -428,6 +468,19 @@ class TestLocalCiSync:
         m = copy.deepcopy(good)
         m["verify"]["pytest_collect_ok"] = False
         cases.append((m, None))
+
+        # Every fatal invariant must have a case above. Without this, adding
+        # a fatal gate with no parity case leaves its semantics unguarded and
+        # the whole test passes anyway -- which is exactly what happened when
+        # the three measurability gates first landed.
+        from datasmith.docker.manifest import INVARIANTS
+
+        covered = {want_id for _case, want_id in cases if want_id is not None}
+        all_fatal = {inv.id for inv in INVARIANTS if inv.severity == "fatal"}
+        assert all_fatal <= covered, (
+            f"fatal invariants with no parity case: {sorted(all_fatal - covered)}. "
+            "Add a case that violates each in isolation, or drift in it goes undetected."
+        )
 
         for case, want_id in cases:
             manifest_fatal = evaluate_invariants(case or None).fatal
