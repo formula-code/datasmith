@@ -312,9 +312,19 @@ the hard part. Every invariant gets three tests plus a producer check.
 | unit | each invariant — **fires** (violating value → in `fatal`/`warnings`), **skips** (key absent → in neither), **holds** (clean value → in neither) | no |
 | unit | **producer coverage**: enumerate every `verify.*` key the new invariants read, assert each is emitted by `emit_measure.py` when run against a fixture. Deleting a producer line fails the suite. | no |
 | unit | `TestLocalCiSync` extended to the new fatal set | no |
-| regression | measure timeout is a **failure**: stub image that sleeps past `DATASMITH_VERIFY_MEASURE_TIMEOUT_S`; assert `verify()` is False | yes, seconds |
-| regression | `solution.patch` is absent from a built image's filesystem | yes, seconds |
-| integration (`slow`) | one real cheap task end-to-end: manifest carries `benchmarks_measured_n > 0` and a finite `geomean_speedup` | yes, ~30 min |
+| regression | measure timeout is a **failure**: stub image that sleeps past `DATASMITH_VERIFY_MEASURE_TIMEOUT_S`; assert `run_measure` returns False | yes, seconds |
+| integration (`slow`) | the real `measure.sh` + `apply_oracle_patch.py` + `emit_measure.py` + `parser.py` composed against **stub** `lsv_init`/`lsv_measure` in a `python:3.11-slim` image: patch applies, block emits, geomean is right | yes, ~5 min |
+
+**Full-image end-to-end is deliberately not a CI test.** A task image is 7–13 GB and disk
+is at 98%; `tests/docker/test_manifest_integration.py` already establishes the
+cheap-synthetic-image pattern (`alpine`, `python:3.11-slim`) for exactly this reason. Only
+`lsv_init`/`lsv_measure` are stubbed — every script this spec introduces executes for real.
+Whole-image validation happens on the first production stage-6 run.
+
+`solution.patch`'s absence from published images is guarded statically at both routes a file
+can take into a layer: it is not a `Dockerfile.pr` COPY target, and it is not a
+`DockerContext._FILE_MAP` entry. The dynamic equivalent would require the real task image
+that CI cannot afford.
 
 The producer-coverage test is the one that answers the brief's non-negotiable lesson
 directly: three gates shipped inert last time because nothing emitted the value they read.
