@@ -33,7 +33,7 @@ graph LR
 	* `ds.docker.verify.smoke`: Runs `import {package_name}` inside the container.
 	* `ds.docker.verify.profile`: Collects asv benchmarks and runs `asv --quick`.
 	* `ds.docker.verify.pytest`: Collects the pytest suite via `testrunner`, runs with a 45-second timeout.
-	* `ds.docker.verify.MultiObjVerifier`: Chains `smoke -> profile -> pytest`.
+	* ~~`ds.docker.verify.MultiObjVerifier`: Chains `smoke -> profile -> pytest`.~~ **REMOVED** — this API was never wired into any pipeline path (its only `.verify()` call site was inside `verifiers.py` itself). Verification is now `local_ci.py` + the build manifest; see `read_build_manifest` / `evaluate_invariants`.
 * `ds.docker.python_verify`: Simple "python smoke test" verifier (mostly for exposition).
 
 ## 3-Tier Image Hierarchy
@@ -87,7 +87,7 @@ At ~20k PRs across many repositories, disk usage from Docker images will be sign
 ## Verification
 
 * Unit tests for each verifier with mock containers.
-* Integration test: build a known-good PR image (e.g. `pandas-dev/pandas#1234`) and run `MultiObjVerifier`.
+* Integration test: build a known-good PR image (e.g. `pandas-dev/pandas#1234`) and assert its sealed manifest evaluates clean via `evaluate_invariants`.
 * Thread-safety stress test: run 10+ concurrent `build_image` calls and verify no race conditions.
 * Cleanup test: simulate a failed build and verify dangling artifacts are removed.
 
@@ -142,7 +142,9 @@ Multi-stage Dockerfile in `src/datasmith/docker/Dockerfile` implements all 6 sta
 **Assessment: Replace.** The build pipeline suffered from frequent deadlocks and required manual restarts. Root causes: docker-py's thread-unsafe connection pool, shared `deque` tail buffers, and streaming output parsing that could hang indefinitely. Switching to `python-on-whales` subprocess calls should eliminate the deadlock class entirely.
 
 ### Verification (verifiers)
-**Assessment: Fix timeouts.** The verifiers themselves are functionally correct, but the 30-45 second default timeouts cause false positives. Pytest collection alone can take 2-3 minutes on large repos — a container that times out during collection gets rc=124, which is treated as success. Fix: increase timeouts substantially (at least 5 minutes for collection), or distinguish between "timed out during collection" vs "timed out during execution." The `--quick` flag for ASV should also be waited out rather than killed early.
+**Assessment: Fix timeouts. — RESOLVED** (2026-07-31 build-manifest work; timeout is now FATAL and the limit is 3600s, configurable via `DATASMITH_VERIFY_TEST_TIMEOUT_S`). Preserved verbatim below because it is the record that this defect was diagnosed *before* it cost 619 rows, and was not acted on for months.
+
+**Original assessment:** The verifiers themselves are functionally correct, but the 30-45 second default timeouts cause false positives. Pytest collection alone can take 2-3 minutes on large repos — a container that times out during collection gets rc=124, which is treated as success. Fix: increase timeouts substantially (at least 5 minutes for collection), or distinguish between "timed out during collection" vs "timed out during execution." The `--quick` flag for ASV should also be waited out rather than killed early.
 
 `DockerValidator` in `src/datasmith/docker/validation.py:159-566`. Two verifiers chained via `validate_acceptance()`:
 

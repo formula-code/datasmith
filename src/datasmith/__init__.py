@@ -66,11 +66,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "DockerContext": ("datasmith.docker", "DockerContext"),
     "DockerHubPublisher": ("datasmith.docker", "DockerHubPublisher"),
     "ImageManager": ("datasmith.docker", "ImageManager"),
-    "MultiObjVerifier": ("datasmith.docker", "MultiObjVerifier"),
-    "ProfileVerifier": ("datasmith.docker", "ProfileVerifier"),
-    "PytestVerifier": ("datasmith.docker", "PytestVerifier"),
-    "SmokeVerifier": ("datasmith.docker", "SmokeVerifier"),
-    "VerifyResult": ("datasmith.docker", "VerifyResult"),
     # --- agents ---
     "AgentConfig": ("datasmith.agents", "AgentConfig"),
     "ClassificationDecision": ("datasmith.agents", "ClassificationDecision"),
@@ -196,21 +191,6 @@ if TYPE_CHECKING:
     )
     from datasmith.docker import (
         ImageManager as ImageManager,
-    )
-    from datasmith.docker import (
-        MultiObjVerifier as MultiObjVerifier,
-    )
-    from datasmith.docker import (
-        ProfileVerifier as ProfileVerifier,
-    )
-    from datasmith.docker import (
-        PytestVerifier as PytestVerifier,
-    )
-    from datasmith.docker import (
-        SmokeVerifier as SmokeVerifier,
-    )
-    from datasmith.docker import (
-        VerifyResult as VerifyResult,
     )
     from datasmith.filters import (
         check_file_compliance as check_file_compliance,

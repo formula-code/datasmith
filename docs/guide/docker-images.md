@@ -42,28 +42,40 @@ tar_bytes = ctx.to_tar_bytes()
 
 ## Verification
 
-Verify images with a chain of verifiers that short-circuits on first failure:
+Verification is performed by `local_ci.py` during stage-6 synthesis, which
+builds the image, runs the test suite, runs the measure step, and gates on the
+build manifest's FATAL invariants. See the
+[Verification guide](verification.md) for the full pipeline.
+
+To inspect an already-built image, read its manifest:
 
 ```python
-from datasmith.docker import MultiObjVerifier, SmokeVerifier, ProfileVerifier
+from datasmith.docker import read_build_manifest, evaluate_invariants
 
-verifier = MultiObjVerifier(verifiers=[
-    SmokeVerifier("pandas"),      # can we import the package?
-    ProfileVerifier(timeout=300), # can we discover and run ASV benchmarks?
-])
+manifest = read_build_manifest("formulacode/pandas-dev-pandas:16222")
+report = evaluate_invariants(manifest)
 
-result = verifier.verify("formulacode/pandas-dev-pandas:16222")
-# result.ok, result.rc, result.stdout, result.stderr, result.duration_s
+report.ok        # True (all fatals held) / False (a fatal failed) / None (no manifest)
+report.fatal     # ["asv_exec_failed", "oracle_patch_failed"]
+report.warnings  # ["speedup_direction", "discovery_fallback_used"]
+report.skipped   # invariants whose inputs were absent
 ```
 
-### Available verifiers
+`ok` is deliberately three-valued. Every image built before build manifests
+existed has none, and for those `read_build_manifest` returns `None` and
+`evaluate_invariants(None)` reports `ok=None` with every invariant skipped —
+rather than raising, or worse, reporting a clean pass it never checked.
 
-| Verifier | Purpose |
-|----------|---------|
-| `SmokeVerifier` | Runs `import {package}` inside the container |
-| `ProfileVerifier` | Runs `profile.sh`, treats timeout (exit 124) as success |
-| `PytestVerifier` | Runs `run-tests.sh` with pytest |
-| `MultiObjVerifier` | Chains verifiers, short-circuits on failure |
+This reads facts the build already recorded, so it is fast, offline, and works
+against any published image without rebuilding it.
+
+### Invariant severity
+
+| Severity | Effect |
+|----------|--------|
+| `fatal` | Fails the verification step; recorded in `report.fatal` |
+| `warn` | Recorded in `candidate_containers.manifest_warnings`, non-blocking |
+| *(skipped)* | The invariant's inputs were absent, so it was not evaluated |
 
 ## Implementation notes
 

@@ -95,20 +95,27 @@ This checks:
 | Docker | Docker daemon is running |
 | GitHub | API access and remaining rate limit |
 
-## Programmatic verification
+## Reading a manifest programmatically
 
-Use verifiers directly in Python:
+Inspect any built image's sealed build manifest and evaluate the invariants
+over it:
 
 ```python
-from datasmith.docker import MultiObjVerifier, SmokeVerifier, ProfileVerifier
+from datasmith.docker import read_build_manifest, evaluate_invariants
 
-verifier = MultiObjVerifier(verifiers=[
-    SmokeVerifier("pandas"),
-    ProfileVerifier(timeout=300),
-])
+manifest = read_build_manifest("formulacode/pandas-dev-pandas:16222")
+report = evaluate_invariants(manifest)
 
-result = verifier.verify("formulacode/pandas-dev-pandas:16222")
-print(result.ok)        # True/False
-print(result.stderr)    # Error output if failed
-print(result.duration_s)  # Time taken
+report.ok        # True (all fatals held) / False (a fatal failed) / None (no manifest)
+report.fatal     # ["asv_exec_failed", "oracle_patch_failed"]
+report.warnings  # ["speedup_direction", "discovery_fallback_used"]
+report.skipped   # invariants whose inputs were absent
 ```
+
+`ok` is deliberately three-valued. Every image built before build manifests
+existed has none, and for those `read_build_manifest` returns `None` and
+`evaluate_invariants(None)` reports `ok=None` with every invariant skipped —
+rather than raising, or worse, reporting a clean pass it never checked.
+
+This reads facts the build already recorded, so it is fast, offline, and works
+against any published image without rebuilding it.
