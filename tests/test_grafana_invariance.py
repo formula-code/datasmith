@@ -127,9 +127,17 @@ class TestAuditScriptsNeverDelete:
         path = Path(__file__).parents[1] / rel
         if not path.exists():
             pytest.skip(f"{rel} not implemented yet")
-        src = path.read_text()
-        assert "_save_context" not in src, (
-            f"{rel} routes through _save_context, which upserts "
-            "candidate_containers and would overwrite resource_metrics on the "
-            "rows whose original measurement is the evidence under audit."
+        # Match CODE, not prose: the script's docstring legitimately names
+        # _save_context to explain why it is avoided. A blunt substring check
+        # would fire on that explanation -- and a guard that punishes
+        # documenting the hazard teaches people to stop documenting it.
+        code = "\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("#"))
+        for pattern in ("_save_context(", "import _save_context", "from datasmith.agents"):
+            assert pattern not in code, (
+                f"{rel} references {pattern!r}, which upserts candidate_containers "
+                "and would overwrite resource_metrics on the rows whose original "
+                "measurement is the evidence under audit."
+            )
+        assert 'resource_metrics":' not in code and "'resource_metrics':" not in code, (
+            f"{rel} appears to write resource_metrics; --calibrate must report, not rewrite."
         )
