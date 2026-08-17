@@ -338,7 +338,21 @@ def main() -> None:
     # Write init results
     import dataclasses
 
+    # Record the sha the BASELINE was measured at. Without this, invariant
+    # #15 (baseline_sha == base_commit) has nothing to compare -- neither
+    # side of the comparison existed before, so the check could never fire.
+    # This is the failure it exists to catch: shapely measured its baselines
+    # AFTER the patch was applied, collapsing every speedup to ~1.0.
+    try:
+        baseline_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), text=True
+        ).strip()
+    except Exception as exc:  # noqa: BLE001 -- never fail init over a breadcrumb
+        print(f"[{_ts()}] [lsv_init] WARNING: could not read baseline sha: {exc}")
+        baseline_sha = None
+
     init_data = {
+        "baseline_sha": baseline_sha,
         "benchmarks_discovered": init_result.benchmarks_discovered,
         "benchmarks_impactable": init_result.benchmarks_impactable,
         "source_files_covered": init_result.source_files_covered,
