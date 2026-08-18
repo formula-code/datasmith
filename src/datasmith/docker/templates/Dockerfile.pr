@@ -38,10 +38,23 @@ RUN chmod +x /profile.sh /run-tests.sh
 RUN micromamba clean --all --yes
 
 FROM pkg AS run
+# The operator-declared benchmark file this task's measurement depends on,
+# from formulacode_task_overrides. docker_build_run.sh turns it into the
+# benchmark_dest_present_post_clean breadcrumb, which is the input to the
+# FATAL benchmark_dest_missing invariant.
+#
+# Declared HERE, in the `run` stage, because ARGs do not cross FROM
+# boundaries -- docker_build_run.sh runs in this stage and would not see an
+# ARG declared anywhere else.
+#
+# Empty is the normal case (only tasks with an override row declare one), and
+# docker_build_run.sh deliberately emits nothing when it is empty, so the
+# invariant skips rather than firing against a value nobody declared.
+ARG BENCHMARK_DEST=""
 
 COPY docker_build_run.sh /docker_build_run.sh
 RUN chmod +x /docker_build_run.sh \
-    && /docker_build_run.sh
+    && BENCHMARK_DEST="${BENCHMARK_DEST}" /docker_build_run.sh
 
 FROM run AS final
 ARG BENCHMARKS=""

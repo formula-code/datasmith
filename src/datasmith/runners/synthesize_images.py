@@ -11,6 +11,7 @@ from datasmith.agents.rate_limit import RateLimitError
 from datasmith.agents.synthesizer import Synthesizer
 from datasmith.runners.base import BaseRunner
 from datasmith.utils import get_client, get_logger
+from datasmith.utils.overrides import benchmark_dest_for, fetch_overrides
 
 logger = get_logger("runners.synthesize_images")
 
@@ -71,8 +72,15 @@ def _build_pr_image(
     docker_context: Any | None = None,
     python_version: str = "",
     base_sha: str = "",
+    benchmark_dest: str = "",
 ) -> str:
     """Build the final PR image from synthesized context (no push).
+
+    ``benchmark_dest`` is the operator-declared benchmark file from
+    formulacode_task_overrides. It reaches docker_build_run.sh as the
+    BENCHMARK_DEST build arg and becomes the input to the FATAL
+    benchmark_dest_missing invariant. Empty (the common case) means no
+    override row declared one, and the invariant skips.
 
     Returns the PR image tag that will be used for the subsequent push.
     """
@@ -98,6 +106,7 @@ def _build_pr_image(
                 commit_sha=checkout_sha or "HEAD",
                 env_payload=env_payload or "[]",
                 py_version=python_version,
+                benchmark_dest=benchmark_dest,
             )
     else:
         mgr.build_pr_image(
@@ -107,6 +116,7 @@ def _build_pr_image(
             commit_sha=checkout_sha or "HEAD",
             env_payload=env_payload or "[]",
             py_version=python_version,
+            benchmark_dest=benchmark_dest,
         )
 
     return pr_tag
@@ -507,6 +517,20 @@ class SynthesizeImagesRunner(BaseRunner):
         sha = item.get("sha", "")
         base_sha = item.get("base_sha", "")
         solution_patch = item.get("patch", "") or ""
+        # Operator-declared benchmark file, if this task has an override row.
+        # Producer for the FATAL benchmark_dest_missing invariant, which has
+        # been inert since it shipped because nothing set $BENCHMARK_DEST.
+        # Absent -> "" -> docker_build_run.sh emits no breadcrumb -> the
+        # invariant skips, exactly as it does today for every task.
+        benchmark_dest = benchmark_dest_for(fetch_overrides([(owner, repo, issue_number)]), (owner, repo, issue_number))
+        if benchmark_dest:
+            logger.info(
+                "Task override for %s/%s#%d declares benchmark_dest=%s",
+                owner,
+                repo,
+                issue_number,
+                benchmark_dest,
+            )
         env_payload = item.get("env_payload", "")
 
         from datasmith.docker.images import get_repo_image_name
@@ -544,6 +568,7 @@ class SynthesizeImagesRunner(BaseRunner):
             ctx,
             py_version,
             base_sha=base_sha,
+            benchmark_dest=benchmark_dest,
         )
 
         # Record the container name in Supabase *before* pushing. If the DB

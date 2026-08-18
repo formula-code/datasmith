@@ -27,6 +27,14 @@ _MOCK_REPO_IMAGE = patch(
     "datasmith.docker.images.get_repo_image_name",
     return_value="formulacode/numpy-numpy:latest",
 )
+# _do_process_item looks up formulacode_task_overrides for benchmark_dest.
+# fetch_all resolves its own client, so without this the "mocked" runner tests
+# open a real Supabase connection -- passing only because a local DB happens to
+# be running, and failing on any machine without one.
+_MOCK_OVERRIDES = patch(
+    "datasmith.runners.synthesize_images.fetch_overrides",
+    return_value={},
+)
 
 
 def _mock_supabase() -> MagicMock:
@@ -77,6 +85,7 @@ class TestDockerRunsInThread:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
@@ -112,6 +121,7 @@ class TestHandlesFailure:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
@@ -140,6 +150,7 @@ class TestBuildAndPushOnSuccess:
             ) as mock_build,
             patch("datasmith.runners.synthesize_images._push_pr_image") as mock_push,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
@@ -180,6 +191,7 @@ class TestRenderProblemWithGitHubClient:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
             patch(
                 "datasmith.github.render.render_problem_statement",
                 return_value="Rendered problem text",
@@ -220,6 +232,7 @@ class TestRenderProblemWithGitHubClient:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
             patch(
                 "datasmith.github.render.render_problem_statement",
             ) as mock_render,
@@ -267,6 +280,7 @@ class TestRenderProblemWithGitHubClient:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
             patch(
                 "datasmith.github.render.render_problem_statement",
                 return_value="Rendered with issues",
