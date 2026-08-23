@@ -158,29 +158,11 @@ def is_valid_pypi_requirement(req: str) -> bool:
     return not (pkg_name.startswith("_") or len(pkg_name) == 1)
 
 
-def fix_marker_spacing(req: str) -> str:
-    """Fix missing spaces around 'and' and 'or' operators in PEP 508 markers."""
-    if "#" in req:
-        match = re.search(r"(?<!\s)#", req)
-        if match:
-            req = req[: match.start()]
-    if ";" not in req:
-        return req
-    parts = req.split(";", 1)
-    if len(parts) != 2:
-        return req
-    pkg_spec, marker = parts
-    marker = re.sub(r"(?<=[^\s])and(?=[^\s])", " and ", marker)
-    marker = re.sub(r"(?<=[^\s])or(?=[^\s])", " or ", marker)
-    return f"{pkg_spec};{marker}"
-
-
 def normalize_requirement(req: str) -> list[str]:
     """Normalize a token into one or more requirement strings."""
     if not req or not req.strip():
         return []
     req = req.strip()
-    req = fix_marker_spacing(req)
     if "{" in req or "}" in req or "$" in req:
         return []
     if any(op in req for op in ["&&", "||", ";;", "|", "&"]) or req.startswith("--"):
@@ -260,7 +242,6 @@ def filter_requirements_for_pypi(  # noqa: C901
         if not raw or not raw.strip():
             continue
         raw = raw.strip()
-        raw = fix_marker_spacing(raw)
 
         if raw.startswith(("http://", "https://", "git+", "hg+", "svn+", "bzr+", "file://")):
             if is_valid_direct_url(raw):

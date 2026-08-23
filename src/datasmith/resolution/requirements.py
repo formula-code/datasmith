@@ -1,7 +1,7 @@
 r"""PEP 508 requirement parsing.
 
-The predecessor, ``package_filters.fix_marker_spacing``, tried to repair markers
-with two unanchored substitutions::
+The predecessor -- the marker-spacing repair in ``package_filters``, audit B1 --
+tried to fix markers with two unanchored substitutions::
 
     re.sub(r"(?<=[^\s])and(?=[^\s])", " and ", marker)
     re.sub(r"(?<=[^\s])or(?=[^\s])",  " or ",  marker)

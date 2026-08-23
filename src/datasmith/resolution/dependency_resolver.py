@@ -9,8 +9,8 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .constants import ANSI_RE
-from .package_filters import fix_marker_spacing
 from .python_manager import run_uv
+from .requirements import parse_many, render
 
 
 def strip_ansi(s: str) -> str:
@@ -51,7 +51,8 @@ def uv_compile_from_pyproject(
 
 def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutoff_rfc3339: str | None) -> list[str]:
     """Use `uv pip compile` to resolve to pinned requirements from stdin."""
-    reqs = sorted({fix_marker_spacing(r.strip()) for r in requirements if r and r.strip()})
+    parsed, _dropped = parse_many(requirements)
+    reqs = render(parsed)
     if not reqs:
         return []
     req_text = "\n".join(reqs) + "\n"
@@ -77,7 +78,8 @@ def uv_dry_run_install(
     pinned: Iterable[str], *, python_version: str | None, venv_path: Path | None = None
 ) -> tuple[bool, str]:
     """Run a dry-run install to validate that dependencies can be installed."""
-    text_lines = [fix_marker_spacing(x) for x in pinned if x.strip()]
+    parsed, _dropped = parse_many(pinned)
+    text_lines = render(parsed)
     if not text_lines:
         return True, "No runtime dependencies."
     text = "\n".join(text_lines) + "\n"
@@ -102,7 +104,8 @@ def uv_dry_run_install(
 
 def uv_install_real(pinned: Iterable[str], *, python_executable: str | None = None) -> tuple[bool, str]:
     """Perform a real install of pinned requirements to surface sdist build failures."""
-    lines = [fix_marker_spacing(x) for x in pinned if x.strip()]
+    parsed, _dropped = parse_many(pinned)
+    lines = render(parsed)
     if not lines:
         return True, "No dependencies to install."
     text = "\n".join(lines) + "\n"
@@ -167,7 +170,6 @@ def uv_build_and_read_metadata(project_dir: Path) -> tuple[str | None, str | Non
                 version = line.split("Version:", 1)[1].strip()
             elif line.startswith("Requires-Dist: "):
                 req = line.split("Requires-Dist:", 1)[1].strip()
-                req = fix_marker_spacing(req)
                 requires_dist.append(req)
             elif line.startswith("Requires-Python: "):
                 requires_python = line.split("Requires-Python:", 1)[1].strip()
