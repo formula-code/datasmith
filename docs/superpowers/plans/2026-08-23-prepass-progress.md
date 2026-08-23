@@ -17,11 +17,30 @@ run, Harbor runs, and the pipeline scales.
 `/opt/conda/envs/$ENV_NAME/bin`, while `PATH` carries `/opt/conda/bin`, the base
 conda. The call exits 127 and fails the run stage.
 
-**All 1856 stored `build_run_sh` scripts, across all 134 repositories, add an
-activation to that line.** So the first thing every synthesis agent ever did was
-repair our own template. This is the largest single reason the no-agent path
-never succeeded, and it means the measured agent cost was mostly spent on our
-bug rather than on the repositories.
+Measured over the 1856 stored `build_run_sh` scripts:
+
+| | rows | repos |
+|---|---|---|
+| contain an `asv machine` line | 1847 | |
+| ... env made explicit **on that line** | 1776 | |
+| ... still **bare** on that line | 71 | 35 |
+| contain no `asv machine` line | 9 | |
+| activate the environment **somewhere in the file** | 1856 | 134 of 134 |
+
+So every repository's script activates the environment, and 1776 of the 1847
+that call `asv machine` do it on that exact line. The 71 bare ones activate
+earlier in the file instead.
+
+The first thing every synthesis agent did was repair our own template. This is
+the largest single reason the no-agent path never succeeded, and it means the
+measured agent cost was spent substantially on our bug rather than on the
+repositories.
+
+**Correction.** An earlier version of this log, and the commit message of
+`2cdce16`, both say "all 1856 scripts add an activation to that line". That is
+overstated by 80 rows. The load-bearing claim survives -- all 134 repositories
+repair it -- but the headline number was wrong. Found by a verification agent
+and reproduced independently.
 
 Fixed in `2cdce16`, with a guard that scans every build-stage template for bare
 calls to environment-only binaries.
