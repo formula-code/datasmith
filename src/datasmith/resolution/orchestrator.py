@@ -111,6 +111,32 @@ def collect_asv_cfg(cfgs: list) -> ASVCfgAggregate:
     return agg
 
 
+def matrix_requirements(matrix: dict[str, set[str]]) -> set[str]:
+    """Turn an ASV matrix into requirement strings.
+
+    ASV maps a package name to the versions its benchmarks require. An empty
+    version set means "require this package at any version". A non-empty set
+    means "pin it".
+
+    The keys carry the package names, so they must not be discarded. Passing a
+    bare version such as ``0.29.21`` to the resolver treats it as a package
+    name, which either fails resolution or is silently dropped.
+    """
+    out: set[str] = set()
+    for pkg, versions in (matrix or {}).items():
+        name = str(pkg).strip().lower()
+        if not name or name.startswith("-"):
+            continue
+        if versions:
+            for version in versions:
+                value = str(version).strip()
+                if value and not value.startswith("-"):
+                    out.update(normalize_requirement(f"{name}=={value}"))
+        else:
+            out.update(normalize_requirement(name))
+    return out
+
+
 @cache_completion(CACHE_LOCATION, table_name="commit_analysis")
 def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict[str, Any] | None:  # noqa: C901
     """Analyze a commit to extract build/runtime information for benchmarking.
@@ -307,12 +333,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                         normalized = normalize_requirement(tok)
                         base_requirements.update(normalized)
 
-            for vals in cfg_items.matrix.values():
-                for v in vals:
-                    s = str(v).strip()
-                    if s and not s.startswith("-"):
-                        normalized = normalize_requirement(s)
-                        base_requirements.update(normalized)
+            base_requirements.update(matrix_requirements(cfg_items.matrix))
 
             # E) Build and read wheel metadata
             project_dir = tmpfile_pth / primary_root
