@@ -62,7 +62,13 @@ honesty gate: HONEST, 10 of 10 checks
 This is the first time TRY_DEFAULT has ever succeeded for this task. Two of our
 own template bugs were the only blockers.
 
-**Caveat.** The gate is defeatable, and I proved it. A 19-line adversarial
+**Caveat 1. `extensions_import` is unproven.** networkx is pure Python, so the
+gate reported `extensions 0/0`. Every container gated so far has had zero
+compiled extensions. Nobody should read "10 of 10 passed" as covering compiled
+code. The first real test of that check is a compiled repository. If it reports
+`0/0` there, the check is broken rather than the container.
+
+**Caveat 2.** The gate is defeatable, and I proved it. A 19-line adversarial
 `sitecustomize.py` that patches `Path.is_file` and `shutil.which` made the gate
 report HONEST on a container with a replaced `grep`. This container passes
 because no agent built it, so nothing had motive or opportunity. The gate
