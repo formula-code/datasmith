@@ -18,6 +18,7 @@ from .constants import (
     STDLIB,
 )
 from .git_utils import read_blob_text
+from .requirements import strip_inline_comment
 
 
 def parse_extras_segment(token: str) -> list[str]:
@@ -78,9 +79,13 @@ def resolve_requirements_file(commit: Commit, rel_path: str, seen: set[str]) -> 
     if not content:
         return requirements
 
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    for raw_line in content.splitlines():
+        # ``#`` opens a comment in a requirements file, so the text after it is
+        # not part of the requirement. Strip it here, where the line is still
+        # known to be file syntax: a later whitespace-collapsing pass would glue
+        # the comment onto the requirement and lose the package entirely.
+        line = strip_inline_comment(raw_line)
+        if not line:
             continue
 
         tokens = line.split()
@@ -200,8 +205,12 @@ def project_local_names(project_dir: Path) -> set[str]:
 def clean_pinned(reqs: list[str]) -> list[str]:
     """Removes lower-bound version specifiers from requirements that have both >= and <=."""
     new_reqs = []
-    for r in reqs:
-        r = re.sub(r"\s+", "", r)
+    for raw in reqs:
+        # Drop any comment before collapsing whitespace; afterwards the ``#``
+        # would no longer be whitespace-preceded and would fuse to the version.
+        r = re.sub(r"\s+", "", strip_inline_comment(raw))
+        if not r:
+            continue
         if ">=" in r and "<=" in r:
             pkg_name = extract_pkg_name(r)
             parts = re.split(r",\s*", r)

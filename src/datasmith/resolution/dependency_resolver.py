@@ -8,9 +8,32 @@ import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 
+from datasmith.utils import get_logger
+
 from .constants import ANSI_RE
 from .python_manager import run_uv
-from .requirements import parse_many, render
+from .requirements import Dropped, to_requirement_lines
+
+logger = get_logger("resolution.dependency_resolver")
+
+
+def seed_lines(raws: Iterable[str], *, context: str) -> list[str]:
+    """Turn requirement strings into the text uv is given, and report the losses.
+
+    Every line uv does not get is logged with the reason it was refused, so a
+    missing package is diagnosable from the run log instead of vanishing.
+    """
+    lines, dropped = to_requirement_lines(raws)
+    _log_dropped(dropped, context=context)
+    return lines
+
+
+def _log_dropped(dropped: list[Dropped], *, context: str) -> None:
+    if not dropped:
+        return
+    logger.info("%s: dropped %d requirement(s)", context, len(dropped))
+    for item in dropped:
+        logger.debug("%s: dropped %r (%s)", context, item.raw, item.reason)
 
 
 def strip_ansi(s: str) -> str:
@@ -51,8 +74,7 @@ def uv_compile_from_pyproject(
 
 def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutoff_rfc3339: str | None) -> list[str]:
     """Use `uv pip compile` to resolve to pinned requirements from stdin."""
-    parsed, _dropped = parse_many(requirements)
-    reqs = render(parsed)
+    reqs = seed_lines(requirements, context="uv pip compile")
     if not reqs:
         return []
     req_text = "\n".join(reqs) + "\n"
@@ -78,8 +100,7 @@ def uv_dry_run_install(
     pinned: Iterable[str], *, python_version: str | None, venv_path: Path | None = None
 ) -> tuple[bool, str]:
     """Run a dry-run install to validate that dependencies can be installed."""
-    parsed, _dropped = parse_many(pinned)
-    text_lines = render(parsed)
+    text_lines = seed_lines(pinned, context="uv pip install --dry-run")
     if not text_lines:
         return True, "No runtime dependencies."
     text = "\n".join(text_lines) + "\n"
@@ -104,8 +125,7 @@ def uv_dry_run_install(
 
 def uv_install_real(pinned: Iterable[str], *, python_executable: str | None = None) -> tuple[bool, str]:
     """Perform a real install of pinned requirements to surface sdist build failures."""
-    parsed, _dropped = parse_many(pinned)
-    lines = render(parsed)
+    lines = seed_lines(pinned, context="uv pip install")
     if not lines:
         return True, "No dependencies to install."
     text = "\n".join(lines) + "\n"
@@ -126,10 +146,6 @@ def uv_build_and_read_metadata(project_dir: Path) -> tuple[str | None, str | Non
     """
     import subprocess as _sp
 
-    from datasmith.utils import get_logger as _get_logger
-
-    _logger = _get_logger("resolution.dependency_resolver")
-
     # Use subprocess directly with DEVNULL for stderr to suppress noisy
     # setup.py tracebacks from child processes that bypass capture_output.
     env = os.environ.copy()
@@ -143,7 +159,7 @@ def uv_build_and_read_metadata(project_dir: Path) -> tuple[str | None, str | Non
         env=env,
     )
     if cp.returncode != 0:
-        _logger.debug(
+        logger.debug(
             "uv build failed in %s (expected for repos with dynamic setup.py): %s",
             project_dir.name,
             strip_ansi(cp.stderr.decode())[-200:],
