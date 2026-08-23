@@ -273,7 +273,8 @@ def summarise(image: str, facts: dict, verdict: dict) -> str:
         f"  package        {imp.get('import_name')}  import_ok={imp.get('package_import_ok')}",
         f"  extensions     {imp.get('extensions_ok')}/{imp.get('extensions_total')} import"
         + ("  TRUNCATED" if imp.get("extensions_truncated") else ""),
-        f"  benchmarks     {bench.get('discovered_n')}  err={bench.get('discover_error')}",
+        f"  benchmarks     asv={bench.get('discovered_n')} source={bench.get('source_n')}"
+        f"  err={bench.get('discover_error')}",
         f"  pytest         collect_ok={tests.get('collect_ok')} n={tests.get('collected_n')}",
         "",
         f"  passed   {', '.join(verdict['passed']) or '-'}",

@@ -151,7 +151,38 @@ def run_builds(specs: list[str], concurrency: int, timeout: int) -> float:
     return time.time() - started
 
 
-_NOISE = ("ERROR: failed to build", "------", "> [", "note: This is an issue")
+# Lines that state a cause. Preferred over position in the log.
+_NAMED_CAUSES = (
+    "BackendUnavailable",
+    "ModuleNotFoundError",
+    "Interrupted:",
+    "error during collection",
+    "errors during collection",
+    "DISCOVERY_FAILED",
+    "NO_BENCHMARKS",
+    "reference is not a tree",
+    "metadata-generation-failed",
+    "Failed to build installable wheels",
+    "unsatisfiable",
+    "No `asv.conf` file found",
+    "broke the interpreter",
+)
+
+_NOISE = (
+    "ERROR: failed to build",
+    "------",
+    "> [",
+    "note: This is an issue",
+    "hint: See above",
+    # Our own protocol markers and the JSON between them. They are the LAST
+    # lines of a failed run, so taking the last meaningful line reported
+    # "FORMULACODE_SNAPSHOT_END" for six repositories, which names nothing.
+    "FORMULACODE_",
+    "{",
+    "}",
+    "=====",
+    "!!!!!",
+)
 
 
 def _signature(row: dict) -> str:
@@ -162,6 +193,10 @@ def _signature(row: dict) -> str:
     which named nothing.
     """
     lines = [ln.strip() for ln in (row.get("error_message") or "").splitlines() if ln.strip()]
+    # Prefer a line that names a known cause, wherever it sits in the log.
+    for ln in reversed(lines):
+        if any(marker in ln for marker in _NAMED_CAUSES):
+            return ln[:110].replace("|", "/")
     for ln in reversed(lines):
         if any(ln.startswith(n) for n in _NOISE):
             continue
