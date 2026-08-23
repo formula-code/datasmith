@@ -1,448 +1,227 @@
-"""Main orchestration for commit analysis."""
+"""Compose the resolution units for one commit.
+
+The predecessor was one 669-line function with two paths through it.  The first
+compiled the project's packaging file directly and returned early on success; the
+second aggregated requirements from every file it could find, healed whatever
+failed, and injected test tooling.  Two commits of one repository could therefore
+be resolved by different halves and get different environments for no principled
+reason, and neither half recorded which one had answered.
+
+Here the flow is one path made of six small units, each testable alone:
+
+``discover`` finds the packaging roots, ``declare`` reads what the project states
+it needs, ``interpreter`` picks the Python from that declaration, ``pin`` compiles
+it once, ``probe`` dry-runs the result advisorily, and this module emits the row.
+
+Two things the predecessor did are gone rather than repaired.  It gated: a failed
+dry-run set ``can_install = False`` and stages 5 and 6 then skipped the PR, so
+3,217 performance PRs were never attempted.  The probe now orders the queue
+instead.  And it installed the resolved set for real on the host, which proves
+nothing about the container -- different interpreter, different base image, no
+compilers -- while dominating the stage's runtime.
+"""
 
 from __future__ import annotations
 
 import contextlib
-import re
-import shlex
-import shutil
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import json5
 
 from datasmith.utils import get_logger
+from git import Commit
 
 from .cache import cache_completion
-from .constants import ALLOWLIST_COMMON_PYPI, CACHE_LOCATION
-from .dependency_resolver import (
-    rfc3339,
-    uv_build_and_read_metadata,
-    uv_compile,
-    uv_compile_from_pyproject,
-    uv_dry_run_install,
-    uv_install_real,
-)
+from .constants import CACHE_LOCATION
+from .declare import declare
 from .git_utils import asv_finder, prepare_repo_checkout
+from .interpreter import select_interpreter, trove_versions_from_classifiers
 from .metadata_parser import analyze_candidate_meta, discover_candidates, select_primary_candidate
-from .models import ASVCfgAggregate
-from .package_filters import (
-    clean_pinned,
-    extract_pkg_name,
-    extract_requested_extras,
-    filter_requirements_for_pypi,
-    normalize_requirement,
-    resolve_requirements_file,
-    split_shell_command,
-)
-from .python_manager import (
-    SUPPORTED_PYTHON_VERSIONS,
-    ensure_python_version_available,
-    filter_python_versions_by_commit_date,
-    run_uv,
-)
+from .models import ASVCfgAggregate, CandidateMeta
+from .pin import pin
+from .probe import probe
 
 logger = get_logger("resolution.orchestrator")
 
+__all__ = ["RESOLVER_VERSION", "ResolutionResult", "analyze_commit", "collect_asv_cfg"]
 
-@cache_completion(CACHE_LOCATION, table_name="commit_analysis")
-def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict[str, Any] | None:  # noqa: C901
-    """Analyze a commit to extract build/runtime information for benchmarking.
+#: Stamped on every row this resolver writes.  Rows carrying ``legacy`` came from
+#: the predecessor and carry no provenance at all.
+RESOLVER_VERSION = "2026.08.23"
 
-    Returns a dictionary with resolution results, or None if analysis failed.
+#: Keys of an ASV ``matrix`` that name a section rather than a package.  Modern
+#: asv nests requirements under ``req`` and environment variables under ``env`` /
+#: ``env_nobuild``; older configs put the packages at the top level.
+_ASV_MATRIX_SECTIONS = ("req", "env", "env_nobuild")
+
+
+@dataclass(frozen=True)
+class ResolutionResult:
+    """One commit's resolved environment, and the story of how it was reached."""
+
+    owner_repo: str
+    sha: str
+    package_name: str | None
+    package_version: str | None
+    primary_root: str
+    requires_python: str | None
+    python_version: str
+    interpreter_source: str
+    env_payload: list[str] = field(default_factory=list)
+    probe_status: str = "empty"
+    probe_log: str = ""
+    cutoff_used: str | None = None
+    cutoff_relaxed: bool = False
+    dropped_requirements: list[dict[str, str]] = field(default_factory=list)
+    resolver_version: str = RESOLVER_VERSION
+
+
+def _matrix_entries(matrix: object) -> dict[str, list[str]]:
+    """Read the packages an ASV ``matrix`` names, whichever shape it is written in.
+
+    asv >= 0.6 nests them: ``{"req": {"numpy": ["1.20", ""]}, "env": {...}}``.
+    Reading such a config flat offers ``req`` and ``env`` to the resolver as
+    package names, so the section keys are stepped through rather than into.
+    Older configs name the packages at the top level, which is the fallback.
     """
-    commit_info: dict[str, Any] | None = None
+    if not isinstance(matrix, dict):
+        return {}
+    req = matrix.get("req")
+    entries = req if isinstance(req, dict) else {k: v for k, v in matrix.items() if k not in _ASV_MATRIX_SECTIONS}
+    out: dict[str, list[str]] = {}
+    for name, value in entries.items():
+        if isinstance(value, list | tuple | set):
+            out[str(name)] = [str(v) for v in value]
+        else:
+            out[str(name)] = [str(value)]
+    return out
 
-    python_version: str | None = None
-    resolved_dependencies: list[str] = []
-    resolution_strategy: str | None = None
-    can_install: bool = False
-    dry_run_log: str = ""
-    excluded_missing_on_pypi: dict[str, str] = {}
-    excluded_exists_incompatible: dict[str, str] = {}
-    excluded_other: dict[str, str] = {}
 
+def collect_asv_cfg(commit: Commit) -> ASVCfgAggregate:
+    """Aggregate every ASV config in the commit.
+
+    The predecessor read each parsed config with ``getattr(cfg, "pythons", [])``.
+    ``json5.loads`` returns a ``dict``, and a dict has no such attribute, so every
+    field came back empty: the asv rung of the interpreter ladder never fired and
+    ``matrix`` never reached ``declare``.  Reads here go through ``dict.get``.
+
+    An absent ``pythons`` stays absent.  The predecessor substituted the full
+    supported set, which is a declaration the project never made -- and with the
+    reads fixed it would make the asv rung fire for every repository and override
+    the two rungs above it.
+    """
+    aggregate = ASVCfgAggregate()
+    for cfg_file in asv_finder(commit):
+        cfg: Any
+        try:
+            cfg = json5.loads(cfg_file.read_text())
+        except Exception:  # noqa: S112
+            continue
+        if not isinstance(cfg, dict):
+            continue
+
+        for py in cfg.get("pythons") or []:
+            with contextlib.suppress(Exception):
+                aggregate.pythons.add(tuple(int(part) for part in str(py).split(".")))
+
+        build_command = cfg.get("build_command")
+        if build_command:
+            if isinstance(build_command, list | tuple):
+                build_command = " && ".join(map(str, build_command)).replace("-mpip", "-m pip")
+            aggregate.build_commands.add(str(build_command))
+
+        install_command = cfg.get("install_command")
+        if install_command:
+            if isinstance(install_command, list | tuple):
+                install_command = " && ".join(map(str, install_command))
+            aggregate.install_commands.add(str(install_command))
+
+        for name, versions in _matrix_entries(cfg.get("matrix")).items():
+            aggregate.matrix.setdefault(name, set()).update(versions)
+
+    return aggregate
+
+
+@cache_completion(CACHE_LOCATION, table_name="commit_analysis_v2")
+def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> ResolutionResult | None:
+    """Resolve one commit's environment seed.
+
+    Returns ``None`` only when the repository declares no packaging root at this
+    commit -- there is then nothing to resolve.  Everything else is an answer,
+    including an empty seed: a project that declares no dependencies gets ``[]``
+    and says so, where the predecessor would invent a list by guessing PyPI names
+    from import statements.
+
+    The cache table is ``commit_analysis_v2``.  The predecessor's rows hold a
+    ``dict`` of a different shape, and unpickling one into this dataclass would
+    fail far from here.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        repo, tmpfile_pth, _cleanup_checkout = prepare_repo_checkout(repo_name, sha, tmp_path)
+        repo, _checkout_dir, cleanup_checkout = prepare_repo_checkout(repo_name, sha, Path(tmpdir))
         try:
             commit = repo.commit(sha)
             with contextlib.suppress(Exception):
                 repo.git.checkout(sha)
 
-            # A) ASV configs (optional — repos without ASV can still be resolved)
-            asv_cfg_files = asv_finder(commit)
+            asv = collect_asv_cfg(commit)
 
-            asv_cfgs = []
-            for cfg_file in asv_cfg_files:
-                with contextlib.suppress(Exception):
-                    asv_cfgs.append(json5.loads(cfg_file.read_text()))
-
-            cfg_items = ASVCfgAggregate()
-            for cfg in asv_cfgs:
-                pythons: set[tuple[int, ...]] = set()
-                for py in getattr(cfg, "pythons", []) or []:
-                    with contextlib.suppress(Exception):
-                        pythons.add(tuple(map(int, str(py).split("."))))
-                cfg_items.pythons.update(pythons)
-                bc = getattr(cfg, "build_command", None)
-                ic = getattr(cfg, "install_command", None)
-                if bc:
-                    if isinstance(bc, list | tuple):
-                        bc = " && ".join(bc).replace("-mpip", "-m pip")
-                    cfg_items.build_commands.add(str(bc))
-                if ic:
-                    if isinstance(ic, list | tuple):
-                        ic = " && ".join(ic)
-                    cfg_items.install_commands.add(str(ic))
-                mx = getattr(cfg, "matrix", None) or {}
-                for k, v in mx.items():
-                    values = cfg_items.matrix.setdefault(k, set())
-                    if isinstance(v, list | tuple | set):
-                        values.update(map(str, v))
-                    else:
-                        values.add(str(v))
-
-            if not cfg_items.pythons:
-                cfg_items.pythons.update(SUPPORTED_PYTHON_VERSIONS)
-
-            # B) Choose Python version candidates
-            if (not cfg_items.pythons) or all(py < (3, 8) for py in cfg_items.pythons):
-                logger.debug("No Python >=3.8 available in ASV config: %s", cfg_items.pythons)
-                return None
-
-            authored = commit.authored_datetime
-            cutoff = rfc3339(authored)
-            candidate_python_versions = filter_python_versions_by_commit_date(cfg_items.pythons, authored)
-
-            if not candidate_python_versions:
-                logger.debug("No suitable Python versions after temporal filtering from %s", cfg_items.pythons)
-                return None
-
-            # C) Discover packaging candidates
             candidates = discover_candidates(commit)
             if not candidates:
+                logger.debug("No packaging root at %s@%s; nothing to resolve", repo_name, sha[:8])
                 return None
-            analyzed: dict[str, Any] = {root: analyze_candidate_meta(c) for root, c in candidates.items()}
-            primary_root = select_primary_candidate(repo_name, candidates, cfg_items.install_commands, analyzed)
-            primary_meta = analyzed[primary_root]
-            primary_cand = candidates[primary_root]
-            project_dir = tmpfile_pth / primary_root
-            all_sources = [
-                s
-                for s in (primary_cand.setup_py_path, primary_cand.pyproject_path, primary_cand.setup_cfg_path)
-                if s and s.exists()
-            ]
-            if len(all_sources):
-                for source in all_sources:
-                    skip_source = False
-                    for py_ver in (".".join(map(str, t)) for t in candidate_python_versions[:3]):
-                        if skip_source:
-                            break
-                        for strict_cutoff in (True, False):
-                            source_name = source.name.replace(".", "_")
-                            candidate_venv_path = Path(tmpdir) / f"venv_{source_name}_{py_ver.replace('.', '_')}"
-                            try:
-                                venv_cp = run_uv(["venv", str(candidate_venv_path), "--python", py_ver])
-                                if venv_cp.returncode != 0:
-                                    logger.debug(
-                                        "Failed to create venv with Python %s: %s", py_ver, venv_cp.stderr.decode()
-                                    )
-                                    continue
-
-                                python_exe = candidate_venv_path / "bin" / "python"
-                                if not python_exe.exists():
-                                    python_exe = candidate_venv_path / "Scripts" / "python.exe"
-
-                                if not python_exe.exists():
-                                    logger.debug("Venv created but Python executable not found for version %s", py_ver)
-                                    shutil.rmtree(candidate_venv_path, ignore_errors=True)
-                                    continue
-
-                                resolved = uv_compile_from_pyproject(
-                                    project_dir / source.name,
-                                    python_version=python_exe.as_posix(),
-                                    cutoff_rfc3339=cutoff if strict_cutoff else None,
-                                )
-                            except Exception as e:
-                                shutil.rmtree(candidate_venv_path, ignore_errors=True)
-                                logger.debug(
-                                    "uv_compile_from_pyproject failed for Python %s with cutoff %s: %s",
-                                    py_ver,
-                                    "strict" if strict_cutoff else "none",
-                                    e,
-                                )
-                                if "--no-build-isolation" in str(e):
-                                    skip_source = True
-                                    break
-                                continue
-                            strat = f"{'cutoff=strict' if strict_cutoff else 'cutoff=none'}, extras=on, python={py_ver}, source={source.name}"
-
-                            if len(resolved) > 0:
-                                candidate_can_install, candidate_dry_run_log = uv_dry_run_install(
-                                    resolved, python_version=py_ver, venv_path=candidate_venv_path
-                                )
-
-                                if candidate_can_install:
-                                    ok_real, real_log = uv_install_real(
-                                        resolved, python_executable=python_exe.as_posix()
-                                    )
-                                    if ok_real:
-                                        shutil.rmtree(candidate_venv_path, ignore_errors=True)
-                                        commit_info = {
-                                            "sha": sha,
-                                            "repo_name": repo_name,
-                                            "package_name": primary_meta.name,
-                                            "package_version": primary_meta.version,
-                                            "python_version": py_ver,
-                                            "build_command": list(cfg_items.build_commands),
-                                            "install_command": list(cfg_items.install_commands),
-                                            "final_dependencies": list(dict.fromkeys(resolved)),
-                                            "can_install": True,
-                                            "dry_run_log": candidate_dry_run_log,
-                                            "primary_root": primary_root,
-                                            "resolution_strategy": strat,
-                                            "excluded_missing_on_pypi": {},
-                                            "excluded_exists_incompatible": {},
-                                            "excluded_other": {},
-                                        }
-                                        return commit_info
-                                    else:
-                                        logger.debug(
-                                            "Preflight install failed for Python %s (source=%s); trying next.\n%s",
-                                            py_ver,
-                                            source.name,
-                                            real_log[-800:],
-                                        )
-                                        shutil.rmtree(candidate_venv_path, ignore_errors=True)
-                                else:
-                                    shutil.rmtree(candidate_venv_path, ignore_errors=True)
-
-            # D) Aggregate base requirements (unresolved, human-intent)
-            base_requirements: set[str] = set()
-            base_requirements.update(primary_meta.core_deps)
-            base_requirements.add("pytest")
-            base_requirements.add("setuptools")
-            base_requirements.add("hypothesis")
-
-            requested_extras = extract_requested_extras(
-                cfg_items.install_commands, cfg_items.matrix, primary_meta.extras.keys()
-            )
-            for ex in requested_extras:
-                base_requirements.update(primary_meta.extras.get(ex, set()))
-
-            for install_cmd in cfg_items.install_commands:
-                for cmd_part in split_shell_command(install_cmd):
-                    try:
-                        tokens = shlex.split(cmd_part)
-                    except Exception:
-                        logger.exception("Failed to split command %s", cmd_part)
-                        continue
-
-                    skip_next = False
-                    for i, tok in enumerate(tokens):
-                        if skip_next:
-                            skip_next = False
-                            continue
-                        if tok in {"-r", "--requirement"} and i + 1 < len(tokens):
-                            rel = tokens[i + 1]
-                            skip_next = True
-                            requirements_from_file = resolve_requirements_file(commit, rel, set())
-                            base_requirements.update(requirements_from_file)
-                            continue
-
-                    skip_next = False
-                    for tok in tokens:
-                        if skip_next:
-                            skip_next = False
-                            continue
-                        if tok in {"-r", "--requirement"}:
-                            skip_next = True
-                            continue
-                        if tok.startswith("-"):
-                            continue
-                        normalized = normalize_requirement(tok)
-                        base_requirements.update(normalized)
-
-            for vals in cfg_items.matrix.values():
-                for v in vals:
-                    s = str(v).strip()
-                    if s and not s.startswith("-"):
-                        normalized = normalize_requirement(s)
-                        base_requirements.update(normalized)
-
-            # E) Build and read wheel metadata
-            project_dir = tmpfile_pth / primary_root
-            pkg_name, pkg_version, wheel_requires, wheel_requires_python = uv_build_and_read_metadata(project_dir)
-
-            if not primary_meta.name and pkg_name:
-                primary_meta.name = pkg_name
-            if not primary_meta.version and pkg_version:
-                primary_meta.version = pkg_version
-            if wheel_requires_python and not primary_meta.requires_python:
-                primary_meta.requires_python = wheel_requires_python
-
-            own_import = None
-            if primary_meta.name:
-                own_import = primary_meta.name.replace("-", "_")
-
-            # F) Candidate runtime requirements (unresolved)
-            # An empty set is an answer. What a project declares is what it needs;
-            # a name read off an `import` statement is a guess about which
-            # distribution ships that module, and the guess put numpy's own
-            # submodules and the dead py2 distribution `version` into numpy's seed.
-            runtime_candidates: set[str] = set(wheel_requires)
-
-            runtime_candidates.update(base_requirements)
-
-            cleaned_unresolved = filter_requirements_for_pypi(
-                runtime_candidates,
-                project_dir=project_dir,
-                own_import_name=own_import,
-            )
-
-            if not cleaned_unresolved and runtime_candidates:
-                cleaned_unresolved = sorted({
-                    r for r in runtime_candidates if extract_pkg_name(r) in ALLOWLIST_COMMON_PYPI
-                })
-
-            found_flag = False
-
-            for use_cleaned_pinned in (False, True):
-                for py_tuple in candidate_python_versions:
-                    if found_flag:
-                        break
-                    candidate_version = ".".join(map(str, py_tuple))
-                    logger.debug("Trying Python %s", candidate_version)
-
-                    if not ensure_python_version_available(candidate_version):
-                        logger.debug("Python %s not available, trying next", candidate_version)
-                        continue
-
-                    candidate_venv_path = Path(tmpdir) / f"venv_{candidate_version.replace('.', '_')}"
-                    venv_cp = run_uv(["venv", str(candidate_venv_path), "--python", candidate_version])
-
-                    if venv_cp.returncode != 0:
-                        logger.debug(
-                            "Failed to create venv with Python %s: %s", candidate_version, venv_cp.stderr.decode()
-                        )
-                        continue
-
-                    python_exe = candidate_venv_path / "bin" / "python"
-                    if not python_exe.exists():
-                        python_exe = candidate_venv_path / "Scripts" / "python.exe"
-
-                    if not python_exe.exists():
-                        logger.debug("Venv created but Python executable not found for version %s", candidate_version)
-                        continue
-
-                    def _compile_or_pass_through(
-                        reqs: list[str], *, strict_cutoff: bool, py_ver: str
-                    ) -> tuple[list[str], str]:
-                        # One compile, one answer. The requirements that go in are
-                        # the ones this commit declared; a failure is reported as
-                        # such rather than being healed by dropping whichever
-                        # package uv named first.
-                        try:
-                            resolved = uv_compile(
-                                reqs,
-                                python_version=py_ver,
-                                cutoff_rfc3339=cutoff if strict_cutoff else None,
-                            )
-                        except Exception as e:
-                            return list(reqs), f"unresolved(pass-through): {e.__class__.__name__}"
-                        cutoff_label = "cutoff=strict" if strict_cutoff else "cutoff=none"
-                        return resolved, f"{cutoff_label}, extras=on, python={py_ver}"
-
-                    if use_cleaned_pinned:
-                        cleaned_unresolved = clean_pinned(cleaned_unresolved)
-                    candidate_resolved, candidate_strategy = _compile_or_pass_through(
-                        cleaned_unresolved, strict_cutoff=True, py_ver=candidate_version
-                    )
-
-                    if candidate_resolved == cleaned_unresolved and candidate_resolved:
-                        relaxed = [x for x in cleaned_unresolved if not re.search(r"\[.*\]$", x)]
-                        if relaxed and relaxed != cleaned_unresolved:
-                            resolved2, strat2 = _compile_or_pass_through(
-                                relaxed, strict_cutoff=False, py_ver=candidate_version
-                            )
-                            if resolved2 != relaxed or "cutoff=none" in strat2:
-                                candidate_resolved, candidate_strategy = resolved2, strat2
-
-                    if not candidate_resolved and cleaned_unresolved:
-                        candidate_resolved = list(cleaned_unresolved)
-
-                    # H) Validate via dry-run. The result describes the seed this
-                    # commit declared; a failing package is reported, not removed.
-                    candidate_can_install, candidate_dry_run_log = uv_dry_run_install(
-                        candidate_resolved, python_version=candidate_version, venv_path=candidate_venv_path
-                    )
-
-                    python_version = candidate_version
-                    resolved_dependencies = candidate_resolved
-                    resolution_strategy = candidate_strategy
-                    can_install = candidate_can_install
-                    dry_run_log = candidate_dry_run_log
-
-                    if can_install:
-                        ok_real, real_log = uv_install_real(candidate_resolved, python_executable=python_exe.as_posix())
-                        if ok_real:
-                            found_flag = True
-                            logger.debug("Success with Python %s (preflight install ok)!", candidate_version)
-                            break
-                        else:
-                            logger.debug(
-                                "Dry-run ok but real install failed on Python %s; trying older version.\n%s",
-                                candidate_version,
-                                real_log[-800:],
-                            )
-                            can_install = False
-                            dry_run_log = real_log
-
-                    log_lower = dry_run_log.lower()
-                    is_abi_error = (
-                        "python abi tag" in log_lower
-                        or "cp3" in dry_run_log
-                        or ("no wheels" in log_lower and "python" in log_lower)
-                        or "cannot install on python version" in log_lower
-                        or "only versions" in log_lower
-                    )
-
-                    if is_abi_error:
-                        logger.debug("ABI incompatibility with Python %s, trying older version", candidate_version)
-                        continue
-                    else:
-                        logger.debug("Non-ABI error with Python %s, stopping attempts", candidate_version)
-                        break
-
-            if not python_version:
-                logger.debug("No Python version succeeded")
-                return None
-
-            # I) Final identity
-            excluded_missing_on_pypi = {}
-            excluded_exists_incompatible = {}
-            excluded_other = {}
-
-            commit_info = {
-                "sha": sha,
-                "repo_name": repo_name,
-                "package_name": primary_meta.name,
-                "package_version": primary_meta.version,
-                "python_version": python_version,
-                "build_command": list(cfg_items.build_commands),
-                "install_command": list(cfg_items.install_commands),
-                "final_dependencies": list(dict.fromkeys(resolved_dependencies)),
-                "can_install": can_install,
-                "dry_run_log": dry_run_log,
-                "primary_root": primary_root,
-                "resolution_strategy": resolution_strategy,
-                "excluded_missing_on_pypi": excluded_missing_on_pypi,
-                "excluded_exists_incompatible": excluded_exists_incompatible,
-                "excluded_other": excluded_other,
+            analyzed: dict[str, CandidateMeta] = {
+                root: analyze_candidate_meta(cand) for root, cand in candidates.items()
             }
+            primary_root = select_primary_candidate(repo_name, candidates, asv.install_commands, analyzed)
+            primary_meta = analyzed[primary_root]
 
-            return commit_info
+            declared = declare(primary_meta, asv.matrix)
+
+            commit_date = commit.authored_datetime
+            choice = select_interpreter(
+                requires_python=primary_meta.requires_python,
+                trove_versions=trove_versions_from_classifiers(primary_meta.classifiers),
+                asv_pythons=asv.pythons,
+                commit_date=commit_date,
+            )
+
+            # ``extras`` and ``operator_pins`` are the per-repository opt-ins the
+            # design gives ``formulacode_task_overrides``. Nothing reads that
+            # table yet, so the defaults stand: extras stay out of the seed.
+            pinned = pin(declared, python_version=choice.version, commit_date=commit_date)
+            probed = probe(pinned, python_version=choice.version)
+
+            dropped = [{"req": d.raw, "reason": d.reason} for d in (*declared.dropped, *pinned.dropped)]
+
+            logger.debug(
+                "Resolved %s@%s: python=%s (%s) deps=%d probe=%s dropped=%d",
+                repo_name,
+                sha[:8],
+                choice.version,
+                choice.source,
+                len(pinned.requirements),
+                probed.status,
+                len(dropped),
+            )
+
+            return ResolutionResult(
+                owner_repo=repo_name,
+                sha=sha,
+                package_name=primary_meta.name,
+                package_version=primary_meta.version,
+                primary_root=primary_root,
+                requires_python=primary_meta.requires_python,
+                python_version=choice.version,
+                interpreter_source=choice.source,
+                env_payload=list(pinned.requirements),
+                probe_status=probed.status,
+                probe_log=probed.log,
+                cutoff_used=pinned.cutoff_used,
+                cutoff_relaxed=pinned.cutoff_relaxed,
+                dropped_requirements=dropped,
+            )
         finally:
-            _cleanup_checkout()
+            cleanup_checkout()

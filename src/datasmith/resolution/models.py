@@ -24,6 +24,7 @@ class CandidateMeta:
     version: str | None = None
     import_name: str | None = None  # importable module (when we can guess)
     requires_python: str | None = None
+    classifiers: set[str] = field(default_factory=set)  # trove, rung 2 of the interpreter ladder
     core_deps: set[str] = field(default_factory=set)  # runtime
     extras: dict[str, set[str]] = field(default_factory=dict)
     build_requires: set[str] = field(default_factory=set)  # [build-system].requires

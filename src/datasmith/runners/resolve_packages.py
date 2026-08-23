@@ -36,31 +36,39 @@ class ResolvePackagesRunner(BaseRunner):
             logger.info("Resolution returned None for %s/%s@%s", owner, repo, sha[:8])
             return
 
-        env_payload = json.dumps(result.get("final_dependencies", []))
+        env_payload = json.dumps(result.env_payload)
 
+        # The columns are still today's. The provenance the resolver now carries
+        # -- probe_status, interpreter_source, cutoff_used, dropped_requirements
+        # -- has nowhere to go until the schema migration adds it.
+        # ``can_install`` is the probe's verdict under its old name: the same
+        # dry-run, and "installable" is the same "clean, with the commit-date
+        # cutoff held". It stays a gate only until the stage 5 and 6 readers are
+        # removed.
         row = {
             "owner": owner,
             "repo": repo,
             "sha": sha,
-            "package_name": result.get("package_name"),
-            "package_version": result.get("package_version"),
-            "python_version": result.get("python_version", ""),
+            "package_name": result.package_name,
+            "package_version": result.package_version,
+            "python_version": result.python_version,
             "env_payload": env_payload,
-            "build_commands": result.get("build_command"),
-            "install_commands": result.get("install_command"),
-            "primary_root": result.get("primary_root"),
-            "resolution_strategy": result.get("resolution_strategy"),
-            "can_install": result.get("can_install", False),
+            "build_commands": None,
+            "install_commands": None,
+            "primary_root": result.primary_root,
+            "resolution_strategy": None,
+            "can_install": result.probe_status == "installable",
             "requires_python": None,
         }
 
         client.table("packages").upsert(row).execute()
         logger.info(
-            "Resolved %s/%s@%s: python=%s can_install=%s deps=%d",
+            "Resolved %s/%s@%s: python=%s (%s) probe=%s deps=%d",
             owner,
             repo,
             sha[:8],
-            result.get("python_version"),
-            result.get("can_install"),
-            len(result.get("final_dependencies", [])),
+            result.python_version,
+            result.interpreter_source,
+            result.probe_status,
+            len(result.env_payload),
         )

@@ -143,11 +143,11 @@ def test_dry_run_install_hands_uv_the_same_lines(captured_uv):
     assert WHEEL_URL in lines
 
 
-def test_real_install_hands_uv_the_same_lines(captured_uv):
-    dr.uv_install_real(CANDIDATES)
-    lines = captured_uv[0].splitlines()
-    assert "numpy>=1.25" in lines
-    assert WHEEL_URL in lines
+# ``uv_install_real`` had a test here too. The host-side real install is deleted
+# outright by the redesign (design doc §5): it installs against a different
+# interpreter and a different base image from the container, so it proved nothing
+# about the build while dominating the stage's runtime. The two uv entry points
+# that survive are covered above.
 
 
 def test_nothing_uv_would_reject_is_handed_to_it(captured_uv):

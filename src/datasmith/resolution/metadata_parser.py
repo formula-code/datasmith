@@ -48,6 +48,8 @@ def parse_pyproject(path: Path) -> CandidateMeta:
         rp = proj.get("requires-python")
         if isinstance(rp, str):
             meta.requires_python = rp
+        classifiers = proj.get("classifiers") or []
+        meta.classifiers.update([c for c in classifiers if isinstance(c, str)])
 
     bsys = data.get("build-system") or {}
     breq = bsys.get("requires") or []
@@ -66,6 +68,8 @@ def parse_setup_cfg(path: Path) -> CandidateMeta:
     if cfg.has_section("metadata"):
         meta.name = cfg.get("metadata", "name", fallback=None) or meta.name
         meta.version = cfg.get("metadata", "version", fallback=None) or meta.version
+        classifiers = cfg.get("metadata", "classifiers", raw=True, fallback="")
+        meta.classifiers.update([line.strip() for line in classifiers.splitlines() if line.strip()])
     if cfg.has_section("options"):
         if cfg.has_option("options", "install_requires"):
             reqs = [
@@ -315,6 +319,7 @@ def analyze_candidate_meta(cand: Candidate) -> CandidateMeta:
         meta.name = meta.name or m2.name
         meta.version = meta.version or m2.version
         meta.requires_python = meta.requires_python or m2.requires_python
+        meta.classifiers.update(m2.classifiers)
         meta.core_deps.update(m2.core_deps)
         for k, v in m2.extras.items():
             meta.extras.setdefault(k, set()).update(v)
