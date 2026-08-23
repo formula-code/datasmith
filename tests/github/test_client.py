@@ -1133,6 +1133,39 @@ class TestSearchFanOutCap:
         await gh.close()
 
     @respx.mock
+    async def test_the_cap_is_shared_across_repositories(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The multiplicative case, which is the one the number 80 came from.
+
+        Stage 2 builds one ``GitHubClient`` per stage and hands it to the
+        runner, so several repositories bisect through the same client at once.
+        The cap has to be per client, not per call: ~16 leaves times 5
+        repositories in flight is ~80 concurrent POSTs from a one-token pool.
+        """
+        monkeypatch.setattr(client_mod, "DATASMITH_GH_SEARCH_CAP", 1)
+        monkeypatch.setattr(client_mod, "DATASMITH_GH_SEARCH_CONCURRENCY", 3)
+        gh = GitHubClient(TokenPool(tokens=["ghp_a"]))
+
+        live = {"now": 0, "peak": 0}
+        seen: list[str] = []
+        respx.post("https://api.github.com/graphql").mock(side_effect=self._split_to_one_day_leaves(live, seen))
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                *(
+                    gh.fetch_merged_prs("octo", f"repo{n}", _dt("2026-08-01T00:00:00"), _dt("2026-08-09T00:00:00"))
+                    for n in range(4)
+                )
+            ),
+            timeout=30,
+        )
+
+        assert results == [[], [], [], []]
+        assert len(seen) == 60, len(seen)
+        assert live["peak"] <= 3, f"{live['peak']} concurrent search POSTs across 4 repositories, cap 3"
+
+        await gh.close()
+
+    @respx.mock
     async def test_a_cap_of_one_still_terminates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The tree is deeper than the cap, which is where a naive fix deadlocks."""
         monkeypatch.setattr(client_mod, "DATASMITH_GH_SEARCH_CAP", 1)
