@@ -354,9 +354,14 @@ def select_primary_candidate(  # noqa: C901
             nm = meta.name.lower().replace("_", "-")
             if nm == repo_suffix or nm == repo_suffix.replace("-", ""):
                 by_name.append(root)
+    # Every remaining tiebreak is sorted. The predecessor returned from
+    # unordered dict iteration, so scipp picked 'python', 'binder' or 'scippy'
+    # depending on the run — and 'binder' is a Binder config directory, not a
+    # package.
+    depth_then_name = lambda s: (len(Path(s).parts), s)
     if by_name:
-        return by_name[0]
-    for root, cand in candidates.items():
-        if cand.pyproject_path:
-            return root
-    return sorted(candidates.keys(), key=lambda s: (len(Path(s).parts), s))[0]
+        return sorted(by_name, key=depth_then_name)[0]
+    with_pyproject = [root for root, cand in candidates.items() if cand.pyproject_path]
+    if with_pyproject:
+        return sorted(with_pyproject, key=depth_then_name)[0]
+    return sorted(candidates.keys(), key=depth_then_name)[0]
