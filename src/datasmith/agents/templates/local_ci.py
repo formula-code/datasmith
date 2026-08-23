@@ -405,6 +405,28 @@ def _pytest_verify_fields(stdout: str) -> dict:
             fields["pytest_failed_at_base"] = int(summary["failed"])
         except (TypeError, ValueError):
             pass
+
+    # Recorded, NOT gated. Today any failing test fails the build, because
+    # run-tests.sh exits with pytest's code and run_tests treats rc != 0 as a
+    # failure. CalebBell/fluids#38 is rejected at 554/559 -- 99.1% -- for five
+    # numba TypingErrors, with zero collection errors.
+    #
+    # Whether that is the right policy needs a distribution, and the one we
+    # have is survivorship-biased: all 68 harbor_runs ratios come from
+    # containers that already passed this gate, and 60 of them sit at exactly
+    # 1.0. It cannot show how many repos are being rejected just below 1.0.
+    # So record the ratio on every run, including rejected ones, and set a
+    # threshold from that evidence rather than from one repository.
+    for key, name in (("total", "pytest_total_at_base"), ("passed", "pytest_passed_at_base")):
+        if key in summary:
+            try:
+                fields[name] = int(summary[key])
+            except (TypeError, ValueError):
+                pass
+    total = fields.get("pytest_total_at_base")
+    passed = fields.get("pytest_passed_at_base")
+    if isinstance(total, int) and isinstance(passed, int) and total > 0:
+        fields["pytest_pass_ratio"] = round(passed / total, 6)
     return fields
 
 

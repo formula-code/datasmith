@@ -526,7 +526,13 @@ class TestLocalCiPytestSummaryParsing:
             '"skipped": 1, "total": 13, "warnings": 0, "xfailed": 0, "xpassed": 0}'
         )
         fields = local_ci._pytest_verify_fields(stdout)
-        assert fields == {"pytest_collect_ok": True, "pytest_failed_at_base": 0}
+        assert fields == {
+            "pytest_collect_ok": True,
+            "pytest_failed_at_base": 0,
+            "pytest_total_at_base": 13,
+            "pytest_passed_at_base": 12,
+            "pytest_pass_ratio": 0.923077,
+        }
 
     def test_normal_summary_with_failures_but_no_collection_errors(self):
         """Failed tests alone (joblib's preexisting pytest-8 failures, per
@@ -538,7 +544,13 @@ class TestLocalCiPytestSummaryParsing:
             '"skipped": 1, "total": 13, "warnings": 0, "xfailed": 0, "xpassed": 0}'
         )
         fields = local_ci._pytest_verify_fields(stdout)
-        assert fields == {"pytest_collect_ok": True, "pytest_failed_at_base": 3}
+        assert fields == {
+            "pytest_collect_ok": True,
+            "pytest_failed_at_base": 3,
+            "pytest_total_at_base": 13,
+            "pytest_passed_at_base": 9,
+            "pytest_pass_ratio": 0.692308,
+        }
 
     def test_collection_error_flips_collect_ok_false(self):
         local_ci = self._module()
@@ -547,7 +559,12 @@ class TestLocalCiPytestSummaryParsing:
             '"skipped": 0, "total": 0, "warnings": 0, "xfailed": 0, "xpassed": 0}'
         )
         fields = local_ci._pytest_verify_fields(stdout)
-        assert fields == {"pytest_collect_ok": False, "pytest_failed_at_base": 0}
+        assert fields == {
+            "pytest_collect_ok": False,
+            "pytest_failed_at_base": 0,
+            "pytest_total_at_base": 0,
+            "pytest_passed_at_base": 0,
+        }
 
     # ── the no-ASV-benchmarks early-exit shape (hardcoded in run-tests.sh) ──
 
@@ -555,7 +572,13 @@ class TestLocalCiPytestSummaryParsing:
         local_ci = self._module()
         stdout = self._wrap('{"total": 0, "passed": 0, "failed": 0, "error": 0, "skipped": 0}')
         fields = local_ci._pytest_verify_fields(stdout)
-        assert fields == {"pytest_collect_ok": True, "pytest_failed_at_base": 0}
+        assert fields == {
+            "pytest_collect_ok": True,
+            "pytest_failed_at_base": 0,
+            "pytest_total_at_base": 0,
+            "pytest_passed_at_base": 0,
+        }
+        assert "pytest_pass_ratio" not in fields, "0/0 has no ratio; it must be absent, not 0.0"
 
     # ── the run_pytest=False template shape: no failed/error keys at all ──
 
@@ -760,3 +783,52 @@ class TestMeasurabilityProducerCoverage:
             if key == "local_ci":
                 continue  # produced by local_ci.py, covered by TestLocalCiSync
             assert key in block, f"emit_measure.py stopped emitting {key}, needed by {inv_id}"
+
+
+class TestPytestPassRatioIsRecordedNotGated:
+    """The pass ratio must be observable on every run, including rejected ones.
+
+    Today any failing test fails the build: run-tests.sh exits with pytest's
+    code and run_tests treats rc != 0 as a failure. CalebBell/fluids#38 is
+    rejected at 554/559 -- 99.1% -- for five numba TypingErrors, with zero
+    collection errors.
+
+    Whether that is right needs a distribution, and the one available is
+    survivorship-biased: all 68 harbor_runs ratios come from containers that
+    already passed this gate, 60 of them at exactly 1.0. It cannot show what is
+    being rejected just below 1.0. So record on every run and set a threshold
+    from that, not from one repository.
+    """
+
+    def _module(self):
+        return _load_local_ci_module()
+
+    def _wrap(self, body: str) -> str:
+        return f"FORMULACODE_TESTS_START\n{body}\nFORMULACODE_TESTS_END\n"
+
+    def test_the_fluids_numbers(self):
+        """554/559, the run that is currently rejected."""
+        local_ci = self._module()
+        stdout = self._wrap('{"error": 0, "failed": 5, "passed": 554, "skipped": 0, "total": 559}')
+        fields = local_ci._pytest_verify_fields(stdout)
+        assert fields["pytest_pass_ratio"] == 0.991055
+        assert fields["pytest_total_at_base"] == 559
+        assert fields["pytest_passed_at_base"] == 554
+
+    def test_a_perfect_run_is_exactly_one(self):
+        local_ci = self._module()
+        stdout = self._wrap('{"error": 0, "failed": 0, "passed": 6756, "skipped": 0, "total": 6756}')
+        assert local_ci._pytest_verify_fields(stdout)["pytest_pass_ratio"] == 1.0
+
+    def test_a_missing_total_yields_no_ratio(self):
+        """Absent input must skip, never read as a ratio of zero."""
+        local_ci = self._module()
+        stdout = self._wrap('{"error": 0, "failed": 0}')
+        assert "pytest_pass_ratio" not in local_ci._pytest_verify_fields(stdout)
+
+    def test_a_non_numeric_total_yields_no_ratio(self):
+        local_ci = self._module()
+        stdout = self._wrap('{"error": 0, "failed": 0, "passed": 1, "total": "many"}')
+        fields = local_ci._pytest_verify_fields(stdout)
+        assert "pytest_pass_ratio" not in fields
+        assert "pytest_total_at_base" not in fields
