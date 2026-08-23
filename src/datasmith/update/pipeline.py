@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import os
 from collections import Counter
+from collections.abc import Sequence
 from typing import Any
 
 from datasmith.utils import get_client, get_logger
 from datasmith.utils.db import fetch_all
 
 logger = get_logger("update.pipeline")
+
+# How many key values one ``in_filters`` request may carry.  PostgREST puts
+# the list in the query string, so the ceiling is a URL length, not a row
+# count: 200 forty-character merge SHAs is roughly 8.2 KB, past the 8 KB
+# request-line limit most proxies apply by default.  100 leaves headroom on
+# both the local socket and the Cloudflare Access tunnel.
+DATASMITH_KEY_FILTER_CHUNK: int = int(os.environ.get("DATASMITH_KEY_FILTER_CHUNK", "100"))
 
 
 def _parse_task_specs(specs: str) -> set[tuple[str, str, int]]:
@@ -122,12 +131,67 @@ def _cap_per_repo(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any
     return capped
 
 
+def _fetch_scoped(
+    table: str,
+    select: str,
+    chunk_column: str,
+    chunk_values: Sequence[Any],
+    *,
+    filters: dict[str, Any] | None = None,
+    also_in: dict[str, Sequence[Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Read *table* restricted, server-side, to the keys the caller asked about.
+
+    Every skip-set read in this module used to pull its whole table and then
+    discard almost all of it in Python — the same shape that made stage 2 read
+    265 181 rows to decide 35 upserts.  The fix has to filter server-side, and
+    an equality filter is not enough: ``owner=pandas-dev, repo=pandas`` still
+    returns every row that repository ever produced.
+
+    *chunk_values* is split into ``DATASMITH_KEY_FILTER_CHUNK``-sized requests
+    because PostgREST encodes the list into the URL.  *also_in* is applied
+    whole on every request, so put the short lists there.
+
+    Duplicate rows cannot appear across chunks: the chunks partition the values
+    of one column, so a row matches at most one of them.
+    """
+    values = list(dict.fromkeys(chunk_values))
+    if not values:
+        return []
+    rows: list[dict[str, Any]] = []
+    for start in range(0, len(values), DATASMITH_KEY_FILTER_CHUNK):
+        chunk = values[start : start + DATASMITH_KEY_FILTER_CHUNK]
+        rows.extend(
+            fetch_all(
+                table,
+                select=select,
+                filters=filters,
+                in_filters={chunk_column: chunk, **(also_in or {})},
+            )
+        )
+    return rows
+
+
 def _fetch_repo_descriptions(rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
-    """Batch-fetch repo descriptions for a set of rows with owner/repo keys."""
+    """Batch-fetch repo descriptions for a set of rows with owner/repo keys.
+
+    Scoped to the owners and repositories actually present in *rows* rather
+    than reading every ``repositories`` row and filtering in Python.  The two
+    ``in`` lists are an over-approximation — their cross product can name a
+    repository that does not exist — so the result is still intersected
+    against ``repo_keys`` below.  ``repositories`` holds roughly 154 rows, so
+    this change is about not repeating the pattern, not about the seconds.
+    """
     repo_keys = {(r["owner"], r["repo"]) for r in rows}
     descriptions: dict[tuple[str, str], str] = {}
     if repo_keys:
-        desc_rows = fetch_all("repositories", select="owner, repo, description")
+        desc_rows = _fetch_scoped(
+            "repositories",
+            select="owner, repo, description",
+            chunk_column="owner",
+            chunk_values=sorted({o for o, _ in repo_keys}),
+            also_in={"repo": sorted({r for _, r in repo_keys})},
+        )
         for rd in desc_rows:
             key = (rd["owner"], rd["repo"])
             if key in repo_keys:
@@ -412,11 +476,22 @@ class Pipeline:
             logger.info("Imported %d pull request records from offline source", n)
 
     async def _classify_prs(self, start_date: str, end_date: str) -> None:
+        # The window means merged_at, half-open [start, end), in every stage.
+        # This filtered created_at inclusively at both ends while stage 2
+        # windowed merged_at, and the two defects masked each other exactly:
+        # stage 2 stored only PRs both created and merged in the window, so no
+        # stored row could ever have created_at before the window and the
+        # column mismatch never showed. Repairing stage 2 alone would scrape
+        # PRs that then never advanced past here.
+        #
+        # ``patch`` is selected so a resumed run reuses a diff stage 3 already
+        # paid a REST call for. The read is window-filtered, which is what
+        # keeps it clear of the unfiltered-large-column guardrail in db.py.
         classify_kwargs: dict[str, Any] = {
             "select": "owner, repo, issue_number, title, body, patch, file_changes",
             "filters": {"is_performance_commit_symbolic": True},
-            "gte_filters": {"created_at": start_date},
-            "lte_filters": {"created_at": end_date},
+            "gte_filters": {"merged_at": start_date},
+            "lt_filters": {"merged_at": end_date},
         }
         if not self._force:
             classify_kwargs["is_null"] = ["is_performance_commit"]
@@ -446,27 +521,40 @@ class Pipeline:
 
         from datasmith.agents.classifiers import ClassifyJudge, PerfClassifier
         from datasmith.agents.config import AgentConfig, configure_dspy
+        from datasmith.github.client import GitHubClient
         from datasmith.runners.classify_prs import ClassifyPRsRunner
+        from datasmith.utils.tokens import TokenPool
 
         configure_dspy(AgentConfig.from_env())
 
+        # Built after the dry-run return above: TokenPool raises when no GitHub
+        # token is configured, and a dry run must stay runnable without one.
+        pool = TokenPool()
+        gh = GitHubClient(pool)
         classifier = PerfClassifier()
         judge = ClassifyJudge()
         runner = ClassifyPRsRunner(
             classifier,
             judge,
+            github_client=gh,
             **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
         )
-        await runner.run(items)
+        try:
+            await runner.run(items)
+        finally:
+            # try/finally, unlike the bare close stages 2 and 5 do: a runner
+            # that raises would otherwise leak the httpx connection pool.
+            await gh.close()
 
     async def _resolve_packages(self, start_date: str, end_date: str) -> None:
-        # Get performance-classified PRs within the date range
+        # merged_at, half-open [start, end) — the same window stages 2, 3 and 5
+        # use. See _classify_prs for why filtering created_at here was invisible.
         rows = fetch_all(
             "pull_requests",
             select="owner, repo, merge_commit_sha",
             filters={"is_performance_commit": True},
-            gte_filters={"created_at": start_date},
-            lte_filters={"created_at": end_date},
+            gte_filters={"merged_at": start_date},
+            lt_filters={"merged_at": end_date},
         )
 
         # Deduplicate by (owner, repo, sha) — multiple PRs may share the same commit
@@ -482,10 +570,21 @@ class Pipeline:
             seen.add(key)
             items.append({"owner": r["owner"], "repo": r["repo"], "sha": sha})
 
-        # Skip items already in the packages table (unless --force)
+        # Skip items already in the packages table (unless --force).
+        #
+        # Scoped to the SHAs this window actually produced. The predecessor
+        # read every row of ``packages`` to decide a few dozen skips, so its
+        # cost grew with the table while the work stayed flat. A merge SHA is
+        # globally unique, so an ``in`` on ``sha`` alone is a tight predicate;
+        # the full (owner, repo, sha) triple is still what decides the skip.
         skipped = 0
         if items and not self._force:
-            existing_rows = fetch_all("packages", select="owner, repo, sha")
+            existing_rows = _fetch_scoped(
+                "packages",
+                select="owner, repo, sha",
+                chunk_column="sha",
+                chunk_values=[it["sha"] for it in items],
+            )
             existing_keys = {(e["owner"], e["repo"], e["sha"]) for e in existing_rows}
             before = len(items)
             items = [it for it in items if (it["owner"], it["repo"], it["sha"]) not in existing_keys]
@@ -511,30 +610,48 @@ class Pipeline:
         await runner.run(items)
 
     async def _render_problems(self, start_date: str, end_date: str) -> None:
-        # Fetch performance-classified PRs
+        # merged_at, half-open [start, end) — the same window stages 2, 3 and 4
+        # use. ``created_at`` stays in the select: the PR model renders it, but
+        # it is not what the window means.
         rows = fetch_all(
             "pull_requests",
             select="owner, repo, issue_number, merge_commit_sha, title, body, created_at",
             filters={"is_performance_commit": True, "is_performance_commit_symbolic": True},
             neq_filters={"merge_commit_sha": ""},
-            gte_filters={"created_at": start_date},
-            lte_filters={"created_at": end_date},
+            gte_filters={"merged_at": start_date},
+            lt_filters={"merged_at": end_date},
         )
 
-        # Only process PRs whose commit has can_install=True resolved packages
-        pkg_rows = fetch_all(
+        # Only process PRs whose commit has can_install=True resolved packages.
+        # Scoped to this window's merge SHAs rather than reading the whole
+        # packages table; can_install stays a server-side equality filter.
+        pkg_rows = _fetch_scoped(
             "packages",
             select="owner, repo, sha",
+            chunk_column="sha",
+            chunk_values=[sha for r in rows if (sha := r.get("merge_commit_sha", ""))],
             filters={"can_install": True},
         )
         installable: set[tuple[str, str, str]] = {(p["owner"], p["repo"], p["sha"]) for p in pkg_rows}
 
         repo_descriptions = _fetch_repo_descriptions(rows)
 
-        # Skip PRs already processed (have a candidate_prs row) unless --force
+        # Skip PRs already processed (have a candidate_prs row) unless --force.
+        #
+        # Scoped to the owners and repositories this window touched instead of
+        # reading every candidate_prs row. issue_number is not unique across
+        # repositories, so it cannot carry the predicate on its own; the two
+        # ``in`` lists over-approximate by their cross product and the full
+        # (owner, repo, issue_number) triple still decides the skip.
         existing_keys: set[tuple[str, str, int]] = set()
-        if not self._force:
-            existing_rows = fetch_all("candidate_prs", select="owner, repo, issue_number")
+        if rows and not self._force:
+            existing_rows = _fetch_scoped(
+                "candidate_prs",
+                select="owner, repo, issue_number",
+                chunk_column="owner",
+                chunk_values=sorted({r["owner"] for r in rows}),
+                also_in={"repo": sorted({r["repo"] for r in rows})},
+            )
             existing_keys = {(e["owner"], e["repo"], e["issue_number"]) for e in existing_rows}
 
         skipped_no_pkg = 0
