@@ -12,6 +12,27 @@ An image is honest when four things hold:
 decides what they mean. The split is deliberate and mirrors the build manifest:
 a script that both measures and judges can quietly stop doing one of them.
 
+THIS IS NOT A SECURITY BOUNDARY. Read this before trusting a verdict.
+
+The probe runs inside the container, under an interpreter the image's builder
+configured. `sitecustomize.py` is imported at startup, before the probe's first
+line, so anything the probe observes can be lied about. This was demonstrated,
+not theorised: 19 lines patching `Path.is_file` and `shutil.which` made this
+gate report HONEST on a container whose `grep` had been replaced.
+
+What it is good for is the careless case -- a half-built extension, a repo that
+discovers no benchmarks, a package that will not import, and a tamper nobody
+tried to hide. What it cannot do is resist a builder that wants to pass it.
+
+The defences that survive a determined builder are elsewhere, and none of them
+ask the container about itself:
+
+  * do not pay the builder for the property being checked
+  * rebuild from a recipe, so the builder's container is not the measured one
+  * read the image from the host (`docker export`, `docker history`) rather
+    than executing it
+  * ask questions whose answers are already known
+
 Checks are THREE-VALUED. A check whose input is absent is SKIPPED, never
 passed. That rule exists because the reverse cost us a corpus: a counter that
 returned 0 for "cannot detect" was read as "nothing detected".
