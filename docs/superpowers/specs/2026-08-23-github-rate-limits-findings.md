@@ -5,6 +5,15 @@
 **Question:** We hit rate limits everywhere we scrape GitHub with a personal
 access token. Do GitHub App installation access tokens have higher limits?
 
+> **Provenance.** Every source claim below was read from the working checkout on
+> branch **`spec/ingestion-window`** (local, unpushed; `client.py` tip at the
+> time of writing). That matters for one load-bearing statement: `main` does
+> **not** contain `fetch_merged_prs` or `_SEARCH_MERGED_PRS_QUERY` — grepping
+> `origin/main:src/datasmith/github/client.py` for either returns nothing. This
+> memo is committed on a branch based on `main`, so it does not sit alongside
+> the code it describes; cherry-pick it onto `spec/ingestion-window` if you want
+> the two together. Line numbers and query names will drift.
+
 ## Answer in one paragraph
 
 **A GitHub App will not raise the limits that matter, and the data shows we are
@@ -75,7 +84,10 @@ budget. Stage 3 also already self-paces at
 `DATASMITH_CLASSIFY_DIFF_MIN_INTERVAL_S=0.75` (~4,800/hr).
 
 **Live `/rate_limit`** on the configured PAT: `core 5000/5000 used=0`,
-`graphql 4968/5000`.
+`graphql 4968/5000`. Treat this as the weakest of the three legs — it was
+sampled on a freshly-rotated token with no pipeline running, so it shows the
+buckets are not *stuck* exhausted, not that they never fill during a run. The
+cost measurements and the 684-diff count are the robust legs.
 
 ## Reason 3 — the 403s on record are historical, from deprecated code
 
@@ -190,11 +202,19 @@ credential-lifecycle merits. Run this before building anything.
    stage 3 already has. Small, no behaviour change, and it removes the exact
    ambiguity that made this investigation indirect.
 
-2. **Treat token expiry as the known live failure.** Either move to App
-   installation tokens *for their auto-refresh*, or — far cheaper — add a
-   preflight assertion that fails loudly on 401 and warns when the PAT is within
-   N days of expiry (`GET /rate_limit` response headers expose the token's
-   validity; `preflight.py` already calls that endpoint).
+2. **Treat credential failure as the known live problem.** Either move to App
+   installation tokens *for their auto-refresh*, or — far cheaper — make
+   `preflight.py` fail loudly and specifically on 401 rather than letting 23
+   identical stack traces land in `runner_failures`; it already calls
+   `GET /rate_limit`, so the check costs one status-code branch.
+
+   A proactive "your PAT expires in N days" warning is *not* available on this
+   token: a HEAD to `/rate_limit` with it returns no
+   `github-authentication-token-expiration` header (verified — the response
+   carries only the `X-RateLimit-*` family and
+   `x-accepted-github-permissions: allows_permissionless_access=true`). GitHub
+   emits that header only for tokens that carry an expiry, so it cannot be
+   relied on here. Assert on 401; don't build the expiry forecast.
 
 3. **Do not build the App integration for rate-limit reasons.** It is the most
    expensive option on the table, and the measurements say it addresses a limit
