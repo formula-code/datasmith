@@ -311,10 +311,15 @@ error. That is the repository's warning policy, not a broken container.
 - **Harbor.** Started on networkx#8148 and bottleneck#468 at 12:22 with
   `--harbor-environment docker`. Still running at the time of writing. No
   result yet, so no claim either way.
-- **Missing dependencies, 4 repos.** `salem` (oggm), `pkg_resources` (mars),
-  `imp` (satpy), `src` (napari). `imp` was removed in Python 3.12 and
-  `pkg_resources` needs setuptools present, so at least two are stage-4 Python
-  selection problems rather than resolution gaps.
+- **Import failures, 4 repos, and they are NOT all the same problem.** Filing
+  these together as "missing dependency" would send the next reader after the
+  wrong fix.
+  - `imp` (satpy) and `pkg_resources` (mars) are **Python-version
+    misassignment**. Both got `asv_3.12`. `imp` was removed in 3.12, and
+    setuptools is no longer present by default. Neither is a resolution gap;
+    stage 4 chose a Python the code cannot run on.
+  - `salem` (oggm) and `src` (napari) may be genuine resolution gaps. Not
+    diagnosed.
 - **`warp-lang==1.13.0.dev20260302`** (mujoco_warp) no longer exists on PyPI.
   Stage 4 pinned a dev build. Version-reproducibility cannot be achieved
   against a version that was deleted.
