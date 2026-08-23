@@ -239,11 +239,29 @@ for v in $PY_VERSIONS; do
     e="asv_$v"
     micromamba env list | awk '{print $1}' | grep -qx "$e" || { echo "missing $e"; exit 1; }
     PYTHON_BIN="/opt/conda/envs/$e/bin/python"
-    # Uninstall PUT by uv pip and micromamba to ensure clean re-install
+    # Uninstall PUT by uv pip and micromamba to ensure clean re-install.
+    #
+    # --no-prune-deps is load-bearing. micromamba prunes dependencies by
+    # default, so removing the package under test also removes everything that
+    # was pulled in only for it. That cascade can take the environment's own
+    # interpreter with it: apache/arrow#1646 unlinked libarchive here and then
+    # died several steps later on "No virtual environment or system Python
+    # installation found for path /opt/conda/envs/asv_3.8/bin/python". We want
+    # exactly one package gone, never its dependency closure.
     [ -n "$PKG_NAME" ]    && uv pip uninstall --python "$PYTHON_BIN" "$PKG_NAME"    || true
     [ -n "$IMPORT_NAME" ] && uv pip uninstall --python "$PYTHON_BIN" "$IMPORT_NAME" || true
-    [ -n "$PKG_NAME" ]    && micromamba remove -n "$e" -y "$PKG_NAME"    || true
-    [ -n "$IMPORT_NAME" ] && micromamba remove -n "$e" -y "$IMPORT_NAME" || true
+    [ -n "$PKG_NAME" ]    && micromamba remove -n "$e" -y --no-prune-deps "$PKG_NAME"    || true
+    [ -n "$IMPORT_NAME" ] && micromamba remove -n "$e" -y --no-prune-deps "$IMPORT_NAME" || true
+
+    # Every command above ends in `|| true`, so a removal that damages the
+    # environment is silent here and surfaces much later as an unrelated uv
+    # error. Check the interpreter still runs, and name the cause if it does not.
+    if ! "$PYTHON_BIN" -c "import sys" >/dev/null 2>&1; then
+        echo "Error: removing '$PKG_NAME'/'$IMPORT_NAME' broke the interpreter in '$e'." >&2
+        echo "       $PYTHON_BIN no longer runs. This is a package-removal cascade," >&2
+        echo "       not a dependency-resolution failure." >&2
+        exit 1
+    fi
 done
 
 
