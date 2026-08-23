@@ -1,0 +1,19 @@
+{
+  "cutoff_relaxed": false,
+  "cutoff_used": "2026-01-02T14:28:44Z",
+  "dropped_requirements": [],
+  "env_payload": [
+    "flit-core==3.12.0"
+  ],
+  "interpreter_source": "requires-python",
+  "owner_repo": "pypa/packaging",
+  "package_name": "packaging",
+  "package_version": null,
+  "primary_root": ".",
+  "probe_status": "installable",
+  "python_version": "3.12",
+  "repo_name": "pypa/packaging",
+  "requires_python": ">=3.8",
+  "resolver_version": "2026.08.23",
+  "sha": "c39b6da9ab11f649f5497a11628f9dfc98380bb2"
+}

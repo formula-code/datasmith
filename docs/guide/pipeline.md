@@ -109,23 +109,35 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 3 --force
 
 ### Stage 4: Resolve Packages
 
-For each performance-classified PR, checks out the repository at the merge commit SHA and resolves a complete, pinned Python dependency set. The process:
+For each performance-classified PR, checks out the repository at the merge commit SHA and emits a dependency **seed** — an environment in which the repository builds and asv runs. It is not a record of the environment as it was at commit time, and it is not a verdict on whether the container builds. Six units compose the stage:
 
-1. **Parse metadata** — Reads `pyproject.toml`, `setup.py`, or `setup.cfg` to extract declared dependencies
-2. **Resolve with uv** — Runs `uv pip compile` to produce a fully pinned requirements file, trying multiple Python versions if needed
-3. **Validate installability** — Confirms the resolved set can actually be installed (sets `can_install = True/False`)
+1. **discover** — Scan the commit tree for packaging roots and choose one, deterministically. A directory that holds only a `requirements.txt` or an `environment.yml` is not a packaging root. The choice is stored in `primary_root` and becomes the image's `BUILD_ROOT`, so apache/arrow builds in `python/` rather than at the repository root
+2. **declare** — Read only what the project *states* it needs: `[project].dependencies` and its optional groups, `setup.cfg` `install_requires`, a static `setup.py` parse, `[build-system].requires`, and the `asv.conf.json` `matrix.req`. No `requirements*.txt` glob, no `environment.yml`, and no names inferred from import statements. Every string is parsed with `packaging.requirements.Requirement`; one that will not parse is dropped and recorded, never rewritten, and never aborts its siblings
+3. **interpreter** — Walk a declared ladder and record the rung that answered in `interpreter_source`: `requires-python`, then trove classifiers, then `asv.conf.json` `pythons`, then the newest release that existed at commit date. `DATASMITH_PYTHON_FLOOR` and `DATASMITH_PYTHON_CEILING` bound the answer
+4. **pin** — One `uv pip compile` over the declared runtime and build requirements, with the commit date as `--exclude-newer`. If the cutoff makes the set unsatisfiable the compile is retried without it, and `cutoff_used` is then null. No `--all-extras`: extras are opt-in
+5. **probe** — A dry-run install against the interpreter that was chosen, recorded in `probe_status` and `probe_log`. **Advisory only**
+6. **emit** — One row per `(owner, repo, sha)`, carrying provenance: `resolver_version`, `uv_version`, `resolved_at`
 
-The resolved dependency set (`env_payload`) and the Python version used are stored in the `packages` table. These are consumed by stage 6 to build `docker_build_env.sh` — the shell script that installs dependencies inside the Docker image.
+Benchmark tooling — `asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer` — is stripped from the declared set *and* from the compiled one. The base image already installs it, and naming it again in `env_payload` only lets the seed fight the image over versions.
+
+The seed may legitimately be empty. Where a project declares no dependencies, stage 4 writes `[]` and sets `probe_status = 'empty'`.
+
+The resolved dependency set (`env_payload`) and the Python version used are consumed by stage 6 to build `docker_build_env.sh` — the shell script that installs dependencies inside the Docker image.
 
 ```bash
 fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 4
 ```
 
-**Writes to:** `packages` table (`env_payload`, `python_version`, `can_install`)
+**Writes to:** `packages` table (`env_payload`, `python_version`, `interpreter_source`, `primary_root`, `requires_python`, `probe_status`, `probe_log`, `dropped_requirements`, `cutoff_used`, `resolver_version`, `uv_version`, `resolved_at`)
 **Runner:** `ResolvePackagesRunner`
 
-!!! note
-    Only PRs with `can_install = True` proceed to later stages. If resolution fails for a commit, check the `runner_failures` table for the error.
+!!! note "Stage 4 gates nothing"
+    Every PR proceeds, whatever the probe saw. `probe_status` is a queue *ordering* key — `installable`, then `unresolved`, then `failed`, then `empty` — so confidently-installable seeds run first and `--tasks-per-repo` caps a run. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container and iterates on failure; its agent can replace the seed outright through `env_payload_override.json`.
+
+    `can_install` is deprecated. It is nullable, and the redesigned runner neither reads nor writes it. Rows carrying `resolver_version = 'legacy'` came from the predecessor and have no provenance.
+
+!!! tip "Diagnosing a thin seed"
+    `dropped_requirements` records every requirement that was refused and why, so a missing package is diagnosable without a re-run. It is JSON-encoded text, like `env_payload`, so query it with a cast: `dropped_requirements::jsonb`. If resolution raises outright, check the `runner_failures` table.
 
 ---
 
@@ -260,7 +272,7 @@ All runners extend `BaseRunner`, which provides:
 |-------|-----------|---------|
 | `repositories` | Stage 1 | Tracked GitHub repos (language, stars, topics) |
 | `pull_requests` | Stages 2–3 | PR metadata, classification, diffs, rendered problems |
-| `packages` | Stage 4 | Pinned `env_payload` and `python_version` per commit |
+| `packages` | Stage 4 | Pinned `env_payload` and `python_version` per commit, plus `interpreter_source`, `primary_root`, the advisory `probe_status`, `dropped_requirements`, and provenance |
 | `candidate_prs` | Stage 5 | Deconstructed PR context for re-rendering |
 | `candidate_containers` | Stage 6 | Successful agent-generated build scripts per SHA |
 | `error_logs` | Stage 6 | Per-attempt synthesis results (agent output, failure details) |

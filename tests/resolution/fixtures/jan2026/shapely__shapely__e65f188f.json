@@ -1,0 +1,20 @@
+{
+  "cutoff_relaxed": false,
+  "cutoff_used": "2026-01-29T13:59:14Z",
+  "dropped_requirements": [],
+  "env_payload": [
+    "cython==3.2.4",
+    "numpy==2.4.1"
+  ],
+  "interpreter_source": "requires-python",
+  "owner_repo": "shapely/shapely",
+  "package_name": "shapely",
+  "package_version": null,
+  "primary_root": ".",
+  "probe_status": "installable",
+  "python_version": "3.12",
+  "repo_name": "shapely/shapely",
+  "requires_python": ">=3.11",
+  "resolver_version": "2026.08.23",
+  "sha": "e65f188f5330f0c881d22324bd392b855e9ac9a8"
+}

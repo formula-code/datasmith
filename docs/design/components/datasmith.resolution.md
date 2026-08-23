@@ -9,13 +9,16 @@ tags:
 
 This document covers the `ds.resolution` module — dependency resolution for Python repositories. Given a commit SHA and repository name, this module discovers packaging metadata, resolves pinned dependencies via `uv`, validates installability, and persists results to a `packages` Supabase table. It runs as pipeline stage 3.5 — after `classify_prs` and before `synthesize_images` — providing the `env_payload` and `python_version` that the synthesizer requires to produce correct Docker build contexts.
 
-!!! warning "Being redesigned"
+!!! warning "Redesigned — read the guide first"
 
-    Stage 4 is mid-rewrite against
+    Stage 4 was rewritten against
     `docs/superpowers/specs/2026-08-23-stage4-resolution-redesign-design.md`, which
-    is the authority on intent. The pages below still describe the two-strategy
-    orchestrator; the modules that have already been deleted are removed from this
-    page as they go, and the rest of the prose is corrected when the rewrite lands.
+    is the authority on intent. The module tables and the `packages` schema below
+    are current. **The prose, the flow diagrams and the code snippets below are
+    not**: they describe the two-strategy orchestrator this redesign replaced, and
+    they are kept as the record of how the stage was first designed. For what the
+    stage does now — the six units, the seed contract, and why `can_install` no
+    longer gates — see [the pipeline guide](../../guide/pipeline.md#stage-4-resolve-packages).
 
 ## High level overview
 
@@ -70,12 +73,23 @@ CREATE TABLE IF NOT EXISTS packages (
     package_version TEXT,           -- Version from metadata
     python_version TEXT NOT NULL,   -- Selected Python version (e.g., "3.10")
     env_payload TEXT NOT NULL,      -- JSON array of pinned requirement strings
-    build_commands JSONB,           -- ASV build commands
-    install_commands JSONB,         -- ASV install commands
-    primary_root TEXT,              -- Relative path to primary package root
-    resolution_strategy TEXT,       -- Strategy description for debugging
-    can_install BOOLEAN NOT NULL,   -- Whether dry-run + real install succeeded
+    primary_root TEXT,              -- Relative path to primary package root; the image's BUILD_ROOT
     requires_python TEXT,           -- Requires-Python constraint from metadata
+
+    -- Advisory probe (migration 00028). Orders the stage 5 queue; excludes nobody.
+    probe_status TEXT,              -- installable | unresolved | failed | empty
+    probe_log TEXT,                 -- dry-run output
+
+    -- Provenance (migration 00028)
+    interpreter_source TEXT,        -- which ladder rung chose python_version
+    dropped_requirements TEXT NOT NULL DEFAULT '[]',  -- JSON-encoded [{req, reason}]
+    cutoff_used TIMESTAMPTZ,        -- the commit-date cutoff applied; null when relaxed
+    resolver_version TEXT,          -- 'legacy' marks a row the predecessor wrote
+    uv_version TEXT,
+    resolved_at TIMESTAMPTZ,
+
+    -- Deprecated. Nullable since migration 00028; neither read nor written.
+    can_install BOOLEAN,
 
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -83,12 +97,17 @@ CREATE TABLE IF NOT EXISTS packages (
 );
 ```
 
+`build_commands`, `install_commands` and `resolution_strategy` were dropped: a
+reader audit found no consumer for any of the three outside the runner that wrote
+them, and the explicit provenance columns say what `resolution_strategy` was
+trying to.
+
 **Key design decisions:**
 
 - **Keyed by `(owner, repo, sha)`** — not by `issue_number`. Multiple PRs can share the same base SHA within a repo; resolution results are identical for the same commit, so we deduplicate at the SHA level.
 - **`env_payload`** is a JSON array of pinned requirement strings (e.g., `["numpy==1.24.3", "scipy==1.11.0"]`). This is passed directly to `docker_build_env.sh` via Docker build args.
-- **`can_install`** filters out commits where dependency resolution failed — the synthesizer should not attempt these.
-- **`dry_run_log`** and `excluded_*` dicts from the archive are intentionally omitted. They were useful for debugging the resolution module itself but are not consumed downstream. If needed for debugging, they can be logged to `runner_failures`.
+- **`can_install`** was meant to filter out commits where dependency resolution failed. It did — 3,245 rows of 13,016, and 3,217 performance PRs that no stage ever attempted. It is now deprecated; **`probe_status`** replaces it as an *ordering* key, never a filter, and stage 6 is the sole arbiter of buildability.
+- **`dropped_requirements`** records every requirement that was refused and why, so a thin seed is diagnosable without a re-run. It is JSON-encoded text, exactly like `env_payload`, so query it with a cast: `dropped_requirements::jsonb`. It supersedes the `dry_run_log` and `excluded_*` dicts this design originally omitted.
 
 ### Impact on `pull_requests` table
 

@@ -57,7 +57,7 @@ fc-data --stage 7 --harbor-limit 10                                    # Smoke t
 1. **scrape_repos** — Fetch repository metadata from GitHub
 2. **scrape_commits** — Scrape merged PR commits and patches
 3. **classify_prs** — LLM-based performance classification
-4. **resolve_packages** — Resolve Python dependencies via `uv pip compile`, persist to `packages` table
+4. **resolve_packages** — Emit one dependency **seed** per commit, and the story of how it was reached. Six units compose it: `discover` picks the packaging root, `declare` reads only what the project states it needs, `interpreter` walks a declared ladder (`requires-python` → trove classifiers → `asv.conf.json` `pythons` → newest release at commit date) and records the rung in `interpreter_source`, `pin` runs one `uv pip compile` with the commit date as `--exclude-newer`, `probe` dry-runs the result, and the row is written. What it deliberately does not read: `requirements*.txt` globs, `environment.yml`, and import statements — so a project that declares nothing gets an empty seed and says so, rather than a list of invented PyPI names. Benchmark tooling (`asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer`) is stripped from both the declared set and the compiled one: the base image owns it, and a second owner only starts a version fight. **The stage gates nothing.** `can_install` is retained, nullable, and no longer read or written; `probe_status` (`installable` → `unresolved` → `failed` → `empty`) orders the stage 5 queue best-first and excludes nobody. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container.
 5. **render_problems** — Scrape linked issues and render deconstructed problem contexts
 6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
 7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
@@ -114,7 +114,17 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_RL_DEFAULT_PAUSE_S`, `DATASMITH_RL_PAUSE_JITTER_S`,
   `DATASMITH_RL_MAX_RETRIES`, `DATASMITH_NEIGHBOR_WINDOW_DAYS`,
   `DATASMITH_NEIGHBOR_CAP`, `DATASMITH_BENCH_SCRAPE_MAX_FILE_BYTES`,
-  `DATASMITH_BENCH_SCRAPE_DIRS`, `DATASMITH_ASV_PIP_ENV_TYPES`.
+  `DATASMITH_BENCH_SCRAPE_DIRS`, `DATASMITH_ASV_PIP_ENV_TYPES`,
+  `DATASMITH_PYTHON_FLOOR`, `DATASMITH_PYTHON_CEILING`.
+- `DATASMITH_PYTHON_FLOOR` (default `3.8`) and `DATASMITH_PYTHON_CEILING`
+  (default `3.12`) bound stage 4's interpreter ladder. The floor is the oldest
+  interpreter the container toolchain still supports; the ceiling is the newest
+  it is known to build against, and it is a ceiling on purpose — a fresh run
+  must not silently start choosing an interpreter no existing image was built
+  with. Raise the ceiling only together with a base-image rebuild **and a
+  regeneration of `tests/resolution/fixtures/jan2026/`** — all 13 golden
+  fixtures record the ceiling as their `python_version`, so a raise fails
+  every one of them at once.
 - `DATASMITH_ASV_PIP_ENV_TYPES` (default `virtualenv,venv,existing`) is the
   comma-separated set of `asv.conf.json` `environment_type` values whose
   `matrix` names PyPI distributions. Every other value — `conda`, `mamba`,
@@ -154,7 +164,7 @@ Six tables are readable by the `anon` role: `repositories`, `pull_requests`, `ca
 | Table | Purpose | Populated by |
 |-------|---------|-------------|
 | `pull_requests` | All scraped PRs with classification, patches, rendered problems, container names | Stages 1-3, 5-6 |
-| `packages` | Resolved `env_payload` (pinned deps) and `python_version` per commit | Stage 4 |
+| `packages` | One seed per `(owner, repo, sha)`: `env_payload` (pinned deps) and `python_version`, plus `interpreter_source` (which ladder rung chose that interpreter), `primary_root`, `requires_python`, the advisory `probe_status` / `probe_log`, `dropped_requirements` (JSON-encoded text, like `env_payload` — every requirement that was refused, with its reason), and provenance: `resolver_version`, `uv_version`, `resolved_at`, `cutoff_used` (null when the commit-date cutoff had to be relaxed). `can_install` is deprecated — nullable, no longer read or written; `resolver_version = 'legacy'` marks the rows the predecessor wrote. | Stage 4 |
 | `candidate_containers` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA | Stage 6 (on success) |
 | `harbor_runs` | One row per Harbor oracle trial for a synthesized container: `max_speedup`, `geomean_speedup`, `n_benchmarks`, `wallclock_sec`, `reward_payload`, `status`. One-to-many FK on `candidate_containers(owner, repo, sha)`. | Stage 7 |
 | `benchmark_information` | Per-benchmark speedup measurements from terminal-bench eval runs: one row per (run, owner/repo/issue, benchmark, agent, model). `speedup` is `(agent/nop)/(oracle/nop)` so 1.0 = parity with the human expert. `benchmark_type` (`time`/`mem`/`peakmem`/`track`) is a generated column derived from the ASV naming convention. Loaded out-of-band via `scripts/load_benchmark_information.py`. | (manual) |
