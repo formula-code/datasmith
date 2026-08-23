@@ -343,55 +343,20 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                     def _compile_or_pass_through(
                         reqs: list[str], *, strict_cutoff: bool, py_ver: str
                     ) -> tuple[list[str], str]:
-                        from .blocklist import (
-                            add_to_blocklist,
-                            extract_failing_package,
-                            remove_package_from_requirements,
-                        )
-
-                        current_reqs = list(reqs)
-                        max_compile_retries = 3
-                        compile_retry_count = 0
-
-                        while compile_retry_count <= max_compile_retries:
-                            try:
-                                resolved = uv_compile(
-                                    current_reqs,
-                                    python_version=py_ver,
-                                    cutoff_rfc3339=cutoff if strict_cutoff else None,
-                                )
-                                strat = (
-                                    f"{'cutoff=strict' if strict_cutoff else 'cutoff=none'}, extras=on, python={py_ver}"
-                                )
-                                if compile_retry_count > 0:
-                                    strat = f"{strat} (compile-healed: {compile_retry_count} pkgs)"
-                                return resolved, strat
-                            except Exception as e:
-                                error_msg = str(e)
-
-                                if compile_retry_count < max_compile_retries and (
-                                    "was not found in the package registry" in error_msg
-                                    or "Because there are no versions of" in error_msg
-                                ):
-                                    failing_pkg = extract_failing_package(error_msg)
-                                    if failing_pkg:
-                                        if add_to_blocklist(failing_pkg):
-                                            logger.info(
-                                                "Compile self-healing: Blocking '%s' (retry %d/%d)",
-                                                failing_pkg,
-                                                compile_retry_count + 1,
-                                                max_compile_retries,
-                                            )
-                                        current_reqs, was_removed = remove_package_from_requirements(
-                                            current_reqs, failing_pkg
-                                        )
-                                        if was_removed:
-                                            compile_retry_count += 1
-                                            continue
-
-                                return list(current_reqs), f"unresolved(pass-through): {e.__class__.__name__}"
-
-                        return list(current_reqs), "unresolved(max-retries-exceeded)"
+                        # One compile, one answer. The requirements that go in are
+                        # the ones this commit declared; a failure is reported as
+                        # such rather than being healed by dropping whichever
+                        # package uv named first.
+                        try:
+                            resolved = uv_compile(
+                                reqs,
+                                python_version=py_ver,
+                                cutoff_rfc3339=cutoff if strict_cutoff else None,
+                            )
+                        except Exception as e:
+                            return list(reqs), f"unresolved(pass-through): {e.__class__.__name__}"
+                        cutoff_label = "cutoff=strict" if strict_cutoff else "cutoff=none"
+                        return resolved, f"{cutoff_label}, extras=on, python={py_ver}"
 
                     if use_cleaned_pinned:
                         cleaned_unresolved = clean_pinned(cleaned_unresolved)
@@ -411,52 +376,11 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                     if not candidate_resolved and cleaned_unresolved:
                         candidate_resolved = list(cleaned_unresolved)
 
-                    # H) Validate via dry-run with self-healing retry
-                    from .blocklist import (
-                        add_to_blocklist,
-                        extract_failing_package,
-                        remove_package_from_requirements,
-                        should_retry_without_package,
-                    )
-
+                    # H) Validate via dry-run. The result describes the seed this
+                    # commit declared; a failing package is reported, not removed.
                     candidate_can_install, candidate_dry_run_log = uv_dry_run_install(
                         candidate_resolved, python_version=candidate_version, venv_path=candidate_venv_path
                     )
-
-                    max_retries = 3
-                    retry_count = 0
-                    current_deps = list(candidate_resolved)
-
-                    while (
-                        not candidate_can_install
-                        and retry_count < max_retries
-                        and should_retry_without_package(candidate_dry_run_log)
-                    ):
-                        failing_pkg = extract_failing_package(candidate_dry_run_log)
-                        if not failing_pkg:
-                            break
-
-                        if add_to_blocklist(failing_pkg):
-                            logger.info(
-                                "Self-healing: Blocking '%s' and retrying (attempt %d/%d)",
-                                failing_pkg,
-                                retry_count + 1,
-                                max_retries,
-                            )
-
-                        current_deps, was_removed = remove_package_from_requirements(current_deps, failing_pkg)
-                        if not was_removed:
-                            break
-
-                        candidate_can_install, candidate_dry_run_log = uv_dry_run_install(
-                            current_deps, python_version=candidate_version, venv_path=candidate_venv_path
-                        )
-                        retry_count += 1
-
-                    if retry_count > 0:
-                        candidate_resolved = current_deps
-                        if retry_count > 0 and candidate_can_install:
-                            candidate_strategy = f"{candidate_strategy} (self-healed: {retry_count} pkgs removed)"
 
                     python_version = candidate_version
                     resolved_dependencies = candidate_resolved

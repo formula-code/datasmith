@@ -236,15 +236,17 @@ def extract_pkg_name(req: str) -> str:
 def filter_requirements_for_pypi(  # noqa: C901
     requirements: Iterable[str], *, project_dir: Path, own_import_name: str | None
 ) -> list[str]:
-    """Remove things that are clearly not PyPI-installable."""
-    from .blocklist import get_blocklist, normalize_package_name
+    """Remove things that are clearly not PyPI-installable.
 
+    Every rule here is a property of the requirement string and of the project
+    being resolved. Nothing consults shared state, so resolving one repository
+    cannot change the answer for another, and the same input gives the same
+    answer whatever ran before it.
+    """
     local_names = project_local_names(project_dir)
     own_names = set()
     if own_import_name:
         own_names |= {own_import_name, own_import_name.replace("-", "_"), own_import_name.replace("_", "-")}
-
-    dynamic_blocklist = get_blocklist()
 
     out: list[str] = []
     for raw in requirements:
@@ -278,9 +280,6 @@ def filter_requirements_for_pypi(  # noqa: C901
         if low in STDLIB or name in NOT_REQUIREMENTS:
             continue
 
-        normalized_name = normalize_package_name(name)
-        if normalized_name in dynamic_blocklist:
-            continue
         if low in CONDA_SYSTEM_PACKAGES:
             continue
         if low in GENERIC_LOCAL_NAMES and name not in ALLOWLIST_COMMON_PYPI:
