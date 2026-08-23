@@ -9,6 +9,14 @@ tags:
 
 This document covers the `ds.resolution` module — dependency resolution for Python repositories. Given a commit SHA and repository name, this module discovers packaging metadata, resolves pinned dependencies via `uv`, validates installability, and persists results to a `packages` Supabase table. It runs as pipeline stage 3.5 — after `classify_prs` and before `synthesize_images` — providing the `env_payload` and `python_version` that the synthesizer requires to produce correct Docker build contexts.
 
+!!! warning "Being redesigned"
+
+    Stage 4 is mid-rewrite against
+    `docs/superpowers/specs/2026-08-23-stage4-resolution-redesign-design.md`, which
+    is the authority on intent. The pages below still describe the two-strategy
+    orchestrator; the modules that have already been deleted are removed from this
+    page as they go, and the rest of the prose is corrected when the rewrite lands.
+
 ## High level overview
 
 ```mermaid
@@ -96,12 +104,12 @@ The `candidate_containers` table already has `python_version` and `env_payload` 
 src/datasmith/resolution/
     __init__.py              # Public API: analyze_commit()
     orchestrator.py          # Main analyze_commit() function
-    metadata_parser.py       # Parse pyproject.toml, setup.cfg, setup.py, requirements.txt
+    metadata_parser.py       # Parse pyproject.toml, setup.cfg, setup.py
     dependency_resolver.py   # uv pip compile, dry-run, real install
     package_filters.py       # Filter non-PyPI packages, normalize requirements
     python_manager.py        # Python version selection, temporal filtering, uv wrapper
-    import_analyzer.py       # Fallback: infer deps from import statements
-    blocklist.py             # Persistent blocklist of packages that fail resolution
+    declare.py               # Collect declared runtime/build/extra requirements
+    requirements.py          # PEP 508 parsing; a bad string is dropped, never rewritten
     constants.py             # NOT_REQUIREMENTS, ALLOWLIST, SPECIAL_IMPORT_TO_PYPI
     models.py                # Candidate, CandidateMeta, ASVCfgAggregate
     git_utils.py             # Repo checkout, ASV config finder
@@ -161,15 +169,11 @@ Tries strict cutoff first, then relaxed (no cutoff) if strict fails.
 ### Strategy 2: Aggregate base requirements → `uv pip compile` (fallback)
 
 When Strategy 1 fails (e.g., the pyproject.toml uses dynamic dependencies, has build-time code generation, etc.):
-1. Collect base requirements from: packaging metadata (`core_deps`), ASV install commands, ASV matrix values, requirements.txt files, and optionally `uv build` wheel metadata or import-inferred deps
+1. Collect base requirements from: packaging metadata (`core_deps`), ASV install commands, ASV matrix values, and optionally `uv build` wheel metadata
 2. Filter through `filter_requirements_for_pypi()` to remove stdlib, local modules, conda packages, etc.
-3. Run `uv pip compile` with self-healing: if a package is "not found", extract its name, add to persistent blocklist, remove, and retry (up to 3 times)
+3. Run `uv pip compile`
 4. Dry-run validate, then real install validate
 5. On ABI errors, fall back to older Python versions
-
-### Self-healing blocklist
-
-A persistent JSON blocklist (`{CACHE_DIR}/package_blocklist.json`) tracks packages that fail resolution. When `uv pip compile` or `uv pip install --dry-run` fails because a package is not found on PyPI, the failing package name is extracted from the error message, added to the blocklist, and the resolution is retried without it. The blocklist is thread-safe (uses `threading.Lock`) and persists across runs.
 
 ## Data flow trace
 
@@ -205,13 +209,10 @@ flowchart TD
         Split["split_shell_command / normalize_requirement  [package_filters]"]
         Resolve["resolve_requirements_file  [package_filters]"]
         BuildMeta["uv_build_and_read_metadata  [dependency_resolver]"]
-        Imports["infer_runtime_from_imports  [import_analyzer]"]
         FilterPyPI["filter_requirements_for_pypi / clean_pinned  [package_filters]"]
         Compile["uv_compile  [dependency_resolver]"]
-        Heal["Self-healing retry loop:<br/>extract_failing_package → add_to_blocklist →<br/>remove_package_from_requirements  [blocklist]"]
-        DryRun2["uv_dry_run_install (same heal loop)"]
+        DryRun2["uv_dry_run_install"]
         Install2["uv_install_real"]
-        Compile --> Heal
     end
     Result["Return dict with resolution results"]
     Post["pd.DataFrame(...).add_prefix('analysis_')<br/>filter can_install == True<br/>filter resolution_strategy not startswith 'unresolved'<br/>save enriched parquet"]
@@ -298,9 +299,7 @@ class ASVCfgAggregate:
 | `parse_pyproject(path)` | Extract name, deps, extras from pyproject.toml (TOML) |
 | `parse_setup_cfg(path)` | Extract from setup.cfg (ConfigParser) |
 | `parse_setup_py(path)` | Heuristic AST-based extraction from setup.py (no code execution) |
-| `parse_requirements_txt(path)` | Line-by-line requirements parser |
-| `parse_conda_env_yaml(path)` | Extract pip deps from environment.yml |
-| `discover_candidates(commit)` | Scan commit tree for packaging files, return `dict[str, Candidate]` |
+| `discover_candidates(commit)` | Scan commit tree for packaging files, return `dict[str, Candidate]`. A directory holding only a `requirements.txt` or an `environment.yml` is not a packaging root |
 | `analyze_candidate_meta(candidate)` | Merge metadata from all sources into `CandidateMeta` |
 | `select_primary_candidate(repo_name, candidates, install_cmds, analyzed)` | Heuristic selection of the primary package |
 
@@ -326,7 +325,6 @@ class ASVCfgAggregate:
 | `resolve_requirements_file(commit, rel_path, seen)` | Recursively resolve `-r` includes |
 | `split_shell_command(cmd)` | Split on `&&`, `\|\|`, `;` |
 | `clean_pinned(reqs)` | Remove redundant lower-bound specifiers |
-| `fix_marker_spacing(req)` | Fix malformed PEP 508 markers |
 
 ### `python_manager.py`
 
@@ -336,22 +334,19 @@ class ASVCfgAggregate:
 | `filter_python_versions_by_commit_date(versions, commit_date)` | Temporal filtering with 90-day grace |
 | `run_uv(args, input_text, cwd, extra_env)` | Subprocess wrapper for all `uv` commands |
 
-### `import_analyzer.py`
+### `declare.py`
 
 | Function | Purpose |
 |----------|---------|
-| `top_level_imports_under(root)` | AST-parse all `.py` files for import statements |
-| `infer_runtime_from_imports(project_dir, own_import_name)` | Map imports to PyPI names |
+| `declare(meta, asv_matrix)` | Collect the runtime, build and extra requirements a project **declares**, plus the ones dropped and why. Reads no `requirements*.txt`, no `environment.yml` and no import statements |
 
-### `blocklist.py`
+### `requirements.py`
 
 | Function | Purpose |
 |----------|---------|
-| `get_blocklist()` | Load persistent blocklist from JSON |
-| `add_to_blocklist(package_name)` | Add package, persist to disk |
-| `extract_failing_package(error_log)` | Regex extract package name from uv error |
-| `should_retry_without_package(error_log)` | Determine if removal+retry is worth it |
-| `remove_package_from_requirements(reqs, pkg)` | Filter package from list |
+| `parse_many(raws)` | Parse with `packaging.requirements.Requirement`, isolating failures |
+| `to_requirement_lines(raws)` | The exact lines to hand to uv, keeping a bare archive URL |
+| `strip_inline_comment(text)` | Read a requirements-file line the way the file format defines it |
 
 ### `constants.py`
 
@@ -444,10 +439,10 @@ fi
 
 ## Verification
 
-- **Unit tests**: Mock `run_uv` and test each strategy path (direct compile success, fallback to aggregate, self-healing blocklist).
+- **Unit tests**: Mock `run_uv` and test each strategy path (direct compile success, fallback to aggregate).
 - **Integration test**: Run `analyze_commit` on a known commit (e.g., a pandas PR) and verify `can_install=True` with correct `python_version`.
 - **Resumption test**: Run the runner, kill mid-execution, restart — verify it skips already-resolved packages.
-- **Blocklist test**: Feed a requirements list with a nonexistent package, verify it's blocklisted and retried without it.
+- **Declaration test**: a `requirements.txt` and an `environment.yml` in the tree change neither the packaging root nor the declared requirements.
 
 ## Migration path
 

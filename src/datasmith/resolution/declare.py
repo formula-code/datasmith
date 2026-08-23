@@ -49,18 +49,27 @@ def _matrix_requirements(matrix: Mapping[str, set[str]] | None) -> list[str]:
 
     The keys carry the package names.  Passing a bare version such as ``0.29.21``
     to the resolver treats it as a package name, so the key must not be dropped.
-    An empty version set means "any version".  The string ``"None"`` means "do not
-    install in this combination" and is skipped rather than converted.
+
+    Three shapes of version set mean three different things, and conflating the
+    last two inverts the answer:
+
+    * an empty set -- the matrix names the package with no version, meaning "any
+      version": emit the bare name;
+    * a set holding at least one real version -- emit one pin per real version;
+    * a set whose every entry is ``"None"`` -- ASV's ``null``, meaning "do not
+      install in this combination".  Emit **nothing**.  Falling through to the
+      bare name here would turn "never install cython" into "install any cython".
     """
     out: list[str] = []
     for pkg, versions in (matrix or {}).items():
         name = str(pkg).strip()
         if not name or name.startswith("-"):
             continue
-        real = {v for v in (str(x).strip() for x in versions) if v and v != "None"}
+        stated = {v for v in (str(x).strip() for x in versions) if v}
+        real = {v for v in stated if v != "None"}
         if real:
             out.extend(f"{name}=={v}" for v in sorted(real))
-        else:
+        elif not stated:
             out.append(name)
     return out
 

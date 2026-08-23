@@ -9,7 +9,6 @@ from pathlib import Path
 
 # Regular expressions
 ASV_REGEX = re.compile(r"(^|/)\.?asv[^/]*\.jsonc?$")
-REQ_TXT_REGEX = re.compile(r"(^|/)(?:constraints(?:\.[-\w]+)?|requirements.*)\.txt$")
 ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 EXTRA_MARKER_RE = re.compile(r';\s*extra\s*==\s*["\']([^"\']+)["\']')
 
@@ -17,7 +16,6 @@ EXTRA_MARKER_RE = re.compile(r';\s*extra\s*==\s*["\']([^"\']+)["\']')
 PYPROJECT = "pyproject.toml"
 SETUP_CFG = "setup.cfg"
 SETUP_PY = "setup.py"
-ENV_YML_NAMES = {"environment.yml", "environment.yaml"}
 
 # Cache location for SQLite caches
 CACHE_LOCATION: str = os.getenv("CACHE_LOCATION", "cache.db")

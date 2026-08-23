@@ -12,9 +12,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
-from git import Commit, Repo
-
 from datasmith.utils import get_logger
+from git import Commit, Repo
 
 from .constants import ASV_REGEX, GIT_CACHE_DIR
 

@@ -1,9 +1,17 @@
-"""Parsing metadata from packaging files (pyproject.toml, setup.cfg, requirements.txt, etc.)."""
+"""Parsing metadata from the packaging files a project declares its dependencies in.
+
+``requirements*.txt`` and ``environment.yml`` are deliberately not among them.
+Globbing them harvested documentation and CI requirements as *runtime*
+dependencies (``sphinx``, ``towncrier``, ``torch``, ``cupy``, ``conda-build``)
+and conda-only names that do not exist on PyPI (``boost-cpp``, ``libprotobuf``).
+Discovering them also minted a packaging *root* out of any directory that held
+one, which is how scipp resolved to ``binder`` -- a Binder configuration
+directory, not a package.
+"""
 
 from __future__ import annotations
 
 import configparser
-import re
 import shlex
 from pathlib import Path
 from typing import Any, cast
@@ -15,20 +23,9 @@ except ImportError:
 
 from git import Commit
 
-from .constants import ENV_YML_NAMES, PYPROJECT, REQ_TXT_REGEX, SETUP_CFG, SETUP_PY
+from .constants import PYPROJECT, SETUP_CFG, SETUP_PY
 from .git_utils import materialize_blobs
 from .models import Candidate, CandidateMeta
-
-
-def parse_requirements_txt(path: Path) -> set[str]:
-    """Parse a requirements.txt file and return a set of requirement strings."""
-    out: set[str] = set()
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        out.add(line)
-    return out
 
 
 def parse_pyproject(path: Path) -> CandidateMeta:
@@ -275,55 +272,16 @@ def parse_setup_py(path: Path) -> CandidateMeta:  # noqa: C901
     return meta
 
 
-def parse_conda_env_yaml(path: Path) -> set[str]:  # noqa: C901
-    """Light parser for environment.yml/.yaml."""
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:
-        return set()
-    out: set[str] = set()
-    in_deps = False
-    in_pip = False
-    indent_pip = None
-    for raw in lines:
-        line = raw.rstrip()
-        if not line.strip() or line.strip().startswith("#"):
-            continue
-        if line.startswith("dependencies:"):
-            in_deps, in_pip, indent_pip = True, False, None
-            continue
-        if not in_deps:
-            continue
-        if re.match(r"\s*-\s*pip\s*:\s*$", line):
-            in_pip = True
-            indent_pip = len(line) - len(line.lstrip(" "))
-            continue
-        if in_pip:
-            if (len(line) - len(line.lstrip(" "))) > (indent_pip or 0):
-                m = re.match(r"\s*-\s*([^\s].+)$", line)
-                if m:
-                    out.add(m.group(1).strip())
-                continue
-            else:
-                in_pip = False
-        m = re.match(r"\s*-\s*([A-Za-z0-9_.-]+)(?:[=<>!].*)?$", line)
-        if m:
-            name = m.group(1)
-            if name.lower() not in {"python", "pip", "setuptools", "wheel"}:
-                out.add(name)
-    return out
+def discover_candidates(commit: Commit) -> dict[str, Candidate]:
+    """Discover the packaging roots of the repo at this commit.
 
-
-def discover_candidates(commit: Commit) -> dict[str, Candidate]:  # noqa: C901
-    """Discover packaging roots and requirement/conda files across the repo at this commit."""
+    A root is a directory holding ``pyproject.toml``, ``setup.cfg`` or
+    ``setup.py``.  A directory that only holds a ``requirements.txt`` or an
+    ``environment.yml`` declares nothing installable and is not a root.
+    """
 
     def predicate(rel: str) -> bool:
-        base = rel.rsplit("/", 1)[-1]
-        if base in (PYPROJECT, SETUP_CFG, SETUP_PY):
-            return True
-        if base in ENV_YML_NAMES:
-            return True
-        return bool(REQ_TXT_REGEX.search(rel))
+        return rel.rsplit("/", 1)[-1] in (PYPROJECT, SETUP_CFG, SETUP_PY)
 
     blob_map = materialize_blobs(commit, predicate, out_dirname="_pkg_blobs")
     candidates: dict[str, Candidate] = {}
@@ -343,10 +301,6 @@ def discover_candidates(commit: Commit) -> dict[str, Candidate]:  # noqa: C901
             cand.setup_cfg_path = local_path
         elif name == SETUP_PY:
             cand.setup_py_path = local_path
-        elif REQ_TXT_REGEX.search(rel):
-            cand.req_files.append(local_path)
-        elif name in ENV_YML_NAMES:
-            cand.env_yamls.append(local_path)
 
     return candidates
 
@@ -373,10 +327,6 @@ def analyze_candidate_meta(cand: Candidate) -> CandidateMeta:
         for k, v in m3.extras.items():
             meta.extras.setdefault(k, set()).update(v)
         meta.build_requires.update(m3.build_requires)
-    for req in cand.req_files:
-        meta.core_deps.update(parse_requirements_txt(req))
-    for y in cand.env_yamls:
-        meta.core_deps.update(parse_conda_env_yaml(y))
     return meta
 
 

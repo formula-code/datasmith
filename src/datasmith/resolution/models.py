@@ -14,8 +14,6 @@ class Candidate:
     pyproject_path: Path | None = None
     setup_cfg_path: Path | None = None
     setup_py_path: Path | None = None
-    req_files: list[Path] = field(default_factory=list)
-    env_yamls: list[Path] = field(default_factory=list)  # environment.yml/.yaml
 
 
 @dataclass

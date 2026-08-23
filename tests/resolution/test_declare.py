@@ -49,6 +49,21 @@ def test_matrix_none_version_is_dropped_not_stringified():
     assert "cython==None" not in d.runtime
 
 
+def test_a_matrix_entry_that_is_only_null_installs_nothing():
+    # ASV's `null` means "do not install in this combination". Emitting the bare
+    # key here would invert that into "install any version", and asserting only
+    # that 'cython==None' is absent cannot tell the two apart: that string never
+    # parses, so it lands in `dropped` under either implementation.
+    d = declare(_meta(), {"cython": {"None"}})
+    assert d.runtime == []
+    assert d.dropped == []
+
+
+def test_a_matrix_entry_with_one_real_version_keeps_it():
+    d = declare(_meta(), {"cython": {"None", "0.29.21"}})
+    assert d.runtime == ["cython==0.29.21"]
+
+
 def test_unparseable_declarations_are_recorded():
     d = declare(_meta(core_deps={"numpy", CORRUPTED_MARKER}), None)
     assert d.runtime == ["numpy"]
