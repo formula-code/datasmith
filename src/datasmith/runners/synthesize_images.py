@@ -51,7 +51,7 @@ def _ensure_prerequisite_images(owner: str, repo: str, py_version: str = "") -> 
 
     mgr = ImageManager()
     base_tag = get_base_image_name()
-    repo_tag = get_repo_image_name(owner, repo)
+    repo_tag = get_repo_image_name(owner, repo, py_version)
 
     if not mgr.image_exists(base_tag):
         logger.info("Building missing base image: %s", base_tag)
@@ -112,13 +112,17 @@ def _build_pr_image(
     return pr_tag
 
 
-def _push_pr_image(owner: str, repo: str, pr_tag: str) -> None:
-    """Push a previously-built PR image (and its repo parent) to DockerHub."""
+def _push_pr_image(owner: str, repo: str, pr_tag: str, py_version: str = "") -> None:
+    """Push a previously-built PR image (and its repo parent) to DockerHub.
+
+    ``py_version`` names the repo parent. Without it this pushes a tag nothing
+    ever built, and the ``except`` below turns that into a warning nobody reads.
+    """
     from datasmith.docker.images import get_repo_image_name
     from datasmith.docker.publish import DockerHubPublisher
 
     publisher = DockerHubPublisher()
-    repo_tag = get_repo_image_name(owner, repo)
+    repo_tag = get_repo_image_name(owner, repo, py_version)
 
     try:
         publisher.push(repo_tag)
@@ -202,7 +206,7 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
 # Building these is expensive and they're shared, so we avoid duplicate work.
 _prereq_lock = threading.Lock()
 # Track repos whose prerequisite images are confirmed present.
-_prereq_done: set[tuple[str, str]] = set()
+_prereq_done: set[tuple[str, str, str]] = set()
 
 
 def _fetch_neighbor_items(
@@ -494,7 +498,7 @@ class SynthesizeImagesRunner(BaseRunner):
 
         from datasmith.docker.images import get_repo_image_name
 
-        repo_image = get_repo_image_name(owner, repo)
+        repo_image = get_repo_image_name(owner, repo, py_version)
 
         # Run synthesizer in thread (Docker operations are blocking)
         ctx = await asyncio.to_thread(
@@ -537,7 +541,7 @@ class SynthesizeImagesRunner(BaseRunner):
         ).execute()
 
         # DB state is durable — safe to publish the image.
-        await asyncio.to_thread(_push_pr_image, owner, repo, pr_tag)
+        await asyncio.to_thread(_push_pr_image, owner, repo, pr_tag, py_version)
 
         # Spread the win: PRs created within ±DATASMITH_NEIGHBOR_WINDOW_DAYS
         # of this one likely share its dependency environment, so the context
@@ -637,8 +641,13 @@ class SynthesizeImagesRunner(BaseRunner):
 
     @staticmethod
     def _ensure_prereqs(owner: str, repo: str, py_version: str) -> None:
-        """Build base/repo images if missing, with dedup across threads."""
-        key = (owner, repo)
+        """Build base/repo images if missing, with dedup across threads.
+
+        The interpreter is part of the key because it is part of the tag. Keyed
+        on the repository alone, a second commit declaring a different Python
+        reads as already done and its parent image is never built.
+        """
+        key = (owner, repo, py_version)
         if key in _prereq_done:
             return
         with _prereq_lock:

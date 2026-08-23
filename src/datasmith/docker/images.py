@@ -37,11 +37,22 @@ def get_base_image_name() -> str:
     return f"{_docker_namespace()}/base:latest"
 
 
-def get_repo_image_name(owner: str, repo: str) -> str:
-    """Return the canonical tag for a repository image."""
+def get_repo_image_name(owner: str, repo: str, py_version: str = "") -> str:
+    """Return the canonical tag for a repository image.
+
+    The interpreter belongs in the tag because it is baked into the image. When
+    it was not, one image per repository was built from whichever commit ran
+    first, and 88% of repositories have commits that disagree on the
+    interpreter — so most containers ran a Python their env_payload was never
+    pinned against.
+
+    An empty ``py_version`` yields ``:latest``, which is what images built
+    before this change are tagged with.
+    """
     owner = owner.lower()
     repo = repo.lower()
-    return f"{_docker_namespace()}/{owner}-{repo}:latest".lower()
+    tag = f"py{py_version}" if py_version else "latest"
+    return f"{_docker_namespace()}/{owner}-{repo}:{tag}".lower()
 
 
 def get_pr_image_name(owner: str, repo: str, issue_number: int) -> str:
@@ -89,7 +100,7 @@ class ImageManager:
     ) -> str:
         ctx = context or _default_context()
         url = repo_url or f"https://github.com/{owner}/{repo}.git"
-        tag = get_repo_image_name(owner, repo)
+        tag = get_repo_image_name(owner, repo, py_version)
         logger.info("Building repo image: %s", tag)
         build_args: dict[str, str] = {
             "BASE_IMAGE": get_base_image_name(),
@@ -120,7 +131,7 @@ class ImageManager:
     ) -> str:
         ctx = context or _default_context()
         tag = get_pr_image_name(owner, repo, issue_number)
-        repo_image = get_repo_image_name(owner, repo)
+        repo_image = get_repo_image_name(owner, repo, py_version)
         logger.info("Building PR image: %s", tag)
         build_args: dict[str, str] = {
             "REPO_IMAGE": repo_image,

@@ -133,7 +133,7 @@ class TestBuildRepoImage:
             repo_url="https://github.com/numpy/numpy.git",
             py_version="3.11",
         )
-        assert tag == get_repo_image_name("numpy", "numpy")
+        assert tag == get_repo_image_name("numpy", "numpy", "3.11")
         call_kwargs = manager._mock_docker.build.call_args  # type: ignore[attr-defined]
         args = call_kwargs[1]["build_args"]
         assert args["REPO_URL"] == "https://github.com/numpy/numpy.git"
