@@ -414,7 +414,7 @@
     "zstd==1.5.7.2",
     "zxcvbn==4.4.28"
   ],
-  "interpreter_source": "commit-date",
+  "interpreter_source": "requires-python",
   "owner_repo": "PostHog/posthog",
   "package_name": "posthog",
   "package_version": "0.0.0",

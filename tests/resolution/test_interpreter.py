@@ -19,6 +19,42 @@ def test_rung_1_requires_python_wins():
     assert c == InterpreterChoice(version="3.11", source="requires-python")
 
 
+def test_an_exact_patch_declaration_still_names_rung_1():
+    # PostHog declares "==3.12.12". SpecifierSet.contains("3.12") is False for
+    # it, so the rung missed, the choice fell through, and the row said
+    # "commit-date" for a project that does declare requires-python. The version
+    # was right either way, which is what let the wrong provenance survive.
+    c = select_interpreter(requires_python="==3.12.12", trove_versions=[], asv_pythons=[], commit_date=JAN_2026)
+    assert c == InterpreterChoice(version="3.12", source="requires-python")
+
+
+@pytest.mark.parametrize(
+    "requires_python,expected",
+    [
+        ("==3.12.12", "3.12"),
+        ("==3.12", "3.12"),
+        ("==3.12.*", "3.12"),
+        ("~=3.11.5", "3.11"),
+        ("===3.12.1", "3.12"),
+        ("<=3.12.4", "3.12"),
+        (">=3.10", "3.12"),
+    ],
+)
+def test_a_pinning_declaration_selects_the_minor_version_it_pins(requires_python, expected):
+    c = select_interpreter(requires_python=requires_python, trove_versions=[], asv_pythons=[], commit_date=JAN_2026)
+    assert c == InterpreterChoice(version=expected, source="requires-python")
+
+
+def test_an_upper_bound_still_excludes_the_version_it_bounds():
+    # "<3.12" carries the release (3, 12) exactly as "==3.12.12" does. Reading
+    # the bound as a declaration of 3.12 would make this pick the one
+    # interpreter the project rules out.
+    for declaration in (">=3.9,<3.12", "<3.12", "!=3.12,>=3.9"):
+        c = select_interpreter(requires_python=declaration, trove_versions=[], asv_pythons=[], commit_date=JAN_2026)
+        assert c.version != "3.12", declaration
+        assert c.source == "requires-python", declaration
+
+
 def test_rung_2_trove_when_no_requires_python():
     c = select_interpreter(requires_python=None, trove_versions=["3.8", "3.9"], asv_pythons=[], commit_date=JAN_2026)
     assert c == InterpreterChoice(version="3.9", source="trove")

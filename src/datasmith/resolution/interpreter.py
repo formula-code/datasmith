@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from .python_manager import PY_RELEASES
 
@@ -41,6 +42,10 @@ DATASMITH_PYTHON_FLOOR: str = os.environ.get("DATASMITH_PYTHON_FLOOR", "3.8")
 DATASMITH_PYTHON_CEILING: str = os.environ.get("DATASMITH_PYTHON_CEILING", "3.12")
 
 _TROVE_RE = re.compile(r"Programming Language :: Python :: (\d+\.\d+)\s*$")
+
+#: Operators that pin a version rather than bound a range.  Only these may be
+#: read as naming a minor version at patch level; see :func:`_declares_minor`.
+_PINNING_OPERATORS = frozenset({"==", "===", "~="})
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,42 @@ def _declared_version(value: object) -> str:
     return text.strip()
 
 
+def _declares_minor(spec: SpecifierSet, candidate: str) -> bool:
+    """Does ``spec`` allow ``candidate``, a bare ``"major.minor"`` version?
+
+    ``SpecifierSet("==3.12.12").contains("3.12")`` is ``False``: the declaration
+    is exact and ``3.12`` is not ``3.12.12``.  PostHog declares exactly that, so
+    the rung matched nothing, the choice fell through, and the row recorded
+    ``commit-date`` for a project that does declare ``requires-python``.  The
+    interpreter was right; only its provenance was wrong, which is the harder
+    kind of wrong to notice.
+
+    The ladder compares minor versions, so a declaration that pins a patch level
+    of ``3.12`` is a declaration of ``3.12``.  **Only the pinning operators may
+    be read that way.**  ``<3.12`` carries the release ``(3, 12)`` just as
+    ``==3.12.12`` does, and truncating that to a minor version would make
+    ``>=3.9,<3.12`` select the one interpreter it exists to exclude.
+
+    Every specifier in the set must agree, so a bound that really does exclude
+    the candidate still excludes it however the others read.
+    """
+    want = _as_tuple(candidate)
+    for specifier in spec:
+        if specifier.contains(candidate):
+            continue
+        if specifier.operator not in _PINNING_OPERATORS:
+            return False
+        try:
+            # ``==3.12.*`` is a prefix match; its release is the prefix.
+            pinned = Version(specifier.version.removesuffix(".*"))
+        except InvalidVersion:
+            # ``===`` takes an arbitrary string, which need not be a version.
+            return False
+        if pinned.release[:2] != want:
+            return False
+    return True
+
+
 def trove_versions_from_classifiers(classifiers: Iterable[str]) -> list[str]:
     """Extract ``3.x`` versions from trove classifiers, newest first.
 
@@ -132,7 +173,7 @@ def select_interpreter(
         except InvalidSpecifier:
             spec = None
         if spec is not None:
-            allowed = [v for v in available if spec.contains(v)]
+            allowed = [v for v in available if _declares_minor(spec, v)]
             if allowed:
                 return InterpreterChoice(version=allowed[0], source="requires-python")
 
