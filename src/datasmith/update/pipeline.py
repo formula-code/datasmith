@@ -54,6 +54,22 @@ def _cap_per_repo(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any
     return capped
 
 
+def order_by_probe(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order rows best-probe-first, keeping every one of them.
+
+    ``can_install`` used to filter here. It blocked 3,217 performance PRs that
+    were then never attempted — and it passed h5py on a single dependency while
+    failing apache/arrow on a corrupted marker. Stage 6 is the only stage that
+    can answer whether a task builds, so this decides order, not eligibility.
+
+    ``sorted`` is stable, so rows sharing a status keep their incoming order.
+    """
+    from datasmith.resolution.probe import PROBE_RANK
+
+    unknown = max(PROBE_RANK.values()) + 1
+    return sorted(rows, key=lambda r: PROBE_RANK.get(r.get("probe_status") or "", unknown))
+
+
 def _fetch_repo_descriptions(rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
     """Batch-fetch repo descriptions for a set of rows with owner/repo keys."""
     repo_keys = {(r["owner"], r["repo"]) for r in rows}
@@ -449,13 +465,16 @@ class Pipeline:
             lte_filters={"created_at": end_date},
         )
 
-        # Only process PRs whose commit has can_install=True resolved packages
+        # Every PR with a resolved package is eligible. The probe says who runs
+        # first, not who runs at all — stage 6 is the only stage that can answer
+        # whether a task builds.
         pkg_rows = fetch_all(
             "packages",
-            select="owner, repo, sha",
-            filters={"can_install": True},
+            select="owner, repo, sha, probe_status",
         )
-        installable: set[tuple[str, str, str]] = {(p["owner"], p["repo"], p["sha"]) for p in pkg_rows}
+        probe_by_commit: dict[tuple[str, str, str], str | None] = {
+            (p["owner"], p["repo"], p["sha"]): p.get("probe_status") for p in pkg_rows
+        }
 
         repo_descriptions = _fetch_repo_descriptions(rows)
 
@@ -472,10 +491,10 @@ class Pipeline:
             sha = r.get("merge_commit_sha", "")
             if not sha:
                 continue
-            if (r["owner"], r["repo"], sha) not in installable:
+            if (r["owner"], r["repo"], sha) not in probe_by_commit:
                 skipped_no_pkg += 1
                 logger.debug(
-                    "Skipping %s/%s#%d: no can_install package for sha %s",
+                    "Skipping %s/%s#%d: no resolved package for sha %s",
                     r["owner"],
                     r["repo"],
                     r["issue_number"],
@@ -494,10 +513,15 @@ class Pipeline:
                 "body": r.get("body", ""),
                 "created_at": r.get("created_at"),
                 "repo_description": repo_descriptions.get((r["owner"], r["repo"]), ""),
+                "probe_status": probe_by_commit.get((r["owner"], r["repo"], sha)),
             })
 
         if self._tasks_per_repo is not None:
             items = _cap_per_repo(items, self._tasks_per_repo)
+        # After the cap, not before: ``_cap_per_repo`` samples at random, so it
+        # neither reads nor preserves an incoming order. Ordering here at least
+        # runs the surest seeds first within whatever the cap kept.
+        items = order_by_probe(items)
 
         logger.info("Rendering problem contexts for %d PRs", len(items))
 
@@ -541,11 +565,12 @@ class Pipeline:
             query_kwargs["is_null"] = ["container_name"]
         rows = fetch_all("pull_requests", **query_kwargs)
 
-        # Join with packages table for env_payload and python_version
+        # Join with packages table for env_payload and python_version. Every
+        # resolved commit joins; the probe orders the queue rather than trimming
+        # it, because this stage is the one that finds out whether it builds.
         pkg_rows = fetch_all(
             "packages",
-            select="owner, repo, sha, env_payload, python_version",
-            filters={"can_install": True},
+            select="owner, repo, sha, env_payload, python_version, probe_status",
         )
         pkg_lookup: dict[tuple[str, str, str], dict[str, Any]] = {
             (p["owner"], p["repo"], p["sha"]): p for p in pkg_rows
@@ -605,9 +630,12 @@ class Pipeline:
                 "repo_description": repo_descriptions.get((r["owner"], r["repo"]), ""),
                 "env_payload": pkg.get("env_payload", ""),
                 "python_version": pkg.get("python_version", ""),
+                "probe_status": pkg.get("probe_status"),
             })
         if self._tasks_per_repo is not None:
             items = _cap_per_repo(items, self._tasks_per_repo)
+        # After the cap: ``_cap_per_repo`` samples at random and discards order.
+        items = order_by_probe(items)
 
         logger.info("Synthesizing images for %d PRs", len(items))
 

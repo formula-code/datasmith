@@ -238,10 +238,12 @@ def _fetch_neighbor_items(
     if not rows:
         return []
 
+    # Every resolved commit of this repository is a candidate neighbour; the
+    # probe orders them, it does not exclude them.
     pkg_rows = fetch_all(
         "packages",
-        select="owner, repo, sha, env_payload, python_version",
-        filters={"can_install": True, "owner": owner, "repo": repo},
+        select="owner, repo, sha, env_payload, python_version, probe_status",
+        filters={"owner": owner, "repo": repo},
     )
     pkg_lookup = {(p["owner"], p["repo"], p["sha"]): p for p in pkg_rows}
 
@@ -288,6 +290,10 @@ def _fetch_neighbor_items(
             "repo_description": repo_description,
             "env_payload": pkg.get("env_payload", ""),
             "python_version": pkg.get("python_version", ""),
+            # Carried for shape parity with pipeline._synthesize_images items.
+            # Ordering lives in the pipeline, which owns the queue; a runner
+            # importing from update/ would invert the dependency direction.
+            "probe_status": pkg.get("probe_status"),
         })
     return items
 
