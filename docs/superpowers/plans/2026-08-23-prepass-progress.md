@@ -45,6 +45,29 @@ and reproduced independently.
 Fixed in `2cdce16`, with a guard that scans every build-stage template for bare
 calls to environment-only binaries.
 
+## The no-agent path now works, and produces an honest container
+
+`networkx/networkx#8148`, built 2026-08-23 08:50 with `--agent none` and
+`DATASMITH_SKIP_SIMILAR_CONTEXTS=1`, so nothing but the stock template was used:
+
+```
+Default template build succeeded for networkx/networkx#8148   1695s
+6754 passed, 23 skipped, 2 xfailed
+honesty gate: HONEST, 10 of 10 checks
+  sitecustomize  none      <- the shim is gone
+  benchmarks     38
+  pytest         6779 collected
+```
+
+This is the first time TRY_DEFAULT has ever succeeded for this task. Two of our
+own template bugs were the only blockers.
+
+**Caveat.** The gate is defeatable, and I proved it. A 19-line adversarial
+`sitecustomize.py` that patches `Path.is_file` and `shutil.which` made the gate
+report HONEST on a container with a replaced `grep`. This container passes
+because no agent built it, so nothing had motive or opportunity. The gate
+passing is consistent evidence, not proof.
+
 ## No existing container is honest
 
 `networkx#8148`, the container whose 1.602x speedup was reported as the good
