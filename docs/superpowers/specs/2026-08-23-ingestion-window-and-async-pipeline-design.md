@@ -500,7 +500,35 @@ pass rate onto 8,407 PRs. The real rate will differ somewhat.
 
 ## 10. Out of scope
 
-- Stages 6–9
+**Amended 2026-08-23, after implementation.** Stages 6–9 were originally listed here in
+full. Stages 6, 7 and 8 were then brought in scope at the user's direction, once the
+verified stage 2–5 fix made the consequence concrete: the 181 recovered PRs in the toy
+window — merged inside it, created before it — were scraped, classified, resolved and
+rendered, and would then have been dropped at stage 6 because it still windowed
+`created_at`. The spec's own argument in section 2.2 applied verbatim one stage later.
+
+What changed beyond the original scope:
+
+| stage | before | after |
+|---|---|---|
+| 6 synthesize_images | `created_at`, inclusive | `merged_at`, half-open, via the shared helper |
+| 7 harbor_healthcheck | `created_at`, inclusive | `merged_at`, half-open, via the shared helper |
+| 8 publish (`publish/records.py`) | `merged_at`, **inclusive** | `merged_at`, half-open, via the shared helper |
+
+Stage 8 was a fourth convention nobody had noticed: the right column with the wrong
+boundary. Stage 9 still windows nothing, which remains correct — the website wants the
+full corpus — but its opt-out now names the helper it declines to use, so the exception is
+visible to a reader and to the structural test.
+
+The window contract itself moved into one helper (`window_filters` in `utils/db.py`)
+rather than being hand-written per stage. Duplication was the reason the original defect
+survived: with no single home for the contract, there was nothing to test. A fail-closed
+AST test now asserts that every windowing site in `src/datasmith` is either routed through
+the helper or listed as an audited exemption.
+
+Still out of scope:
+
+- Stage 9's selection (deliberately unwindowed)
 - Backfilling or re-scraping the existing 265,181 rows
 - A streaming pipeline (excluded by decision 5)
 - A work-ledger table (excluded by decision 8)

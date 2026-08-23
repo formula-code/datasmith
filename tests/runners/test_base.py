@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 import re
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -183,3 +185,82 @@ class TestRunnerIdFormat:
         """Verify runner_id format is '{name}-{8 hex chars}'."""
         runner = _DummyRunner()
         assert re.match(r"^test_runner-[0-9a-f]{8}$", runner.runner_id)
+
+
+class TestEverySubclassReportsItsOutcome:
+    """The summary is only worth having if no stage can quietly skip it.
+
+    ``_log_summary`` lives in ``BaseRunner.run``'s ``finally``, so a subclass
+    that *replaces* ``run`` rather than extending it loses the summary in
+    silence.  That is exactly what happened to stage 6, the longest-running
+    and most failure-prone stage: it fully overrode ``run`` for its queue-based
+    worker pool and ended with no total/succeeded/failed line, while
+    ``base.py``'s docstring claimed every run ends with one.
+
+    Testing ``BaseRunner`` directly cannot notice that, so this walks the real
+    source instead and fails closed on a new override.
+    """
+
+    @staticmethod
+    def _run_overrides() -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+        """Map ``module.Class`` -> the ``run`` it defines, for BaseRunner subclasses."""
+        import datasmith.runners as runners_pkg
+
+        found: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        root = Path(runners_pkg.__file__).parent
+        for path in sorted(root.glob("*.py")):
+            if path.name in {"__init__.py", "base.py"}:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                if not any(isinstance(b, ast.Name) and b.id == "BaseRunner" for b in node.bases):
+                    continue
+                for child in node.body:
+                    if isinstance(child, ast.AsyncFunctionDef | ast.FunctionDef) and child.name == "run":
+                        found[f"{path.stem}.{node.name}"] = child
+        return found
+
+    def test_at_least_one_override_exists(self) -> None:
+        """Guard the guard: if nothing is found, the scan silently proves nothing."""
+        assert self._run_overrides(), "found no BaseRunner.run overrides — the AST scan is broken"
+
+    def test_every_run_override_still_reports(self) -> None:
+        """An override must delegate to ``super().run`` or log the summary itself."""
+        offenders = []
+        for qualname, fn in self._run_overrides().items():
+            calls = {
+                ast.unparse(n.func)
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            }
+            delegates = any(c.startswith("super().run") for c in calls)
+            reports = "self._log_summary" in calls
+            if not (delegates or reports):
+                offenders.append(qualname)
+        assert not offenders, (
+            f"{offenders} override BaseRunner.run without calling super().run() or "
+            "self._log_summary(), so those stages end without a total/succeeded/failed line"
+        )
+
+    def test_self_reporting_overrides_also_reset_error_types(self) -> None:
+        """An override that owns its loop must clear the counter it fills.
+
+        Without the reset the breakdown accumulates across runs, which is the
+        same defect ``test_error_types_do_not_leak_between_runs`` pins for the
+        base class.
+        """
+        offenders = []
+        for qualname, fn in self._run_overrides().items():
+            calls = {
+                ast.unparse(n.func)
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            }
+            if any(c.startswith("super().run") for c in calls):
+                continue  # super() does the reset
+            body = ast.unparse(fn)
+            if "self._error_types" not in body:
+                offenders.append(qualname)
+        assert not offenders, f"{offenders} run their own loop but never reset self._error_types"

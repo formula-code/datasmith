@@ -5,6 +5,7 @@ import datetime
 import os
 import tempfile
 import threading
+from collections import Counter
 from typing import Any
 
 from datasmith.agents.rate_limit import RateLimitError
@@ -395,6 +396,7 @@ class SynthesizeImagesRunner(BaseRunner):
         self._total = len(items)
         self._completed = 0
         self._failed = 0
+        self._error_types = Counter()
         self._enqueued = set()
         self._init_progress()
 
@@ -420,6 +422,7 @@ class SynthesizeImagesRunner(BaseRunner):
                 w.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
             self._update_progress(force=True)
+            self._log_summary()
             self._queue = None
 
     async def _worker_loop(self) -> None:
@@ -434,6 +437,7 @@ class SynthesizeImagesRunner(BaseRunner):
                 self._completed += 1
             except Exception as exc:
                 self._failed += 1
+                self._error_types[type(exc).__name__] += 1
                 self._log_failure(item, exc)
                 logger.exception("Failed processing item %s", self._item_id(item))
             finally:
