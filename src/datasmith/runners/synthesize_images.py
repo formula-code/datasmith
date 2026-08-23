@@ -48,13 +48,15 @@ def _ensure_prerequisite_images(owner: str, repo: str, py_version: str = "", bui
     to be present in the local daemon before the child can be built.
 
     ``build_root`` is the row's ``primary_root`` — the package root inside the
-    repository. This runner is the only caller that has read it.
+    repository, and the image's WORKDIR. It is part of the tag, so a second
+    commit rooted elsewhere builds its own image instead of inheriting this
+    one's working directory.
     """
     from datasmith.docker.images import ImageManager, get_base_image_name, get_repo_image_name
 
     mgr = ImageManager()
     base_tag = get_base_image_name()
-    repo_tag = get_repo_image_name(owner, repo, py_version)
+    repo_tag = get_repo_image_name(owner, repo, py_version, build_root)
 
     if not mgr.image_exists(base_tag):
         logger.info("Building missing base image: %s", base_tag)
@@ -63,6 +65,13 @@ def _ensure_prerequisite_images(owner: str, repo: str, py_version: str = "", bui
     if not mgr.image_exists(repo_tag):
         logger.info("Building missing repo image: %s", repo_tag)
         mgr.build_repo_image(owner, repo, py_version=py_version, build_root=build_root)
+
+
+def _repo_tag_for(owner: str, repo: str, py_version: str, build_root: str) -> str:
+    """Return the repository image tag a row's ``packages`` fields select."""
+    from datasmith.docker.images import get_repo_image_name
+
+    return get_repo_image_name(owner, repo, py_version, build_root)
 
 
 def _build_pr_image(
@@ -74,6 +83,7 @@ def _build_pr_image(
     docker_context: Any | None = None,
     python_version: str = "",
     base_sha: str = "",
+    build_root: str = "",
 ) -> str:
     """Build the final PR image from synthesized context (no push).
 
@@ -101,6 +111,7 @@ def _build_pr_image(
                 commit_sha=checkout_sha or "HEAD",
                 env_payload=env_payload or "[]",
                 py_version=python_version,
+                build_root=build_root,
             )
     else:
         mgr.build_pr_image(
@@ -110,22 +121,24 @@ def _build_pr_image(
             commit_sha=checkout_sha or "HEAD",
             env_payload=env_payload or "[]",
             py_version=python_version,
+            build_root=build_root,
         )
 
     return pr_tag
 
 
-def _push_pr_image(owner: str, repo: str, pr_tag: str, py_version: str = "") -> None:
+def _push_pr_image(owner: str, repo: str, pr_tag: str, py_version: str = "", build_root: str = "") -> None:
     """Push a previously-built PR image (and its repo parent) to DockerHub.
 
-    ``py_version`` names the repo parent. Without it this pushes a tag nothing
-    ever built, and the ``except`` below turns that into a warning nobody reads.
+    ``py_version`` and ``build_root`` name the repo parent. Without them this
+    pushes a tag nothing ever built, and the ``except`` below turns that into a
+    warning nobody reads.
     """
     from datasmith.docker.images import get_repo_image_name
     from datasmith.docker.publish import DockerHubPublisher
 
     publisher = DockerHubPublisher()
-    repo_tag = get_repo_image_name(owner, repo, py_version)
+    repo_tag = get_repo_image_name(owner, repo, py_version, build_root)
 
     try:
         publisher.push(repo_tag)
@@ -208,8 +221,11 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
 # Lock to serialize prerequisite image builds (base + repo) across threads.
 # Building these is expensive and they're shared, so we avoid duplicate work.
 _prereq_lock = threading.Lock()
-# Track repos whose prerequisite images are confirmed present.
-_prereq_done: set[tuple[str, str, str]] = set()
+# Track the repository image tags whose prerequisites are confirmed present.
+# The key is the tag string rather than a tuple of its ingredients: the two
+# cannot then disagree, which is exactly how ``primary_root`` came to be built
+# into an image no key mentioned.
+_prereq_done: set[str] = set()
 
 
 def _fetch_neighbor_items(
@@ -501,9 +517,7 @@ class SynthesizeImagesRunner(BaseRunner):
         base_sha = item.get("base_sha", "")
         env_payload = item.get("env_payload", "")
 
-        from datasmith.docker.images import get_repo_image_name
-
-        repo_image = get_repo_image_name(owner, repo, py_version)
+        repo_image = _repo_tag_for(owner, repo, py_version, build_root)
 
         # Run synthesizer in thread (Docker operations are blocking)
         ctx = await asyncio.to_thread(
@@ -535,6 +549,7 @@ class SynthesizeImagesRunner(BaseRunner):
             ctx,
             py_version,
             base_sha=base_sha,
+            build_root=build_root,
         )
 
         # Record the container name in Supabase *before* pushing. If the DB
@@ -546,7 +561,7 @@ class SynthesizeImagesRunner(BaseRunner):
         ).execute()
 
         # DB state is durable — safe to publish the image.
-        await asyncio.to_thread(_push_pr_image, owner, repo, pr_tag, py_version)
+        await asyncio.to_thread(_push_pr_image, owner, repo, pr_tag, py_version, build_root)
 
         # Spread the win: PRs created within ±DATASMITH_NEIGHBOR_WINDOW_DAYS
         # of this one likely share its dependency environment, so the context
@@ -648,17 +663,15 @@ class SynthesizeImagesRunner(BaseRunner):
     def _ensure_prereqs(owner: str, repo: str, py_version: str, build_root: str = ".") -> None:
         """Build base/repo images if missing, with dedup across threads.
 
-        The interpreter is part of the key because it is part of the tag. Keyed
-        on the repository alone, a second commit declaring a different Python
-        reads as already done and its parent image is never built.
-
-        ``build_root`` is deliberately *not* part of the key: it is not part of
-        the tag either, so keying on it would rebuild the same tag with a
-        different working directory and let the last writer win. Two commits of
-        one repository that share an interpreter and disagree on
-        ``primary_root`` share an image, and the first one seen decides.
+        The key *is* the repository image tag. Both the interpreter and the
+        package root change what is inside that image — the micromamba
+        environment and the WORKDIR — and both are therefore in the tag, so
+        asking the name helper for the key cannot drift from what the builder
+        writes. A key that named fewer facts than the tag is what let one
+        commit's ``primary_root`` decide the working directory of every other
+        commit of the same repository.
         """
-        key = (owner, repo, py_version)
+        key = _repo_tag_for(owner, repo, py_version, build_root)
         if key in _prereq_done:
             return
         with _prereq_lock:

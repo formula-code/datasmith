@@ -68,3 +68,37 @@ def test_prerequisite_images_forward_the_build_root() -> None:
     from datasmith.runners.synthesize_images import _ensure_prerequisite_images
 
     assert "build_root" in inspect.signature(_ensure_prerequisite_images).parameters
+
+
+class TestThePrerequisiteBuildAgreesWithItself:
+    """The tag checked and the tag built must be one string.
+
+    ``_ensure_prerequisite_images`` builds only when the tag is absent, so a
+    lookup that names fewer facts than the build either rebuilds forever or —
+    the case that shipped — reads a differently-rooted image as this row's own.
+    """
+
+    @pytest.fixture()
+    def docker_manager(self) -> Iterator[object]:
+        with patch("datasmith.docker.images.ImageManager") as mock_cls:
+            mock_cls.return_value.image_exists.return_value = False
+            yield mock_cls.return_value
+
+    def test_the_tag_looked_up_is_the_tag_built(self, docker_manager: object) -> None:
+        from datasmith.docker.images import get_repo_image_name
+        from datasmith.runners.synthesize_images import _ensure_prerequisite_images
+
+        _ensure_prerequisite_images("apache", "arrow", "3.11", "python")
+
+        expected = get_repo_image_name("apache", "arrow", "3.11", "python")
+        looked_up = [c.args[0] for c in docker_manager.image_exists.call_args_list]  # type: ignore[attr-defined]
+        assert expected in looked_up
+
+    def test_the_interpreter_and_the_root_both_reach_the_builder(self, docker_manager: object) -> None:
+        from datasmith.runners.synthesize_images import _ensure_prerequisite_images
+
+        _ensure_prerequisite_images("apache", "arrow", "3.11", "python")
+
+        kwargs = docker_manager.build_repo_image.call_args.kwargs  # type: ignore[attr-defined]
+        assert kwargs["py_version"] == "3.11"
+        assert kwargs["build_root"] == "python"

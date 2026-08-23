@@ -2132,7 +2132,9 @@ decides who runs first; it excludes nobody."
 
 ### Task 13: The image tag names the interpreter
 
-`get_repo_image_name(owner, repo)` returns `:latest` with no interpreter in it, while `build_repo_image` bakes `PY_VERSION` in and `_ensure_prerequisite_images` builds only when the tag is absent. One image per repository is therefore built from whichever commit ran first, and **129 of 147 repositories (88%)** have commits that disagree on `python_version`.
+`get_repo_image_name(owner, repo)` returns `:latest` with no interpreter in it, while `_ensure_prerequisite_images` builds only when the tag is absent. One image per repository is therefore built from whichever commit ran first, and **129 of 147 repositories (88%)** have commits that disagree on `python_version`.
+
+> **Correction (post-implementation).** An earlier draft of this task said `build_repo_image` "bakes `PY_VERSION` in". It does not: `Dockerfile.repo` declares no `ARG PY_VERSION`, so BuildKit drops that build arg. The interpreter is decided by `base:latest`, which carries the single `asv_<version>` environment the first commit of the run asked for. Naming the interpreter in the repository tag is therefore necessary but not sufficient — a repository's second interpreter still hard-fails at `docker_build_env.sh`, which is a **separate, unfixed** defect belonging to `get_base_image_name`.
 
 **Files:**
 - Modify: `src/datasmith/docker/images.py:40-44`, `:92`, `:124`
@@ -2236,6 +2238,8 @@ env_payload was never pinned against."
 ### Task 14: `primary_root` reaches the build
 
 Stage 4 discovers `primary_root` correctly and nothing uses it. `Dockerfile.repo` hardcodes `WORKDIR /workspace/repo`, so apache/arrow's `python/` subdirectory is ignored — 733 rows are affected, 385 of them arrow.
+
+> **Correction (post-implementation).** `BUILD_ROOT` changes the repository image's `WORKDIR`, so it must also be in that image's tag and in the build-dedup key — otherwise two commits of one repository that disagree on `primary_root` share an image and the first one built chooses the working directory for both. That is a *new* harm, not a missed improvement: Qiskit has 384 rows whose own root is the repository root and which would inherit `qiskit_pkg`. `get_repo_image_name` therefore takes a fourth argument and appends a `slug-digest` suffix for a non-root package root, and `_ensure_prereqs` keys its cache on the tag string rather than on a tuple of the tag's ingredients. See the amendment in section 3 of the design doc.
 
 **Files:**
 - Modify: `src/datasmith/docker/templates/Dockerfile.repo`

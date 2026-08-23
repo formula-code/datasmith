@@ -284,3 +284,95 @@ class TestRenderProblemWithGitHubClient:
         assert len(issues_arg) == 1
         assert issues_arg[0].number == 99
         assert issues_arg[0].title == "Slow sort"
+
+
+class TestTheRowReachesTheBuilder:
+    """A row's ``python_version`` and ``primary_root`` must arrive at the image.
+
+    Stage 4 discovers both and the bug both tasks exist to fix is that neither
+    survived the trip to the builder. Pinning the name helper and the
+    ``ImageManager`` leaves the middle of that trip deletable with a green
+    suite, so these tests walk the item dict the pipeline actually builds.
+    """
+
+    def _item(self) -> dict[str, object]:
+        item = _make_item(owner="Qiskit", repo="qiskit", issue=99)
+        item["sha"] = "deadbeef"
+        item["python_version"] = "3.12"
+        item["primary_root"] = "qiskit_pkg"
+        return item
+
+    async def test_the_interpreter_and_the_root_reach_the_prereq_call(self) -> None:
+        synthesizer = MagicMock()
+        synthesizer.run.return_value = None  # stop before any DB write
+
+        with patch.object(SynthesizeImagesRunner, "_ensure_prereqs") as prereqs:
+            runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
+            with pytest.raises(RuntimeError):
+                await runner._do_process_item(self._item())
+
+        prereqs.assert_called_once_with("Qiskit", "qiskit", "3.12", "qiskit_pkg")
+
+    async def test_the_synthesizer_is_handed_the_image_that_carries_the_root(self) -> None:
+        from datasmith.docker.images import get_repo_image_name
+
+        synthesizer = MagicMock()
+        synthesizer.run.return_value = None
+
+        with patch.object(SynthesizeImagesRunner, "_ensure_prereqs"):
+            runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
+            with pytest.raises(RuntimeError):
+                await runner._do_process_item(self._item())
+
+        expected = get_repo_image_name("Qiskit", "qiskit", "3.12", "qiskit_pkg")
+        assert synthesizer.run.call_args.kwargs["repo_image"] == expected
+
+    async def test_the_build_and_the_push_name_the_same_parent(self) -> None:
+        mock_client = _mock_supabase()
+        synthesizer = MagicMock()
+        synthesizer.run.return_value = MagicMock()
+
+        with (
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+            patch("datasmith.runners.synthesize_images.get_client", return_value=mock_client),
+            patch.object(SynthesizeImagesRunner, "_ensure_prereqs"),
+            patch.object(SynthesizeImagesRunner, "_enqueue_neighbors"),
+            patch(
+                "datasmith.runners.synthesize_images._build_pr_image",
+                return_value="formulacode/qiskit-qiskit:99",
+            ) as build,
+            patch("datasmith.runners.synthesize_images._push_pr_image") as push,
+        ):
+            runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
+            await runner._do_process_item(self._item())
+
+        assert build.call_args.args[6] == "3.12"
+        assert build.call_args.kwargs["build_root"] == "qiskit_pkg"
+        # The push resolves the repo parent from these two arguments; a parent
+        # named differently from the one just built is pushed as a warning.
+        assert push.call_args.args == ("Qiskit", "qiskit", "formulacode/qiskit-qiskit:99", "3.12", "qiskit_pkg")
+
+
+class TestOneImagePerRootAndInterpreter:
+    """Dedup must skip only the work already done for *this* row's image."""
+
+    def test_two_roots_of_one_repository_build_two_images(self) -> None:
+        with patch("datasmith.runners.synthesize_images._ensure_prerequisite_images") as build:
+            SynthesizeImagesRunner._ensure_prereqs("Qiskit", "qiskit", "3.12", ".")
+            SynthesizeImagesRunner._ensure_prereqs("Qiskit", "qiskit", "3.12", "qiskit_pkg")
+
+        assert build.call_count == 2
+
+    def test_two_interpreters_of_one_repository_build_two_images(self) -> None:
+        with patch("datasmith.runners.synthesize_images._ensure_prerequisite_images") as build:
+            SynthesizeImagesRunner._ensure_prereqs("Qiskit", "qiskit", "3.11", "qiskit_pkg")
+            SynthesizeImagesRunner._ensure_prereqs("Qiskit", "qiskit", "3.12", "qiskit_pkg")
+
+        assert build.call_count == 2
+
+    def test_the_same_image_is_built_once(self) -> None:
+        with patch("datasmith.runners.synthesize_images._ensure_prerequisite_images") as build:
+            SynthesizeImagesRunner._ensure_prereqs("apache", "arrow", "3.11", "python")
+            SynthesizeImagesRunner._ensure_prereqs("apache", "arrow", "3.11", "./python")
+
+        assert build.call_count == 1

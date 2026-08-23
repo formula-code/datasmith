@@ -65,11 +65,21 @@ is parsed and discarded. Re-running the same 13 SHAs kept the dependency sets
 
 **B13 — per-commit interpreter, per-repo image.** `get_repo_image_name(owner, repo)`
 returns `:latest` with no interpreter in the tag (`images.py:40-44`), while
-`build_repo_image` bakes `PY_VERSION` in (`images.py:98-99`) and
 `_ensure_prerequisite_images` builds only when the tag is absent. One image per
 repository is therefore built from whichever commit ran first, and 88% of
 repositories then run an interpreter that does not match the one their `env_payload`
 was pinned against.
+
+The interpreter does not in fact reach the repository image at all: `build_repo_image`
+passes a `PY_VERSION` build arg (`images.py:98-99`) that `Dockerfile.repo` never
+declares, so BuildKit drops it. The interpreter is decided one tier up, by
+`base:latest` — a tag with no interpreter in it either, built once from whichever
+commit ran first, carrying the single `asv_<version>` micromamba environment that
+commit asked for (`docker_build_base.sh:744`). A repository's second interpreter
+therefore fails loudly at the PR env stage (`docker_build_env.sh:202-207`) rather
+than running silently wrong. **Naming the interpreter in the repository tag is
+necessary but not sufficient** — until the base tag names it too, only the first
+interpreter of a run can build.
 
 The remaining defects (B3–B6, B9–B12) are catalogued in the audit report.
 
@@ -104,14 +114,26 @@ Two accepted consequences, stated rather than discovered:
 
 Stage 4 keeps its per-commit unit. B13 is fixed where it belongs, in `images.py`.
 
-`get_repo_image_name(owner, repo, py_version)` produces `owner-repo:py3.11`. All six
-call sites go through that one helper, including stage 8's publish path; nothing
-hardcodes `:latest` elsewhere. This is a contained naming change plus a cache key.
+`get_repo_image_name(owner, repo, py_version, build_root)` produces `owner-repo:py3.11`.
+All six call sites go through that one helper, including stage 8's publish path;
+nothing hardcodes `:latest` elsewhere. This is a contained naming change plus a cache
+key.
 
 Making the interpreter a per-repository decision instead would accept the broken
 naming as a constraint. It also has no defensible answer for a corpus spanning
 2019–2026 commits of the same repository — scipy rows sit at 3.8, napari at 3.12.
 One image per `(repository, interpreter)` does.
+
+**Amended during implementation:** `primary_root` is a *second* per-commit axis of
+the same kind, and the rule that settles the interpreter settles it as well — the tag
+must name what varies inside the image. `primary_root` becomes the image's `WORKDIR`
+(below), and Qiskit alone has 384 rows rooted at the repository root sharing a
+`(repository, interpreter)` key with rows rooted at `qiskit_pkg`. Keyed on the
+interpreter alone, the first commit built would choose the working directory of every
+other commit — a fresh defect, not a surviving one. So the unit is one image per
+`(repository, interpreter, package root)`, the root contributing a tag suffix only
+when it is not the repository root, and the build-dedup cache is keyed on the tag
+string itself so the key and the image identity cannot drift apart again.
 
 Two signals that are computed and then dropped get reconnected:
 
