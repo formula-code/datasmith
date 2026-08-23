@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import enum
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -16,6 +17,19 @@ from datasmith.docker.manifest import evaluate_invariants
 from datasmith.utils import get_client, get_logger
 
 logger = get_logger("agents.synthesizer")
+
+# Skip the TRY_SIMILAR state, so a build can only come from the stock template.
+#
+# TRY_SIMILAR runs BEFORE TRY_DEFAULT and reuses a context that succeeded for
+# another commit of the same repository. Those stored contexts are
+# agent-authored: 128 repositories' contexts install a sitecustomize shim into
+# site-packages, which then runs inside the measured benchmark process.
+#
+# Two situations need it off. Measuring how often the stock template alone
+# works, because a TRY_SIMILAR success means TRY_DEFAULT never runs and the
+# repository silently leaves the denominator. And rebuilding a container that
+# must not inherit an older agent's environment edits.
+DATASMITH_SKIP_SIMILAR_CONTEXTS: bool = os.environ.get("DATASMITH_SKIP_SIMILAR_CONTEXTS", "") not in ("", "0")
 
 
 class SynthesisState(str, enum.Enum):
@@ -109,7 +123,11 @@ class Synthesizer:
 
         # State: FIND_SIMILAR
         self._trace.append(SynthesisState.FIND_SIMILAR)
-        similar_contexts = self._find_similar(owner, repo, issue_number)
+        if DATASMITH_SKIP_SIMILAR_CONTEXTS:
+            logger.info("TRY_SIMILAR disabled via DATASMITH_SKIP_SIMILAR_CONTEXTS")
+            similar_contexts = []
+        else:
+            similar_contexts = self._find_similar(owner, repo, issue_number)
 
         # State: TRY_SIMILAR
         failed_attempts: list[tuple[DockerContext, SandboxResult]] = []
