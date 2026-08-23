@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from datasmith.agents.classifiers import ClassificationDecision, ClassifyJudge, OptimizationType, PerfClassifier
+from datasmith.agents.classifiers import (
+    PERF_CLASSIFIER_INSTRUCTIONS,
+    ClassificationDecision,
+    ClassifyJudge,
+    OptimizationType,
+    PerfClassifier,
+)
 
 
 class TestOptimizationType:
@@ -217,3 +224,53 @@ class TestClassifyJudge:
         assert decision.category == "uncategorized"
         assert decision.difficulty == "medium"
         assert decision.confidence == 0
+
+
+class TestPerfClassifierInstructions:
+    """Pin the properties of the prompt that the evaluation actually paid for.
+
+    These are not style assertions.  Each one corresponds to a measured failure:
+    dropping the hard-NO list admitted ``CI: Bump dask`` and ``DOC: whats new
+    v0.20``, and leaning on title keywords cost ten points of recall on PRs whose
+    titles say nothing about performance -- which is most of them.
+    """
+
+    def test_hard_no_list_precedes_the_yes_guidance(self) -> None:
+        """Order matters: the exclusions must win, so they must be stated first."""
+        text = PERF_CLASSIFIER_INSTRUCTIONS
+        no_at = text.index("Answer NO")
+        yes_at = text.index("Otherwise answer YES")
+        assert no_at < yes_at, "the YES guidance must not precede the exclusions it is scoped by"
+        assert "wins outright" in text
+
+    def test_benchmark_harness_changes_are_excluded(self) -> None:
+        """Adding or speeding up a benchmark is not an optimisable task for this pipeline."""
+        assert "benchmark-harness" in PERF_CLASSIFIER_INSTRUCTIONS
+        assert "the code under measurement must change, not the measurement" in PERF_CLASSIFIER_INSTRUCTIONS
+
+    def test_it_tells_the_model_not_to_rely_on_title_keywords(self) -> None:
+        """43% of confirmed perf PRs carry a perf keyword; the rest must still be caught."""
+        text = PERF_CLASSIFIER_INSTRUCTIONS
+        assert "Judge the CODE, not the wording" in text
+        assert "is not evidence" in text
+
+    def test_the_unscoped_answer_yes_instruction_is_not_reintroduced(self) -> None:
+        """An unconditional "if unsure, YES" measured a 5% false-positive rate."""
+        text = PERF_CLASSIFIER_INSTRUCTIONS
+        # The concession is allowed, but only after the NO list has excluded the obvious.
+        assert "If the diff is not in the NO list above" in text
+
+    def test_the_signature_actually_uses_it(self) -> None:
+        """The constant is only worth pinning if the predictor is built from it."""
+        mock_dspy = MagicMock()
+        captured: dict[str, object] = {}
+
+        class _Sig:
+            pass
+
+        mock_dspy.Signature = _Sig
+        mock_dspy.Predict.side_effect = lambda sig: captured.setdefault("doc", sig.__doc__)
+        classifier = PerfClassifier()
+        with patch.dict("sys.modules", {"dspy": mock_dspy}), contextlib.suppress(Exception):
+            classifier._get_predictor()
+        assert captured.get("doc") == PERF_CLASSIFIER_INSTRUCTIONS
