@@ -1026,7 +1026,7 @@ coverage over 155 repos: 84% / 91% / 99% / 100%."
 
 ### Task 6: Deterministic primary root
 
-`select_primary_candidate` returns from unordered dict iteration in two places, so the same repository can pick a different package root on different runs. scipp resolved to `python`, `binder` and `scippy` across commits, and `binder` is a Binder configuration directory, not a package.
+`select_primary_candidate` returns from unordered iteration in three places, so the same repository can pick a different package root on different runs. scipp resolved to `python`, `binder` and `scippy` across commits, and `binder` is a Binder configuration directory, not a package. Two of the three are dict iterations; the third, upstream of both, is `for cmd in install_cmds` -- a set, so a monorepo whose asv configs name two package roots answers from the hash seed.
 
 **Files:**
 - Modify: `src/datasmith/resolution/metadata_parser.py:383-412`
@@ -1120,6 +1120,8 @@ with:
         return sorted(with_pyproject, key=depth_then_name)[0]
     return sorted(candidates.keys(), key=depth_then_name)[0]
 ```
+
+And sort the install commands too, above them -- `for cmd in install_cmds:` becomes `for cmd in sorted(install_cmds):`. Token order *inside* one command still decides, because there the first path argument is the package the command means to install.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
