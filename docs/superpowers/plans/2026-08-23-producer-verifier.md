@@ -330,7 +330,7 @@ final stage by construction rather than by instruction."
 
 **Interfaces:**
 - Consumes: `Cause`, `Severity`, `CheckResult` from `schema.py`.
-- Produces: `classify(check_id: str, cause: Cause) -> Severity`, `HARD_CHECK_IDS: frozenset[str]`, `grade(report: RejectionReport) -> GradedReport`, `GradedReport(report: RejectionReport, hard_failures: tuple[str, ...], soft_failures: tuple[str, ...], violations: tuple[str, ...], accepted: bool)`.
+- Produces: `classify(check_id: str, cause: Cause, evidence: str = "") -> Severity`, `contradicts_host_facility_claim(cause: Cause, evidence: str) -> bool`, `HARD_CHECK_IDS: frozenset[str]`, `grade(report: RejectionReport) -> GradedReport`, `GradedReport(report: RejectionReport, hard_failures: tuple[str, ...], soft_failures: tuple[str, ...], violations: tuple[str, ...], accepted: bool)`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -369,7 +369,14 @@ class TestClassify:
 
     @pytest.mark.parametrize(
         "check_id",
-        ["tamper_audit", "asv_discovers_zero_against_source", "measure_timed_out", "asv_exec_failed", "oracle_patch_failed"],
+        [
+            "tamper_audit",
+            "asv_discovers_zero_against_source",
+            "measure_timed_out",
+            "asv_exec_failed",
+            "oracle_patch_failed",
+            "numpy_moved_major_minor",
+        ],
     )
     def test_the_always_hard_ids_ignore_the_cause(self, check_id: str) -> None:
         """No cause can soften these. Not even one we do not model."""
@@ -382,6 +389,34 @@ class TestClassify:
     def test_an_unknown_check_id_defaults_to_hard(self) -> None:
         """Fail closed. An unrecognised check must not be waivable."""
         assert classify("something_invented_by_the_agent", Cause.OTHER) is Severity.HARD
+
+    def test_an_invented_id_stays_hard_even_with_a_softening_cause(self) -> None:
+        """The seam an earlier draft left open.
+
+        Letting the CAUSE soften any unrecognised id relocates the cheating
+        concern from the producer to a persuaded verifier -- which is worse,
+        because the verifier is the thing we were trusting.
+        """
+        assert classify("anything_the_agent_invented", Cause.IMPORT_RAISED_ON_HOST_FACILITY) is Severity.HARD
+
+    def test_only_enumerated_ids_are_cause_discriminated(self) -> None:
+        for check_id in ("pytest_collect", "import_sweep"):
+            assert classify(check_id, Cause.IMPORT_RAISED_ON_HOST_FACILITY) is Severity.SOFT
+            assert classify(check_id, Cause.MODULE_NOT_FOUND) is Severity.HARD
+
+    def test_a_host_facility_claim_refuted_by_its_own_evidence_is_hard(self) -> None:
+        """Nothing installed cannot have raised for want of a host facility."""
+        assert (
+            classify("pytest_collect", Cause.IMPORT_RAISED_ON_HOST_FACILITY, "ModuleNotFoundError: No module named 'cupy'")
+            is Severity.HARD
+        )
+
+    def test_a_genuine_host_facility_claim_survives(self) -> None:
+        """cupy installed, CUDA driver absent. The real waiver case."""
+        assert (
+            classify("import_sweep", Cause.IMPORT_RAISED_ON_HOST_FACILITY, "ImportError: libcuda.so.1: cannot open shared object file")
+            is Severity.SOFT
+        )
 
 
 class TestGrade:
@@ -417,6 +452,25 @@ class TestGrade:
             checks=[_check("pytest_pass_ratio", Cause.OTHER)],
         )
         assert grade(report).accepted is False
+
+    def test_a_self_contradicting_waiver_is_recorded_as_a_violation(self) -> None:
+        report = RejectionReport(
+            verdict=Verdict.ACCEPT,
+            mode="container_built",
+            checks=[
+                CheckResult(
+                    id="pytest_collect",
+                    verdict="fail",
+                    cause=Cause.IMPORT_RAISED_ON_HOST_FACILITY,
+                    evidence="ModuleNotFoundError: No module named 'salem'",
+                    remedy="r",
+                    waiver_reason="no GPU on this host",
+                )
+            ],
+        )
+        graded = grade(report)
+        assert graded.accepted is False
+        assert graded.violations == ("pytest_collect",)
 
     def test_waiving_a_hard_check_is_ignored_and_logged(self) -> None:
         """The spec's core promise. An agent that waives a hard check fails."""
@@ -498,14 +552,36 @@ _SOFT_CHECK_IDS: frozenset[str] = frozenset({"pytest_pass_ratio", "repo_smoke_te
 # than against it.
 _SOFTENING_CAUSES: frozenset[Cause] = frozenset({Cause.IMPORT_RAISED_ON_HOST_FACILITY})
 
+# ...and only for THESE check ids. An earlier draft let the cause soften ANY
+# unrecognised id, so `classify("anything_the_agent_invented",
+# IMPORT_RAISED_ON_HOST_FACILITY)` returned SOFT and grade() accepted it on any
+# non-empty waiver_reason. That relocated the standing cheating concern from
+# the producer to a persuaded verifier, which is worse: the verifier is the
+# thing we were trusting.
+_CAUSE_DISCRIMINATED_CHECK_IDS: frozenset[str] = frozenset({"pytest_collect", "import_sweep"})
 
-def classify(check_id: str, cause: Cause) -> Severity:
-    """Grade one check. Unknown ids fail closed to HARD."""
+# A host-facility claim whose own evidence names ModuleNotFoundError is
+# self-contradicting: nothing was installed, so nothing can have raised for
+# want of a host facility. Graded HARD and recorded.
+_NOT_INSTALLED_MARKERS = ("ModuleNotFoundError", "No module named")
+
+
+def contradicts_host_facility_claim(cause: Cause, evidence: str) -> bool:
+    """True when a capability claim is refuted by its own evidence."""
+    if cause is not Cause.IMPORT_RAISED_ON_HOST_FACILITY:
+        return False
+    return any(marker in (evidence or "") for marker in _NOT_INSTALLED_MARKERS)
+
+
+def classify(check_id: str, cause: Cause, evidence: str = "") -> Severity:
+    """Grade one check. Unknown ids fail closed to HARD, whatever the cause."""
     if check_id in HARD_CHECK_IDS:
         return Severity.HARD
     if check_id in _SOFT_CHECK_IDS:
         return Severity.SOFT
-    if cause in _SOFTENING_CAUSES:
+    if check_id in _CAUSE_DISCRIMINATED_CHECK_IDS and cause in _SOFTENING_CAUSES:
+        if contradicts_host_facility_claim(cause, evidence):
+            return Severity.HARD
         return Severity.SOFT
     return Severity.HARD
 
@@ -533,7 +609,14 @@ def grade(report: RejectionReport) -> GradedReport:
     for check in report.checks:
         if check.verdict != "fail":
             continue
-        actual = classify(check.id, check.cause)
+        actual = classify(check.id, check.cause, check.evidence)
+        if contradicts_host_facility_claim(check.cause, check.evidence):
+            violations.append(check.id)
+            logger.error(
+                "verifier claimed a host-facility cause for %r while its own evidence "
+                "names ModuleNotFoundError; graded hard",
+                check.id,
+            )
         if check.severity is Severity.SOFT and actual is Severity.HARD:
             violations.append(check.id)
             logger.error(
@@ -690,6 +773,28 @@ def test_no_battery_command_references_a_path_that_does_not_exist_in_the_image()
     joined = " ".join(" ".join(argv) for _, argv in BATTERY_COMMANDS)
     assert "/formulacode_testrunner.py" not in joined
     assert "count_source_benchmarks.py" not in joined
+
+
+def test_the_battery_collects_integrity_facts() -> None:
+    """Without these the negative controls cannot be rejected at all.
+
+    attack-demo:1 does not break function, it defeats DETECTION: pytest
+    passes, imports work, benchmarks discover. pysindy#139's replaced grep is
+    equally invisible to the functional commands. Both are labelled `reject`,
+    so the verifier needs a fact to reject them ON.
+    """
+    names = {name for name, _ in BATTERY_COMMANDS}
+    assert "integrity_probe" in names
+
+
+def test_the_probe_is_mounted_read_only_not_baked_into_the_image() -> None:
+    """A probe baked at build time is a probe the producer could have edited."""
+    import inspect
+
+    from datasmith.agents.reflexive import battery
+
+    source = inspect.getsource(battery._docker_runner)
+    assert "/opt/fc_probe.py:ro" in source, "the probe mount must be read-only"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -721,6 +826,7 @@ import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -788,6 +894,18 @@ BATTERY_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("import_sweep", ("bash", "-lc", f'{_IN_ENV} python -c "import os, importlib; importlib.import_module(os.environ[\'IMPORT_NAME\'])" 2>&1 | tail -20')),
     ("pip_freeze", ("bash", "-lc", f'{_IN_ENV} python -m pip freeze 2>&1')),
     ("build_manifest", ("cat", "/opt/formulacode/build_manifest.json")),
+    # Integrity facts. WITHOUT THESE THE NEGATIVE CONTROLS ARE UNJUDGEABLE.
+    #
+    # attack-demo:1 does not break function -- it defeats DETECTION. Its pytest
+    # passes, its imports work, its benchmarks discover. From the six commands
+    # above it looks clean, and pysindy#139's replaced grep is equally
+    # invisible to them. Both are labelled `reject` in the validation set, so
+    # without integrity facts the verifier has nothing to reject them ON.
+    #
+    # honesty_probe.py is standalone by design -- its own docstring says it
+    # "must not import anything from datasmith" -- so it mounts read-only and
+    # runs under the container's interpreter.
+    ("integrity_probe", ("bash", "-lc", 'micromamba run -n "$ENV_NAME" python /opt/fc_probe.py 2>&1 | tail -60')),
 )
 
 
@@ -801,9 +919,18 @@ class BatteryFact:
     crashed: bool
 
 
+# Mounted read-only so the integrity probe can run inside the image without
+# being baked into it -- a probe baked at build time is a probe the producer
+# could have edited.
+_PROBE_SRC = Path(__file__).resolve().parents[3] / "scripts" / "honesty_probe.py"
+
+
 def _docker_runner(image_tag: str, argv: list[str], timeout_s: int) -> tuple[str, str, int]:
+    mounts: list[str] = []
+    if _PROBE_SRC.is_file():
+        mounts = ["-v", f"{_PROBE_SRC}:/opt/fc_probe.py:ro"]
     proc = subprocess.run(  # noqa: S603
-        ["docker", "run", "--rm", "--entrypoint", argv[0], image_tag, *argv[1:]],
+        ["docker", "run", "--rm", *mounts, "--entrypoint", argv[0], image_tag, *argv[1:]],
         capture_output=True,
         text=True,
         timeout=timeout_s,
@@ -2105,6 +2232,25 @@ def test_the_legacy_states_are_unchanged() -> None:
 def test_llm_generate_still_exists_for_the_disabled_path() -> None:
     """With the flag off, the old behaviour must remain reachable."""
     assert SynthesisState.LLM_GENERATE.value == "llm_generate"
+
+
+def test_produce_verify_runs_the_tamper_audit_on_the_producer_context() -> None:
+    """Otherwise producer-side tampering is checked by nobody.
+
+    The legacy path calls classify_context after TRY_DEFAULT and after every
+    LLM_GENERATE attempt. The battery collects functional facts only, so
+    without this `tamper_audit` is a check id nothing can ever emit -- and
+    attack-demo:1 and pysindy#139, both labelled reject in the validation set,
+    would have nothing to be rejected on. Neither breaks function; both defeat
+    detection.
+    """
+    import inspect
+
+    from datasmith.agents.synthesizer import Synthesizer
+
+    source = inspect.getsource(Synthesizer._run_produce_verify)
+    assert "classify_context" in source, "PRODUCE_VERIFY must run the tamper audit"
+    assert "tamper.tampered" in source, "and must act on its result"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2199,6 +2345,7 @@ Add the method `_run_produce_verify` to the `Synthesizer` class:
         from datasmith.agents.reflexive.loop import LoopOutcome, run_loop
         from datasmith.agents.reflexive.producer import revise as producer_revise
         from datasmith.agents.reflexive.verifier import verify as verifier_verify
+        from datasmith.agents.tamper_audit import classify_context
 
         producer_agent = get_agent([os.environ.get("DATASMITH_PV_PRODUCER_AGENT", "codex")])
         verifier_agent = get_agent([os.environ.get("DATASMITH_PV_VERIFIER_AGENT", "codex")])
@@ -2246,7 +2393,34 @@ Add the method `_run_produce_verify` to the `Synthesizer` class:
             for filename, field_name in DockerContext._FILE_MAP.items():
                 (workdir / filename).write_text(getattr(context, field_name), encoding="utf-8")
 
-            def on_accept() -> tuple[dict | None, dict]:
+            def revise_and_audit(
+            ctx: DockerContext, graded: "GradedReport"
+        ) -> tuple[DockerContext | None, "ProducerPlan | None"]:
+            """Producer edit, then the tamper audit on what it produced.
+
+            The legacy path runs classify_context after TRY_DEFAULT and after
+            every LLM_GENERATE attempt. PRODUCE_VERIFY must too, or
+            producer-side tampering is checked by nobody: the battery collects
+            functional facts, and `tamper_audit` would be a check id nothing
+            can ever emit. The producer is the agent with motive here.
+            """
+            revised, plan = producer_revise(ctx, graded, producer_agent, workdir)
+            if revised is None:
+                return None, plan
+            tamper = classify_context(revised)
+            if tamper.tampered:
+                logger.error(
+                    "PRODUCE_VERIFY tamper audit failed for %s/%s#%d: %s",
+                    owner,
+                    repo,
+                    issue_number,
+                    tamper.as_list(),
+                )
+                self._log_tamper(owner, repo, sha, issue_number, 0, tamper, "produce_verify")
+                return None, plan
+            return revised, plan
+
+        def on_accept() -> tuple[dict | None, dict]:
                 result = last["result"]
                 if result is None:
                     return None, {}
@@ -2256,7 +2430,7 @@ Add the method `_run_produce_verify` to the `Synthesizer` class:
                 context=context,
                 build=build,
                 verify=lambda image, log, mode: verifier_verify(image, log, verifier_agent, mode),
-                revise=lambda ctx, graded: producer_revise(ctx, graded, producer_agent, workdir),
+                revise=revise_and_audit,
                 workdir=workdir,
                 on_accept=on_accept,
             )
