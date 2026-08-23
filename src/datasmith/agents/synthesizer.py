@@ -61,6 +61,26 @@ def _load_default_context() -> DockerContext:
     )
 
 
+def _default_failure_message(failure: dict[str, Any]) -> str:
+    """Build a diagnosable message from a TRY_DEFAULT failure.
+
+    `stage` and `error_message` give "run: rc=1", which identifies nothing.
+    `failure_json["stdout"]` holds what the build actually printed, so a tail of
+    it travels with the row. Failures are grouped by cause when scaling, and a
+    return code cannot be grouped.
+    """
+    stage = failure.get("stage") or "unknown"
+    message = failure.get("error_message") or ""
+    stdout = (failure.get("stdout") or "").strip()
+    stderr = (failure.get("stderr") or "").strip()
+    parts = [f"{stage}: {message}".strip()]
+    if stderr:
+        parts.append(f"--- stderr (tail) ---\n{stderr[-4000:]}")
+    if stdout:
+        parts.append(f"--- stdout (tail) ---\n{stdout[-6000:]}")
+    return "\n".join(parts)[-14_000:]
+
+
 class Synthesizer:
     """State machine for synthesizing Docker build contexts."""
 
@@ -218,13 +238,12 @@ class Synthesizer:
                 issue_number=issue_number,
                 success=bool(result.success),
                 duration_s=round(time.monotonic() - default_started, 2),
-                error_message=(
-                    None
-                    if result.success
-                    else (f"{default_failure.get('stage') or 'unknown'}: {default_failure.get('error_message') or ''}")[
-                        -10_000:
-                    ]
-                ),
+                # The stage and message alone say "run stage, rc=1", which is
+                # not enough to diagnose anything. failure_json carries the
+                # build's own output, so keep a tail of it. At a few hundred
+                # repositories, grouping failures by cause is the whole game,
+                # and a cause cannot be grouped from a return code.
+                error_message=(None if result.success else _default_failure_message(default_failure)),
             )
             if result.success:
                 tamper = classify_context(default_ctx)
