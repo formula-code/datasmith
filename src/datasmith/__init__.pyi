@@ -150,6 +150,12 @@ from datasmith.utils import (
     TokenPool as TokenPool,
 )
 from datasmith.utils import (
+    abatch_upsert as abatch_upsert,
+)
+from datasmith.utils import (
+    afetch_all as afetch_all,
+)
+from datasmith.utils import (
     batch_upsert as batch_upsert,
 )
 from datasmith.utils import (

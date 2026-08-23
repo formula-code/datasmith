@@ -2,13 +2,60 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import BaseModel
 
-from datasmith.utils.db import batch_upsert, get_client, stable_hash, supabase_cached
+from datasmith.utils.db import (
+    UnfilteredLargeSelectError,
+    abatch_upsert,
+    afetch_all,
+    batch_upsert,
+    fetch_all,
+    get_async_client,
+    get_client,
+    stable_hash,
+    supabase_cached,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_async_client_cache():
+    """Drop any memoised async client so tests never share one."""
+    import datasmith.utils.db as db_mod
+
+    db_mod._async_clients.clear()
+    yield
+    db_mod._async_clients.clear()
+
+
+def _sync_query_mock(pages: list[list[dict[str, Any]]]) -> tuple[MagicMock, MagicMock]:
+    """Build a client whose select chain returns *pages* in order.
+
+    Every builder method returns the same object, so the test can inspect
+    exactly which predicates fetch_all attached.
+    """
+    query = MagicMock()
+    for method in ("select", "eq", "is_", "gte", "lte", "lt", "neq", "order", "range"):
+        getattr(query, method).return_value = query
+    query.execute.side_effect = [MagicMock(data=page) for page in pages]
+    client = MagicMock()
+    client.table.return_value = query
+    return client, query
+
+
+def _async_query_mock(pages: list[list[dict[str, Any]]]) -> tuple[MagicMock, MagicMock]:
+    """Async twin of :func:`_sync_query_mock`; ``execute`` is awaitable."""
+    query = MagicMock()
+    for method in ("select", "eq", "is_", "gte", "lte", "lt", "neq", "order", "range"):
+        getattr(query, method).return_value = query
+    query.execute = AsyncMock(side_effect=[MagicMock(data=page) for page in pages])
+    client = MagicMock()
+    client.table.return_value = query
+    return client, query
 
 
 class SampleModel(BaseModel):
@@ -170,3 +217,267 @@ class TestGetClient:
         with pytest.raises(ValueError, match="SUPABASE_URL"):
             get_client()
         db_mod._client = None
+
+
+class TestLtFilters:
+    """`lt_filters` is a real strict less-than, not lte minus a second."""
+
+    def test_lt_applied_to_query(self) -> None:
+        client, query = _sync_query_mock([[{"issue_number": 1}]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            rows = fetch_all(
+                "pull_requests",
+                select="issue_number",
+                gte_filters={"merged_at": "2026-08-01"},
+                lt_filters={"merged_at": "2026-09-01"},
+            )
+        assert rows == [{"issue_number": 1}]
+        query.gte.assert_called_once_with("merged_at", "2026-08-01")
+        query.lt.assert_called_once_with("merged_at", "2026-09-01")
+        # The half-open window must NOT degrade into an inclusive upper bound.
+        query.lte.assert_not_called()
+
+    def test_lt_and_lte_are_independent(self) -> None:
+        client, query = _sync_query_mock([[]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            fetch_all(
+                "pull_requests",
+                select="issue_number",
+                lte_filters={"created_at": "2026-08-31"},
+                lt_filters={"merged_at": "2026-09-01"},
+            )
+        query.lte.assert_called_once_with("created_at", "2026-08-31")
+        query.lt.assert_called_once_with("merged_at", "2026-09-01")
+
+    def test_lt_omitted_when_absent(self) -> None:
+        client, query = _sync_query_mock([[]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            fetch_all("pull_requests", select="issue_number", filters={"owner": "pandas-dev"})
+        query.lt.assert_not_called()
+
+    def test_lt_counts_as_a_filter_for_the_guardrail(self) -> None:
+        """A window-scoped read of `patch` is legitimate and must not raise."""
+        client, _ = _sync_query_mock([[]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            rows = fetch_all(
+                "pull_requests",
+                select="owner, repo, patch",
+                lt_filters={"merged_at": "2026-09-01"},
+            )
+        assert rows == []
+
+
+class TestLargeSelectGuardrail:
+    """Selecting `patch` table-wide killed PostgREST; refuse it up front."""
+
+    def test_unfiltered_star_on_large_table_raises(self) -> None:
+        client, _ = _sync_query_mock([[]])
+        with (
+            patch("datasmith.utils.db.get_client", return_value=client),
+            pytest.raises(UnfilteredLargeSelectError, match="pull_requests"),
+        ):
+            fetch_all("pull_requests")
+
+    def test_unfiltered_large_column_raises(self) -> None:
+        client, _ = _sync_query_mock([[]])
+        with (
+            patch("datasmith.utils.db.get_client", return_value=client),
+            pytest.raises(UnfilteredLargeSelectError, match="patch"),
+        ):
+            fetch_all("pull_requests", select="owner, repo, patch")
+
+    def test_guardrail_raises_before_any_query(self) -> None:
+        client, query = _sync_query_mock([[]])
+        with (
+            patch("datasmith.utils.db.get_client", return_value=client),
+            pytest.raises(UnfilteredLargeSelectError),
+        ):
+            fetch_all("pull_requests", select="patch")
+        query.execute.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"filters": {"owner": "pandas-dev"}},
+            {"is_null": ["container_name"]},
+            {"gte_filters": {"merged_at": "2026-08-01"}},
+            {"lte_filters": {"merged_at": "2026-08-31"}},
+            {"lt_filters": {"merged_at": "2026-09-01"}},
+            {"neq_filters": {"merge_commit_sha": ""}},
+        ],
+    )
+    def test_any_filter_permits_the_read(self, kwargs: dict[str, Any]) -> None:
+        client, _ = _sync_query_mock([[]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            assert fetch_all("pull_requests", select="patch", **kwargs) == []
+
+    def test_empty_filter_containers_do_not_count(self) -> None:
+        """`filters={}` is the caller having no filter, not having one."""
+        client, _ = _sync_query_mock([[]])
+        with (
+            patch("datasmith.utils.db.get_client", return_value=client),
+            pytest.raises(UnfilteredLargeSelectError),
+        ):
+            fetch_all("pull_requests", select="patch", filters={}, is_null=[])
+
+    def test_narrow_select_on_large_table_is_fine(self) -> None:
+        client, _ = _sync_query_mock([[{"owner": "a", "repo": "b"}]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            rows = fetch_all("pull_requests", select="owner, repo")
+        assert rows == [{"owner": "a", "repo": "b"}]
+
+    def test_unfiltered_star_on_small_table_is_fine(self) -> None:
+        """`repositories` is small and stage 5 still reads it whole."""
+        client, _ = _sync_query_mock([[{"owner": "a", "repo": "b"}]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            rows = fetch_all("repositories")
+        assert rows == [{"owner": "a", "repo": "b"}]
+
+    def test_substring_lookalike_column_is_not_flagged(self) -> None:
+        """`patch_url` merely contains "patch"; it is not a large column."""
+        client, _ = _sync_query_mock([[]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            assert fetch_all("pull_requests", select="owner, patch_url") == []
+
+    def test_aliased_large_column_is_flagged(self) -> None:
+        """`diff:patch` renames the column but still ships its bytes."""
+        client, _ = _sync_query_mock([[]])
+        with (
+            patch("datasmith.utils.db.get_client", return_value=client),
+            pytest.raises(UnfilteredLargeSelectError),
+        ):
+            fetch_all("pull_requests", select="owner, diff:patch")
+
+    async def test_guardrail_also_applies_to_afetch_all(self) -> None:
+        client, query = _async_query_mock([[]])
+        with (
+            patch("datasmith.utils.db.get_async_client", return_value=client),
+            pytest.raises(UnfilteredLargeSelectError),
+        ):
+            await afetch_all("pull_requests", select="patch")
+        query.execute.assert_not_awaited()
+
+
+class TestGetAsyncClient:
+    """Per-event-loop singleton, mirroring the memoised get_client()."""
+
+    async def test_same_loop_reuses_one_client(self) -> None:
+        created = [MagicMock(name="c1"), MagicMock(name="c2")]
+        with patch("supabase.acreate_client", AsyncMock(side_effect=created)) as create:
+            c1 = await get_async_client()
+            c2 = await get_async_client()
+        assert c1 is c2
+        assert create.await_count == 1
+
+    async def test_concurrent_callers_share_one_client(self) -> None:
+        """All eight can miss the cache, but they must still agree on one client.
+
+        The create suspends, so every coroutine gets past the cache check
+        before any of them stores a result — the exact race `setdefault`
+        exists to settle.
+        """
+        created: list[MagicMock] = []
+
+        async def _slow_create(*args: Any, **kwargs: Any) -> MagicMock:
+            await asyncio.sleep(0)
+            client = MagicMock(name=f"c{len(created)}")
+            created.append(client)
+            return client
+
+        with patch("supabase.acreate_client", _slow_create):
+            clients = await asyncio.gather(*(get_async_client() for _ in range(8)))
+
+        assert len(created) == 8, "the race did not actually happen"
+        assert all(c is clients[0] for c in clients)
+
+    def test_distinct_loops_get_distinct_clients(self) -> None:
+        created = [MagicMock(name="c1"), MagicMock(name="c2")]
+        with patch("supabase.acreate_client", AsyncMock(side_effect=created)) as create:
+            first = asyncio.run(get_async_client())
+            second = asyncio.run(get_async_client())
+        assert first is not second
+        assert create.await_count == 2
+
+    def test_missing_credentials_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SUPABASE_URL", "")
+        monkeypatch.setenv("SUPABASE_KEY", "")
+        with pytest.raises(ValueError, match="SUPABASE_URL"):
+            asyncio.run(get_async_client())
+
+
+class TestAFetchAll:
+    async def test_single_page(self) -> None:
+        client, query = _async_query_mock([[{"owner": "a", "repo": "b"}]])
+        with patch("datasmith.utils.db.get_async_client", return_value=client):
+            rows = await afetch_all("repositories", select="owner, repo")
+        assert rows == [{"owner": "a", "repo": "b"}]
+        query.execute.assert_awaited_once()
+
+    async def test_paginates_until_short_page(self) -> None:
+        full = [{"owner": "a", "repo": "b", "issue_number": i} for i in range(3)]
+        client, query = _async_query_mock([full, full[:1]])
+        with patch("datasmith.utils.db.get_async_client", return_value=client):
+            rows = await afetch_all("pull_requests", select="issue_number", filters={"owner": "a"}, page_size=3)
+        assert len(rows) == 4
+        assert query.execute.await_count == 2
+        assert [c.args for c in query.range.call_args_list] == [(0, 2), (3, 5)]
+
+    async def test_applies_every_filter_kind(self) -> None:
+        client, query = _async_query_mock([[]])
+        with patch("datasmith.utils.db.get_async_client", return_value=client):
+            await afetch_all(
+                "pull_requests",
+                select="issue_number",
+                filters={"owner": "pandas-dev"},
+                is_null=["container_name"],
+                gte_filters={"merged_at": "2026-08-01"},
+                lte_filters={"created_at": "2026-08-31"},
+                lt_filters={"merged_at": "2026-09-01"},
+                neq_filters={"merge_commit_sha": ""},
+            )
+        query.eq.assert_called_once_with("owner", "pandas-dev")
+        query.is_.assert_called_once_with("container_name", "null")
+        query.gte.assert_called_once_with("merged_at", "2026-08-01")
+        query.lte.assert_called_once_with("created_at", "2026-08-31")
+        query.lt.assert_called_once_with("merged_at", "2026-09-01")
+        query.neq.assert_called_once_with("merge_commit_sha", "")
+
+    async def test_default_order_by_matches_sync(self) -> None:
+        client, query = _async_query_mock([[]])
+        with patch("datasmith.utils.db.get_async_client", return_value=client):
+            await afetch_all("pull_requests", select="issue_number", filters={"owner": "a"})
+        assert [c.args[0] for c in query.order.call_args_list] == ["owner", "repo", "issue_number"]
+
+    async def test_null_data_is_an_empty_page(self) -> None:
+        client = MagicMock()
+        query = MagicMock()
+        for method in ("select", "eq", "order", "range"):
+            getattr(query, method).return_value = query
+        query.execute = AsyncMock(return_value=MagicMock(data=None))
+        client.table.return_value = query
+        with patch("datasmith.utils.db.get_async_client", return_value=client):
+            assert await afetch_all("repositories", select="owner") == []
+
+
+class TestABatchUpsert:
+    async def test_empty_list_writes_nothing(self) -> None:
+        client = MagicMock()
+        with patch("datasmith.utils.db.get_async_client", return_value=client):
+            assert await abatch_upsert("pull_requests", []) == 0
+        client.table.assert_not_called()
+
+    async def test_chunks_sequentially(self) -> None:
+        table = MagicMock()
+        table.upsert.return_value = table
+        table.execute = AsyncMock(return_value=MagicMock())
+        client = MagicMock()
+        client.table.return_value = table
+
+        rows = [{"id": i} for i in range(250)]
+        with patch("datasmith.utils.db.get_async_client", return_value=client):
+            total = await abatch_upsert("pull_requests", rows, chunk_size=100)
+
+        assert total == 250
+        assert table.upsert.call_count == 3
+        assert [len(c.args[0]) for c in table.upsert.call_args_list] == [100, 100, 50]
+        assert table.execute.await_count == 3

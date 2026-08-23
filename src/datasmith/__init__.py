@@ -52,6 +52,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # --- utils ---
     "Settings": ("datasmith.utils", "Settings"),
     "TokenPool": ("datasmith.utils", "TokenPool"),
+    "abatch_upsert": ("datasmith.utils", "abatch_upsert"),
+    "afetch_all": ("datasmith.utils", "afetch_all"),
     "batch_upsert": ("datasmith.utils", "batch_upsert"),
     "fetch_all": ("datasmith.utils", "fetch_all"),
     "get_async_client": ("datasmith.utils", "get_async_client"),
@@ -283,6 +285,12 @@ if TYPE_CHECKING:
     )
     from datasmith.utils import (
         TokenPool as TokenPool,
+    )
+    from datasmith.utils import (
+        abatch_upsert as abatch_upsert,
+    )
+    from datasmith.utils import (
+        afetch_all as afetch_all,
     )
     from datasmith.utils import (
         batch_upsert as batch_upsert,
