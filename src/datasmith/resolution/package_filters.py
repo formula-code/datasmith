@@ -248,9 +248,15 @@ def filter_requirements_for_pypi(  # noqa: C901
 
     out: list[str] = []
     for raw in requirements:
-        if not raw or not raw.strip():
+        if not raw:
             continue
-        raw = raw.strip()
+        # A '#' comment is requirements-file syntax, not part of the requirement.
+        # Strip it at this boundary: what this function returns is the seed that
+        # is stored on the row, and the resolver's pass-through path stores it
+        # without ever handing it to uv.
+        raw = strip_inline_comment(raw)
+        if not raw:
+            continue
 
         if raw.startswith(("http://", "https://", "git+", "hg+", "svn+", "bzr+", "file://")):
             if is_valid_direct_url(raw):

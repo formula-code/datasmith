@@ -4,12 +4,18 @@ The comment is stripped where the line is read, not later: ``clean_pinned``
 collapses whitespace, so a comment that survives that far is glued to the
 version (``numpy>=1.25#pinnedfortheABI``), stops looking like a comment, and
 takes the package with it when the parser rejects the result.
+
+``filter_requirements_for_pypi`` is the other boundary that has to be clean:
+its output is the seed stored on the row, and the resolver's pass-through path
+(one commit in five, per the audit) stores it without ever handing it to uv.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from datasmith.resolution import package_filters as pf
-from datasmith.resolution.package_filters import clean_pinned, resolve_requirements_file
+from datasmith.resolution.package_filters import clean_pinned, filter_requirements_for_pypi, resolve_requirements_file
 from datasmith.resolution.requirements import to_requirement_lines
 
 REQUIREMENTS_TXT = """\
@@ -42,3 +48,22 @@ def test_the_package_survives_clean_pinned_and_reaches_uv(monkeypatch):
 def test_clean_pinned_does_not_fuse_a_comment_to_a_version():
     assert clean_pinned(["numpy>=1.25  # pinned for the ABI"]) == ["numpy>=1.25"]
     assert clean_pinned(["# a whole-line comment"]) == []
+
+
+def test_the_stored_seed_carries_no_comment(tmp_path: Path):
+    # The pass-through path stores this list verbatim as env_payload, so a
+    # comment left here is a comment in the dataset.
+    kept = filter_requirements_for_pypi(
+        ["numpy>=1.25  # pinned for the ABI", "# a whole-line comment", "scipy>=1.10"],
+        project_dir=tmp_path,
+        own_import_name=None,
+    )
+    assert sorted(kept) == ["numpy>=1.25", "scipy>=1.10"]
+
+
+def test_stripping_the_comment_does_not_damage_a_url(tmp_path: Path):
+    url = "https://files.pythonhosted.org/packages/x/foo-1.0-py3-none-any.whl"
+    kept = filter_requirements_for_pypi(
+        [url, f"{url}  # the vendored wheel"], project_dir=tmp_path, own_import_name=None
+    )
+    assert kept == [url]

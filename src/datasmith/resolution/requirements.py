@@ -97,6 +97,11 @@ def is_direct_url_line(text: str) -> bool:
 def _rejection_reason(text: str) -> str | None:
     """Name the reason a string is not a requirement at all, or ``None``."""
     if text.startswith("-"):
+        # This also refuses ``-e <url>``, which uv would accept. That is
+        # deliberate: an editable install belongs to the build, not to the
+        # dependency seed, and ``-e .`` -- by far the common form -- installs the
+        # project under resolution into its own environment. The refusal is
+        # reported with this reason rather than being silent.
         return REASON_DIRECTIVE
     if text.startswith("."):
         return REASON_LOCAL_PATH
