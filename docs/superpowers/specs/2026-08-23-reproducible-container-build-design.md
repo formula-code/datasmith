@@ -104,14 +104,27 @@ variables that nothing sets.
 
 ### 2.3 Defects that waste compute
 
-**The pipeline discards each repository's dependency declaration.**
-`resolution/orchestrator.py:269` iterates `cfg_items.matrix.values()` and
-discards the keys. ASV defines `matrix` as a map from package name to required
-versions. For the pandas declaration
-`{"numpy": [], "Cython": ["0.29.21"], "matplotlib": [], "sqlalchemy": []}` the
-code derives the single string `'0.29.21'`, and passes it to the resolver as a
-package name. Every package name is lost, and every pinned version becomes an
-invalid requirement.
+**The pipeline never reads a repository's own configuration at all.**
+`resolution/orchestrator.py:81` parses each `asv.conf.json` with
+`json5.loads`, which returns a plain dict. Lines 86 to 99 then read that dict
+with `getattr(cfg, "pythons", [])`, `getattr(cfg, "build_command", None)`,
+`getattr(cfg, "install_command", None)`, and `getattr(cfg, "matrix", None)`.
+`getattr` is attribute access, and a dict has no such attributes, so every one
+of those calls returns its default.
+
+The whole read is therefore a no-op. `pythons` is always empty, so line 111
+falls back to `SUPPORTED_PYTHON_VERSIONS` and the repository's declared Python
+version is never used. `build_command`, `install_command`, and `matrix` are
+always empty.
+
+A second defect sits below the first and is currently unreachable.
+`orchestrator.py:269` iterates `cfg_items.matrix.values()` and discards the
+keys. ASV defines `matrix` as a map from package name to required versions. For
+the pandas declaration
+`{"numpy": [], "Cython": ["0.29.21"], "matplotlib": [], "sqlalchemy": []}` that
+code derives the single string `'0.29.21'` and passes it to the resolver as a
+package name. Fixing the first defect exposes the second, so both must be fixed
+together.
 
 `apache/arrow` declares `boost-cpp: ["1.68.0"]` and ships its own
 `asv-build.sh`. `profile.sh:97` forces `environment_type` to `existing`, which
@@ -229,7 +242,9 @@ flowchart TB
 ### Step 1. Deterministic pre-pass, with no agent
 
 1. Read `asv.conf.json`. Take `pythons`, and filter by commit date. The
-   pipeline already does this correctly at `orchestrator.py:118`.
+   filtering code at `orchestrator.py:118` is correct, but it currently
+   filters a fallback set, because the read above it returns nothing. See
+   section 2.3.
 2. Take `matrix`, and read it as ASV defines it. An empty list means "require
    this package". A version means "pin this package to that version".
 3. Take `build_command` and `install_command`, and run them.
