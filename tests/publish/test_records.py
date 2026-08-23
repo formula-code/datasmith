@@ -84,8 +84,40 @@ class TestRecordsFromSupabase:
         assert records[0].owner == "org"
         assert records[0].task_id == 1
 
-        # Verify fetch_all was called with correct filters (first call = pull_requests)
+        # Verify fetch_all was called with correct filters (first call = pull_requests).
+        # The upper bound is strict: the window is half-open, so ``lte_filters``
+        # must not appear at all. See ``datasmith.utils.db.window_filters``.
         first_call_kwargs = mock_fetch.call_args_list[0]
         assert first_call_kwargs[1]["filters"] == {"is_performance_commit": True}
         assert first_call_kwargs[1]["gte_filters"] == {"merged_at": "2024-01-01"}
-        assert first_call_kwargs[1]["lte_filters"] == {"merged_at": "2024-12-31"}
+        assert first_call_kwargs[1]["lt_filters"] == {"merged_at": "2024-12-31"}
+        assert "lte_filters" not in first_call_kwargs[1]
+
+    def test_select_is_narrowed_to_the_columns_the_record_uses(self):
+        """``select="*"`` streamed every text column of every matching row.
+
+        That is the shape of the read that killed PostgREST with "cannot
+        enlarge string buffer containing 1073741822 bytes".  ``patch`` is
+        still selected because the record requires it; the point is that
+        ``body``, ``problem_description`` and the rest no longer ride along.
+        """
+        with patch("datasmith.publish.records.fetch_all", side_effect=[[], []]) as mock_fetch:
+            records_from_supabase(start_date="2024-01-01", end_date="2024-12-31")
+
+        select = mock_fetch.call_args_list[0][1]["select"]
+        assert select != "*"
+        columns = {c.strip() for c in select.split(",")}
+        # Every column the record constructor actually reads.
+        assert columns == {
+            "owner",
+            "repo",
+            "issue_number",
+            "merge_commit_sha",
+            "base_sha",
+            "merged_at",
+            "rendered_problem",
+            "classification",
+            "difficulty",
+            "container_name",
+            "patch",
+        }

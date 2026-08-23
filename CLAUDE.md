@@ -15,9 +15,10 @@ make check            # Lint (ruff), format, type-check (mypy), dependency check
 make test             # Run pytest with coverage
 
 # Development
-uv run pytest tests/                         # Run all tests
+uv run pytest tests/ -m "not slow"           # Run all tests (excludes tests that build/run real containers)
 uv run pytest tests/test_docker_context.py   # Run a single test file
 uv run pytest -xvs tests/test_scraper.py     # Verbose, stop on first failure
+uv run pytest tests/docker/test_manifest_integration.py -v -m slow  # Docker integration tests (opt-in, needs a daemon)
 uv run mypy                                  # Type checking
 uv run pre-commit run -a                     # Run all pre-commit hooks
 

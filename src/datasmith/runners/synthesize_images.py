@@ -5,12 +5,14 @@ import datetime
 import os
 import tempfile
 import threading
+from collections import Counter
 from typing import Any
 
 from datasmith.agents.rate_limit import RateLimitError
 from datasmith.agents.synthesizer import Synthesizer
 from datasmith.runners.base import BaseRunner
 from datasmith.utils import get_client, get_logger
+from datasmith.utils.overrides import benchmark_dest_for, fetch_overrides
 
 logger = get_logger("runners.synthesize_images")
 
@@ -84,8 +86,15 @@ def _build_pr_image(
     python_version: str = "",
     base_sha: str = "",
     build_root: str = "",
+    benchmark_dest: str = "",
 ) -> str:
     """Build the final PR image from synthesized context (no push).
+
+    ``benchmark_dest`` is the operator-declared benchmark file from
+    formulacode_task_overrides. It reaches docker_build_run.sh as the
+    BENCHMARK_DEST build arg and becomes the input to the FATAL
+    benchmark_dest_missing invariant. Empty (the common case) means no
+    override row declared one, and the invariant skips.
 
     Returns the PR image tag that will be used for the subsequent push.
     """
@@ -112,6 +121,7 @@ def _build_pr_image(
                 env_payload=env_payload or "[]",
                 py_version=python_version,
                 build_root=build_root,
+                benchmark_dest=benchmark_dest,
             )
     else:
         mgr.build_pr_image(
@@ -122,9 +132,18 @@ def _build_pr_image(
             env_payload=env_payload or "[]",
             py_version=python_version,
             build_root=build_root,
+            benchmark_dest=benchmark_dest,
         )
 
     return pr_tag
+
+
+# Build without publishing. See _push_pr_image for why a trial run wants this.
+DATASMITH_SKIP_IMAGE_PUSH: bool = os.environ.get("DATASMITH_SKIP_IMAGE_PUSH", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 def _push_pr_image(owner: str, repo: str, pr_tag: str, py_version: str = "", build_root: str = "") -> None:
@@ -133,9 +152,19 @@ def _push_pr_image(owner: str, repo: str, pr_tag: str, py_version: str = "", bui
     ``py_version`` and ``build_root`` name the repo parent. Without them this
     pushes a tag nothing ever built, and the ``except`` below turns that into a
     warning nobody reads.
+
+    Set DATASMITH_SKIP_IMAGE_PUSH=1 to build without publishing. A trial run
+    that rebuilds many repositories to measure a build rate has no reason to
+    upload the results to a public registry, and pushing images built from
+    templates known to be defective is worse than pointless. The default stays
+    unchanged, so the pipeline behaves as before unless asked otherwise.
     """
     from datasmith.docker.images import get_repo_image_name
     from datasmith.docker.publish import DockerHubPublisher
+
+    if DATASMITH_SKIP_IMAGE_PUSH:
+        logger.info("DATASMITH_SKIP_IMAGE_PUSH set; not pushing %s", pr_tag)
+        return
 
     publisher = DockerHubPublisher()
     repo_tag = get_repo_image_name(owner, repo, py_version, build_root)
@@ -190,6 +219,10 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
     from pathlib import Path
 
     templates = Path(__file__).parents[1] / "docker" / "templates"
+    # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
+    # trial path — copied, never forked, so a change to LSV selection
+    # affects stage 6 and stage 7 identically.
+    lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template"
 
     # Every file that Dockerfile.pr references via COPY
     required = [
@@ -198,10 +231,15 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
         "docker_build_pkg.sh",
         "docker_build_run.sh",
         "docker_build_final.sh",
+        "emit_manifest.py",
+        "measure.sh",
+        "apply_oracle_patch.py",
+        "emit_measure.py",
         "profile.sh",
         "run-tests.sh",
         "entrypoint.sh",
     ]
+    lsv_required = ["lsv_init.py", "lsv_measure.py", "parser.py"]
 
     for fname in required:
         target = os.path.join(context_dir, fname)
@@ -216,6 +254,14 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
             src = templates / fname
             if src.exists():
                 shutil.copy2(str(src), target)
+
+    for fname in lsv_required:
+        target = os.path.join(context_dir, fname)
+        if os.path.exists(target):
+            continue
+        src = lsv_templates / fname
+        if src.exists():
+            shutil.copy2(str(src), target)
 
 
 # Lock to serialize prerequisite image builds (base + repo) across threads.
@@ -238,15 +284,27 @@ def _fetch_neighbor_items(
 
     Returns item dicts shaped like ``pipeline._synthesize_images`` items, so
     :meth:`SynthesizeImagesRunner._do_process_item` can consume them without
-    any special-casing. Filters mirror the stage 6 selection: performance
-    commits with resolved packages and a non-empty extracted problem context,
-    excluding PRs that already have a ``container_name``.
+    any special-casing. The eligibility filters mirror the stage 6 selection --
+    performance commits with resolved packages and a non-empty extracted
+    problem context, excluding PRs that already have a ``container_name``.
+
+    The date bounds deliberately do **not**. Stage 6 windows the run, which is
+    ``merged_at`` half-open ``[start, end)`` via
+    :func:`datasmith.utils.db.window_filters`; this asks a different question --
+    which PRs sit within +/- ``DATASMITH_NEIGHBOR_WINDOW_DAYS`` of one pivot PR,
+    and so probably share the dependency environment just cached for it. Reaching
+    *outside* the run's window is the whole point, so ``window_filters`` would
+    break the feature rather than make it consistent. ``created_at`` is used as
+    the proximity axis for the same reason it is inclusive on both ends: this is
+    a similarity heuristic, not a claim about which run owns the row.
     """
     from datasmith.utils.db import fetch_all
 
     rows = fetch_all(
         "pull_requests",
-        select=("owner, repo, issue_number, merge_commit_sha, base_sha, title, body, created_at, rendered_problem"),
+        select=(
+            "owner, repo, issue_number, merge_commit_sha, base_sha, patch, title, body, created_at, rendered_problem"
+        ),
         filters={
             "owner": owner,
             "repo": repo,
@@ -306,6 +364,9 @@ def _fetch_neighbor_items(
             "issue_number": r["issue_number"],
             "sha": sha,
             "base_sha": r.get("base_sha", ""),
+            # The oracle patch, shipped into the synthesis workspace so
+            # measure.sh can prove the container measures a speedup.
+            "patch": r.get("patch", "") or "",
             "title": r.get("title", ""),
             "body": r.get("body", ""),
             "created_at": r.get("created_at"),
@@ -364,6 +425,7 @@ class SynthesizeImagesRunner(BaseRunner):
         self._total = len(items)
         self._completed = 0
         self._failed = 0
+        self._error_types = Counter()
         self._enqueued = set()
         self._init_progress()
 
@@ -389,6 +451,7 @@ class SynthesizeImagesRunner(BaseRunner):
                 w.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
             self._update_progress(force=True)
+            self._log_summary()
             self._queue = None
 
     async def _worker_loop(self) -> None:
@@ -403,6 +466,7 @@ class SynthesizeImagesRunner(BaseRunner):
                 self._completed += 1
             except Exception as exc:
                 self._failed += 1
+                self._error_types[type(exc).__name__] += 1
                 self._log_failure(item, exc)
                 logger.exception("Failed processing item %s", self._item_id(item))
             finally:
@@ -515,6 +579,21 @@ class SynthesizeImagesRunner(BaseRunner):
 
         sha = item.get("sha", "")
         base_sha = item.get("base_sha", "")
+        solution_patch = item.get("patch", "") or ""
+        # Operator-declared benchmark file, if this task has an override row.
+        # Producer for the FATAL benchmark_dest_missing invariant, which has
+        # been inert since it shipped because nothing set $BENCHMARK_DEST.
+        # Absent -> "" -> docker_build_run.sh emits no breadcrumb -> the
+        # invariant skips, exactly as it does today for every task.
+        benchmark_dest = benchmark_dest_for(fetch_overrides([(owner, repo, issue_number)]), (owner, repo, issue_number))
+        if benchmark_dest:
+            logger.info(
+                "Task override for %s/%s#%d declares benchmark_dest=%s",
+                owner,
+                repo,
+                issue_number,
+                benchmark_dest,
+            )
         env_payload = item.get("env_payload", "")
 
         repo_image = _repo_tag_for(owner, repo, py_version, build_root)
@@ -531,6 +610,7 @@ class SynthesizeImagesRunner(BaseRunner):
             env_payload=env_payload,
             python_version=py_version,
             base_sha=base_sha,
+            solution_patch=solution_patch,
         )
 
         if ctx is None:
@@ -550,6 +630,7 @@ class SynthesizeImagesRunner(BaseRunner):
             py_version,
             base_sha=base_sha,
             build_root=build_root,
+            benchmark_dest=benchmark_dest,
         )
 
         # Record the container name in Supabase *before* pushing. If the DB

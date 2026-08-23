@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from datasmith.runners.render_problems import RenderProblemsRunner
@@ -104,3 +106,127 @@ class TestIncludesScrapedIssues:
         assert len(issues_arg) == 1
         assert issues_arg[0].number == 99
         assert issues_arg[0].title == "Slow sort"
+
+
+class TestProblemExtractorIsHoisted:
+    """One extractor per stage, not one per PR.
+
+    ``ProblemExtractor()`` was being constructed inside every
+    ``asyncio.to_thread`` call, so each item rebuilt the dspy.Signature
+    subclass and re-ran ``ensure_configured`` before it could ask anything.
+    """
+
+    async def test_one_extractor_serves_every_item(self) -> None:
+        mock_client = _mock_supabase()
+        gh = AsyncMock()
+        gh.get_issue_expanded = AsyncMock(return_value=None)
+
+        extraction = MagicMock()
+        extraction.to_problem_markdown.return_value = "problem"
+        extraction.initial_observations = "obs"
+        extraction.triage_attempts = None
+        extraction.solution_overview = None
+        extraction.solution_observations = None
+
+        instances: list[MagicMock] = []
+
+        def _factory() -> MagicMock:
+            inst = MagicMock()
+            inst.extract_problem.return_value = extraction
+            instances.append(inst)
+            return inst
+
+        with (
+            patch("datasmith.agents.extractors.ProblemExtractor", _factory),
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+            patch("datasmith.runners.render_problems.get_client", return_value=mock_client),
+            patch("datasmith.github.render.render_problem_statement", return_value="Rendered"),
+        ):
+            runner = RenderProblemsRunner(gh=gh, n_concurrent=2)
+            await runner.run([_make_item(issue=n) for n in (1, 2, 3)])
+
+        assert len(instances) == 1, f"{len(instances)} extractors built for 3 PRs"
+        assert instances[0].extract_problem.call_count == 3
+
+
+class TestExplicitThreadPool:
+    """The blocking extraction and render run on a pool this runner owns.
+
+    ``asyncio.to_thread`` puts them on the interpreter default, sized
+    ``min(32, cpu_count + 4)`` — a different number on every host and shared
+    with everything else in the process (spec section 6.4).
+    """
+
+    @staticmethod
+    def _extraction() -> MagicMock:
+        extraction = MagicMock()
+        extraction.to_problem_markdown.return_value = "problem"
+        extraction.initial_observations = "obs"
+        extraction.triage_attempts = None
+        extraction.solution_overview = None
+        extraction.solution_observations = None
+        return extraction
+
+    async def test_blocking_calls_run_on_the_runners_own_pool(self) -> None:
+        mock_client = _mock_supabase()
+        gh = AsyncMock()
+        gh.get_issue_expanded = AsyncMock(return_value=None)
+        seen: list[str] = []
+
+        def _extract(*_args: object) -> MagicMock:
+            seen.append(threading.current_thread().name)
+            return self._extraction()
+
+        def _render(*_args: object, **_kwargs: object) -> str:
+            seen.append(threading.current_thread().name)
+            return "Rendered"
+
+        extractor = MagicMock()
+        extractor.extract_problem.side_effect = _extract
+
+        with (
+            patch("datasmith.agents.extractors.ProblemExtractor", return_value=extractor),
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+            patch("datasmith.runners.render_problems.get_client", return_value=mock_client),
+            patch("datasmith.github.render.render_problem_statement", side_effect=_render),
+        ):
+            runner = RenderProblemsRunner(gh=gh, n_concurrent=1)
+            await runner.run([_make_item()])
+
+        assert len(seen) == 2
+        assert all(name.startswith("render-problems") for name in seen), seen
+
+    async def test_the_pool_is_bounded_and_shut_down(self) -> None:
+        mock_client = _mock_supabase()
+        gh = AsyncMock()
+        gh.get_issue_expanded = AsyncMock(return_value=None)
+
+        peak = 0
+        live = 0
+        lock = threading.Lock()
+
+        def _extract(*_args: object) -> MagicMock:
+            nonlocal peak, live
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            time.sleep(0.02)
+            with lock:
+                live -= 1
+            return self._extraction()
+
+        extractor = MagicMock()
+        extractor.extract_problem.side_effect = _extract
+
+        with (
+            patch("datasmith.agents.extractors.ProblemExtractor", return_value=extractor),
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+            patch("datasmith.runners.render_problems.get_client", return_value=mock_client),
+            patch("datasmith.github.render.render_problem_statement", return_value="Rendered"),
+        ):
+            runner = RenderProblemsRunner(gh=gh, n_concurrent=8, max_workers=2)
+            await runner.run([_make_item(issue=n) for n in range(8)])
+
+        assert peak <= 2, f"{peak} concurrent extractions against a 2-thread pool"
+        assert runner._executor is None
+        assert not any(t.name.startswith("render-problems") for t in threading.enumerate())

@@ -126,10 +126,15 @@ def _matrix_entries(matrix: object, environment_type: object = None) -> dict[str
             continue
         if not name:
             continue
-        if isinstance(value, list | tuple | set):
-            out[name] = [str(v) for v in value]
-        else:
-            out[name] = [str(value)]
+        # ``null`` is kept, as the string ``"None"``, deliberately.  It means "do
+        # not install this package in this combination", which is NOT the same as
+        # an empty version list -- that means "install any version".  Dropping the
+        # null here collapses the two, and ``declare`` would then read "never
+        # install pytables" as "install any pytables".  ``_matrix_requirements``
+        # is where the sentinel is resolved, and it is the only reader that needs
+        # to know.
+        values = value if isinstance(value, list | tuple | set) else [value]
+        out[name] = [str(v) for v in values]
     return out
 
 

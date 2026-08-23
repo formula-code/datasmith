@@ -123,8 +123,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         metavar="SPECS",
-        help="Comma-separated list of stage-7 task specs (owner/repo#PR or owner/repo/PR). "
-        "When set, stage 7 runs only these tasks (bypasses date/repo filters). "
+        help="Comma-separated task specs (owner/repo#PR or owner/repo/PR). "
+        "When set, stages 6 (synthesize_images) and 7 (harbor_healthcheck) run only "
+        "these tasks and bypass the date window. Ignored by other stages. "
         "Example: --tasks apache/arrow#34476,pandas-dev/pandas#58617",
     )
     return parser.parse_args(argv)

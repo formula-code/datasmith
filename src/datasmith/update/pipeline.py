@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import os
 from collections import Counter
+from collections.abc import Sequence
 from typing import Any
 
 from datasmith.utils import get_client, get_logger
-from datasmith.utils.db import fetch_all
+from datasmith.utils.db import fetch_all, window_filters
 
 logger = get_logger("update.pipeline")
+
+# How many key values one ``in_filters`` request may carry.  PostgREST puts
+# the list in the query string, so the ceiling is a URL length, not a row
+# count: 200 forty-character merge SHAs is roughly 8.2 KB, past the 8 KB
+# request-line limit most proxies apply by default.  100 leaves headroom on
+# both the local socket and the Cloudflare Access tunnel.
+DATASMITH_KEY_FILTER_CHUNK: int = int(os.environ.get("DATASMITH_KEY_FILTER_CHUNK", "100"))
 
 
 def _parse_task_specs(specs: str) -> set[tuple[str, str, int]]:
@@ -36,6 +45,74 @@ def _parse_task_specs(specs: str) -> set[tuple[str, str, int]]:
             raise ValueError(f"Invalid PR number in --tasks spec '{spec}'") from exc
         out.add((owner, repo, pr_number))
     return out
+
+
+def _report_dropped(
+    items: list[dict[str, Any]],
+    pinned: set[tuple[str, str, int]] | None,
+    skipped_no_pkg: int,
+    skipped_no_ctx: int,
+) -> None:
+    """Say out loud which PRs were dropped between selection and assembly.
+
+    A pinned task that disappears here is the worst failure mode in this stage.
+    The log reads "Synthesizing images for 0 PRs", which looks like there is no
+    work rather than like a filter conflict. Both skip reasons were logged at
+    DEBUG, so at normal level a task simply vanished.
+    """
+    if pinned:
+        assembled = {(i["owner"], i["repo"], i["issue_number"]) for i in items}
+        lost = pinned - assembled
+        if lost:
+            logger.warning(
+                "synthesize_images: %d pinned task(s) were selected and then dropped "
+                "(no resolved packages, or no pr_context): %s",
+                len(lost),
+                ", ".join(f"{o}/{rp}#{n}" for o, rp, n in sorted(lost)),
+            )
+    if skipped_no_pkg or skipped_no_ctx:
+        logger.info(
+            "synthesize_images: skipped %d PR(s) with no resolved packages, %d with no pr_context",
+            skipped_no_pkg,
+            skipped_no_ctx,
+        )
+
+
+def _select_pinned_prs(
+    rows: list[dict[str, Any]],
+    wanted: set[tuple[str, str, int]],
+    select: str,
+) -> list[dict[str, Any]]:
+    """Reduce `rows` to exactly the PRs named by --tasks, fetching any that are missing.
+
+    An explicit spec set names the PRs the operator wants built, so it OVERRIDES
+    the date window rather than narrowing it. Without the override, pinning a
+    task outside the window selects nothing, and the log reads "no work to do"
+    rather than "you asked for a task the filter excluded".
+
+    Returns rows in sorted spec order, so a run is reproducible.
+    """
+    keyed = {(r["owner"], r["repo"], int(r["issue_number"])): r for r in rows}
+    # fetch_all has no OR support, and --tasks is a handful of specs, so one
+    # query per missing spec is both correct and cheap.
+    for owner, repo_name, number in sorted(wanted - set(keyed)):
+        for row in fetch_all(
+            "pull_requests",
+            select=select,
+            filters={"owner": owner, "repo": repo_name, "issue_number": number},
+        ):
+            keyed[(row["owner"], row["repo"], int(row["issue_number"]))] = row
+
+    selected = [keyed[key] for key in sorted(wanted) if key in keyed]
+    missing = wanted - set(keyed)
+    if missing:
+        logger.warning(
+            "synthesize_images: --tasks named %d PR(s) not found in pull_requests: %s",
+            len(missing),
+            ", ".join(f"{o}/{rp}#{n}" for o, rp, n in sorted(missing)),
+        )
+    logger.info("synthesize_images: --tasks filter selected %d PR(s)", len(selected))
+    return selected
 
 
 def _cap_per_repo(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -70,12 +147,67 @@ def order_by_probe(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda r: PROBE_RANK.get(r.get("probe_status") or "", unknown))
 
 
+def _fetch_scoped(
+    table: str,
+    select: str,
+    chunk_column: str,
+    chunk_values: Sequence[Any],
+    *,
+    filters: dict[str, Any] | None = None,
+    also_in: dict[str, Sequence[Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Read *table* restricted, server-side, to the keys the caller asked about.
+
+    Every skip-set read in this module used to pull its whole table and then
+    discard almost all of it in Python — the same shape that made stage 2 read
+    265 181 rows to decide 35 upserts.  The fix has to filter server-side, and
+    an equality filter is not enough: ``owner=pandas-dev, repo=pandas`` still
+    returns every row that repository ever produced.
+
+    *chunk_values* is split into ``DATASMITH_KEY_FILTER_CHUNK``-sized requests
+    because PostgREST encodes the list into the URL.  *also_in* is applied
+    whole on every request, so put the short lists there.
+
+    Duplicate rows cannot appear across chunks: the chunks partition the values
+    of one column, so a row matches at most one of them.
+    """
+    values = list(dict.fromkeys(chunk_values))
+    if not values:
+        return []
+    rows: list[dict[str, Any]] = []
+    for start in range(0, len(values), DATASMITH_KEY_FILTER_CHUNK):
+        chunk = values[start : start + DATASMITH_KEY_FILTER_CHUNK]
+        rows.extend(
+            fetch_all(
+                table,
+                select=select,
+                filters=filters,
+                in_filters={chunk_column: chunk, **(also_in or {})},
+            )
+        )
+    return rows
+
+
 def _fetch_repo_descriptions(rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
-    """Batch-fetch repo descriptions for a set of rows with owner/repo keys."""
+    """Batch-fetch repo descriptions for a set of rows with owner/repo keys.
+
+    Scoped to the owners and repositories actually present in *rows* rather
+    than reading every ``repositories`` row and filtering in Python.  The two
+    ``in`` lists are an over-approximation — their cross product can name a
+    repository that does not exist — so the result is still intersected
+    against ``repo_keys`` below.  ``repositories`` holds roughly 154 rows, so
+    this change is about not repeating the pattern, not about the seconds.
+    """
     repo_keys = {(r["owner"], r["repo"]) for r in rows}
     descriptions: dict[tuple[str, str], str] = {}
     if repo_keys:
-        desc_rows = fetch_all("repositories", select="owner, repo, description")
+        desc_rows = _fetch_scoped(
+            "repositories",
+            select="owner, repo, description",
+            chunk_column="owner",
+            chunk_values=sorted({o for o, _ in repo_keys}),
+            also_in={"repo": sorted({r for _, r in repo_keys})},
+        )
         for rd in desc_rows:
             key = (rd["owner"], rd["repo"])
             if key in repo_keys:
@@ -140,7 +272,11 @@ class Pipeline:
         self._harbor_use_daytona = harbor_use_daytona
         self._harbor_rounds = harbor_rounds
         self._harbor_limit = harbor_limit
-        self._harbor_tasks = _parse_task_specs(harbor_tasks) if harbor_tasks else None
+        # Used by stage 6 (synthesize_images) and stage 7 (harbor_healthcheck).
+        # The parameter keeps its old name for callers; the attribute does not,
+        # because a name that says 'harbor' invites the next reader to assume
+        # stage 6 cannot use it.
+        self._task_specs = _parse_task_specs(harbor_tasks) if harbor_tasks else None
         self._completed_stages: list[str] = []
 
     def _log_dry_run_summary(
@@ -338,6 +474,14 @@ class Pipeline:
 
         pool = TokenPool()
         gh = GitHubClient(pool)
+        # The one stage that does not window a table.  Its window is a GitHub
+        # search query, so it cannot go through ``window_filters`` -- but it
+        # must mean the same thing, and it does: the runner receives these
+        # same ``start_date``/``end_date`` values and treats them as
+        # ``merged_at`` half-open ``[since, until)``, rejecting an empty or
+        # inverted window outright.  The two paths are one contract with two
+        # implementations; ``window_filters`` documents why the boundary is
+        # exclusive on both of them.
         kwargs: dict[str, Any] = {"since": start_date, "until": end_date}
         if self._n_concurrent:
             kwargs["n_concurrent"] = self._n_concurrent
@@ -356,11 +500,13 @@ class Pipeline:
             logger.info("Imported %d pull request records from offline source", n)
 
     async def _classify_prs(self, start_date: str, end_date: str) -> None:
+        # ``patch`` is selected so a resumed run reuses a diff stage 3 already
+        # paid a REST call for. The read is window-filtered, which is what
+        # keeps it clear of the unfiltered-large-column guardrail in db.py.
         classify_kwargs: dict[str, Any] = {
             "select": "owner, repo, issue_number, title, body, patch, file_changes",
             "filters": {"is_performance_commit_symbolic": True},
-            "gte_filters": {"created_at": start_date},
-            "lte_filters": {"created_at": end_date},
+            **window_filters(start_date, end_date),
         }
         if not self._force:
             classify_kwargs["is_null"] = ["is_performance_commit"]
@@ -390,28 +536,45 @@ class Pipeline:
 
         from datasmith.agents.classifiers import ClassifyJudge, PerfClassifier
         from datasmith.agents.config import AgentConfig, configure_dspy
+        from datasmith.github.client import GitHubClient
         from datasmith.runners.classify_prs import ClassifyPRsRunner
+        from datasmith.utils.tokens import TokenPool
 
         configure_dspy(AgentConfig.from_env())
 
+        # Built after the dry-run return above: TokenPool raises when no GitHub
+        # token is configured, and a dry run must stay runnable without one.
+        pool = TokenPool()
+        gh = GitHubClient(pool)
         classifier = PerfClassifier()
         judge = ClassifyJudge()
         runner = ClassifyPRsRunner(
             classifier,
             judge,
+            github_client=gh,
             **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
         )
-        await runner.run(items)
+        try:
+            await runner.run(items)
+        finally:
+            # try/finally, unlike the bare close stages 2 and 5 do: a runner
+            # that raises would otherwise leak the httpx connection pool.
+            await gh.close()
 
     async def _resolve_packages(self, start_date: str, end_date: str) -> None:
-        # Get performance-classified PRs within the date range
         rows = fetch_all(
             "pull_requests",
-            select="owner, repo, merge_commit_sha",
+            select="owner, repo, merge_commit_sha, issue_number",
             filters={"is_performance_commit": True},
-            gte_filters={"created_at": start_date},
-            lte_filters={"created_at": end_date},
+            **window_filters(start_date, end_date),
         )
+
+        # --tasks pins this stage too. Stages 6 and 7 already honoured it, and
+        # stage 4 not doing so made a thin env_payload impossible to iterate
+        # on: the only way to re-resolve one repository was to re-resolve the
+        # whole window. Pinned tasks bypass the date filter, as elsewhere.
+        if self._task_specs:
+            rows = _select_pinned_prs(rows, self._task_specs, "owner, repo, merge_commit_sha, issue_number")
 
         # Deduplicate by (owner, repo, sha) — multiple PRs may share the same commit
         seen: set[tuple[str, str, str]] = set()
@@ -426,10 +589,21 @@ class Pipeline:
             seen.add(key)
             items.append({"owner": r["owner"], "repo": r["repo"], "sha": sha})
 
-        # Skip items already in the packages table (unless --force)
+        # Skip items already in the packages table (unless --force).
+        #
+        # Scoped to the SHAs this window actually produced. The predecessor
+        # read every row of ``packages`` to decide a few dozen skips, so its
+        # cost grew with the table while the work stayed flat. A merge SHA is
+        # globally unique, so an ``in`` on ``sha`` alone is a tight predicate;
+        # the full (owner, repo, sha) triple is still what decides the skip.
         skipped = 0
         if items and not self._force:
-            existing_rows = fetch_all("packages", select="owner, repo, sha")
+            existing_rows = _fetch_scoped(
+                "packages",
+                select="owner, repo, sha",
+                chunk_column="sha",
+                chunk_values=[it["sha"] for it in items],
+            )
             existing_keys = {(e["owner"], e["repo"], e["sha"]) for e in existing_rows}
             before = len(items)
             items = [it for it in items if (it["owner"], it["repo"], it["sha"]) not in existing_keys]
@@ -455,22 +629,28 @@ class Pipeline:
         await runner.run(items)
 
     async def _render_problems(self, start_date: str, end_date: str) -> None:
-        # Fetch performance-classified PRs
+        # ``created_at`` stays in the select because the rendered PR carries it;
+        # it is not what the window means. See ``window_filters``.
         rows = fetch_all(
             "pull_requests",
             select="owner, repo, issue_number, merge_commit_sha, title, body, created_at",
             filters={"is_performance_commit": True, "is_performance_commit_symbolic": True},
             neq_filters={"merge_commit_sha": ""},
-            gte_filters={"created_at": start_date},
-            lte_filters={"created_at": end_date},
+            **window_filters(start_date, end_date),
         )
 
         # Every PR with a resolved package is eligible. The probe says who runs
         # first, not who runs at all — stage 6 is the only stage that can answer
-        # whether a task builds.
-        pkg_rows = fetch_all(
+        # whether a task builds, so there is no equality filter here any more.
+        #
+        # Still scoped to this window's merge SHAs rather than reading the whole
+        # packages table: dropping the gate removes a predicate, it does not make
+        # a full-table read acceptable.
+        pkg_rows = _fetch_scoped(
             "packages",
             select="owner, repo, sha, probe_status",
+            chunk_column="sha",
+            chunk_values=[sha for r in rows if (sha := r.get("merge_commit_sha", ""))],
         )
         probe_by_commit: dict[tuple[str, str, str], str | None] = {
             (p["owner"], p["repo"], p["sha"]): p.get("probe_status") for p in pkg_rows
@@ -478,10 +658,22 @@ class Pipeline:
 
         repo_descriptions = _fetch_repo_descriptions(rows)
 
-        # Skip PRs already processed (have a candidate_prs row) unless --force
+        # Skip PRs already processed (have a candidate_prs row) unless --force.
+        #
+        # Scoped to the owners and repositories this window touched instead of
+        # reading every candidate_prs row. issue_number is not unique across
+        # repositories, so it cannot carry the predicate on its own; the two
+        # ``in`` lists over-approximate by their cross product and the full
+        # (owner, repo, issue_number) triple still decides the skip.
         existing_keys: set[tuple[str, str, int]] = set()
-        if not self._force:
-            existing_rows = fetch_all("candidate_prs", select="owner, repo, issue_number")
+        if rows and not self._force:
+            existing_rows = _fetch_scoped(
+                "candidate_prs",
+                select="owner, repo, issue_number",
+                chunk_column="owner",
+                chunk_values=sorted({r["owner"] for r in rows}),
+                also_in={"repo": sorted({r["repo"] for r in rows})},
+            )
             existing_keys = {(e["owner"], e["repo"], e["issue_number"]) for e in existing_rows}
 
         skipped_no_pkg = 0
@@ -554,16 +746,26 @@ class Pipeline:
         await gh.close()
 
     async def _synthesize_images(self, start_date: str, end_date: str) -> None:
+        # ``created_at`` stays in the select, but it is not what the window
+        # means -- see ``window_filters``. It is load-bearing for one consumer:
+        # ``SynthesizeImagesRunner._enqueue_neighbors`` pivots on it and returns
+        # silently when it is missing, so dropping it from this select would
+        # disable neighbor enqueueing without any error to notice.
         query_kwargs: dict[str, Any] = {
-            "select": "owner, repo, issue_number, merge_commit_sha, base_sha, title, body, created_at, rendered_problem",
+            "select": (
+                "owner, repo, issue_number, merge_commit_sha, base_sha, patch, "
+                "title, body, created_at, rendered_problem"
+            ),
             "filters": {"is_performance_commit": True, "is_performance_commit_symbolic": True},
             "neq_filters": {"merge_commit_sha": ""},
-            "gte_filters": {"created_at": start_date},
-            "lte_filters": {"created_at": end_date},
+            **window_filters(start_date, end_date),
         }
         if not self._force:
             query_kwargs["is_null"] = ["container_name"]
         rows = fetch_all("pull_requests", **query_kwargs)
+
+        if self._task_specs:
+            rows = _select_pinned_prs(rows, self._task_specs, query_kwargs["select"])
 
         # Join with packages table for env_payload and python_version. Every
         # resolved commit joins; the probe orders the queue rather than trimming
@@ -592,6 +794,13 @@ class Pipeline:
 
         skipped_no_pkg = 0
         skipped_no_ctx = 0
+        # `pr_context` exists to give an LLM agent something to work with.
+        # TRY_DEFAULT never reads it, so requiring it blocks the no-agent path
+        # for a reason that only applies to the agent path. Corpus-wide that
+        # filter excludes 4065 of 12944 performance PRs, or 31%.
+        #
+        # When no LLM will run, attempt the build anyway.
+        require_context = self._agent != "none"
         items = []
         for r in rows:
             sha = r.get("merge_commit_sha", "")
@@ -608,7 +817,7 @@ class Pipeline:
                 )
                 continue
             # Skip PRs without a rendered context (non-empty issues + observations)
-            if (r["owner"], r["repo"], r["issue_number"]) not in eligible_prs:
+            if require_context and (r["owner"], r["repo"], r["issue_number"]) not in eligible_prs:
                 skipped_no_ctx += 1
                 logger.debug(
                     "Skipping %s/%s#%d: no eligible pr_context (empty issues_json or initial_observations)",
@@ -623,6 +832,9 @@ class Pipeline:
                 "issue_number": r["issue_number"],
                 "sha": sha,
                 "base_sha": r.get("base_sha", ""),
+                # The oracle patch, shipped into the synthesis workspace so
+                # measure.sh can prove the container measures a speedup.
+                "patch": r.get("patch", "") or "",
                 "title": r.get("title", ""),
                 "body": r.get("body", ""),
                 "created_at": r.get("created_at"),
@@ -641,6 +853,7 @@ class Pipeline:
         # After the cap: ``_cap_per_repo`` samples at random and discards order.
         items = order_by_probe(items)
 
+        _report_dropped(items, self._task_specs, skipped_no_pkg, skipped_no_ctx)
         logger.info("Synthesizing images for %d PRs", len(items))
 
         if self._dry_run:
@@ -685,8 +898,7 @@ class Pipeline:
             ),
             filters={"is_performance_commit": True},
             neq_filters={"container_name": ""},
-            gte_filters={"created_at": start_date},
-            lte_filters={"created_at": end_date},
+            **window_filters(start_date, end_date),
         )
 
         # Require non-empty container_name, merge sha, base sha.
@@ -695,8 +907,8 @@ class Pipeline:
         # Filter to the explicit --tasks spec set first, if provided. Each spec
         # names a specific PR the operator wants to triage, so an unmatched
         # spec is a hard error (fail fast before spinning up Harbor).
-        if self._harbor_tasks:
-            wanted = self._harbor_tasks
+        if self._task_specs:
+            wanted = self._task_specs
             matched = [r for r in ready if (r["owner"], r["repo"], int(r["issue_number"])) in wanted]
             got_keys = {(r["owner"], r["repo"], int(r["issue_number"])) for r in matched}
             missing = wanted - got_keys
@@ -713,7 +925,7 @@ class Pipeline:
         # Skip PRs that already have a successful harbor_runs row, unless --force
         # or --tasks (explicit triage request implies re-run).
         skipped_already_run = 0
-        if not self._force and not self._harbor_tasks:
+        if not self._force and not self._task_specs:
             hr_rows = fetch_all(
                 "harbor_runs",
                 select="owner, repo, sha, status, max_speedup",
@@ -778,6 +990,10 @@ class Pipeline:
             logger.info("harbor_healthcheck: task dir retained at %s", task_dir)
 
     async def _publish(self, start_date: str, end_date: str) -> None:
+        # No ``window_filters`` call here, and that is not a fourth convention:
+        # stage 8 applies the window one level down, in
+        # ``publish.records.records_from_supabase``, which is where its
+        # ``pull_requests`` read lives.
         if self._dry_run:
             # Query what would be published without running the pipeline
             rows = fetch_all(
@@ -796,10 +1012,14 @@ class Pipeline:
         await publish_pipeline(start_date, end_date)
 
     async def _scrape_benchmark_source(self, start_date: str, end_date: str) -> None:
+        # The one stage that deliberately does not call ``window_filters``.
         # Pull every (owner, repo, sha) we've successfully synthesized a container
-        # for. We don't filter by date — the website wants the full corpus of
-        # benchmark sources, and bench source rarely changes per commit, so
-        # re-scraping is mostly a no-op on the upsert path.
+        # for, with no date bound at all: this stage feeds the FormulaCode
+        # website, which wants the full corpus of benchmark sources rather than
+        # this run's slice of it, and benchmark source rarely changes per commit,
+        # so re-scraping is mostly a no-op on the upsert path. ``start_date`` and
+        # ``end_date`` are still accepted, because every stage shares one
+        # signature, and are used only for the dry-run summary below.
         rows = fetch_all("candidate_containers", select="owner, repo, sha")
 
         # Dedup by (owner, repo) — one SHA per repo is enough to populate the

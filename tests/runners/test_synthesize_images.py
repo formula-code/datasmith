@@ -27,6 +27,14 @@ _MOCK_REPO_IMAGE = patch(
     "datasmith.docker.images.get_repo_image_name",
     return_value="formulacode/numpy-numpy:latest",
 )
+# _do_process_item looks up formulacode_task_overrides for benchmark_dest.
+# fetch_all resolves its own client, so without this the "mocked" runner tests
+# open a real Supabase connection -- passing only because a local DB happens to
+# be running, and failing on any machine without one.
+_MOCK_OVERRIDES = patch(
+    "datasmith.runners.synthesize_images.fetch_overrides",
+    return_value={},
+)
 
 
 def _mock_supabase() -> MagicMock:
@@ -77,6 +85,7 @@ class TestDockerRunsInThread:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
@@ -92,6 +101,7 @@ class TestDockerRunsInThread:
             env_payload="",
             python_version="",
             base_sha="",
+            solution_patch="",
         )
 
 
@@ -111,6 +121,7 @@ class TestHandlesFailure:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
@@ -139,6 +150,7 @@ class TestBuildAndPushOnSuccess:
             ) as mock_build,
             patch("datasmith.runners.synthesize_images._push_pr_image") as mock_push,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
         ):
             runner = SynthesizeImagesRunner(synthesizer=synthesizer, n_concurrent=1)
             await runner.run([_make_item()])
@@ -179,6 +191,7 @@ class TestRenderProblemWithGitHubClient:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
             patch(
                 "datasmith.github.render.render_problem_statement",
                 return_value="Rendered problem text",
@@ -219,6 +232,7 @@ class TestRenderProblemWithGitHubClient:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
             patch(
                 "datasmith.github.render.render_problem_statement",
             ) as mock_render,
@@ -266,6 +280,7 @@ class TestRenderProblemWithGitHubClient:
             _MOCK_BUILD,
             _MOCK_PUSH,
             _MOCK_REPO_IMAGE,
+            _MOCK_OVERRIDES,
             patch(
                 "datasmith.github.render.render_problem_statement",
                 return_value="Rendered with issues",
@@ -376,3 +391,21 @@ class TestOneImagePerRootAndInterpreter:
             SynthesizeImagesRunner._ensure_prereqs("apache", "arrow", "3.11", "./python")
 
         assert build.call_count == 1
+
+
+class TestPatchSelection:
+    def test_patch_is_in_the_pull_requests_select(self):
+        from pathlib import Path
+
+        src = (Path(__file__).parents[2] / "src" / "datasmith" / "runners" / "synthesize_images.py").read_text()
+        select_lines = [ln for ln in src.splitlines() if "merge_commit_sha, base_sha" in ln]
+        assert select_lines, "could not find the pull_requests select"
+        assert any("patch" in ln for ln in select_lines), "select does not fetch `patch`"
+
+    def test_pipeline_select_agrees(self):
+        from pathlib import Path
+
+        src = (Path(__file__).parents[2] / "src" / "datasmith" / "update" / "pipeline.py").read_text()
+        select_lines = [ln for ln in src.splitlines() if "merge_commit_sha, base_sha" in ln]
+        assert select_lines, "could not find the pull_requests select in pipeline.py"
+        assert any("patch" in ln for ln in select_lines), "pipeline select does not fetch `patch`"

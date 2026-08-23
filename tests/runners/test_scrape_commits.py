@@ -1,25 +1,33 @@
-"""Tests for datasmith.runners.scrape_commits — ScrapeCommitsRunner."""
+"""Tests for datasmith.runners.scrape_commits — ScrapeCommitsRunner.
+
+Stage 2 now asks GitHub for the PRs merged in the window instead of paging
+every PR by creation order and filtering client-side, so these tests are
+written against ``fetch_merged_prs`` returning a list rather than
+``paginate_merged_prs`` yielding pages.
+
+The window contract is the point of the file: a PR merged inside the window is
+stored no matter when it was created.
+"""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import pytest
+
+from datasmith.github.client import Truncated
 from datasmith.runners.scrape_commits import ScrapeCommitsRunner
 
-# Shared patch for fetch_all that returns no existing PRs (clean state)
-_EMPTY_FETCH_ALL = patch("datasmith.runners.scrape_commits.fetch_all", return_value=[])
+_SINCE = "2024-06-01"
+_UNTIL = "2024-07-01"
 
-_SAMPLE_DIFF = "--- a/src/core.py\n+++ b/src/core.py\n-old\n+new\n" + "\n".join(
-    f"-line{i}\n+fast{i}" for i in range(20)
-)
-_SAMPLE_FILES = [
-    {"filename": "src/core.py", "additions": 20, "deletions": 20},
-]
+_CORE_FILES: list[dict[str, Any]] = [{"filename": "src/core.py", "additions": 20, "deletions": 20}]
 
 
 def _mock_supabase() -> MagicMock:
-    """Create a mock Supabase client with fluent API."""
+    """A Supabase client mock with the fluent API BaseRunner uses."""
     client = MagicMock()
     table = MagicMock()
     client.table.return_value = table
@@ -29,315 +37,385 @@ def _mock_supabase() -> MagicMock:
     return client
 
 
-def _make_gh_client(
-    pages: list[list[dict[str, Any]]],
-    diff: str = _SAMPLE_DIFF,
-    files: list[dict[str, Any]] | None = None,
-) -> MagicMock:
-    """Create a mock GitHub client with paginate_merged_prs, get_diff, get_files."""
-    gh_client = MagicMock()
-
-    # Mock paginate_merged_prs as an async generator
-    async def _paginate_merged_prs(*args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
-        for page in pages:
-            yield page
-
-    gh_client.paginate_merged_prs = _paginate_merged_prs
-
-    gh_client.get_diff = AsyncMock(return_value=diff)
-    gh_client.get_files = AsyncMock(return_value=files if files is not None else _SAMPLE_FILES)
-    return gh_client
-
-
 def _make_pr(
     number: int,
-    merged: bool = True,
+    *,
     title: str | None = None,
-    created_at: str = "2024-01-01T00:00:00Z",
-    merged_at: str | None = None,
+    created_at: str = "2024-06-14T00:00:00Z",
+    merged_at: str | None = "2024-06-15T12:00:00Z",
     merge_commit_sha: str | None = None,
+    file_changes: list[dict[str, Any]] | None = None,
+    changed_files: int | None = None,
 ) -> dict[str, Any]:
-    """Create a mock PR data dict (REST-shaped, as normalized by paginate_merged_prs)."""
-    pr: dict[str, Any] = {
+    """Build a PR dict shaped like ``_normalise_pr_node``'s output."""
+    files = _CORE_FILES if file_changes is None else file_changes
+    return {
         "number": number,
-        "title": title if title is not None else f"PR #{number}",
+        "title": title if title is not None else f"PERF: speed up thing {number}",
         "body": f"Body of PR #{number}",
         "state": "closed",
         "created_at": created_at,
-        "closed_at": "2024-01-02T00:00:00Z",
+        "merged_at": merged_at,
+        "closed_at": "2024-06-15T12:00:00Z",
         "merge_commit_sha": merge_commit_sha if merge_commit_sha is not None else f"abc{number}",
         "base": {"sha": f"base{number}"},
         "head": {"sha": f"head{number}"},
         "labels": [{"name": "perf"}, {"name": "bug"}],
+        "file_changes": files,
+        "changed_files": len(files) if changed_files is None else changed_files,
     }
-    if merged:
-        pr["merged_at"] = merged_at or "2024-01-02T00:00:00Z"
-    else:
-        pr["merged_at"] = None
-    return pr
 
 
-def _pr_records(mock_client: MagicMock) -> list[dict[str, Any]]:
-    """Extract PR upsert records (filter out runner_progress upserts)."""
-    return [c.args[0] for c in mock_client.table.return_value.upsert.call_args_list if "issue_number" in c.args[0]]
+def _make_gh_client(prs: list[dict[str, Any]] | None = None, **kwargs: Any) -> MagicMock:
+    """A GitHub client mock whose only used method is ``fetch_merged_prs``."""
+    gh = MagicMock()
+    gh.fetch_merged_prs = AsyncMock(return_value=list(prs or []), **kwargs)
+    gh.get_diff = AsyncMock(return_value="--- a/f.py\n+++ b/f.py\n-old\n+new")
+    gh.get_files = AsyncMock(return_value=_CORE_FILES)
+    return gh
 
 
-class TestStoresPRData:
-    async def test_stores_pr_data(self) -> None:
-        """Mock GitHub API with merged PRs, verify upsert to pull_requests."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client([[_make_pr(1), _make_pr(2)]])
+class _Harness:
+    """The mocks a stage-2 run writes through."""
 
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
+    def __init__(self, existing: list[dict[str, Any]] | None) -> None:
+        self.afetch_all = AsyncMock(return_value=list(existing or []))
+        self.abatch_upsert = AsyncMock(side_effect=lambda table, rows, **kw: len(rows))
+        self.db = _mock_supabase()
+        self.runner: ScrapeCommitsRunner | None = None
 
-        assert len(_pr_records(mock_client)) == 2
+    @property
+    def records(self) -> list[dict[str, Any]]:
+        """Every row handed to ``abatch_upsert`` for ``pull_requests``."""
+        out: list[dict[str, Any]] = []
+        for c in self.abatch_upsert.call_args_list:
+            table, rows = c.args[0], c.args[1]
+            if table == "pull_requests":
+                out.extend(rows)
+        return out
 
-    async def test_stores_patch_and_file_changes(self) -> None:
-        """Diff and file list from GitHub should be stored in the record."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client(
-            [[_make_pr(1, title="PERF: speed up sort")]],
-            diff="--- a/f.py\n+++ b/f.py\n-old\n+new",
-            files=[{"filename": "src/f.py", "additions": 5, "deletions": 3}],
+
+async def _run(
+    gh: MagicMock,
+    items: list[tuple[str, str]],
+    *,
+    existing: list[dict[str, Any]] | None = None,
+    since: str = _SINCE,
+    until: str = _UNTIL,
+) -> _Harness:
+    """Run the stage against mocked GitHub and database layers."""
+    harness = _Harness(existing)
+    with (
+        patch("datasmith.runners.scrape_commits.afetch_all", harness.afetch_all),
+        patch("datasmith.runners.scrape_commits.abatch_upsert", harness.abatch_upsert),
+        patch("datasmith.runners.base.get_client", return_value=harness.db),
+    ):
+        runner = ScrapeCommitsRunner(github_client=gh, since=since, until=until, n_concurrent=1)
+        harness.runner = runner
+        await runner.run(items)
+    return harness
+
+
+class TestWindowContract:
+    """The window means merged_at, half-open [since, until)."""
+
+    async def test_pr_created_before_the_window_is_stored(self) -> None:
+        """Created outside, merged inside → stored.
+
+        This inverts the former ``test_early_termination``, which required that
+        a PR merged inside the window be *dropped* because pagination in
+        created-order had already stopped.  That assertion encoded the defect:
+        46 of 81 in-window PRs were lost on the measured day, biased towards
+        repositories whose review takes longer than a day.
+        """
+        gh = _make_gh_client([
+            _make_pr(1, created_at="2024-01-05T00:00:00Z", merged_at="2024-06-15T12:00:00Z"),
+            _make_pr(2, created_at="2024-06-10T00:00:00Z", merged_at="2024-06-10T18:00:00Z"),
+        ])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        assert [r["issue_number"] for r in harness.records] == [1, 2]
+        assert harness.records[0]["created_at"] == "2024-01-05T00:00:00Z"
+
+    async def test_window_is_expressed_in_the_query(self) -> None:
+        """The bounds go to GitHub as timezone-aware datetimes, upper bound exclusive."""
+        gh = _make_gh_client([_make_pr(1)])
+
+        await _run(gh, [("pandas-dev", "pandas")])
+
+        args = gh.fetch_merged_prs.call_args.args
+        assert args[0] == "pandas-dev"
+        assert args[1] == "pandas"
+        assert args[2] == datetime(2024, 6, 1, tzinfo=UTC)
+        assert args[3] == datetime(2024, 7, 1, tzinfo=UTC)
+
+    async def test_naive_and_zulu_bounds_are_read_as_utc(self) -> None:
+        """A naive bound is UTC, not a per-repository ValueError from the fetcher."""
+        gh = _make_gh_client([_make_pr(1)])
+
+        await _run(
+            gh,
+            [("pandas-dev", "pandas")],
+            since="2024-06-01T06:00:00",
+            until="2024-07-01T06:00:00Z",
         )
 
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
+        args = gh.fetch_merged_prs.call_args.args
+        assert args[2] == datetime(2024, 6, 1, 6, tzinfo=UTC)
+        assert args[3] == datetime(2024, 7, 1, 6, tzinfo=UTC)
 
-        records = _pr_records(mock_client)
-        assert len(records) == 1
-        assert records[0]["patch"] == "--- a/f.py\n+++ b/f.py\n-old\n+new"
-        assert records[0]["file_changes"] == [{"filename": "src/f.py", "additions": 5, "deletions": 3}]
+    def test_missing_bound_is_refused(self) -> None:
+        """There is no unwindowed fetch to fall back to."""
+        with pytest.raises(ValueError, match="explicit start date"):
+            ScrapeCommitsRunner(github_client=_make_gh_client(), since="", until=_UNTIL)
 
-    async def test_empty_diff_omits_patch(self) -> None:
-        """When get_diff returns empty string, patch/file_changes keys should be absent."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client([[_make_pr(1)]], diff="", files=[])
+    def test_subsecond_bound_is_refused(self) -> None:
+        """merged: has one-second resolution; a sub-second bound shortens the window."""
+        with pytest.raises(ValueError, match="whole-second"):
+            ScrapeCommitsRunner(
+                github_client=_make_gh_client(),
+                since="2024-06-01T00:00:00.500000",
+                until=_UNTIL,
+            )
 
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
+    def test_empty_window_is_refused(self) -> None:
+        """The window is half-open, so start == end selects nothing."""
+        with pytest.raises(ValueError, match="empty merge window"):
+            ScrapeCommitsRunner(github_client=_make_gh_client(), since=_SINCE, until=_SINCE)
 
-        records = _pr_records(mock_client)
-        assert len(records) == 1
-        assert "patch" not in records[0]
-        assert "file_changes" not in records[0]
+
+class TestGraphQLOnly:
+    """Stage 2 spends no REST budget: no diff here, and no patch stored."""
+
+    async def test_never_fetches_a_diff(self) -> None:
+        gh = _make_gh_client([_make_pr(1), _make_pr(2)])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        gh.get_diff.assert_not_called()
+        gh.get_files.assert_not_called()
+        assert len(harness.records) == 2
+        assert all("patch" not in r for r in harness.records)
+
+    async def test_file_changes_come_from_graphql(self) -> None:
+        """The file list arrives on the PR node, so no REST call is needed for it."""
+        files = [{"filename": "src/f.py", "additions": 5, "deletions": 3}]
+        gh = _make_gh_client([_make_pr(1, file_changes=files)])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        assert harness.records[0]["file_changes"] == files
+
+    async def test_record_fields_are_carried_through(self) -> None:
+        gh = _make_gh_client([_make_pr(7, title="PERF: faster groupby")])
+
+        record = (await _run(gh, [("pandas-dev", "pandas")])).records[0]
+
+        assert record["owner"] == "pandas-dev"
+        assert record["repo"] == "pandas"
+        assert record["issue_number"] == 7
+        assert record["title"] == "PERF: faster groupby"
+        assert record["merged_at"] == "2024-06-15T12:00:00Z"
+        assert record["merge_commit_sha"] == "abc7"
+        assert record["base_sha"] == "base7"
+        assert record["head_sha"] == "head7"
+        assert record["labels"] == ["perf", "bug"]
 
 
 class TestSymbolicCompliance:
+    """symbolic is written from the two components GraphQL can answer."""
+
     async def test_perf_title_sets_symbolic_true(self) -> None:
-        """PR with a performance keyword in title should set is_performance_commit_symbolic=True."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client([[_make_pr(1, title="PERF: speed up sort")]])
+        gh = _make_gh_client([_make_pr(1, title="PERF: speed up sort")])
 
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
+        harness = await _run(gh, [("pandas-dev", "pandas")])
 
-        records = _pr_records(mock_client)
-        assert len(records) == 1
-        assert records[0]["is_performance_commit_symbolic"] is True
+        assert harness.records[0]["is_performance_commit_symbolic"] is True
 
     async def test_non_perf_title_sets_symbolic_false(self) -> None:
-        """PR without performance keywords should set is_performance_commit_symbolic=False."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client([[_make_pr(1, title="Update docs and README")]])
+        gh = _make_gh_client([_make_pr(1, title="Update docs and README")])
 
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
+        harness = await _run(gh, [("pandas-dev", "pandas")])
 
-        records = _pr_records(mock_client)
-        assert len(records) == 1
-        assert records[0]["is_performance_commit_symbolic"] is False
+        assert harness.records[0]["is_performance_commit_symbolic"] is False
 
-    async def test_symbolic_uses_all_inputs(self) -> None:
-        """Symbolic compliance should account for patch size and file changes."""
-        mock_client = _mock_supabase()
-        # Perf title but only test files → should fail file compliance
-        gh_client = _make_gh_client(
-            [[_make_pr(1, title="PERF: speed up tests")]],
-            diff=_SAMPLE_DIFF,
-            files=[{"filename": "tests/test_x.py", "additions": 5, "deletions": 3}],
+    async def test_test_only_changes_fail_file_compliance(self) -> None:
+        gh = _make_gh_client([
+            _make_pr(
+                1,
+                title="PERF: speed up tests",
+                file_changes=[{"filename": "tests/test_x.py", "additions": 5, "deletions": 3}],
+            )
+        ])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        assert harness.records[0]["is_performance_commit_symbolic"] is False
+
+    async def test_truncated_file_list_is_not_trusted(self) -> None:
+        """files(first: 100) truncated and the REST fallback came back empty.
+
+        The 500-file guard cannot fire and the 40 000-line sum undercounts, so
+        the screen would pass a PR it must reject.  totalCount stays truthful,
+        so a short list is refused rather than believed.
+        """
+        gh = _make_gh_client([
+            _make_pr(
+                1,
+                title="PERF: enormous refactor",
+                file_changes=[{"filename": f"src/f{i}.py", "additions": 1, "deletions": 1} for i in range(100)],
+                changed_files=3000,
+            )
+        ])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        assert harness.records[0]["is_performance_commit_symbolic"] is False
+
+    async def test_patch_size_component_is_not_applied(self) -> None:
+        """No patch is available, so the third component is skipped, not guessed.
+
+        A PR whose title and files pass is symbolic-True with no patch stored;
+        stage 3 fetches the diff and applies check_patch_size there.
+        """
+        gh = _make_gh_client([_make_pr(1, title="PERF: speed up sort")])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        record = harness.records[0]
+        assert record["is_performance_commit_symbolic"] is True
+        assert "patch" not in record
+        gh.get_diff.assert_not_called()
+
+
+class TestBatchedUpsert:
+    async def test_one_batched_upsert_per_repository(self) -> None:
+        gh = _make_gh_client([_make_pr(i) for i in range(1, 6)])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        assert harness.abatch_upsert.await_count == 1
+        assert harness.abatch_upsert.call_args.args[0] == "pull_requests"
+        assert len(harness.abatch_upsert.call_args.args[1]) == 5
+
+    async def test_each_repository_gets_its_own_batch(self) -> None:
+        gh = _make_gh_client([_make_pr(1), _make_pr(2)])
+
+        harness = await _run(gh, [("pandas-dev", "pandas"), ("numpy", "numpy")])
+
+        assert harness.abatch_upsert.await_count == 2
+        owners = {r["owner"] for r in harness.records}
+        assert owners == {"pandas-dev", "numpy"}
+
+    async def test_every_record_carries_the_same_keys(self) -> None:
+        """PostgREST rejects a bulk upsert whose objects disagree on their keys."""
+        gh = _make_gh_client([
+            _make_pr(1, file_changes=_CORE_FILES),
+            _make_pr(2, file_changes=[]),
+        ])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        key_sets = {frozenset(r) for r in harness.records}
+        assert len(key_sets) == 1
+        assert harness.records[1]["file_changes"] == []
+
+
+class TestWindowScopedSkipSet:
+    async def test_skip_set_is_scoped_to_the_repository_and_window(self) -> None:
+        """The predecessor read every stored issue_number for the repository."""
+        gh = _make_gh_client([_make_pr(1)])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        kwargs = harness.afetch_all.call_args.kwargs
+        assert harness.afetch_all.call_args.args[0] == "pull_requests"
+        assert kwargs["select"] == "issue_number"
+        assert kwargs["filters"] == {"owner": "pandas-dev", "repo": "pandas"}
+        assert kwargs["gte_filters"] == {"merged_at": "2024-06-01T00:00:00+00:00"}
+        assert kwargs["lt_filters"] == {"merged_at": "2024-07-01T00:00:00+00:00"}
+
+    async def test_skips_prs_already_stored(self) -> None:
+        gh = _make_gh_client([_make_pr(1), _make_pr(2), _make_pr(3)])
+
+        harness = await _run(
+            gh,
+            [("pandas-dev", "pandas")],
+            existing=[{"issue_number": 1}, {"issue_number": 2}],
         )
 
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
+        assert [r["issue_number"] for r in harness.records] == [3]
 
-        records = _pr_records(mock_client)
-        assert len(records) == 1
-        assert records[0]["is_performance_commit_symbolic"] is False
+    async def test_no_database_read_when_nothing_merged(self) -> None:
+        """Most repositories merge nothing in a short window; they cost one query."""
+        gh = _make_gh_client([])
 
+        harness = await _run(gh, [("pandas-dev", "pandas")])
 
-class TestSkipsUnmerged:
-    async def test_skips_unmerged(self) -> None:
-        """Mock PRs without merged_at, verify they are not stored."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client([
-            [
-                _make_pr(1, merged=False),
-                _make_pr(2, merged=False),
-                _make_pr(3, merged=True),
-            ]
-        ])
-
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("numpy", "numpy")])
-
-        # Only the merged PR (#3) should produce a pull_requests upsert
-        assert len(_pr_records(mock_client)) == 1
-
-
-class TestPagination:
-    async def test_paginates_multiple_pages(self) -> None:
-        """PRs from multiple pages should all be upserted."""
-        mock_client = _mock_supabase()
-        page1 = [_make_pr(i) for i in range(1, 4)]
-        page2 = [_make_pr(i) for i in range(4, 6)]
-        gh_client = _make_gh_client([page1, page2])
-
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
-
-        assert len(_pr_records(mock_client)) == 5
-
-
-class TestDateFiltering:
-    async def test_date_filtering_skips_out_of_range(self) -> None:
-        """PRs with merged_at outside [since, until) are skipped."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client([
-            [
-                _make_pr(1, created_at="2024-06-15T00:00:00Z", merged_at="2024-06-15T12:00:00Z"),
-                _make_pr(2, created_at="2024-05-01T00:00:00Z", merged_at="2024-05-01T12:00:00Z"),
-                _make_pr(3, created_at="2024-07-01T00:00:00Z", merged_at="2024-07-01T12:00:00Z"),
-            ]
-        ])
-
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(
-                github_client=gh_client, n_concurrent=1, since="2024-06-01", until="2024-07-01"
-            )
-            await runner.run([("pandas-dev", "pandas")])
-
-        records = _pr_records(mock_client)
-        assert len(records) == 1
-        assert records[0]["issue_number"] == 1
-
-    async def test_early_termination(self) -> None:
-        """Pagination stops when created_at < since (sorted created desc)."""
-        mock_client = _mock_supabase()
-        page1 = [
-            _make_pr(1, created_at="2024-06-15T00:00:00Z", merged_at="2024-06-15T12:00:00Z"),
-        ]
-        # Page 2 has a PR created before our window — should trigger early stop
-        page2 = [
-            _make_pr(2, created_at="2024-05-01T00:00:00Z", merged_at="2024-05-01T12:00:00Z"),
-        ]
-        # Page 3 should never be reached
-        page3 = [
-            _make_pr(3, created_at="2024-06-10T00:00:00Z", merged_at="2024-06-10T12:00:00Z"),
-        ]
-        gh_client = _make_gh_client([page1, page2, page3])
-
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(
-                github_client=gh_client, n_concurrent=1, since="2024-06-01", until="2024-07-01"
-            )
-            await runner.run([("pandas-dev", "pandas")])
-
-        records = _pr_records(mock_client)
-        # Only PR #1 from page 1 should be stored; PR #3 on page 3 is never reached
-        assert len(records) == 1
-        assert records[0]["issue_number"] == 1
+        harness.afetch_all.assert_not_called()
+        harness.abatch_upsert.assert_not_called()
 
 
 class TestDeduplication:
-    async def test_deduplication_by_sha(self) -> None:
-        """Duplicate merge_commit_sha across pages should only produce one upsert."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client([
-            [_make_pr(1, merge_commit_sha="deadbeef"), _make_pr(2, merge_commit_sha="deadbeef")],
+    async def test_deduplicates_by_issue_number(self) -> None:
+        """One batch per repository means a repeated primary key is fatal.
+
+        Postgres refuses an upsert that affects the same row twice in one
+        statement, so identity — the PR number — is what has to be unique in
+        the payload.
+        """
+        gh = _make_gh_client([_make_pr(1), _make_pr(1)])
+
+        harness = await _run(gh, [("pandas-dev", "pandas")])
+
+        assert [r["issue_number"] for r in harness.records] == [1]
+
+    async def test_prs_sharing_a_merge_commit_are_both_stored(self) -> None:
+        """Deduplicating on merge_commit_sha dropped real PRs.
+
+        A merge-queue batch lands several PRs under one merge commit, and
+        decision 3 is to store every merged PR.
+        """
+        gh = _make_gh_client([
+            _make_pr(1, merge_commit_sha="deadbeef"),
+            _make_pr(2, merge_commit_sha="deadbeef"),
         ])
 
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            _EMPTY_FETCH_ALL,
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
+        harness = await _run(gh, [("pandas-dev", "pandas")])
 
-        assert len(_pr_records(mock_client)) == 1
+        assert [r["issue_number"] for r in harness.records] == [1, 2]
 
 
-class TestIdempotency:
-    async def test_skips_existing_prs(self) -> None:
-        """PRs already in Supabase should not trigger API calls."""
-        mock_client = _mock_supabase()
-        gh_client = _make_gh_client([
-            [_make_pr(1), _make_pr(2), _make_pr(3)],
-        ])
+class TestSkipsUnmerged:
+    async def test_unmerged_pr_is_not_stored(self) -> None:
+        """``is:merged`` should make this impossible; a NULL merged_at row would lie."""
+        gh = _make_gh_client([_make_pr(1, merged_at=None), _make_pr(2)])
 
-        # Simulate PR #1 and #2 already existing in the database
-        with (
-            patch("datasmith.runners.scrape_commits.get_client", return_value=mock_client),
-            patch("datasmith.runners.base.get_client", return_value=mock_client),
-            patch(
-                "datasmith.runners.scrape_commits.fetch_all",
-                return_value=[{"issue_number": 1}, {"issue_number": 2}],
-            ),
-        ):
-            runner = ScrapeCommitsRunner(github_client=gh_client, n_concurrent=1)
-            await runner.run([("pandas-dev", "pandas")])
+        harness = await _run(gh, [("pandas-dev", "pandas")])
 
-        # Only PR #3 should be scraped (1 API call for diff + 1 for files)
-        records = _pr_records(mock_client)
-        assert len(records) == 1
-        assert records[0]["issue_number"] == 3
+        assert [r["issue_number"] for r in harness.records] == [2]
+
+
+class TestFailureVisibility:
+    async def test_truncation_fails_the_repository_not_the_stage(self) -> None:
+        """Decision 4: the repository fails, the stage continues."""
+
+        async def _fetch(owner: str, repo: str, since: Any, until: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            if repo == "posthog":
+                raise Truncated("posthog: got 1000 of 5166 PRs")
+            return [_make_pr(1)]
+
+        gh = MagicMock()
+        gh.fetch_merged_prs = AsyncMock(side_effect=_fetch)
+
+        harness = await _run(gh, [("PostHog", "posthog"), ("pandas-dev", "pandas")])
+
+        assert harness.runner is not None
+        assert harness.runner._failed == 1
+        assert harness.runner._completed == 1
+        assert [r["repo"] for r in harness.records] == ["pandas"]
+        assert call("runner_failures") in harness.db.table.call_args_list
+        failure = harness.db.table.return_value.insert.call_args.args[0]
+        assert "posthog" in failure["item_id"]
+        assert "5166" in failure["error_message"]

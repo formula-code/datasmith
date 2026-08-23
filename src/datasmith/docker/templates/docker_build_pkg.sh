@@ -5,6 +5,7 @@ set -euo pipefail
 ###### SETUP CODE (NOT TO BE MODIFIED) ######
 source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
+command -v fc_note >/dev/null 2>&1 || fc_note() { :; }
 
 REPO_ROOT=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 TARGET_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
@@ -66,6 +67,72 @@ elif [[ "$ORIGIN_URL" =~ github\.com/astropy/astropy(\.git)?$ ]]; then
 fi
 
 # =====================================================================
+# Build backend
+# =====================================================================
+# Map a PEP 517 backend module onto the distribution that provides it. The
+# fallback (top-level module, underscores to hyphens) is right for most of the
+# long tail, so only the ones it gets wrong are listed.
+backend_distribution() {
+  case "$1" in
+    setuptools*)      echo "setuptools wheel" ;;
+    scikit_build_core*) echo "scikit-build-core" ;;
+    mesonpy|meson*)   echo "meson-python" ;;
+    poetry*)          echo "poetry-core" ;;
+    flit_core*)       echo "flit-core" ;;
+    pdm.backend*)     echo "pdm-backend" ;;
+    pdm.pep517*)      echo "pdm-pep517" ;;
+    sipbuild*)        echo "sip" ;;
+    py_build_cmake*)  echo "py-build-cmake" ;;
+    *)                echo "${1%%.*}" | tr '_' '-' ;;
+  esac
+}
+
+env_numpy_version() {
+  micromamba run -n "$1" python -c "import numpy; print(numpy.__version__)" 2>/dev/null || true
+}
+
+ensure_build_backend() {
+  local env_name=$1
+  [ -f "$REPO_ROOT/pyproject.toml" ] || return 0
+
+  local backend
+  backend=$(micromamba run -n "$env_name" python -c '
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        sys.exit(0)
+try:
+    with open("'"$REPO_ROOT"'/pyproject.toml", "rb") as fh:
+        print(tomllib.load(fh).get("build-system", {}).get("build-backend", "") or "")
+except Exception:
+    pass
+' 2>/dev/null | tr -d '[:space:]')
+
+  [ -n "$backend" ] || return 0
+
+  local module="${backend%%.*}"
+  if micromamba run -n "$env_name" python -c "import $module" >/dev/null 2>&1; then
+    log "Build backend '$backend' already importable"
+    fc_note "build_backend=$backend"
+    return 0
+  fi
+
+  local dist
+  dist="$(backend_distribution "$backend")"
+  log "Build backend '$backend' missing, installing: $dist"
+  # shellcheck disable=SC2086
+  if micromamba run -n "$env_name" python -m pip install $dist; then
+    fc_note "build_backend=$backend"
+  else
+    warn "Could not install build backend '$dist'; the isolated fallback will have to resolve it"
+  fi
+}
+
+# =====================================================================
 # Build & install across envs
 # =====================================================================
 for version in $TARGET_VERSIONS; do
@@ -84,10 +151,37 @@ for version in $TARGET_VERSIONS; do
   # export CFLAGS="${CFLAGS:-} -Wno-error=incompatible-pointer-types"
   # -----------------------------------------------------------------
 
+  # --no-build-isolation needs the PEP 517 backend already present in the env.
+  # It is not there by default, so every repo that uses hatchling,
+  # scikit-build-core, meson-python, poetry-core or flit failed here with
+  # "BackendUnavailable: Cannot import 'hatchling.build'". Both attempts below
+  # used to differ only in $EXTRAS, so the retry could never fix it.
+  ensure_build_backend "$ENV_NAME"
+
+  _NUMPY_BEFORE="$(env_numpy_version "$ENV_NAME")"
+
   log "Editable install with --no-build-isolation"
+  _ISOLATION="none"
   if ! PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"$EXTRAS; then
     warn "Failed with extras, retrying without"
-    PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"
+    if ! PIP_NO_BUILD_ISOLATION=1 micromamba run -n "$ENV_NAME" python -m pip install --no-build-isolation -v -e "$REPO_ROOT"; then
+      # Last resort. An isolated build resolves the backend itself, but it also
+      # builds against whatever numpy the backend picks, which is a weaker ABI
+      # guarantee than building against the env's own. Record which one we got
+      # so whatever gates publishing can see the difference.
+      warn "No-isolation install failed twice, falling back to an ISOLATED build"
+      _ISOLATION="isolated"
+      micromamba run -n "$ENV_NAME" python -m pip install -v -e "$REPO_ROOT"
+    fi
+  fi
+  fc_note "build_isolation=$_ISOLATION"
+
+  # An install that moves numpy under the extension it just compiled produces a
+  # container that imports cleanly now and mismeasures later. Name it here.
+  _NUMPY_AFTER="$(env_numpy_version "$ENV_NAME")"
+  if [ -n "$_NUMPY_BEFORE" ] && [ "$_NUMPY_BEFORE" != "$_NUMPY_AFTER" ]; then
+    warn "numpy moved during install: $_NUMPY_BEFORE -> $_NUMPY_AFTER (ABI risk)"
+    fc_note "numpy_moved_during_install=$_NUMPY_BEFORE->$_NUMPY_AFTER"
   fi
 
   log "Running smoke checks"

@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import time
 from glob import glob
 
@@ -355,6 +356,79 @@ def _attach_warning_hook(plugin, pytest_module):
         plugin.pytest_warning_captured = _warning_captured
 
 
+_TESTPATH_MARKERS = ("testpaths",)
+_CONVENTIONAL_TEST_DIRS = ("tests", "test", "testing")
+
+
+def _declares_testpaths(repo_root):
+    """True when the repo scopes collection itself.
+
+    pytest honours `testpaths` when it gets no path argument, so in that case
+    handing it nothing is already correct and we must not override the repo.
+    """
+    for name in ("pyproject.toml", "setup.cfg", "pytest.ini", "tox.ini"):
+        path = os.path.join(repo_root, name)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for marker in _TESTPATH_MARKERS:
+            for line in text.splitlines():
+                if line.strip().startswith(marker):
+                    return True
+    return False
+
+
+def default_test_paths(repo_root):
+    """Where to collect when the caller named no paths.
+
+    pytest with no path argument collects from rootdir. For a repo that puts
+    `--doctest-modules` in addopts and declares no `testpaths`, that imports
+    every .py in the tree -- docs/conf.py, build helpers, sphinx shims -- and a
+    single ImportError in any of them aborts the whole run before one test
+    executes.
+
+    CalebBell/fluids#38 died exactly there:
+
+        ERROR docs/conf.py
+        ERROR jinja_patch_plugin_pandas.py
+        Interrupted: 2 errors during collection
+
+    Neither file is a test. The repo sets `--doctest-modules` and no
+    `testpaths`, and we passed pytest an empty list, so we asked for the whole
+    tree and got it.
+
+    Returns [] when the repo scopes itself or when no conventional test root
+    exists -- in both cases rootdir collection is the honest default.
+    """
+    if _declares_testpaths(repo_root):
+        return []
+    found = []
+    for name in _CONVENTIONAL_TEST_DIRS:
+        candidate = os.path.join(repo_root, name)
+        if os.path.isdir(candidate):
+            found.append(candidate)
+    if found:
+        return found
+    # A src-layout or package-internal test directory, e.g. pkg/tests.
+    try:
+        entries = sorted(os.listdir(repo_root))
+    except OSError:
+        return []
+    for entry in entries:
+        pkg = os.path.join(repo_root, entry)
+        if not os.path.isdir(pkg) or entry.startswith((".", "_")):
+            continue
+        for name in _CONVENTIONAL_TEST_DIRS:
+            candidate = os.path.join(pkg, name)
+            if os.path.isdir(candidate):
+                found.append(candidate)
+    return found
+
+
 def run_pytest_and_collect(test_paths, extra_args=None, cwd=None):
     import pytest
 
@@ -374,10 +448,31 @@ def run_pytest_and_collect(test_paths, extra_args=None, cwd=None):
     plugin = _ResultsPlugin()
     _attach_warning_hook(plugin, pytest)
 
-    args = unique_paths + list(extra_args)
+    scoped_by_default = False
+    if not unique_paths and not test_paths:
+        unique_paths = default_test_paths(base)
+        scoped_by_default = bool(unique_paths)
+
+    # One test module that cannot be imported must not hide the rest of the
+    # suite. Without this, pytest stops at the first collection error and
+    # reports zero tests, which is indistinguishable from a suite that does not
+    # exist. NCAR/geocat-comp#748 and AllenCellModeling/aicsimageio#486 both
+    # aborted on optional-dependency imports (dask, bioformats) with hundreds of
+    # unrelated tests never attempted.
+    #
+    # The errors are still counted, in summary["error"] and results["errors"],
+    # so a caller can tell "ran with N import failures" from "ran clean". That
+    # distinction is the caller's to act on, not ours to suppress.
+    flag = "--continue-on-collection-errors"
+    extra_args = list(extra_args)
+    if flag not in extra_args:
+        extra_args.append(flag)
+
+    args = unique_paths + extra_args
     exit_code = pytest.main(args=args, plugins=[plugin])
     plugin.results["exit_code"] = int(exit_code)
     plugin.results["selected_paths"] = unique_paths
+    plugin.results["scoped_by_default"] = scoped_by_default
     return plugin.results
 
 

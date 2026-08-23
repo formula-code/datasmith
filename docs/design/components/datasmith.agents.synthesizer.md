@@ -184,7 +184,7 @@ class CodexResult:
 | `owner`, `repo`, `issue_number` | Pipeline item | Identifies the PR |
 | `sha` | Pipeline item | Merge commit SHA |
 | `pr_context` | Rendered problem statement | Full PR context for the AGENTS.md template |
-| `verifier` | Caller (typically `MultiObjVerifier`) | Validates the built Docker image (used by TRY_SIMILAR) |
+| ~~`verifier`~~ | *(removed)* | The verifier API was dead and is gone. TRY_SIMILAR validates via `verify_context`, which runs `local_ci.py` — build, tests, measure, then the build manifest's FATAL invariants. |
 | `base_context` | Pipeline item or templates | Base Docker context with all 9 files |
 | `env_payload` | `packages` table (via `ds.resolution`) | JSON array of pinned dependency strings. Populated by the `resolve_packages` pipeline stage, which runs `analyze_commit()` and persists results to the `packages` Supabase table keyed by `(owner, repo, sha)`. See `datasmith.resolution.md`. |
 | `python_version` | `packages` table (via `ds.resolution`) | Target Python version (e.g., "3.10"). Selected by temporal filtering against the commit date to avoid anachronisms (e.g., not using Python 3.12 for a 2019 commit). |

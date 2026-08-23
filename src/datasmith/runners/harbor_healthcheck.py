@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 from datasmith.harbor_adapter import FormulaCodeAdapter, to_record
 from datasmith.utils import get_client, get_logger
+from datasmith.utils.overrides import expected_n_for, fetch_overrides
 
 logger = get_logger("runners.harbor_healthcheck")
 
@@ -96,6 +97,20 @@ def _materialize_tasks(
     adapter = FormulaCodeAdapter(harbor_tasks_root=task_dir, force=True)
     verifier_env = _build_verifier_env() or None
 
+    # Per-task operator declarations. expected_n is the producer for the
+    # dilution_ratio invariant; the trial container cannot read the table
+    # itself (RLS-locked, no anon grant), so it is injected per task via
+    # [verifier.env]. Tasks without a declaration get None and the invariant
+    # skips, which is the common case.
+    overrides = fetch_overrides([
+        (pr["owner"], pr["repo"], int(pr["issue_number"]))
+        for pr in items
+        if pr.get("owner") and pr.get("repo") and pr.get("issue_number") is not None
+    ])
+    if overrides:
+        n_expected = sum(1 for row in overrides.values() if row.get("expected_n") is not None)
+        logger.info("Loaded %d task override(s); %d declare expected_n", len(overrides), n_expected)
+
     task_id_map: dict[str, dict[str, Any]] = {}
     for pr in items:
         try:
@@ -114,6 +129,7 @@ def _materialize_tasks(
                 run_pytest=True,
                 rounds=rounds,
                 verifier_env=verifier_env,
+                expected_n=expected_n_for(overrides, (rec.owner, rec.repo, rec.issue_number)),
             )
         except Exception:
             logger.exception("generate_task failed for %s/%s#%d", rec.owner, rec.repo, rec.issue_number)

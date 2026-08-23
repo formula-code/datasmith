@@ -3,22 +3,142 @@
 ARG REPO_IMAGE
 
 FROM ${REPO_IMAGE} AS env
+
+# ─────────────────────────── BUILD CACHES ───────────────────────────
+# Two BuildKit cache mounts make a rebuild cheap: /ccache for compiled
+# object files and /opt/uvcache for downloaded and built wheels.  Both
+# are declared on the env AND pkg stage RUNs below.  The targets must
+# stay equal to CCACHE_DIR and UV_CACHE_DIR — a mount whose target does
+# not match the tool's cache directory is silently, permanently cold.
+# tests/docker/test_build_caches.py asserts that coupling.
+#
+# NOT cached, deliberately, each measured and rejected:
+#   /opt/conda/pkgs   — only 16.9% of tasks run `micromamba install` at
+#                       PR-build time, and a warm pkgs dir did not speed
+#                       that install (5.30s vs 5.80s, noise).
+#   /root/.cache/conda — 7.2s off the solve, on 16.9% of tasks.
+#   /opt/pipcache      — the only pip call is an editable install of the
+#                       local repo, which pip does not cache (4 KB - 7.6 MB).
+#
+# `sharing=shared` on both: the pipeline runs up to --n-concurrent 16
+# builds against one cache.  ccache does its own locking, and the uv
+# cache is content-addressed; `locked` would serialize the most
+# expensive stage of every concurrent build, and `private` would give
+# each build its own copy so N-1 of them pay full price and discard it.
+#
+# A cache mount NEVER enters the image, so this also removes the
+# ~1.4 GB of uv cache that every image carried as dead weight.
+#
+# WARNING: `--no-cache` empties these mounts.  No `docker.build()` call
+# site passes it today and none should — see test_build_caches.py.
+ENV CCACHE_DIR=/ccache \
+    UV_CACHE_DIR=/opt/uvcache \
+    UV_LINK_MODE=copy \
+    CCACHE_COMPILERCHECK=content \
+    CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,locale \
+    CCACHE_MAXSIZE=20G \
+    PATH=/opt/ccache-bin:$PATH
+
+# ccache bootstrap.  This lives in Dockerfile.pr, not in
+# docker_build_base.sh or docker_build_env.sh, because
+# candidate_containers stores a frozen per-task copy of build_env_sh: a
+# template edit there would never reach the rows already synthesized,
+# and formulacode/base:latest is rebuilt too rarely to rely on.
+# Dockerfile.pr is backfilled from the templates directory on every
+# build (runners/synthesize_images._fill_missing_scripts), so it is the
+# one surface that reaches every task, old and new.
+#
+# A dedicated prefix rather than `micromamba install -n base ccache`:
+# installing into base can re-solve and bump the packages the build
+# scripts depend on.
+#
+# The masquerade symlinks are the supported way to interpose ccache
+# here.  conda's activate-gcc_linux-64.sh sets CC to the BARE name
+# `x86_64-conda-linux-gnu-cc`, resolved through PATH, so a PATH prepend
+# reaches it; `CC="ccache gcc"` must not be used because distutils,
+# meson and cmake each split a multi-word CC differently.
+#
+# The PATH prepend has to happen twice.  The ENV above covers uv's
+# isolated sdist build environments, which never activate a conda env.
+# `micromamba run -n <env>` prepends the env's own bin AFTER any
+# Dockerfile ENV, so for those calls the prepend must run post
+# activation — hence the activate.d hook, named zz- so it sorts after
+# activate-gcc_linux-64.sh.
+#
+# Placed BEFORE `ARG COMMIT_SHA` and `RUN git checkout` on purpose.
+# Nothing in this step depends on the commit, so its layer cache key
+# carries no per-task input and BuildKit builds it once per repo image
+# instead of once per task.  Below the checkout it would miss on all
+# 1856 tasks, which would mean 1856 conda-forge solves rather than 134.
+#
+# Never fatal: ccache is an optimization, and a build must not fail
+# because conda-forge was unreachable.  The cost of that tolerance is a
+# silently uncached build, so the no-ccache path and the stats step both
+# print FORMULACODE_CCACHE_UNAVAILABLE — grep a slow build for it.
+RUN set -eu; \
+    if ! [ -x /opt/ccache-env/bin/ccache ] && ! command -v ccache >/dev/null 2>&1; then \
+        micromamba create -y -p /opt/ccache-env -c conda-forge ccache >/dev/null || true; \
+    fi; \
+    CCACHE_BIN=""; \
+    for c in /opt/ccache-env/bin/ccache /opt/conda/bin/ccache; do \
+        if [ -x "$c" ]; then CCACHE_BIN="$c"; break; fi; \
+    done; \
+    if [ -z "$CCACHE_BIN" ]; then \
+        echo "FORMULACODE_CCACHE_UNAVAILABLE: compilations will not be cached" >&2; \
+    else \
+        mkdir -p /opt/ccache-bin /ccache; \
+        for n in ccache cc gcc c++ g++ \
+                 x86_64-conda-linux-gnu-cc x86_64-conda-linux-gnu-gcc \
+                 x86_64-conda-linux-gnu-c++ x86_64-conda-linux-gnu-g++; do \
+            ln -sf "$CCACHE_BIN" "/opt/ccache-bin/$n"; \
+        done; \
+        for e in /opt/conda/envs/asv_*; do \
+            [ -d "$e" ] || continue; \
+            mkdir -p "$e/etc/conda/activate.d"; \
+            printf '%s\n' 'export PATH="/opt/ccache-bin:$PATH"' \
+                > "$e/etc/conda/activate.d/zz-ccache.sh"; \
+        done; \
+        "$CCACHE_BIN" --version | head -1; \
+    fi
+
 ARG COMMIT_SHA
 ARG ENV_PAYLOAD="[]"
 ARG PY_VERSION=""
 RUN git checkout "$COMMIT_SHA"
 LABEL vcs.ref="$COMMIT_SHA"
 
+# Record the DECLARED commit from the build arg — the authoritative statement of
+# what this image is supposed to be. head_commit_drift later compares the HEAD
+# introspected at seal time against this value. It must come from the build arg,
+# never from `git rev-parse`: comparing HEAD against HEAD is tautological and the
+# invariant would be structurally incapable of ever firing.
+# Written directly rather than via fc_note because ARGs do not cross FROM
+# boundaries, so this must happen here, in the stage where COMMIT_SHA is in scope.
+RUN mkdir -p /opt/formulacode \
+ && python3 -c 'import json,sys; print(json.dumps({"k":"declared_commit","v":sys.argv[1]}))' \
+      "$COMMIT_SHA" >> /opt/formulacode/notes.jsonl || true
+
 COPY docker_build_env.sh /workspace/repo/docker_build_env.sh
-RUN chmod +x /workspace/repo/docker_build_env.sh && \
+RUN --mount=type=cache,target=/opt/uvcache,id=fc-uv,sharing=shared \
+    --mount=type=cache,target=/ccache,id=fc-ccache,sharing=shared \
+    chmod +x /workspace/repo/docker_build_env.sh && \
     echo "${ENV_PAYLOAD}" > /tmp/env_payload.json && \
     /workspace/repo/docker_build_env.sh --env-payload /tmp/env_payload.json
 
 FROM env AS pkg
 
 COPY docker_build_pkg.sh /workspace/repo/docker_build_pkg.sh
-RUN chmod +x /workspace/repo/docker_build_pkg.sh && \
+RUN --mount=type=cache,target=/opt/uvcache,id=fc-uv,sharing=shared \
+    --mount=type=cache,target=/ccache,id=fc-ccache,sharing=shared \
+    chmod +x /workspace/repo/docker_build_pkg.sh && \
     /workspace/repo/docker_build_pkg.sh
+
+# Cache effectiveness, in the build log where it can be read after the
+# fact.  Needs the mount: without it ccache reads an empty directory and
+# reports a cache that does not exist.  Never fatal.
+RUN --mount=type=cache,target=/ccache,id=fc-ccache,sharing=shared \
+    ccache --show-stats 2>/dev/null \
+     || echo "FORMULACODE_CCACHE_UNAVAILABLE: this build compiled uncached"
 
 COPY profile.sh /profile.sh
 COPY run-tests.sh /run-tests.sh
@@ -27,16 +147,42 @@ RUN chmod +x /profile.sh /run-tests.sh
 RUN micromamba clean --all --yes
 
 FROM pkg AS run
+# The operator-declared benchmark file this task's measurement depends on,
+# from formulacode_task_overrides. docker_build_run.sh turns it into the
+# benchmark_dest_present_post_clean breadcrumb, which is the input to the
+# FATAL benchmark_dest_missing invariant.
+#
+# Declared HERE, in the `run` stage, because ARGs do not cross FROM
+# boundaries -- docker_build_run.sh runs in this stage and would not see an
+# ARG declared anywhere else.
+#
+# Empty is the normal case (only tasks with an override row declare one), and
+# docker_build_run.sh deliberately emits nothing when it is empty, so the
+# invariant skips rather than firing against a value nobody declared.
+ARG BENCHMARK_DEST=""
 
 COPY docker_build_run.sh /docker_build_run.sh
-RUN chmod +x /docker_build_run.sh \
-    && /docker_build_run.sh
+RUN --mount=type=cache,target=/opt/uvcache,id=fc-uv,sharing=shared \
+    --mount=type=cache,target=/ccache,id=fc-ccache,sharing=shared \
+    chmod +x /docker_build_run.sh \
+    && BENCHMARK_DEST="${BENCHMARK_DEST}" /docker_build_run.sh
 
 FROM run AS final
 ARG BENCHMARKS=""
 ARG BUILD_SCRIPT=""
 
 COPY docker_build_final.sh /docker_build_final.sh
-RUN chmod +x /docker_build_final.sh \
+COPY emit_manifest.py /emit_manifest.py
+# Measurability: measure.sh runs at container-run time (never at build time),
+# so nothing here needs an fc_note breadcrumb or a base-image rebuild.
+# solution.patch is deliberately NOT copied — it is mounted at run time so
+# the oracle solution never enters a published image.
+COPY measure.sh /measure.sh
+COPY apply_oracle_patch.py /apply_oracle_patch.py
+COPY emit_measure.py /emit_measure.py
+COPY lsv_init.py lsv_measure.py parser.py /opt/lsv/
+RUN chmod +x /docker_build_final.sh /measure.sh \
     && printf "%s\n" "${BENCHMARKS}" > /tmp/asv_benchmarks_fallback.txt; \
-    /docker_build_final.sh /tmp/asv_benchmarks_fallback.txt;
+    /docker_build_final.sh /tmp/asv_benchmarks_fallback.txt; rc=$?; \
+    python3 /emit_manifest.py || true; \
+    exit $rc

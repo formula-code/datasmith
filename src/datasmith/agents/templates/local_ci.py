@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess as sp
 import sys
@@ -35,10 +36,28 @@ _IMMUTABLE_FILES = (
     "Dockerfile.pr",
     "docker_build_base.sh",
     "docker_build_final.sh",
+    "emit_manifest.py",
+    "measure.sh",
+    "apply_oracle_patch.py",
+    "emit_measure.py",
     "profile.sh",
     "run-tests.sh",
     "entrypoint.sh",
     "task.txt",
+    "solution.patch",
+)
+
+# Verification test timeout. 720 was the historical default and silently
+# passed ~34% of builds because a timeout was scored as success; 3600 matches
+# every other timeout in the tree and dataset/CLAUDE.md.
+DATASMITH_VERIFY_TEST_TIMEOUT_S: int = int(
+    os.environ.get("DATASMITH_VERIFY_TEST_TIMEOUT_S", "3600")
+)
+
+# Measure-step timeout.  2.3x the observed p90 of a real oracle trial
+# (lsv_init p90 1064s + lsv_measure p90 487s, n=83 harbor_runs rows).
+DATASMITH_VERIFY_MEASURE_TIMEOUT_S: int = int(
+    os.environ.get("DATASMITH_VERIFY_MEASURE_TIMEOUT_S", "3600")
 )
 
 
@@ -215,6 +234,7 @@ def _run_container_with_timeout(
     command: list[str],
     timeout: int,
     metrics: dict | None = None,
+    mounts: list[str] | None = None,
 ) -> tuple[bool, str, str, int]:
     """Run a Docker container with a host-side timeout.
 
@@ -224,7 +244,10 @@ def _run_container_with_timeout(
     ``peak_memory_bytes`` by polling ``docker stats`` in a background thread.
     """
     name = f"fc-{uuid.uuid4().hex[:8]}"
-    cmd = ["docker", "run", "--name", name, "--pull", "never", image_tag, *command]
+    cmd = ["docker", "run", "--name", name, "--pull", "never"]
+    for spec in mounts or []:
+        cmd += ["-v", spec]
+    cmd += [image_tag, *command]
     # No --rm: we clean up manually after collecting metrics.
 
     peak_mem: list[int] = [0]
@@ -286,30 +309,219 @@ def _run_container_with_timeout(
     return timed_out, stdout, stderr, rc
 
 
-def run_tests(image_tag: str, timeout: int = 720, metrics: dict | None = None) -> tuple[bool, str, str, int]:
+def run_tests(
+    image_tag: str,
+    timeout: int | None = None,
+    metrics: dict | None = None,
+) -> tuple[bool, str, str, int]:
     """Run /run-tests.sh inside the built image.
 
-    The contract is intentionally simple: we trust /run-tests.sh's exit code.
-    A non-zero exit means the underlying tool (pytest, asv, etc.) failed and
-    its raw stdout/stderr will be surfaced to the agent verbatim through
-    failure.json so they can read the real error and fix it.
+    A host-side timeout is a FAILURE.  It previously returned success, which
+    meant a container killed at the limit was indistinguishable from one that
+    passed — that inversion silently verified ~34% of candidate_containers.
 
-    Two structural special cases:
-      - host-side timeout → treated as success (long benchmark runs are OK)
-      - rc == 78 (EX_CONFIG) or the FORMULACODE_NO_BENCHMARKS sentinel → the
-        repo has no ASV benchmark suite at this commit; this is a task-level
-        unsuitability, not a fixable bug.
+    rc == 78 (EX_CONFIG) or the FORMULACODE_NO_BENCHMARKS sentinel still means
+    the repo has no ASV suite at this commit: task-level unsuitability, not a
+    fixable bug.
     """
+    limit = DATASMITH_VERIFY_TEST_TIMEOUT_S if timeout is None else timeout
     timed_out, stdout, stderr, rc = _run_container_with_timeout(
-        image_tag, ["/run-tests.sh", "--all"], timeout, metrics=metrics
+        image_tag, ["/run-tests.sh", "--all"], limit, metrics=metrics
     )
+    if metrics is not None:
+        metrics["timeout_s"] = limit
+        metrics["test_timed_out"] = timed_out
     if timed_out:
-        return True, stdout, f"Tests timed out after {timeout}s (treated as success)", rc
+        return (
+            False,
+            stdout,
+            f"Tests exceeded the {limit}s limit and were killed. Raise "
+            f"DATASMITH_VERIFY_TEST_TIMEOUT_S or --test-timeout if this repo "
+            f"legitimately needs longer.",
+            rc,
+        )
     if rc == 78 or "FORMULACODE_NO_BENCHMARKS" in stdout:
         return False, stdout, "No ASV benchmarks discovered — task cannot be used in FormulaCode", rc
     if rc != 0:
         return False, stdout, stderr, rc
     return True, stdout, stderr, rc
+
+
+_TESTS_BLOCK_RE = re.compile(r"FORMULACODE_TESTS_START\s*\n(.*?)\nFORMULACODE_TESTS_END", re.DOTALL)
+
+
+def _parse_test_summary(stdout: str) -> dict:
+    """Extract the JSON object run-tests.sh prints between
+    FORMULACODE_TESTS_START / FORMULACODE_TESTS_END.
+
+    That block's shape varies by which code path produced it (see
+    run-tests.sh and docker/templates/pytest_runner.py):
+      - a normal pytest run prints pytest_runner.py's flat summary dict
+        (total/passed/failed/skipped/xfailed/xpassed/error/rerun/warnings)
+      - the no-ASV-benchmarks early exit prints the same flat shape with
+        hardcoded zeros
+      - a run_pytest=False template config prints an unrelated
+        {"results": {"exit_code": ..., "details": ...}} shape carrying
+        neither "failed" nor "error"
+
+    Returns ``{}`` for a missing block, malformed JSON, or a top level that
+    isn't a JSON object -- callers must treat every field as independently
+    present-or-absent, never guess a value for it.
+    """
+    m = _TESTS_BLOCK_RE.search(stdout)
+    if not m:
+        return {}
+    try:
+        parsed = json.loads(m.group(1).strip())
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _pytest_verify_fields(stdout: str) -> dict:
+    """Derive ``verify.pytest_collect_ok`` / ``verify.pytest_failed_at_base``
+    from run_tests()'s captured stdout.
+
+    pytest_runner.py's ``summary["error"]`` is incremented both by
+    ``pytest_collectreport`` (a genuine broken-import/collection failure --
+    the class of failure invariant #7 exists to catch, see
+    docs/superpowers/specs/2026-07-31-build-manifest-verification-design.md)
+    and by per-test setup/teardown errors (``pytest_runtest_logreport``).
+    The printed block carries no separate collection-only counter, so
+    "error > 0" is the closest available signal without a second read of
+    /logs/test_results.json inside the container. A field is set only when
+    its source key is present and coerces cleanly; otherwise it's omitted
+    so the corresponding invariant is skipped rather than guessed.
+    """
+    summary = _parse_test_summary(stdout)
+    fields: dict = {}
+    if "error" in summary:
+        try:
+            fields["pytest_collect_ok"] = int(summary["error"]) == 0
+        except (TypeError, ValueError):
+            pass
+    if "failed" in summary:
+        try:
+            fields["pytest_failed_at_base"] = int(summary["failed"])
+        except (TypeError, ValueError):
+            pass
+
+    # Recorded, NOT gated. Today any failing test fails the build, because
+    # run-tests.sh exits with pytest's code and run_tests treats rc != 0 as a
+    # failure. CalebBell/fluids#38 is rejected at 554/559 -- 99.1% -- for five
+    # numba TypingErrors, with zero collection errors.
+    #
+    # Whether that is the right policy needs a distribution, and the one we
+    # have is survivorship-biased: all 68 harbor_runs ratios come from
+    # containers that already passed this gate, and 60 of them sit at exactly
+    # 1.0. It cannot show how many repos are being rejected just below 1.0.
+    # So record the ratio on every run, including rejected ones, and set a
+    # threshold from that evidence rather than from one repository.
+    for key, name in (("total", "pytest_total_at_base"), ("passed", "pytest_passed_at_base")):
+        if key in summary:
+            try:
+                fields[name] = int(summary[key])
+            except (TypeError, ValueError):
+                pass
+    total = fields.get("pytest_total_at_base")
+    passed = fields.get("pytest_passed_at_base")
+    if isinstance(total, int) and isinstance(passed, int) and total > 0:
+        fields["pytest_pass_ratio"] = round(passed / total, 6)
+    return fields
+
+
+
+_MEASURE_BLOCK_RE = re.compile(
+    r"FORMULACODE_MEASURE_START\s*\n(.*?)\nFORMULACODE_MEASURE_END", re.DOTALL
+)
+
+
+def run_measure(
+    image_tag: str,
+    patch_path: str,
+    timeout: int | None = None,
+    metrics: dict | None = None,
+) -> tuple[bool, str, str, int]:
+    """Run /measure.sh inside the built image, with the oracle patch mounted.
+
+    This is what makes verification prove the container can MEASURE a
+    speedup rather than merely build.  The patch is bind-mounted read-only
+    and never baked into the image: a published task image carrying the
+    oracle solution would be readable by the agent under evaluation.
+
+    A host-side timeout is a FAILURE, for the same reason it is in
+    run_tests() -- a container killed at the limit must never be
+    indistinguishable from one that succeeded.
+    """
+    limit = DATASMITH_VERIFY_MEASURE_TIMEOUT_S if timeout is None else timeout
+    start = time.time()
+    timed_out, stdout, stderr, rc = _run_container_with_timeout(
+        image_tag,
+        ["/measure.sh", "/tmp/solution.patch"],
+        limit,
+        # metrics=None deliberately: _run_container_with_timeout writes
+        # test_duration_s / peak_memory_bytes, and passing our metrics dict
+        # here would overwrite run_tests' values with the measure step's.
+        # The measure duration is timed separately below.
+        metrics=None,
+        mounts=[f"{patch_path}:/tmp/solution.patch:ro"],
+    )
+    if metrics is not None:
+        metrics["measure_timeout_s"] = limit
+        metrics["measure_timed_out"] = timed_out
+        # Recorded BESIDE the limit for the same reason the predecessor spec
+        # added timeout_s beside test_duration_s: a duration whose limit is
+        # unknown is uninterpretable, and a limit whose duration is unknown
+        # cannot tell us whether the 3600 default was right. 3600 was chosen
+        # from 83 harbor_runs rows; this field is how it gets re-derived
+        # from stage-6's own data.
+        metrics["measure_duration_s"] = round(time.time() - start, 2)
+    if timed_out:
+        return (
+            False,
+            stdout,
+            f"Measurement exceeded the {limit}s limit and was killed. Raise "
+            f"DATASMITH_VERIFY_MEASURE_TIMEOUT_S if this repo legitimately "
+            f"needs longer.",
+            rc,
+        )
+    if rc == 127:
+        # bash exits 127 for "command not found". Every image built before
+        # measurability verification existed has no /measure.sh, and no edit
+        # to docker_build_pkg.sh or docker_build_run.sh can fix that -- so
+        # say so, rather than letting the agent burn attempts on a build
+        # that was never broken.
+        return (
+            False,
+            stdout,
+            "This image has no /measure.sh: it was built before measurability "
+            "verification existed. Rebuild it from the current build context "
+            "(which ships measure.sh). This is NOT a build-script problem and "
+            "cannot be fixed by editing docker_build_pkg.sh or docker_build_run.sh.",
+            rc,
+        )
+    if rc != 0:
+        return False, stdout, stderr, rc
+    return True, stdout, stderr, rc
+
+
+def _measure_verify_fields(stdout: str) -> dict:
+    """Extract the JSON object measure.sh prints between
+    FORMULACODE_MEASURE_START / FORMULACODE_MEASURE_END.
+
+    Returns ``{}`` for a missing block, malformed JSON, or a non-object top
+    level.  An empty dict makes every measure invariant SKIP, which is the
+    correct answer for an image built before /measure.sh existed -- the gate
+    on a *broken* measurement is run_measure()'s own return value, not this.
+    """
+    matches = _MEASURE_BLOCK_RE.findall(stdout)
+    if not matches:
+        return {}
+    try:
+        parsed = json.loads(matches[-1].strip())
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _check_file_integrity(task_dir: Path) -> str | None:
@@ -345,6 +557,154 @@ def _check_file_integrity(task_dir: Path) -> str | None:
         parts.append(f"Deleted: {', '.join(deleted)}")
     parts.append("Revert your changes to these files and try again.")
     return "\n".join(parts)
+
+
+# ── Build manifest (mirrors datasmith.docker.manifest) ───────────────────
+# local_ci.py runs in the sandbox without datasmith installed, so the fatal
+# invariant set is duplicated here.  tests/docker/test_manifest.py
+# ::TestLocalCiSync fails if the two drift apart.
+_MANIFEST_PATH = "/opt/formulacode/build_manifest.json"
+
+
+def _c_timed_out(b: dict, v: dict) -> bool | None:
+    return None if v.get("test_timed_out") is None else v["test_timed_out"] is False
+
+
+def _c_discovered_n(b: dict, v: dict) -> bool | None:
+    return None if b.get("discovered_n") is None else b["discovered_n"] > 0
+
+
+def _c_dest_present(b: dict, v: dict) -> bool | None:
+    key = "benchmark_dest_present_post_clean"
+    return None if b.get(key) is None else bool(b[key])
+
+
+def _c_secrets(b: dict, v: dict) -> bool | None:
+    return None if b.get("secrets_scan_clean") is None else bool(b["secrets_scan_clean"])
+
+
+def _c_collect(b: dict, v: dict) -> bool | None:
+    # Not wired into _FATAL_INVARIANTS below: pytest_collect_failed is warn
+    # severity in datasmith.docker.manifest (pytest_runner.py's
+    # summary["error"] mixes genuine collection failures with ordinary
+    # per-test setup/teardown errors, and only the flat summary reaches this
+    # file, so the two are indistinguishable here). Kept, not deleted, so
+    # datasmith.docker.manifest.evaluate_invariants -- which re-evaluates the
+    # merged manifest downstream with no such gap -- still has a local_ci.py
+    # equivalent to diff against. Returns to _FATAL_INVARIANTS once
+    # len(results["errors"]) is read from /logs/test_results.json (already
+    # written by pytest_runner.py) to separate the two failure classes.
+    return None if v.get("pytest_collect_ok") is None else bool(v["pytest_collect_ok"])
+
+
+def _c_measure_timed_out(b: dict, v: dict) -> bool | None:
+    return None if v.get("measure_timed_out") is None else v["measure_timed_out"] is False
+
+
+def _c_asv_exec(b: dict, v: dict) -> bool | None:
+    # benchmarks_measured_n counts only benchmarks with finite, non-zero
+    # timings on BOTH sides, so non-degeneracy folds in here rather than
+    # becoming a second fatal gate on the same fact.
+    key = "benchmarks_measured_n"
+    return None if v.get(key) is None else v[key] > 0
+
+
+def _c_oracle_patch(b: dict, v: dict) -> bool | None:
+    # Fatal only for "present but did not apply".  6 of 12941 perf PRs have
+    # an empty patch; for those this must skip.
+    if v.get("patch_present") is None or not v["patch_present"]:
+        return None
+    return None if v.get("patch_applied") is None else bool(v["patch_applied"])
+
+
+# Every check returns True (holds), False (violated), or None (inputs absent
+# -> skipped, per check_fatal_invariants below).  This mirrors the three-
+# valued _c_* functions in datasmith.docker.manifest exactly -- a bool()-only
+# form would treat "not yet populated" as a violation, which is precisely
+# the inversion this task exists to prevent.
+_FATAL_INVARIANTS = (
+    # Unreachable via verify()'s own control flow: run_tests() already
+    # returns ok=False on timeout, and verify() returns before
+    # check_fatal_invariants runs in that path. Retained (not dead code)
+    # because the merged manifest -- including this field -- is persisted
+    # and re-evaluated downstream by datasmith.docker.manifest.evaluate_invariants,
+    # which has no such short-circuit.
+    ("test_timed_out", _c_timed_out),
+    ("discovered_n_zero", _c_discovered_n),
+    # INERT pending a producer for BENCHMARK_DEST: see the matching comment
+    # on this Invariant in datasmith.docker.manifest -- nothing in this tree
+    # sets $BENCHMARK_DEST yet, so this check returns None (skipped) on
+    # every build. Kept registered rather than removed; the value is
+    # expected to come from the per-task override record once one exists.
+    ("benchmark_dest_missing", _c_dest_present),
+    # benchmark_init_missing is intentionally NOT here: it is warn-severity
+    # in datasmith.docker.manifest (build-time it's either a false-positive
+    # gate on repos that legitimately lack __init__.py, or tautological if
+    # we create it unconditionally -- see the comment on that Invariant for
+    # the full reasoning). Do not add it back without also flipping
+    # manifest.py's severity, or the parity test below will catch the drift.
+    ("head_commit_drift", lambda b, v: _shas_match(b.get("head_at_seal"), b.get("declared_commit"))),
+    ("secrets_present", _c_secrets),
+    # pytest_collect_failed is intentionally NOT here: it is warn-severity in
+    # datasmith.docker.manifest (see the comment on _c_collect above and on
+    # that Invariant in manifest.py). Do not add it back without also
+    # flipping manifest.py's severity, or the parity test below will catch
+    # the drift.
+    #
+    # Measurability -- the gates that make verification prove a container can
+    # MEASURE a speedup rather than merely build. Their inputs come from the
+    # FORMULACODE_MEASURE block that measure.sh prints, merged into
+    # manifest["verify"] by verify() below.
+    ("measure_timed_out", _c_measure_timed_out),
+    ("asv_exec_failed", _c_asv_exec),
+    ("oracle_patch_failed", _c_oracle_patch),
+)
+
+
+def _shas_match(a: str | None, b: str | None) -> bool | None:
+    if not a or not b:
+        return None
+    n = min(len(a), len(b))
+    return a[:n] == b[:n]
+
+
+def read_manifest_from_image(image_tag: str) -> dict | None:
+    """Read the sealed manifest out of a built image, or None if absent."""
+    try:
+        out = sp.run(  # noqa: S603
+            ["docker", "run", "--rm", "--entrypoint", "cat", image_tag, _MANIFEST_PATH],  # noqa: S607
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, sp.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    try:
+        parsed = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def check_fatal_invariants(manifest: dict | None) -> list[str]:
+    """Return the ids of violated FATAL invariants. Empty means clean.
+
+    An invariant whose inputs are absent is skipped, so an image built before
+    manifests existed yields no violations rather than spurious failures.
+    """
+    if not manifest:
+        return []
+    build = manifest.get("build") or {}
+    verify_block = manifest.get("verify") or {}
+    violations = []
+    for inv_id, check in _FATAL_INVARIANTS:
+        try:
+            result = check(build, verify_block)
+        except Exception:  # noqa: BLE001 - a broken check must not fail the build
+            continue
+        if result is False:
+            violations.append(inv_id)
+    return violations
 
 
 def verify(task_dir: Path) -> bool:
@@ -409,12 +769,55 @@ def verify(task_dir: Path) -> bool:
         _write_failure(task_dir, "build", stderr=str(e), metrics=metrics)
         return False
 
-    # Tests — mandatory, no skip option (profile.sh runs inside run-tests.sh)
+    # Tests — mandatory, no skip option
     ok, stdout, stderr, rc = run_tests(tag, metrics=metrics)
+
+    # Merge post-run observations into the sealed manifest, then gate.
+    manifest = read_manifest_from_image(tag)
+    if manifest is not None:
+        verify_fields = {
+            "test_duration_s": metrics.get("test_duration_s"),
+            "test_timed_out": metrics.get("test_timed_out"),
+            "timeout_s": metrics.get("timeout_s"),
+        }
+        verify_fields.update(_pytest_verify_fields(stdout))
+        manifest.setdefault("verify", {}).update(verify_fields)
+        metrics["build_manifest"] = manifest
+
     if not ok:
         print(f"Tests failed for {task_dir.name}")
         _write_failure(task_dir, "tests", stdout=stdout, stderr=stderr, rc=rc, metrics=metrics)
         return False
+
+    # Measurement -- prove the container can MEASURE a speedup, not just
+    # build. Runs only after tests pass so a doomed attempt never pays the
+    # ~14-minute median cost.
+    patch_path = str((task_dir / "solution.patch").resolve())
+    m_ok, m_stdout, m_stderr, m_rc = run_measure(tag, patch_path, metrics=metrics)
+    if manifest is not None:
+        measure_fields = {
+            "measure_timed_out": metrics.get("measure_timed_out"),
+            "measure_timeout_s": metrics.get("measure_timeout_s"),
+            "measure_duration_s": metrics.get("measure_duration_s"),
+        }
+        measure_fields.update(_measure_verify_fields(m_stdout))
+        manifest.setdefault("verify", {}).update(measure_fields)
+        metrics["build_manifest"] = manifest
+
+    if not m_ok:
+        print(f"Measurement failed for {task_dir.name}")
+        _write_failure(
+            task_dir, "measure", stdout=m_stdout, stderr=m_stderr, rc=m_rc, metrics=metrics
+        )
+        return False
+
+    violations = check_fatal_invariants(manifest)
+    if violations:
+        detail = "Build manifest invariant violations: " + ", ".join(violations)
+        print(detail)
+        _write_failure(task_dir, "invariants", stdout=stdout, stderr=detail, rc=1, metrics=metrics)
+        return False
+
     print(f"Tests passed for {task_dir.name}")
 
     _write_success(task_dir, tag, metrics=metrics)
@@ -430,11 +833,21 @@ def main() -> None:
         default=Path("task"),
         help="Task directory (default: task/)",
     )
+    parser.add_argument(
+        "--test-timeout",
+        type=int,
+        default=None,
+        help="Override DATASMITH_VERIFY_TEST_TIMEOUT_S for this run (seconds)",
+    )
     args = parser.parse_args()
 
     if not args.task.exists():
         print(f"Task directory not found: {args.task}")
         sys.exit(1)
+
+    if args.test_timeout is not None:
+        global DATASMITH_VERIFY_TEST_TIMEOUT_S
+        DATASMITH_VERIFY_TEST_TIMEOUT_S = args.test_timeout
 
     ok = verify(args.task)
     sys.exit(0 if ok else 1)

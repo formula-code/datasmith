@@ -57,6 +57,14 @@ def test_matrix_none_version_is_dropped_not_stringified():
     assert "cython==None" not in d.runtime
 
 
+def test_flag_like_matrix_keys_are_skipped():
+    # Ported from the predecessor's matrix_requirements suite, which this module
+    # replaced. A key beginning with `-` is a pip flag that leaked into the
+    # matrix, not a distribution -- `-e==1.0` is not installable by anyone.
+    d = declare(_meta(), {"-e": {"1.0"}, "numpy": set()})
+    assert d.runtime == ["numpy"]
+
+
 def test_a_matrix_entry_that_is_only_null_installs_nothing():
     # ASV's `null` means "do not install in this combination". Emitting the bare
     # key here would invert that into "install any version", and asserting only

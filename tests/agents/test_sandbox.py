@@ -12,6 +12,7 @@ from datasmith.agents.sandbox import (
     SandboxResult,
     SandboxRunner,
     _compute_immutable_hashes,
+    _extract_build_manifest,
     _extract_resource_metrics,
     _generate_task_txt,
     _render_agents_md,
@@ -39,6 +40,7 @@ class TestSandboxResult:
         assert r.duration_s == 0.0
         assert r.agent_output == ""
         assert r.resource_metrics == {}
+        assert r.build_manifest is None
         assert r.env_payload_override is None
 
     def test_with_env_payload_override(self) -> None:
@@ -115,6 +117,7 @@ class TestPrepareWorkspace:
         assert (task_dir / "docker_build_pkg.sh").exists()
         assert (task_dir / "docker_build_run.sh").exists()
         assert (task_dir / "docker_build_final.sh").exists()
+        assert (task_dir / "emit_manifest.py").exists()
         assert (task_dir / "profile.sh").exists()
         assert (task_dir / "run-tests.sh").exists()
         assert (task_dir / "entrypoint.sh").exists()
@@ -162,6 +165,7 @@ class TestPrepareWorkspace:
             "Dockerfile.pr",
             "docker_build_base.sh",
             "docker_build_final.sh",
+            "emit_manifest.py",
             "profile.sh",
             "run-tests.sh",
             "entrypoint.sh",
@@ -374,6 +378,62 @@ class TestExtractResourceMetrics:
 
         assert result.success is False
         assert result.resource_metrics == metrics
+
+
+class TestExtractBuildManifest:
+    """build_manifest rides inside resource_metrics — see local_ci.py's verify()."""
+
+    def test_from_success_file(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        manifest = {"schema_version": 1, "build": {"discovered_n": 3}, "verify": {}}
+        metrics = {"build_duration_s": 12.5, "build_manifest": manifest}
+        success.write_text(json.dumps({"local_image": "t", "resource_metrics": metrics}))
+
+        assert _extract_build_manifest(success, failure, None) == manifest
+
+    def test_from_failure_json(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        manifest = {"schema_version": 1, "build": {}, "verify": {}}
+        failure_data = {"stage": "tests", "resource_metrics": {"build_manifest": manifest}}
+
+        assert _extract_build_manifest(success, failure, failure_data) == manifest
+
+    def test_none_when_absent(self, tmp_path: Path) -> None:
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        success.write_text(json.dumps({"local_image": "t", "resource_metrics": {"build_duration_s": 1.0}}))
+
+        assert _extract_build_manifest(success, failure, None) is None
+
+    def test_none_when_not_a_dict(self, tmp_path: Path) -> None:
+        """A malformed build_manifest (e.g. a string) is ignored rather than propagated."""
+        success = tmp_path / "verification_success.json"
+        failure = tmp_path / "failure.json"
+        success.write_text(json.dumps({"local_image": "t", "resource_metrics": {"build_manifest": "not-a-dict"}}))
+
+        assert _extract_build_manifest(success, failure, None) is None
+
+    def test_extract_results_includes_build_manifest(self, tmp_path: Path) -> None:
+        """_extract_results populates SandboxResult.build_manifest from success JSON."""
+        task_dir = tmp_path / "task"
+        task_dir.mkdir()
+        manifest = {"schema_version": 1, "build": {"discovered_n": 5}, "verify": {"test_timed_out": False}}
+        metrics = {"build_duration_s": 10.0, "build_manifest": manifest}
+        (task_dir / "verification_success.json").write_text(
+            json.dumps({"local_image": "test:latest", "resource_metrics": metrics})
+        )
+        (task_dir / "docker_build_pkg.sh").write_text("#!/bin/bash")
+        (task_dir / "docker_build_run.sh").write_text("#!/bin/bash")
+
+        runner = SandboxRunner()
+        codex_result = MagicMock()
+        codex_result.output = "ok"
+        result = runner._extract_results(tmp_path, codex_result)
+
+        assert result.success is True
+        assert result.build_manifest == manifest
 
 
 class TestSandboxRunnerRun:
@@ -825,3 +885,126 @@ class TestBuildStageDetection:
         _write_failure(tmp_path, stage, stdout=build_stdout, stderr="", rc=1)
         failure = json.loads((tmp_path / "failure.json").read_text())
         assert failure["stage"] == "env"
+
+
+class TestSolutionPatchPlumbing:
+    def _prepare(self, tmp_path, **kw):
+        from datasmith.agents.sandbox import SandboxRunner
+
+        runner = SandboxRunner()
+        runner._prepare_workspace(
+            workspace=tmp_path,
+            owner="o",
+            repo="r",
+            sha="s" * 40,
+            repo_image="img",
+            env_payload="[]",
+            python_version="3.11",
+            pr_context="ctx",
+            base_sha="b" * 40,
+            **kw,
+        )
+
+    def test_prepare_workspace_writes_solution_patch(self, tmp_path):
+        self._prepare(tmp_path, solution_patch="diff --git a/x b/x\n")
+        assert (tmp_path / "task" / "solution.patch").read_text() == "diff --git a/x b/x\n"
+
+    def test_absent_patch_writes_an_empty_file_not_nothing(self, tmp_path):
+        """local_ci.py mounts this path unconditionally; a missing file makes
+        `docker run -v` create a DIRECTORY at the mount point, which the
+        applier then cannot read."""
+        self._prepare(tmp_path)
+        p = tmp_path / "task" / "solution.patch"
+        assert p.exists()
+        assert p.read_text() == ""
+
+    def test_solution_patch_is_immutable(self):
+        from datasmith.agents.sandbox import _IMMUTABLE_FILES
+
+        assert "solution.patch" in _IMMUTABLE_FILES
+
+    def test_solution_patch_is_hashed_for_integrity(self, tmp_path):
+        import json
+
+        self._prepare(tmp_path, solution_patch="diff --git a/x b/x\n")
+        hashes = json.loads((tmp_path / ".immutable_hashes.json").read_text())
+        assert "solution.patch" in hashes
+
+    def test_measure_scripts_are_copied_into_the_task_dir(self, tmp_path):
+        self._prepare(tmp_path)
+        for name in (
+            "measure.sh",
+            "apply_oracle_patch.py",
+            "emit_measure.py",
+            "lsv_init.py",
+            "lsv_measure.py",
+            "parser.py",
+        ):
+            assert (tmp_path / "task" / name).exists(), name
+
+
+class TestEveryCopySourceReachesTheTaskDir:
+    """A COPY source missing from the task dir breaks the build before the
+    container can measure anything.
+
+    Driven off Dockerfile.pr's actual COPY directives rather than a
+    hand-written list: adding a COPY without updating the copy lists fails
+    here immediately. There are THREE independent producers of a task
+    directory (SandboxRunner._prepare_workspace, verify_context, and
+    _fill_missing_scripts) and they each carry their own list, so each is
+    checked.
+    """
+
+    def _copy_sources(self, task_dir) -> list[str]:
+        sources: list[str] = []
+        for line in (task_dir / "Dockerfile.pr").read_text().splitlines():
+            s = line.strip()
+            if s.upper().startswith("COPY "):
+                parts = s.split()[1:]
+                sources.extend(p for p in parts[:-1] if not p.startswith("--"))
+        assert sources, "no COPY directives parsed — this guard would pass vacuously"
+        return sources
+
+    def test_prepare_workspace_supplies_every_copy_source(self, tmp_path):
+        from datasmith.agents.sandbox import SandboxRunner
+
+        SandboxRunner()._prepare_workspace(
+            workspace=tmp_path,
+            owner="o",
+            repo="r",
+            sha="a" * 40,
+            repo_image="img",
+            env_payload="[]",
+            python_version="3.11",
+            pr_context="ctx",
+            base_sha="b" * 40,
+        )
+        task = tmp_path / "task"
+        have = {p.name for p in task.iterdir()}
+        missing = [n for n in self._copy_sources(task) if n not in have]
+        assert not missing, f"Dockerfile.pr COPYs files _prepare_workspace never writes: {missing}"
+
+    def test_fill_missing_scripts_supplies_every_copy_source(self, tmp_path):
+        from datasmith.runners.synthesize_images import _fill_missing_scripts
+
+        _fill_missing_scripts(str(tmp_path), base_commit="deadbeef")
+        have = {p.name for p in tmp_path.iterdir()}
+        missing = [n for n in self._copy_sources(tmp_path) if n not in have]
+        assert not missing, f"Dockerfile.pr COPYs files _fill_missing_scripts never writes: {missing}"
+
+    def test_verify_contexts_copy_list_matches_prepare_workspaces(self):
+        """verify_context duplicates _prepare_workspace's copy list. Nothing
+        else keeps the two in sync, and TRY_SIMILAR goes through
+        verify_context — so drift silently breaks that path only."""
+        import re
+        from pathlib import Path
+
+        src = (Path(__file__).parents[2] / "src" / "datasmith" / "agents" / "sandbox.py").read_text()
+        tuples = re.findall(r"for fname in \(\n(.*?)\n        \):", src, re.DOTALL)
+        assert len(tuples) == 2, f"expected 2 template copy lists in sandbox.py, found {len(tuples)}"
+        parsed = [sorted(re.findall(r'"([^"]+)"', block)) for block in tuples]
+        assert parsed[0] == parsed[1], f"copy lists have drifted: {parsed[0]} vs {parsed[1]}"
+
+        lsv_tuples = re.findall(r'for fname in \("lsv_init\.py".*?\):', src)
+        assert len(lsv_tuples) == 2, f"expected 2 LSV copy loops, found {len(lsv_tuples)}"
+        assert lsv_tuples[0] == lsv_tuples[1]

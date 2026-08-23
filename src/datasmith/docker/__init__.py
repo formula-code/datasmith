@@ -1,4 +1,4 @@
-"""ds.docker — Docker image lifecycle, build contexts, verifiers, publishing."""
+"""ds.docker — Docker image lifecycle, build contexts, build manifests, publishing."""
 
 from datasmith.docker.context import DockerContext
 from datasmith.docker.images import (
@@ -7,25 +7,21 @@ from datasmith.docker.images import (
     get_pr_image_name,
     get_repo_image_name,
 )
-from datasmith.docker.publish import DockerHubPublisher
-from datasmith.docker.verifiers import (
-    MultiObjVerifier,
-    ProfileVerifier,
-    PytestVerifier,
-    SmokeVerifier,
-    VerifyResult,
+from datasmith.docker.manifest import (
+    InvariantReport,
+    evaluate_invariants,
+    read_build_manifest,
 )
+from datasmith.docker.publish import DockerHubPublisher
 
 __all__ = [
     "DockerContext",
     "DockerHubPublisher",
     "ImageManager",
-    "MultiObjVerifier",
-    "ProfileVerifier",
-    "PytestVerifier",
-    "SmokeVerifier",
-    "VerifyResult",
+    "InvariantReport",
+    "evaluate_invariants",
     "get_base_image_name",
     "get_pr_image_name",
     "get_repo_image_name",
+    "read_build_manifest",
 ]

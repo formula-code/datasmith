@@ -8,11 +8,24 @@ import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
 from datasmith.github.models import FormulaCodeRecord
 from datasmith.utils import get_logger
-from datasmith.utils.db import fetch_all
+from datasmith.utils.db import fetch_all, window_filters
 
 logger = get_logger("publish.records")
 
 MIN_HARBOR_SPEEDUP = 1.05
+
+# Exactly the columns :class:`FormulaCodeRecord` is built from, below.  This
+# used to be ``select="*"``, which pulls every column of ``pull_requests`` --
+# ``body``, ``rendered_problem``, ``problem_description``, ``patch`` and the
+# rest -- for every performance commit in the window.  That is the same shape
+# as the read that killed PostgREST with "cannot enlarge string buffer
+# containing 1073741822 bytes".  ``patch`` is still here because the record
+# requires it; what changes is that the other large text columns no longer
+# ride along for free.
+_RECORD_COLUMNS = (
+    "owner, repo, issue_number, merge_commit_sha, base_sha, merged_at, "
+    "rendered_problem, classification, difficulty, container_name, patch"
+)
 
 
 def records_to_parquet(records: list[FormulaCodeRecord]) -> bytes:
@@ -44,26 +57,29 @@ def records_from_supabase(  # noqa: C901
     end_date: str | None = None,
     unpublished_only: bool = True,
 ) -> list[FormulaCodeRecord]:
-    """Query Supabase for FormulaCodeRecords, optionally filtered by date and publish status."""
+    """Query Supabase for FormulaCodeRecords, optionally filtered by date and publish status.
+
+    The date filter is the pipeline run window, so it comes from
+    :func:`~datasmith.utils.db.window_filters` rather than being spelled out
+    here: ``merged_at``, half-open ``[start_date, end_date)``, the same as
+    every other stage. This read used to close the upper bound, which made a
+    PR merged at exactly midnight publishable by two consecutive monthly
+    runs; the ``published_at IS NULL`` predicate happened to catch it, but
+    that is a second guard covering for a window that meant the wrong thing,
+    and ``unpublished_only=False`` removes the cover.
+    """
     filters: dict[str, Any] = {"is_performance_commit": True}
     is_null: list[str] = []
-    gte_filters: dict[str, Any] = {}
-    lte_filters: dict[str, Any] = {}
 
     if unpublished_only:
         is_null.append("published_at")
-    if start_date:
-        gte_filters["merged_at"] = start_date
-    if end_date:
-        lte_filters["merged_at"] = end_date
 
     rows = fetch_all(
         "pull_requests",
-        select="*",
+        select=_RECORD_COLUMNS,
         filters=filters,
         is_null=is_null or None,
-        gte_filters=gte_filters or None,
-        lte_filters=lte_filters or None,
+        **window_filters(start_date, end_date),
     )
 
     # Stage 7 (harbor_healthcheck) gate: drop any PR whose best successful

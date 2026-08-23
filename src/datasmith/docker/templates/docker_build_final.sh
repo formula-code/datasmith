@@ -34,6 +34,9 @@ cd /workspace/repo || exit 1
 
 source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
+# Defense in depth: never let a bare `fc_note ...` call abort this script
+# under `set -euo pipefail` if the profile.d helper failed to source.
+command -v fc_note >/dev/null 2>&1 || fc_note() { :; }
 cat <<'EOF' >> ~/.bashrc
 source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
@@ -48,6 +51,10 @@ micromamba activate "$ENV_NAME" || true
 set -u
 
 micromamba run -n "$ENV_NAME" uv pip install git+https://github.com/formula-code/snapshot-tester.git || true
+# LSV powers measure.sh's impacted-benchmark selection at container-run time.
+# Installed here (per-build, NOT in the cached base image) so the same
+# selector runs at stage 6 as at stage 7, where harbor's setup.sh installs it.
+micromamba run -n "$ENV_NAME" uv pip install --no-cache git+https://github.com/formula-code/lsv.git || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade coverage || true
 
 # ── Discover ASV benchmarks ──────────────────────────────────────────
@@ -86,16 +93,20 @@ EXTRACT_EOF
 popd > /dev/null
 
 # Fall back to the pre-computed file if live discovery produced nothing.
+fc_note discovery_fallback_used=0
 if [ ! -s /workspace/repo/asv_benchmarks.txt ] && [ -n "$FALLBACK_FILE" ] && [ -s "$FALLBACK_FILE" ]; then
     echo "[final] ASV discovery produced no results; falling back to pre-computed benchmarks."
     cp "$FALLBACK_FILE" /workspace/repo/asv_benchmarks.txt
+    fc_note discovery_fallback_used=1
 fi
 
 if [ -s /workspace/repo/asv_benchmarks.txt ]; then
     COUNT=$(wc -l < /workspace/repo/asv_benchmarks.txt)
     echo "[final] Discovered $COUNT ASV benchmarks."
+    fc_note discovered_n="$COUNT"
 else
     echo "[final] WARNING: No ASV benchmarks discovered."
+    fc_note discovered_n=0
 fi
 
 # ── Resolve benchmark directory ──────────────────────────────────────
@@ -106,5 +117,50 @@ cat >>/etc/profile.d/asv_build_vars.sh <<VARS
 export BENCHMARK_DIR=$ABS_BENCHMARK_DIR
 export ASV_BENCHMARKS=/workspace/repo/asv_benchmarks.txt
 VARS
+
+fc_note benchmark_dir="$ABS_BENCHMARK_DIR"
+if [ -f "$ABS_BENCHMARK_DIR/__init__.py" ]; then
+    fc_note benchmark_dir_init_present=1
+else
+    fc_note benchmark_dir_init_present=0
+fi
+fc_note cpu_cap="${LOKY_MAX_CPU_COUNT:-${N_JOBS_MAX:-}}"
+fc_note rounds="${DATASMITH_LSV_ROUNDS:-5}"
+
+# Identity, derived from the repo's own remote. Purely descriptive — no invariant
+# depends on these — but without them a manifest cannot be attributed to a task
+# when read back out of a published image.
+_ORIGIN="$(git -C /workspace/repo remote get-url origin 2>/dev/null || true)"
+if [ -n "$_ORIGIN" ]; then
+    fc_note owner="$(printf '%s' "$_ORIGIN" | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')"
+    # NOTE: was `sed -E 's#.*/([^/]+?)(\.git)?$#\1#'`. POSIX ERE (sed -E) has no
+    # non-greedy quantifier, so the `?` on `[^/]+?` is a silent no-op: `[^/]+`
+    # greedily consumes "requests.git" whole and `(\.git)?` matches nothing,
+    # leaving the .git suffix in `repo` on every build (verified below).
+    # `basename ... .git` strips the suffix unconditionally and correctly, with
+    # no regex to get wrong.
+    fc_note repo="$(basename "$_ORIGIN" .git)"
+fi
+
+# Scan every baked script for credential literals.  grep -q returns 1 on no
+# match, which is the clean case.
+#
+# The pattern is assembled from fragments so that it does NOT appear verbatim
+# in this file. It used to be written as one literal, and this script is one of
+# the files it scans, so it matched itself. secrets_scan_clean was therefore 0
+# on every build ever made, and the FATAL secrets_present invariant meant the
+# stock template could never pass verification.
+#
+# One synthesis agent diagnosed this correctly and then replaced `grep` with a
+# wrapper that reported clean for this exact invocation. Disabling a detector
+# to silence a false positive is the wrong repair, but the false positive was
+# real, and it was ours.
+_SECRET_RE="sb""_secret_|service""_role|SUPABASE_[A-Z_]*KEY=[A-Za-z0-9]"
+if grep -rqE "$_SECRET_RE" \
+     /docker_build_final.sh /run-tests.sh /profile.sh 2>/dev/null; then
+    fc_note secrets_scan_clean=0
+else
+    fc_note secrets_scan_clean=1
+fi
 
 echo "Docker ASV benchmark finalization complete."

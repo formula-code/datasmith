@@ -14,6 +14,15 @@ LiteLLM runs in **DB-backed mode** against the local Supabase Postgres
 admin UI, virtual keys, spend logs, and live config edits — everything the
 master key alone can't do.
 
+The model list is **not** hand-maintained. vLLM servers come and go on
+whatever ports they were launched with, so `infra/refresh_models.py` discovers
+every live `vllm serve` process, probes its `/v1/models`, and reconciles the
+proxy's registry through the admin API (`POST /model/new` / `/model/delete`).
+`make model-tunnel` runs this reconciler as a background loop; `make
+model-refresh` runs a single pass. The `model_name` clients call is the vLLM
+*served id* (`--served-model-name`, or the loaded model path) — list the
+current set with `/v1/models` rather than assuming a fixed alias.
+
 ## Architecture
 
 ```mermaid
@@ -23,12 +32,15 @@ flowchart LR
     subgraph Host["Host machine"]
         CFD["cloudflared<br/>(datasmith-model tunnel)"]
         LL["LiteLLM proxy :4100"]
+        RF["refresh_models.py<br/>(reconcile loop)"]
         PG[("Postgres :54322<br/>litellm db")]
-        VA["vllm serve :8123<br/>model A"]
-        VB["vllm serve :8124<br/>model B"]
+        VA["vllm serve :PORT_A<br/>served id A"]
+        VB["vllm serve :PORT_B<br/>served id B"]
     end
     Client --> CFE --> CFD --> LL
     LL <--> PG
+    RF -- "ps + /v1/models<br/>discover" --> VA & VB
+    RF -- "/model/new /delete" --> LL
     LL -- "model: A" --> VA
     LL -- "model: B" --> VB
 ```
@@ -52,12 +64,13 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="gemma-4-31b",                   # alias from infra/litellm.config.yaml
+    model="qwen3.6-35b",                   # a vLLM served id — see /v1/models
     messages=[{"role": "user", "content": "hello"}],
 )
 ```
 
-`/v1/models` lists the configured aliases:
+`/v1/models` lists what's currently live (the registry tracks running servers,
+so this set changes as servers start and stop):
 
 ```bash
 curl -H "Authorization: Bearer sk-fc-..." \
@@ -76,8 +89,9 @@ REST API; everything you can do there has a `curl` equivalent.
 
 ### Prerequisites
 
-- vLLM servers already running on `127.0.0.1:8123` and `127.0.0.1:8124`.
-  Bind to localhost — they have no auth and must not be exposed.
+- One or more vLLM servers running locally (any ports). The reconciler finds
+  them by parsing `ps` for `vllm serve` and probing each `/v1/models`. They
+  have no auth, so keep them on loopback / behind the firewall.
 - Local Supabase Postgres reachable on `127.0.0.1:54322` (it already is for
   the datasmith pipeline; LiteLLM uses a separate `litellm` database in the
   same instance).
@@ -98,12 +112,12 @@ LITELLM_SALT_KEY=sk-salt-<random-hex>          # encrypts virtual keys at rest
 STORE_MODEL_IN_DB=True
 ```
 
-The model list — aliases, vLLM ports, upstream model ids — lives in
-`infra/litellm.config.yaml` and is checked in. The
-`litellm_params.model` value must be prefixed `openai/` so LiteLLM speaks
-the OpenAI-compatible protocol vLLM exposes; the suffix after the prefix is
-forwarded to vLLM in the request body and should match what `vllm serve`
-loaded.
+`infra/litellm.config.yaml` holds only `general_settings` / `litellm_settings`
+and an empty `model_list: []` — the model list is reconciled at runtime by
+`infra/refresh_models.py`. The reconciler prefixes each `litellm_params.model`
+with `openai/` so LiteLLM speaks vLLM's OpenAI-compatible protocol; the suffix
+is the served id forwarded to vLLM verbatim. Pin an entry in the YAML only if
+it must stay registered regardless of what's running.
 
 ### One-time setup
 
@@ -145,20 +159,32 @@ This single target:
    venv directory to dodge Prisma's pyproject.toml lookup, which trips over
    the repo's `[[tool.mypy.overrides]]` array-of-tables.
 3. Polls `:4100/health/liveliness` until LiteLLM is ready.
-4. Starts `cloudflared tunnel run datasmith-model` in the foreground.
-5. On Ctrl-C, kills LiteLLM and exits.
+4. Starts `infra/refresh_models.py --watch` in the background — it reconciles
+   the model registry against live vLLM servers every
+   `DATASMITH_MODEL_REFRESH_INTERVAL_S` seconds (default 90).
+5. Starts `cloudflared tunnel run datasmith-model` in the foreground.
+6. On Ctrl-C, kills the reconciler and LiteLLM and exits.
 
 Run it under `tmux`/`screen` or as a systemd service for persistence; the
 target itself is foreground only.
 
 ### Adding or swapping a model
 
-Edit `infra/litellm.config.yaml` and restart `make model-tunnel`.
-Each entry under `model_list` is `model_name` (the alias clients pass) +
-`litellm_params.model` (`openai/<vllm-loaded-id>`) + `api_base`
-(`http://127.0.0.1:<port>/v1`). With `STORE_MODEL_IN_DB=True` you can also
-add models live from the UI — they persist in `LiteLLM_ProxyModelTable` and
-survive restarts without editing the YAML.
+Just start (or stop) the `vllm serve` process. Within one reconcile interval
+the model appears in (or disappears from) the proxy — no YAML edit, no
+restart. To apply immediately rather than waiting for the loop:
+
+```bash
+make model-refresh                 # reconcile once
+make model-refresh ARGS="--dry-run"  # preview the plan, change nothing
+```
+
+The reconciler only deletes models it added (`db_model`) whose upstream is
+gone; anything you pin in `infra/litellm.config.yaml`, or add by hand from the
+UI, is left alone. Knobs (override in `tokens.env`):
+`DATASMITH_MODEL_REFRESH_INTERVAL_S` (loop period, default 90),
+`DATASMITH_MODEL_PROBE_TIMEOUT_S` (per-server probe timeout, default 3),
+`DATASMITH_LITELLM_BASE` (admin API base, default `http://127.0.0.1:4100`).
 
 ### Issuing virtual keys
 
@@ -181,7 +207,8 @@ keys in the UI under `/ui/key-management`.
 |---|---|
 | `401 Unauthorized` | Bearer token does not match the master key or any active virtual key |
 | `400 model not found` | The `model` field does not match any `model_name` in `infra/litellm.config.yaml` (or any DB-stored model) |
-| `502 Bad Gateway` | LiteLLM up, vLLM backend down — check `curl http://127.0.0.1:8123/v1/models` |
+| `502 Bad Gateway` | LiteLLM up, vLLM backend down — check `curl http://127.0.0.1:<port>/v1/models`, then `make model-refresh` to prune the dead entry |
+| `400 model not found` for a server you just started | Reconciler hasn't run yet — wait one interval or `make model-refresh` |
 | UI shows `Authentication Error: Not connected to DB!` | `DATABASE_URL` not set, or the `litellm` database doesn't exist yet — re-run step 4 of one-time setup |
 | `Unable to find Prisma binaries. Please run 'prisma generate' first.` | The `.venv-litellm/` venv is missing or stale — `rm -rf .venv-litellm && make model-proxy-install` |
 | `tomlkit.exceptions.ParseError: Key "overrides" already exists` during prisma generate | Prisma is reading the repo's `pyproject.toml` from cwd. The Makefile already cd's into `.venv-litellm` to dodge this; if you're invoking prisma manually, do the same. |

@@ -174,6 +174,7 @@ class ImageManager:
         env_payload: str = "[]",
         py_version: str = "",
         build_root: str = "",
+        benchmark_dest: str = "",
     ) -> str:
         ctx = context or _default_context()
         tag = get_pr_image_name(owner, repo, issue_number)
@@ -191,6 +192,11 @@ class ImageManager:
             build_args["BUILD_SCRIPT"] = build_script
         if py_version:
             build_args["PY_VERSION"] = py_version
+        if benchmark_dest:
+            # Only passed when declared. Empty would satisfy the ARG default
+            # anyway, but passing it explicitly keeps the intent visible in
+            # `docker history` for tasks that HAVE an override row.
+            build_args["BENCHMARK_DEST"] = benchmark_dest
         self._docker.build(
             ctx,
             tags=[tag],

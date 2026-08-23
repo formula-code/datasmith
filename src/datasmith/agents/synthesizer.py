@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime
 import enum
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,9 +13,23 @@ from datasmith.agents.rate_limit import check as check_rate_limit
 from datasmith.agents.sandbox import SandboxResult, verify_context
 from datasmith.agents.tamper_audit import TamperResult, classify_context
 from datasmith.docker.context import DockerContext
+from datasmith.docker.manifest import evaluate_invariants
 from datasmith.utils import get_client, get_logger
 
 logger = get_logger("agents.synthesizer")
+
+# Skip the TRY_SIMILAR state, so a build can only come from the stock template.
+#
+# TRY_SIMILAR runs BEFORE TRY_DEFAULT and reuses a context that succeeded for
+# another commit of the same repository. Those stored contexts are
+# agent-authored: 128 repositories' contexts install a sitecustomize shim into
+# site-packages, which then runs inside the measured benchmark process.
+#
+# Two situations need it off. Measuring how often the stock template alone
+# works, because a TRY_SIMILAR success means TRY_DEFAULT never runs and the
+# repository silently leaves the denominator. And rebuilding a container that
+# must not inherit an older agent's environment edits.
+DATASMITH_SKIP_SIMILAR_CONTEXTS: bool = os.environ.get("DATASMITH_SKIP_SIMILAR_CONTEXTS", "") not in ("", "0")
 
 
 class SynthesisState(str, enum.Enum):
@@ -43,6 +59,26 @@ def _load_default_context() -> DockerContext:
         build_pkg_sh=_read("docker_build_pkg.sh"),
         build_run_sh=_read("docker_build_run.sh"),
     )
+
+
+def _default_failure_message(failure: dict[str, Any]) -> str:
+    """Build a diagnosable message from a TRY_DEFAULT failure.
+
+    `stage` and `error_message` give "run: rc=1", which identifies nothing.
+    `failure_json["stdout"]` holds what the build actually printed, so a tail of
+    it travels with the row. Failures are grouped by cause when scaling, and a
+    return code cannot be grouped.
+    """
+    stage = failure.get("stage") or "unknown"
+    message = failure.get("error_message") or ""
+    stdout = (failure.get("stdout") or "").strip()
+    stderr = (failure.get("stderr") or "").strip()
+    parts = [f"{stage}: {message}".strip()]
+    if stderr:
+        parts.append(f"--- stderr (tail) ---\n{stderr[-4000:]}")
+    if stdout:
+        parts.append(f"--- stdout (tail) ---\n{stdout[-6000:]}")
+    return "\n".join(parts)[-14_000:]
 
 
 class Synthesizer:
@@ -92,6 +128,7 @@ class Synthesizer:
         python_version: str = "",
         force: bool = False,
         base_sha: str = "",
+        solution_patch: str = "",
     ) -> DockerContext | None:
         """Run the synthesis state machine. Returns DockerContext on success, None on failure."""
         self._trace = []
@@ -106,7 +143,11 @@ class Synthesizer:
 
         # State: FIND_SIMILAR
         self._trace.append(SynthesisState.FIND_SIMILAR)
-        similar_contexts = self._find_similar(owner, repo, issue_number)
+        if DATASMITH_SKIP_SIMILAR_CONTEXTS:
+            logger.info("TRY_SIMILAR disabled via DATASMITH_SKIP_SIMILAR_CONTEXTS")
+            similar_contexts = []
+        else:
+            similar_contexts = self._find_similar(owner, repo, issue_number)
 
         # State: TRY_SIMILAR
         failed_attempts: list[tuple[DockerContext, SandboxResult]] = []
@@ -122,6 +163,7 @@ class Synthesizer:
                     python_version=python_version,
                     context=ctx,
                     base_sha=base_sha,
+                    solution_patch=solution_patch,
                 )
                 if result.success:
                     logger.info("Similar context passed for %s/%s#%d", owner, repo, issue_number)
@@ -132,6 +174,7 @@ class Synthesizer:
                         issue_number,
                         ctx,
                         resource_metrics=result.resource_metrics,
+                        build_manifest=result.build_manifest,
                     )
                     return ctx
                 failed_attempts.append((ctx, result))
@@ -175,6 +218,7 @@ class Synthesizer:
         if (not already_succeeded) and (not too_many_failures):
             self._trace.append(SynthesisState.TRY_DEFAULT)
             default_ctx = _load_default_context()
+            default_started = time.monotonic()
             result = verify_context(
                 owner=owner,
                 repo=repo,
@@ -184,6 +228,22 @@ class Synthesizer:
                 python_version=python_version,
                 context=default_ctx,
                 base_sha=base_sha,
+                solution_patch=solution_patch,
+            )
+            default_failure = result.failure_json or {}
+            self._log_default_attempt(
+                owner=owner,
+                repo=repo,
+                sha=sha,
+                issue_number=issue_number,
+                success=bool(result.success),
+                duration_s=round(time.monotonic() - default_started, 2),
+                # The stage and message alone say "run stage, rc=1", which is
+                # not enough to diagnose anything. failure_json carries the
+                # build's own output, so keep a tail of it. At a few hundred
+                # repositories, grouping failures by cause is the whole game,
+                # and a cause cannot be grouped from a return code.
+                error_message=(None if result.success else _default_failure_message(default_failure)),
             )
             if result.success:
                 tamper = classify_context(default_ctx)
@@ -211,6 +271,7 @@ class Synthesizer:
                         issue_number,
                         default_ctx,
                         resource_metrics=result.resource_metrics,
+                        build_manifest=result.build_manifest,
                     )
                     return default_ctx
             else:
@@ -240,7 +301,7 @@ class Synthesizer:
         attempt_idx = 0
         abort_count = 0
         while attempt_idx < self._max_attempts:
-            generated, metrics, aborted = self._sandbox_generate(
+            generated, metrics, build_manifest, aborted = self._sandbox_generate(
                 owner=owner,
                 repo=repo,
                 sha=sha,
@@ -252,6 +313,7 @@ class Synthesizer:
                 issue_number=issue_number,
                 attempt_index=attempt_idx,
                 base_sha=base_sha,
+                solution_patch=solution_patch,
             )
             if generated is not None:
                 tamper = classify_context(generated)
@@ -284,7 +346,15 @@ class Synthesizer:
                     issue_number,
                     attempt_idx + 1,
                 )
-                self._save_context(owner, repo, sha, issue_number, generated, resource_metrics=metrics)
+                self._save_context(
+                    owner,
+                    repo,
+                    sha,
+                    issue_number,
+                    generated,
+                    resource_metrics=metrics,
+                    build_manifest=build_manifest,
+                )
                 return generated
             if aborted and abort_count < self._max_aborts:
                 abort_count += 1
@@ -434,7 +504,8 @@ class Synthesizer:
         issue_number: int = 0,
         attempt_index: int = 0,
         base_sha: str = "",
-    ) -> tuple[DockerContext | None, dict, bool]:
+        solution_patch: str = "",
+    ) -> tuple[DockerContext | None, dict, dict | None, bool]:
         from datasmith.agents.sandbox import SandboxRunner
 
         runner = SandboxRunner(agent=self._agent)
@@ -449,6 +520,7 @@ class Synthesizer:
             prior_attempts=prior_attempts,
             dry_run=self._dry_run,
             base_sha=base_sha,
+            solution_patch=solution_patch,
         )
         self._log_attempt(
             owner=owner,
@@ -469,7 +541,7 @@ class Synthesizer:
                 message=(f"{result.agent_name} hit usage limit during synthesis for {owner}/{repo}@{sha[:12]}"),
             )
         ctx = result.docker_context if result.success else None
-        return ctx, result.resource_metrics, result.aborted
+        return ctx, result.resource_metrics, result.build_manifest, result.aborted
 
     def _log_attempt(
         self,
@@ -536,6 +608,43 @@ class Synthesizer:
         except Exception:
             logger.debug("Failed to log synthesis attempt to Supabase", exc_info=True)
 
+    def _log_default_attempt(
+        self,
+        owner: str,
+        repo: str,
+        sha: str,
+        issue_number: int,
+        success: bool,
+        duration_s: float,
+        error_message: str | None,
+    ) -> None:
+        """Record one TRY_DEFAULT outcome in ``error_logs``.
+
+        The no-agent path is the only one that can build without spending agent
+        time, so its success rate decides how much agent work the pipeline
+        needs. Rows carry ``agent_name="default_template"`` so the rate is a
+        single query, and they never carry an agent transcript.
+
+        A logging failure must never fail a build, so every error is swallowed.
+        """
+        row: dict[str, Any] = {
+            "owner": owner,
+            "repo": repo,
+            "sha": sha,
+            "issue_number": issue_number,
+            "attempt_index": 0,
+            "agent_name": "default_template",
+            "success": success,
+            "duration_s": duration_s,
+            "failure_stage": None if success else "default_template",
+            "error_message": (error_message or "")[-10_000:] or None,
+            "created_at": datetime.datetime.now(tz=datetime.UTC).isoformat(),
+        }
+        try:
+            get_client().table("error_logs").insert(row).execute()
+        except Exception:
+            logger.debug("Failed to log default-template attempt", exc_info=True)
+
     def _log_tamper(
         self,
         owner: str,
@@ -588,12 +697,17 @@ class Synthesizer:
         ctx: DockerContext,
         resource_metrics: dict | None = None,
         env_payload_override: str | None = None,
+        build_manifest: dict | None = None,
     ) -> None:
         """Persist the agent-edited scripts to the ``candidate_containers`` table.
 
         Saves ``build_pkg_sh``, ``build_run_sh``, and ``build_env_sh``.
         When the agent also modified the env payload, ``env_payload_override``
-        is persisted to the ``env_payload`` column.
+        is persisted to the ``env_payload`` column. ``build_manifest`` — the
+        sealed build facts merged with verify-time observations — is
+        persisted as-is; ``manifest_warnings`` is derived from it via
+        ``evaluate_invariants`` (warn-severity invariant ids only, since the
+        manifest itself carries no precomputed invariant report).
         """
         if not sha:
             return
@@ -611,6 +725,11 @@ class Synthesizer:
             row["resource_metrics"] = resource_metrics
         if env_payload_override:
             row["env_payload"] = env_payload_override
+        if build_manifest:
+            row["build_manifest"] = build_manifest
+            warnings = evaluate_invariants(build_manifest).warnings
+            if warnings:
+                row["manifest_warnings"] = warnings
         client.table("candidate_containers").upsert(row).execute()
         logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
 

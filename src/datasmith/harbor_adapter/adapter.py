@@ -209,8 +209,23 @@ class FormulaCodeAdapter:
         storage: str = "10G",
         rounds: int = 1,
         verifier_env: dict[str, str] | None = None,
+        expected_n: int | None = None,
     ) -> Path:
-        """Generate a complete Harbor task directory for the given FormulaCodeRecord."""
+        """Generate a complete Harbor task directory for the given FormulaCodeRecord.
+
+        ``expected_n`` is the operator-declared count of benchmarks this PR
+        should impact, read from ``formulacode_task_overrides``. It is injected
+        into the trial container as ``FORMULACODE_EXPECTED_N`` -- the producer
+        for the ``dilution_ratio`` invariant, which compares the measured
+        impacted count against it. The container cannot read the overrides
+        table itself: it is RLS-locked with no ``anon`` grant, and the trial
+        only carries the anon key.
+
+        ``None`` injects nothing at all, rather than an empty or zero value.
+        That is the common case (the column is hand-declared and usually
+        NULL), and the invariant then skips. Emitting a key that is always
+        empty would make the wiring look live when it is not.
+        """
         out_dir = self.out_root / rec.task_dir_name
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -222,6 +237,8 @@ class FormulaCodeAdapter:
 
         # Generate all task files
         self._write_instruction_md(rec, paths)
+        if expected_n is not None:
+            verifier_env = {**(verifier_env or {}), "FORMULACODE_EXPECTED_N": str(expected_n)}
         self._write_task_toml(rec, paths, timeout_sec, cpus, memory, storage, verifier_env=verifier_env)
         self._write_environment_files(rec, paths)
         self._write_test_files(rec, paths, run_pytest, rounds)

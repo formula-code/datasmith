@@ -1,11 +1,17 @@
 """Cheap attribute-compliance filters for PR pre-screening.
 
-Applied during scraping (stage 2) to avoid storing irrelevant PRs.
+Split across two stages, because only one of the three components needs a
+diff.  Stage 2 stores **every** merged PR and evaluates the two components
+GraphQL can answer -- the title keyword filter and file compliance --
+recording the verdict in ``is_performance_commit_symbolic``.  Nothing is
+dropped there.  ``check_patch_size`` runs from stage 3, where it gates the
+diff fetch and the LLM call rather than storage.
+
 Implements the attribute compliance checks from the design docs:
 
 - ``message_filter``: positive perf keywords AND NOT negative keywords
 - ``has_core_file``: at least one changed file is not test/doc/benchmark/CI
-- ``check_patch_size``: patch token count within bounds
+- ``check_patch_size``: patch token count within bounds (stage 3)
 - Size limits: max total changes, max files changed
 """
 

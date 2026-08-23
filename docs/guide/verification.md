@@ -26,6 +26,58 @@ python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha>
 !!! important
     Only modify `docker_build_pkg.sh` and `docker_build_run.sh` during verification fixes. Do not edit the Dockerfile or other scripts.
 
+## Measurability
+
+Stage-6 verification proves more than "the image builds". After the test stage
+passes, `local_ci.py` runs the image a second time against `/measure.sh`, which
+proves the container can **measure a speedup** — the measurement this dataset
+exists to collect.
+
+```mermaid
+flowchart LR
+    B["build"] --> T["tests<br/>/run-tests.sh"]
+    T --> M["measure<br/>/measure.sh"]
+    M --> M1["lsv_init<br/>baseline @ base_commit"]
+    M1 --> M2["apply oracle patch"]
+    M2 --> M3["lsv_measure<br/>impacted timings"]
+    M3 --> M4["emit block"]
+    M4 --> G["invariants"]
+```
+
+The oracle patch is bind-mounted read-only from `task/solution.patch` and is
+never baked into the image — a published task image carrying the solution would
+be readable by the agent under evaluation. Benchmark-directory and `asv.*.json`
+sections are filtered out of the patch before it is applied, mirroring what
+`run-tests.sh` resets at trial time, so the measured benchmarks are the ones
+that exist at *both* commits.
+
+Three fatal invariants gate the step:
+
+| Invariant | Fires when |
+|-----------|-----------|
+| `measure_timed_out` | measurement exceeded its limit — a timeout is a **failure**, never a pass |
+| `asv_exec_failed` | no benchmark produced a finite, non-zero timing at both commits |
+| `oracle_patch_failed` | the stored patch exists but did not apply |
+
+Three more are recorded as warnings rather than blocking: `speedup_direction`
+(geomean below 1.0), `oracle_patch_touches_benchmarks` (the PR modified its own
+benchmarks, so the measured set is narrower than the patch), and
+`measure_partial` (LSV reported an error but still produced usable timings).
+
+A failure here writes `failure.json` with `"stage": "measure"`.
+
+**Cost.** The measure step adds roughly 14 minutes to a task at the median
+(~26 minutes at p90), measured across 83 real oracle trials. It runs only after
+the build *and* test stages have both passed, so a doomed attempt never pays it.
+
+### Knobs
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DATASMITH_VERIFY_MEASURE_TIMEOUT_S` | `3600` | Wall-clock limit for the measure step |
+| `DATASMITH_VERIFY_MEASURE_ROUNDS` | `2` | LSV timing rounds; matches stage 7 |
+| `DATASMITH_VERIFY_MEASURE_GEOMEAN_MIN` | `1.0` | Threshold for the `speedup_direction` warning |
+
 ## Preflight check
 
 Before running verification, confirm your environment is properly configured:
@@ -43,20 +95,35 @@ This checks:
 | Docker | Docker daemon is running |
 | GitHub | API access and remaining rate limit |
 
-## Programmatic verification
+It also prints three `[INFO]` lines that **cannot fail the run**: the GitHub
+token pool size and the hourly budget it buys, the measured median database
+round-trip latency (local Postgres and `db.formulacode.org` differ by roughly
+6x, and both are legitimate), and every resolved concurrency dial for stages
+2–5. Those are reports rather than checks because none of them has a threshold
+that is correct on every machine — they exist so an operator on a new host can
+see their real limits before wondering why a stage is slow.
 
-Use verifiers directly in Python:
+## Reading a manifest programmatically
+
+Inspect any built image's sealed build manifest and evaluate the invariants
+over it:
 
 ```python
-from datasmith.docker import MultiObjVerifier, SmokeVerifier, ProfileVerifier
+from datasmith.docker import read_build_manifest, evaluate_invariants
 
-verifier = MultiObjVerifier(verifiers=[
-    SmokeVerifier("pandas"),
-    ProfileVerifier(timeout=300),
-])
+manifest = read_build_manifest("formulacode/pandas-dev-pandas:16222")
+report = evaluate_invariants(manifest)
 
-result = verifier.verify("formulacode/pandas-dev-pandas:16222")
-print(result.ok)        # True/False
-print(result.stderr)    # Error output if failed
-print(result.duration_s)  # Time taken
+report.ok        # True (all fatals held) / False (a fatal failed) / None (no manifest)
+report.fatal     # ["asv_exec_failed", "oracle_patch_failed"]
+report.warnings  # ["speedup_direction", "discovery_fallback_used"]
+report.skipped   # invariants whose inputs were absent
 ```
+
+`ok` is deliberately three-valued. Every image built before build manifests
+existed has none, and for those `read_build_manifest` returns `None` and
+`evaluate_invariants(None)` reports `ok=None` with every invariant skipped —
+rather than raising, or worse, reporting a clean pass it never checked.
+
+This reads facts the build already recorded, so it is fast, offline, and works
+against any published image without rebuilding it.

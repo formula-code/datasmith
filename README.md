@@ -137,7 +137,7 @@ By default, each operation is cached in Supabase so you don't keep hitting expen
 A pull request is useless if you cannot build a reproducible environment for it. fc-data supports building docker images for any pull request using a three-tier hierarchy:
 
 ```python
-from datasmith.docker import ImageManager, MultiObjVerifier, SmokeVerifier, ProfileVerifier
+from datasmith.docker import ImageManager, read_build_manifest, evaluate_invariants
 
 mgr = ImageManager()
 mgr.build_base_image()                                # formulacode/base:latest (uses the default Dockerfile.base)
@@ -152,29 +152,28 @@ mgr.build_repo_image("pandas-dev", "pandas", context="path/to/custom/context")
 mgr.build_pr_image("pandas-dev", "pandas", 16222, context="path/to/custom/context")
 
 
-# Verify an image with a chain of verifiers — short-circuits on first failure.
-verifier = MultiObjVerifier(verifiers=[
-    SmokeVerifier("pandas"),      # can we import the package?
-    ProfileVerifier(timeout=300), # can we discover and run ASV benchmarks?
-])
-result = verifier.verify("formulacode/pandas-dev-pandas:16222")
-# result.ok, result.rc, result.stdout, result.stderr, result.duration_s
+# Every task image seals a build manifest. Read it back and evaluate the
+# invariants over it — no rebuild, no container run.
+manifest = read_build_manifest("formulacode/pandas-dev-pandas:16222")
+report = evaluate_invariants(manifest)
+# report.ok is True (all fatals held), False (a fatal failed), or None (no
+# manifest — true of any image built before manifests existed).
+# report.fatal / report.warnings / report.skipped list the invariant ids.
 ```
 
 One of the main features of `fc-data` is the ability to automatically synthesize docker containers for a pull request. The synthesizer is a state machine that checks Supabase for cached contexts, tries similar build scripts, then falls back to an installed CLI agent (Claude Code, Codex, or Gemini — auto-detected):
 
 ```python
 from datasmith.agents import Synthesizer
-from datasmith.docker import MultiObjVerifier, SmokeVerifier, ProfileVerifier
 from datasmith.docker.context import DockerContext
 
-# The verifier chain validates each synthesis attempt.
-verifier = MultiObjVerifier(verifiers=[
-    SmokeVerifier("pandas"),      # can we import the package?
-    ProfileVerifier(timeout=300), # can we discover and run ASV benchmarks?
-])
+# Each synthesis attempt is validated by local_ci.py inside the sandbox: it
+# builds the image, runs the test suite, runs the measure step, and gates on
+# the build manifest's FATAL invariants.
 
-# Load a base Docker build context (Dockerfile + shell scripts) to iterate on.
+# A DockerContext holds the Dockerfile + shell scripts. The synthesizer
+# discovers its own starting context (cache -> similar -> default template),
+# so you rarely construct one by hand; this is how you would load one.
 base_context = DockerContext.from_directory("dataset/formulacode_verified/pandas-dev_pandas/abc123")
 
 synth = Synthesizer(max_attempts=3)
@@ -183,11 +182,11 @@ ctx = synth.run(
     repo="pandas",
     issue_number=16222,
     pr_context="This PR optimizes groupby performance by ...",
-    verifier=verifier,
     sha="abc123def456",
-    base_context=base_context,
+    base_sha="def456abc123",   # the pre-optimization commit the image checks out
     env_payload='{"dependencies": ["numpy==1.26.0", "cython==3.0.0"]}',
     python_version="3.10",
+    solution_patch=pr_patch,   # the oracle patch, used only to verify measurability
 )
 # Checking cache for pandas-dev/pandas@abc123def456...             [MISS]
 # Found 4 similar scripts from pandas-dev/pandas
@@ -206,7 +205,7 @@ This can be run asynchronously as well for multiple tasks (WARNING: Might be exp
 ```python
 from datasmith.runners import SynthesizeImagesRunner
 
-runner = SynthesizeImagesRunner(synth, verifier, n_concurrent=8)
+runner = SynthesizeImagesRunner(synth, n_concurrent=8)
 await runner.run(pr_items)
 # Returns None entries for PRs where synthesis failed.
 ```
