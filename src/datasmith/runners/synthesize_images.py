@@ -242,9 +242,19 @@ def _fetch_neighbor_items(
 
     Returns item dicts shaped like ``pipeline._synthesize_images`` items, so
     :meth:`SynthesizeImagesRunner._do_process_item` can consume them without
-    any special-casing. Filters mirror the stage 6 selection: performance
-    commits with resolved packages and a non-empty extracted problem context,
-    excluding PRs that already have a ``container_name``.
+    any special-casing. The eligibility filters mirror the stage 6 selection --
+    performance commits with resolved packages and a non-empty extracted
+    problem context, excluding PRs that already have a ``container_name``.
+
+    The date bounds deliberately do **not**. Stage 6 windows the run, which is
+    ``merged_at`` half-open ``[start, end)`` via
+    :func:`datasmith.utils.db.window_filters`; this asks a different question --
+    which PRs sit within +/- ``DATASMITH_NEIGHBOR_WINDOW_DAYS`` of one pivot PR,
+    and so probably share the dependency environment just cached for it. Reaching
+    *outside* the run's window is the whole point, so ``window_filters`` would
+    break the feature rather than make it consistent. ``created_at`` is used as
+    the proximity axis for the same reason it is inclusive on both ends: this is
+    a similarity heuristic, not a claim about which run owns the row.
     """
     from datasmith.utils.db import fetch_all
 

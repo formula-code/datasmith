@@ -28,7 +28,7 @@ from typing import Any
 from datasmith.filters import MAX_FILES_CHANGED, check_file_compliance, message_filter
 from datasmith.runners.base import BaseRunner
 from datasmith.utils import get_logger
-from datasmith.utils.db import abatch_upsert, afetch_all
+from datasmith.utils.db import abatch_upsert, afetch_all, window_filters
 
 logger = get_logger("runners.scrape_commits")
 
@@ -237,7 +237,6 @@ class ScrapeCommitsRunner(BaseRunner):
             "pull_requests",
             select="issue_number",
             filters={"owner": owner, "repo": repo},
-            gte_filters={"merged_at": self._since.isoformat()},
-            lt_filters={"merged_at": self._until.isoformat()},
+            **window_filters(self._since.isoformat(), self._until.isoformat()),
         )
         return {int(row["issue_number"]) for row in rows}

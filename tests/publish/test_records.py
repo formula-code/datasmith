@@ -84,8 +84,11 @@ class TestRecordsFromSupabase:
         assert records[0].owner == "org"
         assert records[0].task_id == 1
 
-        # Verify fetch_all was called with correct filters (first call = pull_requests)
+        # Verify fetch_all was called with correct filters (first call = pull_requests).
+        # The upper bound is strict: the window is half-open, so ``lte_filters``
+        # must not appear at all. See ``datasmith.utils.db.window_filters``.
         first_call_kwargs = mock_fetch.call_args_list[0]
         assert first_call_kwargs[1]["filters"] == {"is_performance_commit": True}
         assert first_call_kwargs[1]["gte_filters"] == {"merged_at": "2024-01-01"}
-        assert first_call_kwargs[1]["lte_filters"] == {"merged_at": "2024-12-31"}
+        assert first_call_kwargs[1]["lt_filters"] == {"merged_at": "2024-12-31"}
+        assert "lte_filters" not in first_call_kwargs[1]

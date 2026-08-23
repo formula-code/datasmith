@@ -19,6 +19,30 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 --stage 6
 fc-data --start-date 2026-02-01 --end-date 2026-03-01 --dry-run
 ```
 
+## The date window
+
+`--start-date` and `--end-date` mean one thing everywhere: a PR belongs to a run
+when its **`merged_at`** falls in the half-open interval `[start-date, end-date)`.
+
+* **`merged_at`, not `created_at`.** A run owns the work that *landed* while it
+  was watching. A project with a deliberate review process merges PRs that were
+  opened weeks or months earlier, and a `created_at` window silently drops all
+  of them.
+* **Half-open.** A PR merged at exactly midnight on `--end-date` belongs to the
+  next run, so `[Jan, Feb)` and `[Feb, Mar)` partition the corpus instead of
+  both claiming the boundary and doing every downstream step twice.
+
+Stages 3 through 8 all get this from a single definition,
+`datasmith.utils.db.window_filters`, rather than each spelling out its own
+filter; stage 2 asks GitHub's search API the same question in the API's own
+terms. Stage 1 (repository discovery) and stage 9 (benchmark-source scraping)
+are deliberately unwindowed — stage 9 feeds the website, which wants the full
+corpus rather than one run's slice of it.
+
+The `±DATASMITH_NEIGHBOR_WINDOW_DAYS` band that stage 6 uses to enqueue
+neighbor PRs is *not* this window. It is a similarity heuristic centred on one
+PR, and it is meant to reach outside the run's range.
+
 ## CLI flags
 
 | Flag | Description | Default |

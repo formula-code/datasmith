@@ -10,6 +10,7 @@ from datasmith.utils.db import (
     get_client,
     stable_hash,
     supabase_cached,
+    window_filters,
 )
 from datasmith.utils.tokens import TokenPool
 
@@ -25,5 +26,6 @@ __all__ = [
     "get_logger",
     "stable_hash",
     "supabase_cached",
+    "window_filters",
     "with_backoff",
 ]

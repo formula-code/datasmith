@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from datasmith.utils import get_client, get_logger
-from datasmith.utils.db import fetch_all
+from datasmith.utils.db import fetch_all, window_filters
 
 logger = get_logger("update.pipeline")
 
@@ -458,6 +458,14 @@ class Pipeline:
 
         pool = TokenPool()
         gh = GitHubClient(pool)
+        # The one stage that does not window a table.  Its window is a GitHub
+        # search query, so it cannot go through ``window_filters`` -- but it
+        # must mean the same thing, and it does: the runner receives these
+        # same ``start_date``/``end_date`` values and treats them as
+        # ``merged_at`` half-open ``[since, until)``, rejecting an empty or
+        # inverted window outright.  The two paths are one contract with two
+        # implementations; ``window_filters`` documents why the boundary is
+        # exclusive on both of them.
         kwargs: dict[str, Any] = {"since": start_date, "until": end_date}
         if self._n_concurrent:
             kwargs["n_concurrent"] = self._n_concurrent
@@ -476,22 +484,13 @@ class Pipeline:
             logger.info("Imported %d pull request records from offline source", n)
 
     async def _classify_prs(self, start_date: str, end_date: str) -> None:
-        # The window means merged_at, half-open [start, end), in every stage.
-        # This filtered created_at inclusively at both ends while stage 2
-        # windowed merged_at, and the two defects masked each other exactly:
-        # stage 2 stored only PRs both created and merged in the window, so no
-        # stored row could ever have created_at before the window and the
-        # column mismatch never showed. Repairing stage 2 alone would scrape
-        # PRs that then never advanced past here.
-        #
         # ``patch`` is selected so a resumed run reuses a diff stage 3 already
         # paid a REST call for. The read is window-filtered, which is what
         # keeps it clear of the unfiltered-large-column guardrail in db.py.
         classify_kwargs: dict[str, Any] = {
             "select": "owner, repo, issue_number, title, body, patch, file_changes",
             "filters": {"is_performance_commit_symbolic": True},
-            "gte_filters": {"merged_at": start_date},
-            "lt_filters": {"merged_at": end_date},
+            **window_filters(start_date, end_date),
         }
         if not self._force:
             classify_kwargs["is_null"] = ["is_performance_commit"]
@@ -547,14 +546,11 @@ class Pipeline:
             await gh.close()
 
     async def _resolve_packages(self, start_date: str, end_date: str) -> None:
-        # merged_at, half-open [start, end) — the same window stages 2, 3 and 5
-        # use. See _classify_prs for why filtering created_at here was invisible.
         rows = fetch_all(
             "pull_requests",
             select="owner, repo, merge_commit_sha",
             filters={"is_performance_commit": True},
-            gte_filters={"merged_at": start_date},
-            lt_filters={"merged_at": end_date},
+            **window_filters(start_date, end_date),
         )
 
         # Deduplicate by (owner, repo, sha) — multiple PRs may share the same commit
@@ -610,16 +606,14 @@ class Pipeline:
         await runner.run(items)
 
     async def _render_problems(self, start_date: str, end_date: str) -> None:
-        # merged_at, half-open [start, end) — the same window stages 2, 3 and 4
-        # use. ``created_at`` stays in the select: the PR model renders it, but
-        # it is not what the window means.
+        # ``created_at`` stays in the select because the rendered PR carries it;
+        # it is not what the window means. See ``window_filters``.
         rows = fetch_all(
             "pull_requests",
             select="owner, repo, issue_number, merge_commit_sha, title, body, created_at",
             filters={"is_performance_commit": True, "is_performance_commit_symbolic": True},
             neq_filters={"merge_commit_sha": ""},
-            gte_filters={"merged_at": start_date},
-            lt_filters={"merged_at": end_date},
+            **window_filters(start_date, end_date),
         )
 
         # Only process PRs whose commit has can_install=True resolved packages.
@@ -719,6 +713,11 @@ class Pipeline:
         await gh.close()
 
     async def _synthesize_images(self, start_date: str, end_date: str) -> None:
+        # ``created_at`` stays in the select, but it is not what the window
+        # means -- see ``window_filters``. It is load-bearing for one consumer:
+        # ``SynthesizeImagesRunner._enqueue_neighbors`` pivots on it and returns
+        # silently when it is missing, so dropping it from this select would
+        # disable neighbor enqueueing without any error to notice.
         query_kwargs: dict[str, Any] = {
             "select": (
                 "owner, repo, issue_number, merge_commit_sha, base_sha, patch, "
@@ -726,8 +725,7 @@ class Pipeline:
             ),
             "filters": {"is_performance_commit": True, "is_performance_commit_symbolic": True},
             "neq_filters": {"merge_commit_sha": ""},
-            "gte_filters": {"created_at": start_date},
-            "lte_filters": {"created_at": end_date},
+            **window_filters(start_date, end_date),
         }
         if not self._force:
             query_kwargs["is_null"] = ["container_name"]
@@ -859,8 +857,7 @@ class Pipeline:
             ),
             filters={"is_performance_commit": True},
             neq_filters={"container_name": ""},
-            gte_filters={"created_at": start_date},
-            lte_filters={"created_at": end_date},
+            **window_filters(start_date, end_date),
         )
 
         # Require non-empty container_name, merge sha, base sha.
@@ -952,6 +949,10 @@ class Pipeline:
             logger.info("harbor_healthcheck: task dir retained at %s", task_dir)
 
     async def _publish(self, start_date: str, end_date: str) -> None:
+        # No ``window_filters`` call here, and that is not a fourth convention:
+        # stage 8 applies the window one level down, in
+        # ``publish.records.records_from_supabase``, which is where its
+        # ``pull_requests`` read lives.
         if self._dry_run:
             # Query what would be published without running the pipeline
             rows = fetch_all(
@@ -970,10 +971,14 @@ class Pipeline:
         await publish_pipeline(start_date, end_date)
 
     async def _scrape_benchmark_source(self, start_date: str, end_date: str) -> None:
+        # The one stage that deliberately does not call ``window_filters``.
         # Pull every (owner, repo, sha) we've successfully synthesized a container
-        # for. We don't filter by date — the website wants the full corpus of
-        # benchmark sources, and bench source rarely changes per commit, so
-        # re-scraping is mostly a no-op on the upsert path.
+        # for, with no date bound at all: this stage feeds the FormulaCode
+        # website, which wants the full corpus of benchmark sources rather than
+        # this run's slice of it, and benchmark source rarely changes per commit,
+        # so re-scraping is mostly a no-op on the upsert path. ``start_date`` and
+        # ``end_date`` are still accepted, because every stage shares one
+        # signature, and are used only for the dry-run summary below.
         rows = fetch_all("candidate_containers", select="owner, repo, sha")
 
         # Dedup by (owner, repo) — one SHA per repo is enough to populate the
