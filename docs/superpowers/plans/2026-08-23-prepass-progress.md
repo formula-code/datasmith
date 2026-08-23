@@ -62,7 +62,22 @@ honesty gate: HONEST, 10 of 10 checks
 This is the first time TRY_DEFAULT has ever succeeded for this task. Two of our
 own template bugs were the only blockers.
 
-**Caveat 1. `extensions_import` is unproven.** networkx is pure Python, so the
+### Second container, compiled, also honest
+
+`pydata/bottleneck#468`, built 2026-08-23 10:29 the same way:
+
+```
+Default template build succeeded   2597s
+honesty gate: HONEST, 10 of 10
+  extensions     4/4 import     <- the check finally fired
+  benchmarks     51
+  pytest         192 collected
+```
+
+`extensions_import` now has a real test and passes it. Caveat 1 below is
+resolved, and kept for the record.
+
+**Caveat 1, RESOLVED. `extensions_import` was unproven.** networkx is pure Python, so the
 gate reported `extensions 0/0`. Every container gated so far has had zero
 compiled extensions. Nobody should read "10 of 10 passed" as covering compiled
 code. The first real test of that check is a compiled repository. If it reports
