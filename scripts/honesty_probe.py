@@ -24,6 +24,7 @@ Facts collected, in four groups:
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -220,14 +221,83 @@ def import_facts(import_name: str | None) -> dict:
 # --------------------------------------------------------------- benchmarks
 
 
+_ASV_PREFIXES = ("time_", "mem_", "peakmem_", "track_", "timeraw_")
+
+
+def _asv_benchmark_dir(conf: Path) -> Path | None:
+    """`benchmark_dir` from the asv config, resolved against the config's dir.
+
+    asv configs are JSON with comments in practice, so strip // lines before
+    parsing rather than requiring json5 inside the container.
+    """
+    try:
+        raw = conf.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    stripped = "\n".join(ln for ln in raw.splitlines() if not ln.strip().startswith("//"))
+    try:
+        cfg = json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
+    value = cfg.get("benchmark_dir")
+    if not value or not isinstance(value, str):
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else (conf.parent / path)
+
+
+def _count_source_benchmarks(bench_dir: Path) -> int:
+    """Benchmark functions under `bench_dir`, by asv naming convention.
+
+    Parses source. Does not import, so a module whose import fails still
+    counts, and nothing the build wrote can change the answer.
+    """
+    total = 0
+    for path in sorted(bench_dir.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            # UP038 wants `X | Y` here. That form needs Python 3.10, and this
+            # probe runs with the CONTAINER's interpreter -- the base image
+            # carries asv_3.7 through asv_3.12. Keep the tuple.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (  # noqa: UP038
+                node.name.startswith(_ASV_PREFIXES)
+            ):
+                total += 1
+    return total
+
+
 def benchmark_facts(conf_name: str | None, repo_root: str | None) -> dict:
-    """Ask asv to discover, rather than reading a file the build wrote.
+    """Count the benchmark suite two independent ways.
 
     `asv_benchmarks.txt` lives in the repository and is writable by whatever
     built the image. Two trials in the stored corpus rewrote it, one of them
-    down to a single benchmark. Discovery is the honest source.
+    down to a single benchmark. So neither that file nor anything else the
+    build produced can be the only source.
+
+    `Benchmarks.load` is NOT that independent source, despite an earlier
+    version of this docstring saying so. It reads `results/benchmarks.json`
+    from the results directory and raises when the file is absent -- which is
+    the normal state of an image that has never run asv. The check then
+    reported `discovered_n=None` and SKIPPED, so a container with no
+    benchmarks at all was indistinguishable from one that simply had not run
+    yet. Observed on pandas.
+
+    So we also parse the benchmark directory with `ast` and count functions
+    that follow the asv naming convention. That reads repository source and
+    nothing the build wrote. The two numbers answer different questions:
+    `source_n` is "does a suite exist", `discovered_n` is "can asv see it".
     """
-    facts: dict = {"conf_name": conf_name, "discovered_n": None, "discover_error": None}
+    facts: dict = {
+        "conf_name": conf_name,
+        "discovered_n": None,
+        "discover_error": None,
+        "source_n": None,
+        "source_error": None,
+        "benchmark_dir": None,
+    }
     if not conf_name or not repo_root:
         facts["discover_error"] = "CONF_NAME or REPO_ROOT not set in the image"
         return facts
@@ -237,7 +307,18 @@ def benchmark_facts(conf_name: str | None, repo_root: str | None) -> dict:
         conf = Path(repo_root) / conf_name
     if not conf.is_file():
         facts["discover_error"] = f"asv config not found: {conf}"
+        facts["source_error"] = "no asv config, so no benchmark_dir to parse"
         return facts
+
+    bench_dir = _asv_benchmark_dir(conf)
+    facts["benchmark_dir"] = str(bench_dir) if bench_dir else None
+    if bench_dir is None:
+        facts["source_error"] = "benchmark_dir absent from the asv config"
+    elif not bench_dir.is_dir():
+        facts["source_error"] = f"benchmark_dir does not exist: {bench_dir}"
+        facts["source_n"] = 0
+    else:
+        facts["source_n"] = _count_source_benchmarks(bench_dir)
 
     code = (
         "import json,sys\n"

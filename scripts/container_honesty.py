@@ -176,12 +176,42 @@ def _c_extensions_import(f: dict) -> bool | None:
 
 
 def _c_benchmarks_discovered(f: dict) -> bool | None:
-    n = f["benchmarks"].get("discovered_n")
-    return None if n is None else n > 0
+    """A suite must exist in the source, and asv must not contradict it.
+
+    `discovered_n` alone is not enough. It comes from `Benchmarks.load`, which
+    reads `results/benchmarks.json` and is absent in an image that has never
+    run asv -- so the check used to SKIP, and a container with no benchmarks
+    read the same as one that simply had not run yet.
+
+    `source_n` is parsed from the benchmark directory and cannot be moved by
+    anything the build wrote, so it is the load-bearing number here.
+    """
+    b = f["benchmarks"]
+    source_n = b.get("source_n")
+    discovered_n = b.get("discovered_n")
+
+    if source_n is not None:
+        if source_n == 0:
+            return False
+        # asv disagreeing with the source is a real failure, not a skip.
+        return not (discovered_n is not None and discovered_n == 0)
+
+    return None if discovered_n is None else discovered_n > 0
 
 
 def _c_pytest_collects(f: dict) -> bool | None:
-    return f["tests"].get("collect_ok")
+    """Collection worked, which is not the same as pytest exiting zero.
+
+    pandas collects 205357 tests and then exits non-zero because its own
+    addopts turn a deprecation warning into an error. That is a property of
+    the repository's warning filters, not evidence of a broken container. The
+    question this check asks is whether tests were found.
+    """
+    t = f["tests"]
+    collected = t.get("collected_n")
+    if collected is not None and collected > 0:
+        return True
+    return t.get("collect_ok")
 
 
 CHECKS: list[tuple[str, str, object]] = [
