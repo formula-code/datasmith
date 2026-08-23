@@ -639,14 +639,24 @@ class GitHubClient:
                 )
 
             if any(_error_type(error) == "RATE_LIMITED" for error in errors):
-                delay = _backoff_delay(attempt)
+                # The rate-limit headers ride along on the 200, so reuse the
+                # same decision ``_request`` makes for a 403.  A bare 1-2-4s
+                # backoff would burn every attempt inside seven seconds while
+                # the real GraphQL window runs to an hour, making this branch
+                # incapable of ever succeeding.
+                delay, reset_at, source = _rate_limit_wait(resp, attempt)
                 if self._last_token is not None:
-                    self._pool.report_rate_limit(self._last_token, remaining=0, reset_at=time.time() + delay)
+                    self._pool.report_rate_limit(
+                        self._last_token,
+                        remaining=0,
+                        reset_at=reset_at if reset_at is not None else time.time() + delay,
+                    )
                 logger.warning(
-                    "GraphQL rate limited (attempt %d/%d); waiting %.1fs",
+                    "GraphQL rate limited (attempt %d/%d); waiting %.1fs per %s",
                     attempt + 1,
                     max(1, attempts),
                     delay,
+                    source,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -798,6 +808,16 @@ class GitHubClient:
         if since.tzinfo is None or until.tzinfo is None:
             raise ValueError(
                 "fetch_merged_prs needs timezone-aware bounds; a naive datetime silently shifts the merge window"
+            )
+        if since.microsecond or until.microsecond:
+            # ``merged:`` resolves to one second and ``_iso_z`` formats whole
+            # seconds, so a sub-second bound would be truncated into a shard
+            # that is short of the requested window -- and the per-leaf
+            # ``issueCount`` check would still pass, because it describes the
+            # window that was queried rather than the one that was asked for.
+            raise ValueError(
+                "fetch_merged_prs needs whole-second bounds; GitHub's merged: qualifier has one-second resolution "
+                "and a sub-second bound would silently shorten the window"
             )
         if until <= since:
             raise ValueError(f"empty merge window: [{since.isoformat()}, {until.isoformat()})")

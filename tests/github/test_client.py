@@ -665,6 +665,7 @@ class TestGraphQLErrorHandling:
             if calls == 1:
                 return httpx.Response(
                     200,
+                    headers={"X-RateLimit-Reset": str(time.time() + 30)},
                     json={"data": None, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]},
                 )
             return httpx.Response(200, json={"data": {"viewer": {"login": "octo"}}})
@@ -674,7 +675,13 @@ class TestGraphQLErrorHandling:
         result = await gh.graphql("query { viewer { login } }")
         assert result["data"]["viewer"]["login"] == "octo"
         assert calls == 2
-        assert pool.reports and pool.reports[0][1] == 0
+        # The rate-limit headers ride along on the 200; the pool must be told
+        # the real reset, not a backoff interval it would clear in a second.
+        assert len(pool.reports) == 1
+        token, remaining, reset_at = pool.reports[0]
+        assert token == "ghp_a"
+        assert remaining == 0
+        assert reset_at == pytest.approx(time.time() + 30.0, abs=3.0)
 
         await gh.close()
 
@@ -929,6 +936,17 @@ class TestFetchMergedPRs:
     async def test_naive_bounds_rejected(self, client: GitHubClient) -> None:
         with pytest.raises(ValueError, match="timezone-aware"):
             await client.fetch_merged_prs("octo", "repo", datetime(2026, 8, 1), datetime(2026, 8, 2))
+        await client.close()
+
+    async def test_sub_second_bounds_rejected(self, client: GitHubClient) -> None:
+        """merged: has one-second resolution, so a fractional bound would be truncated."""
+        with pytest.raises(ValueError, match="whole-second"):
+            await client.fetch_merged_prs(
+                "octo",
+                "repo",
+                _dt("2026-08-01T00:00:00").replace(microsecond=500_000),
+                _dt("2026-08-02T00:00:00"),
+            )
         await client.close()
 
     async def test_empty_window_rejected(self, client: GitHubClient) -> None:
