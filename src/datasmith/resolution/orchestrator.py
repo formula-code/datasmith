@@ -47,6 +47,70 @@ from .python_manager import (
 logger = get_logger("resolution.orchestrator")
 
 
+def _asv_matrix_entries(matrix: dict) -> dict[str, set[str]]:
+    """Normalise an ASV `matrix` block into ``{package: {versions}}``.
+
+    ASV accepts two shapes. The legacy shape maps a package name straight to a
+    list of versions. The shape used since ASV 0.5 groups entries under ``req``,
+    ``env`` and ``env_nobuild``. Only ``req`` names packages, so the grouped
+    shape is read through that key and the rest is ignored.
+
+    A ``None`` version means "do not install this package in this combination".
+    It is dropped rather than converted, because ``str(None)`` would put the
+    literal string ``"None"`` into the requirement set.
+    """
+    if not isinstance(matrix, dict):
+        return {}
+
+    # Grouped shape: any value that is itself a dict means ASV 0.5 or later.
+    if any(isinstance(v, dict) for v in matrix.values()):
+        matrix = matrix.get("req") or {}
+        if not isinstance(matrix, dict):
+            return {}
+
+    out: dict[str, set[str]] = {}
+    for pkg, raw in matrix.items():
+        if not isinstance(pkg, str) or not pkg.strip():
+            continue
+        values = raw if isinstance(raw, list | tuple | set) else [raw]
+        out[pkg.strip()] = {str(v).strip() for v in values if v is not None and str(v).strip()}
+    return out
+
+
+def collect_asv_cfg(cfgs: list) -> ASVCfgAggregate:
+    """Aggregate every ASV config found for one commit.
+
+    `json5.loads` returns a plain dict, so every field must be read with
+    ``dict.get``. The previous code used ``getattr``, which is attribute access
+    and always returned the default, making the whole read a no-op.
+    """
+    agg = ASVCfgAggregate()
+    for cfg in cfgs:
+        if not isinstance(cfg, dict):
+            continue
+
+        for py in cfg.get("pythons") or []:
+            with contextlib.suppress(Exception):
+                agg.pythons.add(tuple(int(part) for part in str(py).split(".")))
+
+        bc = cfg.get("build_command")
+        if bc:
+            if isinstance(bc, list | tuple):
+                bc = " && ".join(str(x) for x in bc)
+            agg.build_commands.add(str(bc).replace("-mpip", "-m pip"))
+
+        ic = cfg.get("install_command")
+        if ic:
+            if isinstance(ic, list | tuple):
+                ic = " && ".join(str(x) for x in ic)
+            agg.install_commands.add(str(ic))
+
+        for pkg, versions in _asv_matrix_entries(cfg.get("matrix") or {}).items():
+            agg.matrix.setdefault(pkg, set()).update(versions)
+
+    return agg
+
+
 @cache_completion(CACHE_LOCATION, table_name="commit_analysis")
 def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict[str, Any] | None:  # noqa: C901
     """Analyze a commit to extract build/runtime information for benchmarking.
@@ -80,30 +144,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                 with contextlib.suppress(Exception):
                     asv_cfgs.append(json5.loads(cfg_file.read_text()))
 
-            cfg_items = ASVCfgAggregate()
-            for cfg in asv_cfgs:
-                pythons: set[tuple[int, ...]] = set()
-                for py in getattr(cfg, "pythons", []) or []:
-                    with contextlib.suppress(Exception):
-                        pythons.add(tuple(map(int, str(py).split("."))))
-                cfg_items.pythons.update(pythons)
-                bc = getattr(cfg, "build_command", None)
-                ic = getattr(cfg, "install_command", None)
-                if bc:
-                    if isinstance(bc, list | tuple):
-                        bc = " && ".join(bc).replace("-mpip", "-m pip")
-                    cfg_items.build_commands.add(str(bc))
-                if ic:
-                    if isinstance(ic, list | tuple):
-                        ic = " && ".join(ic)
-                    cfg_items.install_commands.add(str(ic))
-                mx = getattr(cfg, "matrix", None) or {}
-                for k, v in mx.items():
-                    values = cfg_items.matrix.setdefault(k, set())
-                    if isinstance(v, list | tuple | set):
-                        values.update(map(str, v))
-                    else:
-                        values.add(str(v))
+            cfg_items = collect_asv_cfg(asv_cfgs)
 
             if not cfg_items.pythons:
                 cfg_items.pythons.update(SUPPORTED_PYTHON_VERSIONS)
