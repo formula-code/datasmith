@@ -100,6 +100,7 @@ Enforced in `severity.py`, in our code. **Not** in the verifier's prompt.
 |---|---|
 | tamper audit failed | pytest pass ratio below 1.0 |
 | collection error from a missing **installable** dependency | collection error from a missing **hardware capability** |
+| collection error from a **pytest-version incompatibility** in repo test code | |
 | asv discovers 0 against a non-empty source parse | repo-specific smoke test fails |
 | measurement timed out | |
 | asv exec failed | |
@@ -112,24 +113,47 @@ Two notes on the split.
 the environment is incomplete, which is different in kind from a test that
 fails on repository logic.
 
-**The hardware carve-out is not a loophole.** A module that fails to import
-because Java, a GPU, or a specific CPU feature is absent is a capability gap,
-not a broken build. Without the carve-out `AllenCellModeling/aicsimageio` can
-never pass, and it would be rejected for exactly the reason the verifier was
-told to ignore.
+**Collection errors have three causes, not two.** An earlier draft of this
+spec claimed `AllenCellModeling/aicsimageio` failed because Java and the
+bioformats stack were absent. That was asserted without checking and it is
+wrong. The real error is:
 
-**Who decides which of the two it is.** The verifier **reports the observed
+    test_bioformats_dask_tiling_shapes: in "parametrize" the number of names (1)
+
+which is the repository's own test code disagreeing with the installed pytest.
+`holoviz/datashader` fails the same way, on `PytestRemovedIn10Warning`. So the
+third cause is a **pytest-version incompatibility**, and it is HARD: the
+environment installed a pytest the repo's tests do not support, which the
+producer can fix by pinning. The feasibility probe's producer proposed exactly
+that remedy unprompted.
+
+**The hardware carve-out is real but currently unexercised.** No failure in the
+2026-08-23 trial was a capability gap. The carve-out stays because a GPU or a
+CPU feature genuinely cannot be installed, but it has no observed instance yet
+and must not be treated as a load-bearing path until it has one. Java is
+deliberately **not** an example: `micromamba install openjdk` provides it, so a
+JVM-absent import is a missing dependency the producer should fix.
+
+**Who decides which of the three it is.** The verifier **reports the observed
 cause** and its evidence. `severity.py` **maps** `(check_id, cause)` to HARD or
 SOFT. The verifier never asserts a severity; it asserts a fact and our code
 grades it.
 
-A verifier that mislabels a missing pip package as a hardware gap would open
-the loophole back up, so a `hardware` cause is cross-checked before it is
-honoured. The check is cheap and mechanical: if the unimportable module names a
-distribution that is present on PyPI, or appears anywhere in the resolved
-`env_payload`, the claim is rejected and the cause reverts to `missing
-dependency`. Only a module with no installable provider can be a capability
-gap.
+**The cross-check discriminates on failure MODE, not on PyPI presence.** An
+earlier draft rejected a hardware claim whenever the module appeared on PyPI or
+in the resolved `env_payload`. That test is inverted. `cupy` is on PyPI, is
+resolved into `env_payload`, installs cleanly, and still raises when no CUDA
+driver exists -- presence is evidence *for* the capability claim, not against
+it. Applied literally the old rule would have rejected every genuine waiver.
+The correct discriminator:
+
+| observed failure | cause | severity |
+|---|---|---|
+| `ModuleNotFoundError` -- nothing installed | missing dependency, if any distribution provides it | HARD |
+| module installed, raises at import on a host facility | capability gap, heard on its evidence | SOFT |
+| module imports, pytest rejects the test's own syntax | pytest-version incompatibility | HARD |
+
+Only the middle row can be waived, and only with the raising import recorded.
 
 **`numpy_moved_during_install` carries a tolerance, and that is deliberate.**
 The breadcrumb was wired on 2026-08-23 and has been observed on exactly two
@@ -163,6 +187,22 @@ stateDiagram-v2
     Accept --> [*]
     GiveUp --> [*]
 ```
+
+### Which gate applies where
+
+**In `PRODUCE_VERIFY`, pytest runs only in the verifier's battery, and section
+4 severity governs the verdict.** The legacy `rc != 0` gate in `run_tests`
+applies to `TRY_SIMILAR` and `TRY_DEFAULT` only.
+
+Without that sentence the design contradicts itself. Section 12 leaves the
+legacy gate unchanged; if it also ran inside the loop, fluids would be rejected
+on rc before the verifier could waive anything, and the entire soft column
+would be unreachable for the case that motivated it.
+
+With it, the rescue path is coherent: `TRY_DEFAULT` fails fluids on rc, the
+first `PRODUCE_VERIFY` round rebuilds identically, the verifier weighs five
+commit-invariant numba failures against a 554/559 pass ratio, and accepts or
+rejects on the evidence rather than on an exit code.
 
 ### Two verifier modes
 
@@ -199,6 +239,15 @@ Mode B applies to far more cases than "the build succeeded".
 Rule 3 is why the report is typed rather than prose. Comparing two sets of
 check ids is exact. Comparing two paragraphs is not. Builds cost 300 to 700
 seconds each, so a round that cannot learn anything must not be spent.
+
+**Mode A compares failure signatures, not check ids.** In Mode B the battery
+defines the ids, so they are canonical and stable. In Mode A the verifier
+invents them, and the probes show the same model naming checks `pytest-suite`
+and `asv-benchmark-discovery` in one run and `pep517_editable_backend_import`
+in another. Comparing invented ids across rounds would let rule 3 never fire,
+in the mode that most needs it. So Mode A compares `scripts/prepass_trial.py`'s
+`_signature` of the build log instead. That is deterministic, already written,
+and validated at 26 of 26 stored failures naming a cause.
 
 ### The channel
 
@@ -263,9 +312,20 @@ PRODUCE_VERIFY`. The states before it are unchanged, so a repository the stock
 template already builds never invokes an agent at all. `PRODUCE_VERIFY`
 replaces `LLM_GENERATE`.
 
-The verifier gets a **read-only** posture. It runs commands inside the
-container under test but is never handed the context directory or the build
-scripts. Enforced by not passing those paths, not by instruction.
+The verifier gets a **read-only** posture: it can never write the context
+directory or the build scripts. Enforced by file permissions and by what the
+loop passes, not by instruction.
+
+Read-only **copies** of the build scripts are supplied. The isolation goal is
+that the verifier cannot edit the build or grade its own work, not that it is
+blind to it. The Mode A probe listed `docker_build_pkg.sh` under
+`evidence_you_lack` on its own, so withholding it costs diagnosis for no gain.
+
+One acknowledged consequence of the evidence channel: it is a producer ->
+verifier influence path that a pure one-shot report would not have. The blast
+radius is bounded. Hard checks are graded by `severity.py`, so the most a
+persuasive producer can reach is a soft waiver, and every waiver is recorded
+with its stated reason.
 
 ## 8. Failure handling
 
@@ -308,7 +368,7 @@ rechecked.
 |---|---|---|---|
 | honest, accepted 2026-08-23 | 4 | networkx#8148, bottleneck#468, trackintel#596, xbatcher#167 | accept |
 | built, rejected on soft grounds | 2 | fluids (554/559), datashader (576 pass, 1 collection error) | accept, or reject with a stated reason |
-| built, rejected on hard grounds | 6 | xarray, joblib, dimod, aicsimageio, geocat-comp, tiled | reject, naming the cause |
+| built, rejected on hard grounds | 6 | xarray, joblib, dimod, aicsimageio, geocat-comp, tiled | reject, naming the cause. aicsimageio is a pytest-version incompatibility, **not** a missing Java stack |
 | known dishonest, negative controls | 2 | `attack-demo:1`, pysindy#139 | **reject** |
 | older corpus, unknown state | 2 | pandas, arrow | either, but must be reasoned |
 
@@ -332,6 +392,14 @@ number" is not the result.
    hard reason must not be accepted.
 3. **Every disagreement explained.** Not necessarily resolved -- a disagreement
    may be the label being wrong -- but read, with its cause written down.
+
+4. **One end-to-end round completes.** The 16-container set exercises the
+   verifier standalone against fixed images. It never runs the producer half,
+   the evidence channel, script application, or termination -- yet the flag
+   turns all of that on. So one repository must complete
+   reject -> producer edit -> rebuild -> accept before the flip.
+   `OGGM/oggm#1830` is the clean candidate: it fails on `ModuleNotFoundError:
+   No module named 'salem'`, and the fix is one added dependency.
 
 A false *reject* does not block the flip. It costs one rebuild round. A false
 accept puts a bad container in the dataset.

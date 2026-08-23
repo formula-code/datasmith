@@ -277,10 +277,24 @@ every .py in the tree. **`jinja_patch_plugin_pandas.py` is our own file** --
 `run-tests.sh` writes a pandas-specific jinja shim into every repository root.
 So we planted the file and then told pytest to import it.
 
-Separately, pytest stops at the first collection error, so one missing optional
-dependency reported zero tests -- indistinguishable from a repo with no suite.
-`NCAR/geocat-comp#748` (dask) and `AllenCellModeling/aicsimageio#486`
-(bioformats) both aborted that way.
+Separately, pytest stops at the first collection error, so one unimportable
+module reported zero tests -- indistinguishable from a repo with no suite.
+`NCAR/geocat-comp#748` and `AllenCellModeling/aicsimageio#486` both aborted
+that way.
+
+**Correction.** An earlier version of this paragraph attributed both to a
+missing optional dependency, naming dask and bioformats. That was asserted
+without reading the error. aicsimageio's is not a dependency problem at all:
+
+    test_bioformats_dask_tiling_shapes: in "parametrize" the number of names (1)
+
+The repository's own test code disagrees with the installed pytest.
+`holoviz/datashader` fails the same way on `PytestRemovedIn10Warning`. So
+collection errors have a third cause -- a pytest-version incompatibility --
+which is neither a missing dependency nor a hardware gap, and the remedy is to
+pin pytest rather than to install anything. Found while reviewing the
+producer/verifier spec, where the false example had been carried forward as the
+motivating case for a hardware carve-out.
 
 **4. "No benchmarks" and "our discovery broke" printed the same line**
 (`a79e49d`). `run-tests.sh` exits 78 when `asv_benchmarks.txt` is empty, saying
