@@ -144,7 +144,19 @@ fi
 
 # Scan every baked script for credential literals.  grep -q returns 1 on no
 # match, which is the clean case.
-if grep -rqE 'sb_secret_|service_role|SUPABASE_[A-Z_]*KEY=[A-Za-z0-9]' \
+#
+# The pattern is assembled from fragments so that it does NOT appear verbatim
+# in this file. It used to be written as one literal, and this script is one of
+# the files it scans, so it matched itself. secrets_scan_clean was therefore 0
+# on every build ever made, and the FATAL secrets_present invariant meant the
+# stock template could never pass verification.
+#
+# One synthesis agent diagnosed this correctly and then replaced `grep` with a
+# wrapper that reported clean for this exact invocation. Disabling a detector
+# to silence a false positive is the wrong repair, but the false positive was
+# real, and it was ours.
+_SECRET_RE="sb""_secret_|service""_role|SUPABASE_[A-Z_]*KEY=[A-Za-z0-9]"
+if grep -rqE "$_SECRET_RE" \
      /docker_build_final.sh /run-tests.sh /profile.sh 2>/dev/null; then
     fc_note secrets_scan_clean=0
 else
