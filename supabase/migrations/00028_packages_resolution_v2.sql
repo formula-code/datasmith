@@ -42,6 +42,6 @@ CREATE INDEX IF NOT EXISTS packages_probe_status_idx ON packages (probe_status);
 COMMENT ON COLUMN packages.probe_status IS
     'Advisory only. installable | unresolved | failed | empty. Orders the stage 5 queue; excludes nobody.';
 COMMENT ON COLUMN packages.dropped_requirements IS
-    'JSON-encoded [{raw, reason}], like env_payload. Requirements that could not be parsed or resolved, with reasons. Makes a failure diagnosable without a re-run: dropped_requirements::jsonb.';
+    'JSON-encoded [{req, reason}], like env_payload. Requirements that could not be parsed or resolved, with reasons. Makes a failure diagnosable without a re-run: dropped_requirements::jsonb.';
 COMMENT ON COLUMN packages.can_install IS
     'Deprecated. Retained for compatibility; no longer read. Use probe_status.';
