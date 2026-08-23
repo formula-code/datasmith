@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-MIGRATIONS = Path("supabase/migrations")
+# Anchored at the repository, not the current directory: a relative path makes
+# the glob come back empty from anywhere else, and the fixture's own assert would
+# then report "migration not found" for a migration that is present.
+MIGRATIONS = Path(__file__).resolve().parents[2] / "supabase" / "migrations"
 REQUIRED = [
     "dropped_requirements",
     "probe_status",

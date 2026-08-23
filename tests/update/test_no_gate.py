@@ -19,9 +19,16 @@ STAGES = (SRC / "update", SRC / "runners")
 GREP = ["grep", "-rn", "-I"]
 
 
+#: The ways a row can be excluded on ``can_install``.  ``filters={...}`` is the
+#: ``fetch_all`` idiom the two stages used, and ``.eq("can_install", ...)`` is the
+#: Supabase-client idiom already used elsewhere in these same directories -- a
+#: guard that catches only the first would wave the second straight through.
+_GATE_IDIOMS = ("filters=", '"can_install": True', "'can_install': True", '.eq("can_install"', ".eq('can_install'")
+
+
 def _gate_lines(stdout: str) -> list[str]:
     """The lines that would mean ``can_install`` is still deciding something."""
-    return [ln for ln in stdout.splitlines() if "filters=" in ln or '"can_install": True' in ln]
+    return [ln for ln in stdout.splitlines() if any(idiom in ln for idiom in _GATE_IDIOMS)]
 
 
 def test_no_source_file_filters_on_can_install():
