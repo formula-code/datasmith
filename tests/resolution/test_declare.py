@@ -1,7 +1,15 @@
 """Only declared dependencies. No inference, no globbing, no conda files."""
 
+import subprocess
+from pathlib import Path
+
 from datasmith.resolution.declare import Declared, declare
 from datasmith.resolution.models import CandidateMeta
+
+# Anchor the grep at the repository, not at the current directory: run from
+# anywhere else, a relative path makes grep fail, stdout comes back empty, and
+# the guard passes while a live reference is still there.
+SRC = Path(__file__).resolve().parents[2] / "src" / "datasmith"
 
 # The exact string fix_marker_spacing produced for apache/arrow's `pyuwsgi`
 # requirement -- the same literal tests/resolution/test_requirements.py uses.
@@ -103,3 +111,35 @@ def test_import_analyzer_is_deleted():
     except ModuleNotFoundError:
         return
     raise AssertionError("import_analyzer still exists")
+
+
+def test_no_source_file_references_the_import_analyzer():
+    # Importability is the weaker half. A module can be gone while a caller
+    # still names it -- ``infer_runtime_from_imports`` is what produced
+    # ``arraypad``, ``umath``, ``version`` and ``plex``, and a surviving
+    # reference to it would fail at runtime rather than here.
+    assert SRC.is_dir(), f"source tree not found at {SRC}"
+    cp = subprocess.run(
+        ["grep", "-rn", "-I", "-e", "import_analyzer", "-e", "infer_runtime_from_imports", str(SRC)],
+        capture_output=True,
+        text=True,
+    )
+    # grep exits 0 on a match and 1 on no match; anything else is grep itself
+    # failing, which would make an empty stdout meaningless.
+    assert cp.returncode in (0, 1), f"grep failed ({cp.returncode}): {cp.stderr}"
+    assert cp.stderr == "", f"grep wrote to stderr: {cp.stderr}"
+    assert cp.stdout == "", f"stale references remain:\n{cp.stdout}"
+
+
+def test_the_guard_sees_a_planted_reference(tmp_path):
+    # Proves the guard above can still fail. Without this, a grep that silently
+    # stopped matching would read exactly like a clean tree.
+    planted = tmp_path / "caller.py"
+    planted.write_text("from datasmith.resolution.import_analyzer import infer_runtime_from_imports\n")
+    cp = subprocess.run(
+        ["grep", "-rn", "-I", "-e", "import_analyzer", "-e", "infer_runtime_from_imports", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert cp.returncode == 0
+    assert "caller.py" in cp.stdout

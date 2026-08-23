@@ -252,7 +252,9 @@ def select_primary_candidate(
 
 A packaging root is a directory holding `pyproject.toml`, `setup.cfg` or `setup.py`. A directory that holds only a `requirements.txt` or an `environment.yml` declares nothing installable and is not a root.
 
-Selection is deterministic at every step, which it was not before. An ASV install command naming a path wins first — `install_cmds` is iterated **sorted**, because a set of strings iterates in hash order and monorepos such as arrow, scipp and MDAnalysis answered differently from run to run; token order *inside* one command still decides, because there the first path argument is the package the command means to install. Then a sole candidate wins; then a distribution name matching the repository name; then the shallowest path, breaking ties by name. Under the predecessor, scipp resolved to `python`, `binder` or `scippy` depending on the run — and `binder` is a Binder configuration directory, not a package.
+Selection is deterministic at every step, which it was not before. An ASV install command naming a path wins first — `install_cmds` is iterated **sorted**, because a set of strings iterates in hash order and monorepos such as arrow, scipp and MDAnalysis answered differently from run to run; token order *inside* one command still decides, because there the first path argument is the package the command means to install. Then a sole candidate wins; then a distribution name matching the repository name; **then a candidate carrying a `pyproject.toml`**; and only then the shallowest path. Every rung from the name match down breaks ties by path depth, then name.
+
+That fourth rung matters in a mixed-packaging monorepo: a shallow `setup.py`-only directory does *not* beat a deeper one holding a `pyproject.toml`, so predicting the root — and therefore `BUILD_ROOT` — from path depth alone gives the wrong answer. Under the predecessor, scipp resolved to `python`, `binder` or `scippy` depending on the run, because both that rung and the name match returned from unordered dict iteration — and `binder` is a Binder configuration directory, not a package.
 
 The chosen root is stored in `primary_root` and reaches the image as the `BUILD_ROOT` build arg (`docker/images.py`), so apache/arrow builds in `python/` rather than at the repository root.
 
@@ -557,7 +559,9 @@ Five things a reader of the previous design will look for are gone. They were re
 
 The dual-path branch in `orchestrator.py` went with them. "Strategy 1" compiled the packaging file directly and returned early on success; "Strategy 2" aggregated requirements from every file it could find, healed whatever failed, and injected test tooling. Two commits of one repository could therefore be resolved by different halves and get different environments for no principled reason, and neither half recorded which one had answered. `analyze_commit` now has one path, and `interpreter_source`, `cutoff_used` and `resolver_version` record how it answered.
 
-Three guard tests hold the deletions in place: `tests/resolution/test_no_global_state.py`, `test_no_marker_rewriting.py` and `test_declare.py::test_import_analyzer_is_deleted` each assert both that the module cannot be imported and that no file under `src/` names it — and each has a companion test that plants a reference in a temporary directory, to prove the guard can still see one.
+Three test files hold the deletions in place: `tests/resolution/test_no_global_state.py`, `test_no_marker_rewriting.py` and `test_declare.py`. Each asserts two separate things — that the module can no longer be imported, and that no file under `src/` names it or its entry point — because a module can be gone while a caller still references it, which would fail at runtime rather than in the suite. Each also carries a companion test that plants a reference in a temporary directory, so a grep that silently stopped matching cannot read as a clean tree.
+
+Every one of these greps resolves `src/` from `Path(__file__)` rather than the current directory. A relative path makes grep exit non-zero from any other working directory, returning empty stdout — and the guard would then pass while the thing it guards is still there.
 
 ## Tunable constants
 
