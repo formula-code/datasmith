@@ -25,7 +25,6 @@ from .dependency_resolver import (
     uv_install_real,
 )
 from .git_utils import asv_finder, prepare_repo_checkout
-from .import_analyzer import infer_runtime_from_imports
 from .metadata_parser import analyze_candidate_meta, discover_candidates, select_primary_candidate
 from .models import ASVCfgAggregate
 from .package_filters import (
@@ -289,13 +288,11 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                 own_import = primary_meta.name.replace("-", "_")
 
             # F) Candidate runtime requirements (unresolved)
+            # An empty set is an answer. What a project declares is what it needs;
+            # a name read off an `import` statement is a guess about which
+            # distribution ships that module, and the guess put numpy's own
+            # submodules and the dead py2 distribution `version` into numpy's seed.
             runtime_candidates: set[str] = set(wheel_requires)
-            if not runtime_candidates:
-                runtime_inferred = infer_runtime_from_imports(project_dir, own_import_name=own_import)
-                build_names = {re.split(r"[~<>=!; ]", breq, maxsplit=1)[0] for breq in primary_meta.build_requires}
-                promote = {x for x in runtime_inferred if x in build_names}
-                runtime_candidates.update(runtime_inferred)
-                runtime_candidates.update(promote)
 
             runtime_candidates.update(base_requirements)
 
