@@ -78,8 +78,9 @@ commit ran first, carrying the single `asv_<version>` micromamba environment tha
 commit asked for (`docker_build_base.sh:744`). A repository's second interpreter
 therefore fails loudly at the PR env stage (`docker_build_env.sh:202-207`) rather
 than running silently wrong. **Naming the interpreter in the repository tag is
-necessary but not sufficient** — until the base tag names it too, only the first
-interpreter of a run can build.
+necessary but not sufficient** — until the base tag names it too, the only
+interpreter that can build is whichever one built the cached `base:latest`, which
+may have been built weeks ago and is not re-decided by a fresh run.
 
 The remaining defects (B3–B6, B9–B12) are catalogued in the audit report.
 
