@@ -47,6 +47,76 @@ from .python_manager import (
 logger = get_logger("resolution.orchestrator")
 
 
+#: Words that appear in an ASV install command and are never package names.
+#: `python` and `install` are both real PyPI distributions, so harvesting them
+#: resolves a wrong package silently instead of failing.
+_INSTALL_CMD_NOISE = frozenset({
+    "python",
+    "python3",
+    "pip",
+    "pip3",
+    "uv",
+    "install",
+    "in-dir",
+    "conda",
+    "mamba",
+    "micromamba",
+    "sh",
+    "bash",
+    "env",
+    "run",
+    "-m",
+})
+
+
+def _requirements_from_install_tokens(tokens: list[str]) -> set[str]:
+    """Harvest package requirements from a tokenised ASV install command.
+
+    The previous loop fed every non-flag token to `normalize_requirement`. ASV's
+    own default install command is::
+
+        in-dir={env_dir} python -mpip install {wheel_file}
+
+    which yielded the packages `python` and `install`. Both exist on PyPI, so
+    the resolver installed real but wrong distributions rather than erroring.
+    The loop was dead while the getattr bug suppressed install_commands, and
+    reading the config correctly revived it.
+
+    Only tokens AFTER an install verb are candidates, and placeholders,
+    interpreter names, subcommands and paths are excluded. A command with no
+    install verb yields nothing, which is correct for a command that installs
+    the project's own wheel.
+    """
+    out: set[str] = set()
+    seen_install = False
+    skip_next = False
+    for tok in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in {"-r", "--requirement"}:
+            skip_next = True
+            continue
+        if tok.startswith("-"):
+            continue
+        lowered = tok.lower()
+        if lowered in _INSTALL_CMD_NOISE or lowered.split("=", 1)[0] in _INSTALL_CMD_NOISE:
+            if lowered == "install":
+                seen_install = True
+            continue
+        if not seen_install:
+            continue
+        # ASV placeholders such as {wheel_file} and {build_dir} name the project
+        # under test, never a dependency.
+        if "{" in tok or "}" in tok:
+            continue
+        # A path or an archive is the project itself, not a named requirement.
+        if "/" in tok or tok.endswith((".whl", ".tar.gz", ".zip")) or tok in {".", ".."}:
+            continue
+        out.update(normalize_requirement(tok))
+    return out
+
+
 def _asv_matrix_entries(matrix: dict) -> dict[str, set[str]]:
     """Normalise an ASV `matrix` block into ``{package: {versions}}``.
 
@@ -172,12 +242,33 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
 
             cfg_items = collect_asv_cfg(asv_cfgs)
 
-            if not cfg_items.pythons:
-                cfg_items.pythons.update(SUPPORTED_PYTHON_VERSIONS)
+            # B) Choose Python version candidates.
+            #
+            # Reading the ASV config used to be a no-op, so `pythons` was always
+            # empty and this fallback always fired. Every commit was therefore
+            # resolved against SUPPORTED_PYTHON_VERSIONS. Now that the declared
+            # versions come through, a repo that pins an old interpreter would
+            # be dropped outright: pymc declares ["3.6"], so
+            # `all(py < (3, 8))` holds and analyze_commit returns None.
+            #
+            # Dropping it is a silent yield reduction, and the fallback path is
+            # the one that actually produced containers. So an unusable
+            # declaration falls back rather than failing, and says so.
+            declared = set(cfg_items.pythons)
+            usable = {py for py in declared if py >= (3, 8)}
+            if not usable:
+                if declared:
+                    logger.info(
+                        "ASV config declares only Python %s, all below the 3.8 floor; "
+                        "falling back to supported versions",
+                        sorted(".".join(map(str, py)) for py in declared),
+                    )
+                cfg_items.pythons = set(SUPPORTED_PYTHON_VERSIONS)
+            else:
+                cfg_items.pythons = usable
 
-            # B) Choose Python version candidates
-            if (not cfg_items.pythons) or all(py < (3, 8) for py in cfg_items.pythons):
-                logger.debug("No Python >=3.8 available in ASV config: %s", cfg_items.pythons)
+            if not cfg_items.pythons:
+                logger.debug("No Python version available for this commit")
                 return None
 
             authored = commit.authored_datetime
@@ -320,18 +411,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> dict
                             base_requirements.update(requirements_from_file)
                             continue
 
-                    skip_next = False
-                    for tok in tokens:
-                        if skip_next:
-                            skip_next = False
-                            continue
-                        if tok in {"-r", "--requirement"}:
-                            skip_next = True
-                            continue
-                        if tok.startswith("-"):
-                            continue
-                        normalized = normalize_requirement(tok)
-                        base_requirements.update(normalized)
+                    base_requirements.update(_requirements_from_install_tokens(tokens))
 
             base_requirements.update(matrix_requirements(cfg_items.matrix))
 
