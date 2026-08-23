@@ -5,9 +5,10 @@ Everything here runs offline against fixtures; nothing reaches GitHub.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
 import httpx
@@ -610,6 +611,46 @@ class TestRetryAfter:
         await gh.close()
 
 
+class TestExhaustedRetriesReportTheLastOutcome:
+    """The error a caller sees must be the one that actually ended the run."""
+
+    @respx.mock
+    async def test_rate_limit_wins_over_an_earlier_transport_error(self, client: GitHubClient) -> None:
+        """A transport blip on attempt 0 must not mask 403s on 1 and 2.
+
+        ``last_exc`` was only ever set, never cleared, so a connect timeout
+        followed by a full budget of rate limits was reported as a timeout —
+        misleading in exactly the one-token run that crosses a reset by design.
+        """
+        calls = 0
+
+        def _side_effect(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise httpx.ConnectTimeout("connect timed out")
+            return httpx.Response(403, headers={"Retry-After": "1"})
+
+        respx.get("https://api.github.com/repos/o/r/pulls/1").mock(side_effect=_side_effect)
+
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await client.get_pr("o", "r", 1)
+        assert excinfo.value.response.status_code == 403
+        assert calls == 3
+
+        await client.close()
+
+    @respx.mock
+    async def test_a_transport_error_alone_is_still_raised(self, client: GitHubClient) -> None:
+        """The reset must not swallow the case the branch was written for."""
+        respx.get("https://api.github.com/repos/o/r/pulls/1").mock(side_effect=httpx.ConnectError("connection refused"))
+
+        with pytest.raises(httpx.ConnectError):
+            await client.get_pr("o", "r", 1)
+
+        await client.close()
+
+
 class TestGraphQLErrorHandling:
     """GitHub answers GraphQL failures with HTTP 200 plus an ``errors`` array."""
 
@@ -721,6 +762,66 @@ class TestGraphQLErrorHandling:
 
         result = await client.graphql("query { search { issueCount } rateLimit { cost } }")
         assert result["data"]["search"]["nodes"] == [{"number": 5}]
+
+        await client.close()
+
+    @respx.mock
+    async def test_scoped_not_found_keeps_partial_data(self, client: GitHubClient) -> None:
+        """A NOT_FOUND on one path must not discard the data on the others.
+
+        GitHub answers a multi-path query with everything it could resolve plus
+        one error per path it could not.  Raising on NOT_FOUND before checking
+        for data threw the resolved half away (spec section 5).
+        """
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "search": {"issueCount": 1, "pageInfo": {"hasNextPage": False}, "nodes": [{"number": 5}]},
+                        "repository": None,
+                    },
+                    "errors": [
+                        {
+                            "type": "NOT_FOUND",
+                            "path": ["repository"],
+                            "message": "Could not resolve to a Repository with the name 'ghost/repo'.",
+                        }
+                    ],
+                },
+            )
+        )
+
+        result = await client.graphql("query { search { issueCount } repository { name } }")
+        assert result["data"]["search"]["nodes"] == [{"number": 5}]
+
+        await client.close()
+
+    @respx.mock
+    async def test_not_found_on_the_asked_for_path_still_fails_loudly(self, client: GitHubClient) -> None:
+        """Keeping partial data must not turn a missing search into a healthy zero.
+
+        This is the guard the previous test could otherwise weaken: ``data``
+        carries a non-null sibling, so ``graphql`` returns — and the search
+        consumer has to be the thing that refuses.
+        """
+        respx.post("https://api.github.com/graphql").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": {"search": None, "rateLimit": {"cost": 1}},
+                    "errors": [{"type": "NOT_FOUND", "path": ["search"], "message": "no such repository"}],
+                },
+            )
+        )
+
+        with pytest.raises(GitHubGraphQLError, match="no search block"):
+            await client.fetch_merged_prs(
+                "ghost",
+                "repo",
+                _dt("2026-07-01T00:00:00"),
+                _dt("2026-07-02T00:00:00"),
+            )
 
         await client.close()
 
@@ -967,6 +1068,90 @@ class TestFetchMergedPRs:
         assert any("pymc-devs/pymc" in record.getMessage() for record in caplog.records)
 
         await client.close()
+
+
+class TestSearchFanOutCap:
+    """The bisection recurses with ``gather``; the fan-out has to be bounded.
+
+    A repository needing N leaves would otherwise issue N simultaneous search
+    POSTs, multiplied by the per-repository concurrency above it — a burst from
+    a one-token pool straight into GitHub's secondary rate limit.
+    """
+
+    @staticmethod
+    def _split_to_one_day_leaves(
+        live: dict[str, int],
+        seen: list[str],
+    ) -> Any:
+        """Answer 'too many' until a shard is one day wide, then answer empty."""
+
+        async def _handler(request: httpx.Request) -> httpx.Response:
+            query = str(_graphql_vars(request).get("q", ""))
+            seen.append(query)
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+            try:
+                # Long enough that a violated cap actually overlaps rather than
+                # completing serially by luck.
+                await asyncio.sleep(0.01)
+            finally:
+                live["now"] -= 1
+            lo_text, hi_text = query.rsplit("merged:", 1)[1].split("..")
+            span = datetime.strptime(hi_text, "%Y-%m-%dT%H:%M:%SZ") - datetime.strptime(lo_text, "%Y-%m-%dT%H:%M:%SZ")
+            # ``A..B`` is inclusive at both ends, so a one-day shard measures
+            # one second short of a day: that is the leaf.
+            if span > timedelta(days=1):
+                # Above the (monkeypatched) cap, so this shard gets split.
+                return httpx.Response(200, json=_search_payload(99, []))
+            return httpx.Response(200, json=_search_payload(0, []))
+
+        return _handler
+
+    @respx.mock
+    async def test_concurrent_search_posts_are_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(client_mod, "DATASMITH_GH_SEARCH_CAP", 1)
+        monkeypatch.setattr(client_mod, "DATASMITH_GH_SEARCH_CONCURRENCY", 2)
+        # Built after the monkeypatch: the semaphore is sized in __init__.
+        gh = GitHubClient(TokenPool(tokens=["ghp_a"]))
+
+        live = {"now": 0, "peak": 0}
+        seen: list[str] = []
+        respx.post("https://api.github.com/graphql").mock(side_effect=self._split_to_one_day_leaves(live, seen))
+
+        # A deadlock shows up as a hang, which is worse in CI than a failure:
+        # the recursion must never hold a slot while awaiting its children.
+        prs = await asyncio.wait_for(
+            gh.fetch_merged_prs("octo", "repo", _dt("2026-08-01T00:00:00"), _dt("2026-08-09T00:00:00")),
+            timeout=30,
+        )
+
+        assert prs == []
+        # 8 days bisected down to 1-day leaves: 7 internal shards plus 8 leaves.
+        assert len(seen) == 15, seen
+        assert live["peak"] <= 2, f"{live['peak']} concurrent search POSTs against a cap of 2"
+
+        await gh.close()
+
+    @respx.mock
+    async def test_a_cap_of_one_still_terminates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The tree is deeper than the cap, which is where a naive fix deadlocks."""
+        monkeypatch.setattr(client_mod, "DATASMITH_GH_SEARCH_CAP", 1)
+        monkeypatch.setattr(client_mod, "DATASMITH_GH_SEARCH_CONCURRENCY", 1)
+        gh = GitHubClient(TokenPool(tokens=["ghp_a"]))
+
+        live = {"now": 0, "peak": 0}
+        seen: list[str] = []
+        respx.post("https://api.github.com/graphql").mock(side_effect=self._split_to_one_day_leaves(live, seen))
+
+        prs = await asyncio.wait_for(
+            gh.fetch_merged_prs("octo", "repo", _dt("2026-08-01T00:00:00"), _dt("2026-08-09T00:00:00")),
+            timeout=30,
+        )
+
+        assert prs == []
+        assert live["peak"] == 1
+
+        await gh.close()
 
 
 class TestFilesTruncationFallback:

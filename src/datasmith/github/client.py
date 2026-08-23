@@ -38,6 +38,15 @@ DATASMITH_GH_SEARCH_MAX_PAGES: int = int(os.environ.get("DATASMITH_GH_SEARCH_MAX
 # shard this small cannot be split again and the fetcher must fail loudly
 # rather than recurse forever.
 DATASMITH_GH_MIN_SHARD_SECONDS: int = int(os.environ.get("DATASMITH_GH_MIN_SHARD_SECONDS", "1"))
+# Ceiling on concurrent search POSTs from one client.  The bisection recurses
+# with ``gather`` on both halves, so a repository needing N leaves would
+# otherwise issue up to N simultaneous requests -- and stage 2 runs several
+# repositories at once on top of that.  A PostHog-scale month is ~16 leaves,
+# which against a one-token pool is a burst straight into GitHub's *secondary*
+# rate limit.  The cap is held around the POST itself and never around the
+# recursion: a parent that held a slot while awaiting its children would
+# deadlock any tree deeper than the cap.
+DATASMITH_GH_SEARCH_CONCURRENCY: int = int(os.environ.get("DATASMITH_GH_SEARCH_CONCURRENCY", "4"))
 
 DATASMITH_GH_RETRIES: int = int(os.environ.get("DATASMITH_GH_RETRIES", "3"))
 # Multiplier on the exponential backoff (base * 2**attempt).  Zero disables
@@ -292,6 +301,10 @@ class GitHubClient:
         self._pool = token_pool
         self._http: httpx.AsyncClient | None = None
         self._last_token: str | None = None
+        # Bounds the search POSTs the bisection fans out.  Held around the
+        # request, never around the recursion -- see
+        # ``DATASMITH_GH_SEARCH_CONCURRENCY``.
+        self._search_sem = asyncio.Semaphore(max(1, DATASMITH_GH_SEARCH_CONCURRENCY))
 
     async def _client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
@@ -360,6 +373,12 @@ class GitHubClient:
             if resp.status_code in _MISSING_STATUSES:
                 return resp if resp.status_code in soft_statuses else None
             if resp.status_code in (429, 403):
+                # This attempt's outcome supersedes any earlier transport
+                # error.  Without the reset, a connect timeout on attempt 0
+                # followed by 403s for the rest of the budget would be reported
+                # as a timeout -- hiding a rate limit in exactly the one-token
+                # run that crosses a reset by design.
+                last_exc = None
                 delay, reset_at, source = _rate_limit_wait(resp, attempt)
                 token = headers["Authorization"].removeprefix("Bearer ")
                 if reset_at is not None:
@@ -661,6 +680,21 @@ class GitHubClient:
                 await asyncio.sleep(delay)
                 continue
 
+            # A scoped error alongside usable data is not a failed response --
+            # including a scoped NOT_FOUND.  This guard is deliberately *above*
+            # the NOT_FOUND raise: GitHub answers a multi-path query with the
+            # paths it could resolve plus one error per path it could not, so
+            # raising first would throw away good data because some unrelated
+            # field was missing (spec section 5).
+            #
+            # Nothing is swallowed by returning here.  Each error was already
+            # logged with its path above, and the consumers read their own
+            # path: ``_search_block`` raises when ``data.search`` is not a
+            # dict, so a NOT_FOUND on the path the caller actually asked about
+            # still fails loudly rather than reading as a healthy zero.
+            if _has_data(result):
+                return result
+
             not_found = [error for error in errors if _error_type(error) == "NOT_FOUND"]
             if not_found:
                 paths = ", ".join(_error_path(error) for error in not_found)
@@ -669,9 +703,6 @@ class GitHubClient:
                     errors,
                 )
 
-            # A scoped error alongside usable data is not a failed response.
-            if _has_data(result):
-                return result
             raise GitHubGraphQLError(
                 f"GraphQL response carried only errors: {errors[0].get('message', '')}",
                 errors,
@@ -848,7 +879,7 @@ class GitHubClient:
         """Fetch one shard, bisecting when the search cap would truncate it."""
         query = _merged_search_query(owner, repo, lo, hi)
         variables: dict[str, Any] = {"q": query, "cursor": None, "pageSize": DATASMITH_GH_SEARCH_PAGE_SIZE}
-        result = await self.graphql(self._SEARCH_MERGED_PRS_QUERY, variables)
+        result = await self._search_once(variables)
         counters["queries"] = counters.get("queries", 0) + 1
         search = self._search_block(result, owner, repo)
         try:
@@ -896,7 +927,7 @@ class GitHubClient:
                 "cursor": page_info.get("endCursor"),
                 "pageSize": DATASMITH_GH_SEARCH_PAGE_SIZE,
             }
-            result = await self.graphql(self._SEARCH_MERGED_PRS_QUERY, variables)
+            result = await self._search_once(variables)
             counters["queries"] = counters.get("queries", 0) + 1
             pages += 1
             search = self._search_block(result, owner, repo)
@@ -909,6 +940,16 @@ class GitHubClient:
         if len(nodes) != total:
             raise Truncated(f"{owner}/{repo} [{_iso_z(lo)}, {_iso_z(hi)}): got {len(nodes)} of {total} PRs")
         return nodes
+
+    async def _search_once(self, variables: dict[str, Any]) -> dict[str, Any]:
+        """Issue one search POST under the fan-out cap.
+
+        The slot covers the request alone.  A slot held across the recursive
+        ``gather`` would have every parent waiting on children that cannot
+        acquire, so any bisection tree deeper than the cap would deadlock.
+        """
+        async with self._search_sem:
+            return await self.graphql(self._SEARCH_MERGED_PRS_QUERY, variables)
 
     @staticmethod
     def _search_block(result: dict[str, Any], owner: str, repo: str) -> dict[str, Any]:
