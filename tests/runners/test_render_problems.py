@@ -104,3 +104,44 @@ class TestIncludesScrapedIssues:
         assert len(issues_arg) == 1
         assert issues_arg[0].number == 99
         assert issues_arg[0].title == "Slow sort"
+
+
+class TestProblemExtractorIsHoisted:
+    """One extractor per stage, not one per PR.
+
+    ``ProblemExtractor()`` was being constructed inside every
+    ``asyncio.to_thread`` call, so each item rebuilt the dspy.Signature
+    subclass and re-ran ``ensure_configured`` before it could ask anything.
+    """
+
+    async def test_one_extractor_serves_every_item(self) -> None:
+        mock_client = _mock_supabase()
+        gh = AsyncMock()
+        gh.get_issue_expanded = AsyncMock(return_value=None)
+
+        extraction = MagicMock()
+        extraction.to_problem_markdown.return_value = "problem"
+        extraction.initial_observations = "obs"
+        extraction.triage_attempts = None
+        extraction.solution_overview = None
+        extraction.solution_observations = None
+
+        instances: list[MagicMock] = []
+
+        def _factory() -> MagicMock:
+            inst = MagicMock()
+            inst.extract_problem.return_value = extraction
+            instances.append(inst)
+            return inst
+
+        with (
+            patch("datasmith.agents.extractors.ProblemExtractor", _factory),
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+            patch("datasmith.runners.render_problems.get_client", return_value=mock_client),
+            patch("datasmith.github.render.render_problem_statement", return_value="Rendered"),
+        ):
+            runner = RenderProblemsRunner(gh=gh, n_concurrent=2)
+            await runner.run([_make_item(issue=n) for n in (1, 2, 3)])
+
+        assert len(instances) == 1, f"{len(instances)} extractors built for 3 PRs"
+        assert instances[0].extract_problem.call_count == 3

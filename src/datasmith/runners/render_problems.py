@@ -25,6 +25,19 @@ class RenderProblemsRunner(BaseRunner):
     def __init__(self, gh: Any, n_concurrent: int = 5) -> None:
         super().__init__(name="render_problems", n_concurrent=n_concurrent)
         self._gh = gh
+        # Built once per stage, not once per PR.  A fresh ProblemExtractor was
+        # being constructed inside every ``asyncio.to_thread`` call, so each
+        # item paid to rebuild the dspy.Signature subclass and re-run
+        # ``ensure_configured`` before it could ask a question.
+        #
+        # Sharing is safe: the instance's only state is the memoised
+        # ``dspy.Predict``, and a Predict carries no per-call state — the
+        # request lives on the LM.  The unlocked assignment in
+        # ``_get_predictor`` can at worst build the predictor twice if two
+        # threads race the first call, and the loser is simply discarded.
+        from datasmith.agents.extractors import ProblemExtractor
+
+        self._extractor = ProblemExtractor()
 
     async def _process_item(self, item: Any) -> None:
         """Render the problem statement for a single PR dict."""
@@ -34,7 +47,6 @@ class RenderProblemsRunner(BaseRunner):
         merge_commit_sha: str = item.get("merge_commit_sha", "") or ""
         repo_description: str = item.get("repo_description", "") or ""
 
-        from datasmith.agents.extractors import ProblemExtractor
         from datasmith.github.links import scrape_links
         from datasmith.github.models import PR
         from datasmith.github.render import render_problem_statement
@@ -66,7 +78,7 @@ class RenderProblemsRunner(BaseRunner):
 
         # Run ProblemExtractor once (DSPy LLM call — run in thread)
         extraction = await asyncio.to_thread(
-            ProblemExtractor().extract_problem,
+            self._extractor.extract_problem,
             item.get("title", ""),
             item.get("body", ""),
         )
