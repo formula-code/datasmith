@@ -548,10 +548,17 @@ class Pipeline:
     async def _resolve_packages(self, start_date: str, end_date: str) -> None:
         rows = fetch_all(
             "pull_requests",
-            select="owner, repo, merge_commit_sha",
+            select="owner, repo, merge_commit_sha, issue_number",
             filters={"is_performance_commit": True},
             **window_filters(start_date, end_date),
         )
+
+        # --tasks pins this stage too. Stages 6 and 7 already honoured it, and
+        # stage 4 not doing so made a thin env_payload impossible to iterate
+        # on: the only way to re-resolve one repository was to re-resolve the
+        # whole window. Pinned tasks bypass the date filter, as elsewhere.
+        if self._task_specs:
+            rows = _select_pinned_prs(rows, self._task_specs, "owner, repo, merge_commit_sha, issue_number")
 
         # Deduplicate by (owner, repo, sha) — multiple PRs may share the same commit
         seen: set[tuple[str, str, str]] = set()

@@ -120,3 +120,42 @@ class TestReportDropped:
             _report_dropped([], None, skipped_no_pkg=0, skipped_no_ctx=0)
         assert not log.info.called
         assert not log.warning.called
+
+
+class TestEveryStageThatShouldHonourTasks:
+    """`--tasks` must reach stage 4 as well as stages 6 and 7.
+
+    Stage 4 ignored it. The only way to re-resolve one repository's
+    dependencies was to re-resolve the whole date window, which made a thin
+    `env_payload` impractical to iterate on. dwavesystems/dimod's recent rows
+    carry one dependency where an older row carries 22 -- exactly the shape
+    that makes a benchmark module fail to import -- and there was no cheap way
+    to re-run just that repo.
+    """
+
+    @staticmethod
+    def _source() -> str:
+        from pathlib import Path
+
+        import datasmith.update.pipeline as mod
+
+        return Path(mod.__file__).read_text(encoding="utf-8")
+
+    def test_resolve_packages_applies_the_pin(self):
+        src = self._source()
+        body = src[src.index("async def _resolve_packages") : src.index("async def _resolve_packages") + 2500]
+        assert "self._task_specs" in body, "stage 4 must honour --tasks"
+        assert "_select_pinned_prs" in body
+
+    def test_resolve_packages_selects_issue_number(self):
+        """_select_pinned_prs keys on issue_number, so the query must fetch it."""
+        src = self._source()
+        body = src[src.index("async def _resolve_packages") : src.index("async def _resolve_packages") + 1200]
+        assert "issue_number" in body, "the pin cannot key rows without issue_number"
+
+    def test_the_pin_is_applied_before_the_already_resolved_skip(self):
+        """Otherwise a pinned task is filtered by the window before it is seen."""
+        src = self._source()
+        start = src.index("async def _resolve_packages")
+        body = src[start : start + 3000]
+        assert body.index("_select_pinned_prs") < body.index("Skip items already in the packages table")
