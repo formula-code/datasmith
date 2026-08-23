@@ -10,6 +10,7 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -1391,3 +1392,46 @@ class TestFetchDiff:
             await client.fetch_diff("o", "r", 6)
 
         await client.close()
+
+
+class TestTruncatedGraphQLBody:
+    """A 200 whose body was cut off must retry, not fail the repository.
+
+    Seen on PostHog/posthog during the July/August ingestion run: GitHub
+    answered 200 and the body ended mid-string at column 215853.  It is not a
+    transport error so ``_request`` does not retry it, and it is not a GraphQL
+    error so the error loop does not see it; it escaped as a bare
+    JSONDecodeError and cost the whole repository.
+    """
+
+    async def test_truncated_body_is_retried_and_succeeds(self) -> None:
+        good = {"data": {"viewer": {"login": "x"}}}
+        calls = {"n": 0}
+
+        def _resp() -> Any:
+            calls["n"] += 1
+            r = MagicMock()
+            if calls["n"] == 1:
+                r.json.side_effect = json.JSONDecodeError("Unterminated string", "{", 215852)
+            else:
+                r.json.return_value = good
+            return r
+
+        gh = GitHubClient(TokenPool(["t"]))
+        with patch.object(GitHubClient, "_request", new=AsyncMock(side_effect=lambda *a, **k: _resp())):
+            out = await gh.graphql("query{viewer{login}}")
+        assert out == good
+        assert calls["n"] == 2, "expected exactly one retry after the truncated body"
+
+    async def test_persistent_truncation_raises_a_named_error(self) -> None:
+        def _resp() -> Any:
+            r = MagicMock()
+            r.json.side_effect = json.JSONDecodeError("Unterminated string", "{", 1)
+            return r
+
+        gh = GitHubClient(TokenPool(["t"]))
+        with (
+            patch.object(GitHubClient, "_request", new=AsyncMock(side_effect=lambda *a, **k: _resp())),
+            pytest.raises(GitHubGraphQLError, match="not valid JSON"),
+        ):
+            await gh.graphql("query{viewer{login}}")

@@ -614,6 +614,50 @@ class GitHubClient:
             if len(data) < per_page:
                 return
 
+    async def _decode_graphql_body(self, resp: httpx.Response, attempt: int, attempts: int) -> dict[str, Any] | None:
+        """Parse a GraphQL body, or return ``None`` to signal "retry this attempt".
+
+        GitHub sometimes answers 200 and then truncates the body mid-stream.
+        Observed on PostHog/posthog, whose search pages are the largest this
+        client asks for: ``Unterminated string starting at line 1 column
+        215853``.  It falls between the two things that already retry -- it is
+        not a transport error, so :meth:`_request` never sees it, and there is
+        no parsed result for the ``errors`` loop to inspect -- so it used to
+        escape as a bare ``JSONDecodeError`` and cost the whole repository.
+        """
+        try:
+            body: dict[str, Any] = resp.json()
+        except ValueError as exc:
+            if attempt >= attempts - 1:
+                raise GitHubGraphQLError(
+                    f"GraphQL response was not valid JSON after {attempts} attempts: {exc}"
+                ) from exc
+            logger.warning("GraphQL response truncated (attempt %d/%d): %s", attempt + 1, attempts, exc)
+            await asyncio.sleep(min(_backoff_delay(attempt), DATASMITH_GH_MAX_RETRY_WAIT_S))
+            return None
+        return body
+
+    async def _wait_out_graphql_rate_limit(self, resp: httpx.Response, attempt: int, attempts: int) -> None:
+        """Report a GraphQL ``RATE_LIMITED`` to the pool and sleep until the reset.
+
+        The rate-limit headers ride along on the 200, so this reuses the same
+        decision :meth:`_request` makes for a 403.  A bare 1-2-4s backoff would
+        burn every attempt inside seven seconds while the real GraphQL window
+        runs to an hour, which would make the retry incapable of ever
+        succeeding.
+        """
+        delay, reset_at, source = _rate_limit_wait(resp, attempt)
+        if self._last_token is not None:
+            self._pool.report_rate_limit(
+                self._last_token,
+                remaining=0,
+                reset_at=reset_at if reset_at is not None else time.time() + delay,
+            )
+        logger.warning(
+            "GraphQL rate limited (attempt %d/%d); waiting %.1fs per %s", attempt + 1, attempts, delay, source
+        )
+        await asyncio.sleep(delay)
+
     async def graphql(
         self,
         query: str,
@@ -642,7 +686,9 @@ class GitHubClient:
             resp = await self._request("POST", "/graphql", json=payload)
             if resp is None:
                 raise GitHubGraphQLError("GraphQL endpoint answered with an unavailable status")
-            result: dict[str, Any] = resp.json()
+            result = await self._decode_graphql_body(resp, attempt, max(1, attempts))
+            if result is None:
+                continue
 
             errors = [error for error in (result.get("errors") or []) if isinstance(error, dict)]
             if not errors:
@@ -658,26 +704,7 @@ class GitHubClient:
                 )
 
             if any(_error_type(error) == "RATE_LIMITED" for error in errors):
-                # The rate-limit headers ride along on the 200, so reuse the
-                # same decision ``_request`` makes for a 403.  A bare 1-2-4s
-                # backoff would burn every attempt inside seven seconds while
-                # the real GraphQL window runs to an hour, making this branch
-                # incapable of ever succeeding.
-                delay, reset_at, source = _rate_limit_wait(resp, attempt)
-                if self._last_token is not None:
-                    self._pool.report_rate_limit(
-                        self._last_token,
-                        remaining=0,
-                        reset_at=reset_at if reset_at is not None else time.time() + delay,
-                    )
-                logger.warning(
-                    "GraphQL rate limited (attempt %d/%d); waiting %.1fs per %s",
-                    attempt + 1,
-                    max(1, attempts),
-                    delay,
-                    source,
-                )
-                await asyncio.sleep(delay)
+                await self._wait_out_graphql_rate_limit(resp, attempt, max(1, attempts))
                 continue
 
             # A scoped error alongside usable data is not a failed response --
