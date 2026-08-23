@@ -35,11 +35,14 @@ so a run that dies half way still leaves what it learned.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import random
+import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +53,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample", type=int, default=6, help="repositories to try (ignored with --tasks)")
     p.add_argument("--seed", type=int, default=20260823)
     p.add_argument("--tasks", default="", help="explicit owner/repo#N specs, comma separated")
-    p.add_argument("--build-timeout", type=int, default=7200)
+    p.add_argument("--build-timeout", type=int, default=28800)
+    p.add_argument("--concurrency", type=int, default=16, help="containers built at once")
     p.add_argument("--honesty-timeout", type=int, default=2400)
     p.add_argument("--cpuset", default=None, help="cpuset for the honesty probe, e.g. 32-47")
     p.add_argument("--out", default="docs/superpowers/plans/2026-08-23-prepass-trial-results.md")
@@ -90,17 +94,35 @@ def choose_tasks(sample: int, seed: int) -> list[tuple[str, str, int]]:
     for r in prs:
         key = (r["owner"], r["repo"])
         if (r["owner"], r["repo"], r["merge_commit_sha"]) in installable:
-            by_repo.setdefault(key, []).append((r["owner"], r["repo"], int(r["issue_number"])))
+            by_repo.setdefault(key, []).append((r["created_at"], r["owner"], r["repo"], int(r["issue_number"])))
 
     repos = sorted(by_repo)
     # S311: a seeded generator is the point. The sample must be reproducible
     # so a run can be audited and repeated. This is not a security context.
     picked = random.Random(seed).sample(repos, min(sample, len(repos)))  # noqa: S311
-    # Lowest issue number per repo, so the choice does not drift between runs.
-    return [sorted(by_repo[repo])[0] for repo in sorted(picked)]
+
+    # The NEWEST commit per repository, not the lowest issue number.
+    #
+    # Taking the lowest issue number is reproducible but systematically picks
+    # the oldest commit in every repo, which carries the most dependency rot.
+    # The first run of this script did that, and all four tasks failed within
+    # 40 seconds on missing asv configs, vanished SHAs and setuptools breakage
+    # -- none of which says anything about whether the pipeline works today.
+    out = []
+    for repo in sorted(picked):
+        newest = sorted(by_repo[repo])[-1]
+        out.append((newest[1], newest[2], newest[3]))
+    return out
 
 
-def run_build(spec: str, timeout: int) -> tuple[bool, float]:
+def run_builds(specs: list[str], concurrency: int, timeout: int) -> float:
+    """Build every task in ONE stage-6 run, concurrently.
+
+    The 96-core budget is for parallelism. One `fc-data` call per task, each
+    with --n-concurrent 1, serialises the whole trial and wastes the machine.
+    Measured peak memory per build is 0.3 GB at p50 and 2.6 GB at p90 over 2027
+    rows, so memory is not the ceiling either.
+    """
     cmd = [
         "uv",
         "run",
@@ -115,16 +137,34 @@ def run_build(spec: str, timeout: int) -> tuple[bool, float]:
         "none",
         "--force",
         "--n-concurrent",
-        "1",
+        str(concurrency),
         "--tasks",
-        spec,
+        ",".join(specs),
     ]
     started = time.time()
-    try:
+    with contextlib.suppress(subprocess.TimeoutExpired):
         subprocess.run(cmd, cwd=_ROOT, env=_env(), timeout=timeout, capture_output=True, text=True)
-    except subprocess.TimeoutExpired:
-        return False, time.time() - started
-    return True, time.time() - started
+    return time.time() - started
+
+
+_NOISE = ("ERROR: failed to build", "------", "> [", "note: This is an issue")
+
+
+def _signature(row: dict) -> str:
+    """The line that says WHY, not the first line of a build log.
+
+    Build logs put the cause near the end and the BuildKit summary after it.
+    Taking line 0 reported `pely::env=asv_3.8` and `tions:` on the first run,
+    which named nothing.
+    """
+    lines = [ln.strip() for ln in (row.get("error_message") or "").splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        if any(ln.startswith(n) for n in _NOISE):
+            continue
+        body = re.sub(r"^[#\d.\s]+", "", ln)
+        if len(body) > 12:
+            return body[:90].replace("|", "/")
+    return "no signature"
 
 
 def build_outcome(owner: str, repo: str, number: int) -> dict | None:
@@ -176,59 +216,77 @@ def append(out: Path, text: str) -> None:
         fh.flush()
 
 
+def parse_specs(raw: str) -> list[tuple[str, str, int]]:
+    """`owner/repo#N,owner/repo#N` into tuples."""
+    tasks = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        owner_repo, _, number = item.replace("#", "/").rpartition("/")
+        owner, _, repo = owner_repo.partition("/")
+        tasks.append((owner, repo, int(number)))
+    return tasks
+
+
+def gate_one(item: tuple[str, str, int, dict], outdir: Path, cpuset: str | None, timeout: int) -> str:
+    """Run the honesty gate on one built container and format its result row.
+
+    Concurrent with its siblings. The gate spends nearly all its time inside
+    `docker run`, so a serial pass over 24 containers adds an hour of wall
+    clock for no reason.
+    """
+    owner, repo, number, row = item
+    honest, report = run_honesty(image_tag(owner, repo, number), cpuset, timeout)
+    (outdir / f"honesty-{owner}-{repo}-{number}.txt").write_text(report)
+    failed = ""
+    for line in report.splitlines():
+        if line.strip().startswith("FAILED"):
+            failed = line.split("FAILED", 1)[1].strip()
+    return (
+        f"| {owner}/{repo} | {number} | yes | {row['duration_s']:.0f} | "
+        f"{'yes' if honest else 'no'} | {failed or 'all checks pass'} |"
+    )
+
+
 def main() -> int:
     args = parse_args()
     if os.environ.get("SUPABASE_URL", "http://127.0.0.1:54321") not in ("", "http://127.0.0.1:54321"):
         print("refusing to run against a non-local SUPABASE_URL", file=sys.stderr)
         return 2
 
-    if args.tasks:
-        tasks = []
-        for raw in args.tasks.split(","):
-            raw = raw.strip()
-            if not raw:
-                continue
-            owner_repo, _, number = raw.replace("#", "/").rpartition("/")
-            owner, _, repo = owner_repo.partition("/")
-            tasks.append((owner, repo, int(number)))
-    else:
-        tasks = choose_tasks(args.sample, args.seed)
+    tasks = parse_specs(args.tasks) if args.tasks else choose_tasks(args.sample, args.seed)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     append(out, f"\n# Pre-pass trial, seed {args.seed}, {len(tasks)} repositories\n")
     append(out, "Stage 6 with `--agent none` and TRY_SIMILAR disabled, so only the stock")
     append(out, "template can succeed. The honesty gate is not a security check.\n")
+    specs = [f"{o}/{r}#{n}" for o, r, n in tasks]
+    print(f"[trial] building {len(specs)} tasks at concurrency {args.concurrency}", flush=True)
+    wall = run_builds(specs, args.concurrency, args.build_timeout)
+    append(out, f"Built {len(specs)} tasks in one stage-6 run, concurrency {args.concurrency}, {wall:.0f}s wall.\n")
     append(out, "| repository | issue | built | build s | honest | note |")
     append(out, "|---|---|---|---|---|---|")
 
+    built: list[tuple[str, str, int, dict]] = []
     for owner, repo, number in tasks:
-        spec = f"{owner}/{repo}#{number}"
-        print(f"[trial] {spec}", flush=True)
-        _, wall = run_build(spec, args.build_timeout)
         row = build_outcome(owner, repo, number)
-
         if row is None:
-            append(out, f"| {owner}/{repo} | {number} | no row | {wall:.0f} | - | stage never reached TRY_DEFAULT |")
-            continue
-        if not row["success"]:
-            first = (row.get("error_message") or "").split("\n")[0][:70]
-            append(out, f"| {owner}/{repo} | {number} | no | {row['duration_s']:.0f} | - | {first} |")
-            continue
+            append(out, f"| {owner}/{repo} | {number} | no row | - | - | stage never reached TRY_DEFAULT |")
+        elif not row["success"]:
+            append(out, f"| {owner}/{repo} | {number} | no | {row['duration_s']:.0f} | - | {_signature(row)} |")
+        else:
+            built.append((owner, repo, number, row))
 
-        honest, report = run_honesty(image_tag(owner, repo, number), args.cpuset, args.honesty_timeout)
-        failed = ""
-        for line in report.splitlines():
-            if line.strip().startswith("FAILED"):
-                failed = line.split("FAILED", 1)[1].strip()
-        append(
-            out,
-            f"| {owner}/{repo} | {number} | yes | {row['duration_s']:.0f} | "
-            f"{'yes' if honest else 'no'} | {failed or 'all checks pass'} |",
-        )
-        (out.parent / f"honesty-{owner}-{repo}-{number}.txt").write_text(report)
+    if built:
+        print(f"[trial] gating {len(built)} containers", flush=True)
+        with ThreadPoolExecutor(max_workers=min(args.concurrency, len(built))) as pool:
+            jobs = [pool.submit(gate_one, b, out.parent, args.cpuset, args.honesty_timeout) for b in built]
+            for job in as_completed(jobs):
+                append(out, job.result())
 
-    append(out, "\nRun finished.\n")
+    append(out, f"\nBuilt {len(built)} of {len(tasks)}. Run finished.\n")
     print(f"[trial] wrote {out}", flush=True)
     return 0
 
