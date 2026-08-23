@@ -24,10 +24,29 @@ CONF_NAME=$(find . -type f -name "asv.*.json" | head -n 1)
 # cd to dirname $CONF_NAME
 CWD=$(pwd)
 cd "$(dirname "$CONF_NAME")"
-asv machine --yes --config "$(basename "$CONF_NAME")" \
+# `asv` lives in the micromamba env (/opt/conda/envs/$ENV_NAME/bin), not in
+# the base conda on PATH (/opt/conda/bin). Calling it bare exits 127 and fails
+# the whole run stage.
+#
+# This was broken for every repository. All 1856 stored build_run_sh scripts,
+# across all 134 repos, add an activation here -- meaning the first thing every
+# synthesis agent ever did was repair this line. Lines below already use
+# `micromamba run -n`, so only this call was affected.
+#
+# Real CPU and RAM replace the hardcoded 1 / 4GB. asv writes them into
+# machine.json, which is the only machine record the measurement keeps, and a
+# stub there describes nothing.
+_NPROC="$(nproc 2>/dev/null || echo 1)"
+_RAM_KB="$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+if [ "${_RAM_KB:-0}" -gt 0 ]; then
+  _RAM="$(( _RAM_KB / 1024 / 1024 ))GB"
+else
+  _RAM="unknown"
+fi
+micromamba run -n "$ENV_NAME" asv machine --yes --config "$(basename "$CONF_NAME")" \
   --machine "docker" \
-  --num_cpu "1" \
-  --ram "4GB"
+  --num_cpu "$_NPROC" \
+  --ram "$_RAM"
 cd "$CWD"
 
 
