@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import enum
 import json
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -179,6 +180,7 @@ class Synthesizer:
         if (not already_succeeded) and (not too_many_failures):
             self._trace.append(SynthesisState.TRY_DEFAULT)
             default_ctx = _load_default_context()
+            default_started = time.monotonic()
             result = verify_context(
                 owner=owner,
                 repo=repo,
@@ -189,6 +191,22 @@ class Synthesizer:
                 context=default_ctx,
                 base_sha=base_sha,
                 solution_patch=solution_patch,
+            )
+            default_failure = result.failure_json or {}
+            self._log_default_attempt(
+                owner=owner,
+                repo=repo,
+                sha=sha,
+                issue_number=issue_number,
+                success=bool(result.success),
+                duration_s=round(time.monotonic() - default_started, 2),
+                error_message=(
+                    None
+                    if result.success
+                    else (f"{default_failure.get('stage') or 'unknown'}: {default_failure.get('error_message') or ''}")[
+                        -10_000:
+                    ]
+                ),
             )
             if result.success:
                 tamper = classify_context(default_ctx)
@@ -552,6 +570,43 @@ class Synthesizer:
             )
         except Exception:
             logger.debug("Failed to log synthesis attempt to Supabase", exc_info=True)
+
+    def _log_default_attempt(
+        self,
+        owner: str,
+        repo: str,
+        sha: str,
+        issue_number: int,
+        success: bool,
+        duration_s: float,
+        error_message: str | None,
+    ) -> None:
+        """Record one TRY_DEFAULT outcome in ``error_logs``.
+
+        The no-agent path is the only one that can build without spending agent
+        time, so its success rate decides how much agent work the pipeline
+        needs. Rows carry ``agent_name="default_template"`` so the rate is a
+        single query, and they never carry an agent transcript.
+
+        A logging failure must never fail a build, so every error is swallowed.
+        """
+        row: dict[str, Any] = {
+            "owner": owner,
+            "repo": repo,
+            "sha": sha,
+            "issue_number": issue_number,
+            "attempt_index": 0,
+            "agent_name": "default_template",
+            "success": success,
+            "duration_s": duration_s,
+            "failure_stage": None if success else "default_template",
+            "error_message": (error_message or "")[-10_000:] or None,
+            "created_at": datetime.datetime.now(tz=datetime.UTC).isoformat(),
+        }
+        try:
+            get_client().table("error_logs").insert(row).execute()
+        except Exception:
+            logger.debug("Failed to log default-template attempt", exc_info=True)
 
     def _log_tamper(
         self,
