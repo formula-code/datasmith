@@ -9,10 +9,18 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[2] / "src" / "datasmith"
 
 
-def test_fix_marker_spacing_is_deleted():
-    import datasmith.resolution.package_filters as pf
+def test_the_module_that_rewrote_requirements_is_deleted():
+    # ``fix_marker_spacing`` lived in ``package_filters``, and so did the two
+    # other rewrites: ``EXTRA_MARKER_RE.sub`` stripped a requirement's ``extra``
+    # marker, and ``clean_pinned`` collapsed its whitespace. The whole module is
+    # gone, which is a stronger statement than any one of its names being absent.
+    import importlib
 
-    assert not hasattr(pf, "fix_marker_spacing")
+    try:
+        importlib.import_module("datasmith.resolution.package_filters")
+    except ModuleNotFoundError:
+        return
+    raise AssertionError("datasmith.resolution.package_filters still exists")
 
 
 def test_no_source_file_references_it():

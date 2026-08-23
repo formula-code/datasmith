@@ -124,12 +124,15 @@ src/datasmith/resolution/
     __init__.py              # Public API: analyze_commit()
     orchestrator.py          # Main analyze_commit() function
     metadata_parser.py       # Parse pyproject.toml, setup.cfg, setup.py
-    dependency_resolver.py   # uv pip compile, dry-run, real install
-    package_filters.py       # Filter non-PyPI packages, normalize requirements
+    dependency_resolver.py   # uv pip compile, dry-run
     python_manager.py        # Python version selection, temporal filtering, uv wrapper
     declare.py               # Collect declared runtime/build/extra requirements
+    interpreter.py           # The declared ladder that chooses the Python
+    pin.py                   # One uv pip compile, cutoff first
+    probe.py                 # The advisory dry-run; it never gates
+    cache.py                 # @cache_completion, the SQLite memo
     requirements.py          # PEP 508 parsing; a bad string is dropped, never rewritten
-    constants.py             # NOT_REQUIREMENTS, ALLOWLIST, SPECIAL_IMPORT_TO_PYPI
+    constants.py             # Paths, cache locations, the two regexes still read
     models.py                # Candidate, CandidateMeta, ASVCfgAggregate
     git_utils.py             # Repo checkout, ASV config finder
 ```
@@ -326,24 +329,16 @@ class ASVCfgAggregate:
 
 | Function | Signature | Purpose |
 |----------|-----------|---------|
-| `uv_compile_from_pyproject` | `(path, python_version, cutoff_rfc3339) → list[str]` | `uv pip compile --all-extras` from pyproject.toml |
 | `uv_compile` | `(requirements, python_version, cutoff_rfc3339) → list[str]` | `uv pip compile` from stdin requirements |
 | `uv_dry_run_install` | `(pinned, python_version, venv_path) → (bool, str)` | Validate wheels downloadable |
-| `uv_install_real` | `(pinned, python_executable) → (bool, str)` | Surface sdist build failures |
 | `uv_build_and_read_metadata` | `(project_dir) → (name, version, requires_dist, requires_python)` | Build wheel and read METADATA |
 | `rfc3339` | `(datetime) → str` | Convert to RFC3339 timestamp |
 
-### `package_filters.py`
-
-| Function | Purpose |
-|----------|---------|
-| `filter_requirements_for_pypi(reqs, project_dir, own_import_name)` | Remove stdlib, non-PyPI, local modules |
-| `extract_pkg_name(req)` | Extract package name from requirement string |
-| `normalize_requirement(tok)` | Validate and normalize a token into requirement(s) |
-| `extract_requested_extras(install_cmds, matrix, available)` | Find extras referenced in ASV config |
-| `resolve_requirements_file(commit, rel_path, seen)` | Recursively resolve `-r` includes |
-| `split_shell_command(cmd)` | Split on `&&`, `\|\|`, `;` |
-| `clean_pinned(reqs)` | Remove redundant lower-bound specifiers |
+`uv_compile_from_pyproject` was the entry to the pyproject fast path and
+`uv_install_real` the host-side install. Both are deleted, along with
+`package_filters.py` — the module that filtered names against hand-maintained
+sets and rewrote the requirements it kept. `declare.py` and `requirements.py`
+replace it: what a project declares is read, parsed, and never rewritten.
 
 ### `python_manager.py`
 
@@ -371,11 +366,17 @@ class ASVCfgAggregate:
 
 | Constant | Purpose |
 |----------|---------|
-| `NOT_REQUIREMENTS` | ~175 names that are not PyPI packages (stdlib, system, build tools) |
-| `ALLOWLIST_COMMON_PYPI` | ~120 well-known PyPI packages to never filter out |
-| `GENERIC_LOCAL_NAMES` | ~30 names likely to be local modules (lib, utils, core, etc.) |
-| `CONDA_SYSTEM_PACKAGES` | ~30 system/compiler packages with no PyPI equivalent |
-| `SPECIAL_IMPORT_TO_PYPI` | Import-to-PyPI mapping (e.g., `PIL` → `Pillow`, `cv2` → `opencv-python`) |
+| `ASV_REGEX` | Matches an `asv.conf.json` / `.asv.conf.jsonc` path in a commit tree |
+| `ANSI_RE` | Strips colour escapes from uv's console output |
+| `PYPROJECT` / `SETUP_CFG` / `SETUP_PY` | The three packaging file names discovery looks for |
+| `CACHE_LOCATION` | SQLite memo for `@cache_completion` |
+| `GIT_CACHE_DIR` | Mirrors and base clones |
+
+The hand-maintained name sets — `NOT_REQUIREMENTS`, `ALLOWLIST_COMMON_PYPI`,
+`GENERIC_LOCAL_NAMES`, `CONDA_SYSTEM_PACKAGES`, `SPECIAL_IMPORT_TO_PYPI` — are
+deleted with `package_filters.py` and `import_analyzer.py`, the only readers they
+had. Guessing which declared names are real is no longer something the stage
+does: it reads declarations and drops what does not parse.
 
 ## Runner
 

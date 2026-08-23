@@ -54,29 +54,25 @@ def test_the_guard_sees_a_planted_reference(tmp_path):
     assert "decoy.py" in cp.stdout
 
 
-def test_filter_writes_nothing_to_disk(tmp_path, monkeypatch):
-    # filter_requirements_for_pypi used to read a shared JSON file and the
-    # self-healing loops used to append to it. Nothing may touch disk now.
+def test_declaring_one_project_does_not_change_the_next(tmp_path, monkeypatch):
+    # The B2 property, at the unit that survived the redesign. The predecessor
+    # read a shared JSON blocklist while filtering and the self-healing loops
+    # appended to it, so resolving repository A changed repository B's seed.
+    # ``declare`` is a pure function of one project's own metadata: nothing it
+    # answers may depend on what ran before it, and nothing it does may write.
+    from datasmith.resolution.declare import declare
+    from datasmith.resolution.models import CandidateMeta
+
     monkeypatch.setenv("GIT_CACHE_DIR", str(tmp_path))
-    from datasmith.resolution.package_filters import filter_requirements_for_pypi
+    a = CandidateMeta(core_deps={"numpy", "not a requirement at all"})
+    b = CandidateMeta(core_deps={"scipy"})
 
-    project = tmp_path / "proj"
-    project.mkdir()
     before = set(tmp_path.rglob("*"))
-    filter_requirements_for_pypi({"numpy", "scipy"}, project_dir=project, own_import_name=None)
+    b_alone = declare(b, None)
+    declare(a, None)
+    b_after_a = declare(b, None)
     after = set(tmp_path.rglob("*"))
-    assert before == after, f"filtering wrote {after - before}"
-
-
-def test_filtering_is_independent_of_call_order(tmp_path):
-    from datasmith.resolution.package_filters import filter_requirements_for_pypi
-
-    project = tmp_path / "proj"
-    project.mkdir()
-
-    a_first = filter_requirements_for_pypi({"numpy"}, project_dir=project, own_import_name=None)
-    b_after_a = filter_requirements_for_pypi({"scipy"}, project_dir=project, own_import_name=None)
-    b_alone = filter_requirements_for_pypi({"scipy"}, project_dir=project, own_import_name=None)
 
     assert b_after_a == b_alone
-    assert a_first == ["numpy"]
+    assert b_alone.runtime == ["scipy"]
+    assert after == before, f"declaring wrote {after - before}"
