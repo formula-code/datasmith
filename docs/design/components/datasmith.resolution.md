@@ -195,7 +195,7 @@ src/datasmith/resolution/
     git_utils.py             # Mirrors, worktrees, blob materialization, ASV config finder
 ```
 
-The package is self-contained: it depends on `git`, `uv` and the local filesystem, plus `datasmith.utils` for logging. `__init__.py` deliberately imports nothing eagerly — `analyze_commit` is a thin wrapper, and `__getattr__` defers `RESOLVER_VERSION` and `ResolutionResult` — so importing the package does not pull in `git` and `uv`.
+The package is self-contained within `datasmith`: it reaches for `git`, `uv` and the local filesystem, and imports no other `ds.*` module except `datasmith.utils` for logging. Its third-party surface is small and deliberate — `packaging` supplies `Requirement` and `SpecifierSet`, which are what replaced the marker-rewriting regex and what rung 1 evaluates, and `json5` parses ASV configs, which are JSON with comments. `__init__.py` deliberately imports nothing eagerly — `analyze_commit` is a thin wrapper, and `__getattr__` defers `RESOLVER_VERSION` and `ResolutionResult` — so importing the package does not pull in `git` and `uv`.
 
 ## Core API
 
@@ -374,7 +374,7 @@ flowchart TD
     end
 
     Emit["build_row: ResolutionResult → packages row<br/>[runners.resolve_packages]"]
-    DB[("packages")]
+    DB[(packages)]
     Order["order_by_probe (PROBE_RANK)<br/>[update.pipeline]"]
     Down["Stage 5 render_problems<br/>Stage 6 synthesize_images"]
     Failure["runner_failures"]
@@ -603,7 +603,7 @@ The interpreter is part of the image identity: `docker/images.py:get_repo_image_
 
 ## Verification
 
-`tests/resolution/` holds 14 test files, all running under `make check` and `pytest -m "not slow"` except the golden set.
+`tests/resolution/` holds 14 test files. All of them run under `make test` and `pytest -m "not slow"` except the two `slow` golden tests, which clone real repositories. (`make check` is lint, format, mypy and deptry; it runs no tests.)
 
 | File | What it locks down |
 |---|---|
@@ -620,6 +620,6 @@ The interpreter is part of the image identity: `docker/images.py:get_repo_image_
 | `test_primary_root.py` | The same candidates in any order give the same root; install-command order does not decide it |
 | `test_orchestrator.py` | Provenance is carried; no dual path remains; a conda matrix contributes nothing but its `pip+` entries |
 | `test_migration.py` | 00028 adds the columns, grants nothing to `anon`, and stamps legacy rows |
-| `test_golden.py` | **`slow`.** The 13 audited commits as checked-in fixtures under `fixtures/jan2026/`: exact output, determinism across repeated resolution, and no base-image tooling or invented names in any seed |
+| `test_golden.py` | The 13 audited commits as checked-in fixtures under `fixtures/jan2026/`. Two tests are marked **`slow`** and re-resolve each commit: exact output against the recorded artifact, and determinism across repeated resolution. Three read the fixtures only and run in the default suite: every audited repository has a fixture, and no fixture contains base-image tooling or an invented name |
 
-The golden tests clone real repositories and shell out to `uv`, so point `GIT_CACHE_DIR` at a populated git cache before running them. To regenerate a fixture, resolve the commit again with `bypass_cache=True`, dump the dataclass with `probe_log` removed, and hand-review the result against the audit before committing it.
+The two `slow` tests clone real repositories and shell out to `uv`, so point `GIT_CACHE_DIR` at a populated git cache before running them. To regenerate a fixture, resolve the commit again with `bypass_cache=True`, dump the dataclass with `probe_log` removed, and hand-review the result against the audit before committing it.
