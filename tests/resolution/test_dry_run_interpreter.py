@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 import datasmith.resolution.dependency_resolver as dr
+from datasmith.resolution.python_manager import SUPPORTED_PYTHON_VERSIONS
 
 # Anchor the grep at the repository, not at the current directory: run from
 # anywhere else, a relative path makes grep fail, stdout comes back empty, and
@@ -131,9 +132,16 @@ def test_an_empty_seed_never_touches_uv(uv_calls):
 
 
 @pytest.mark.slow
-def test_a_real_dry_run_against_a_real_interpreter_succeeds():
+@pytest.mark.parametrize("version", [f"{major}.{minor}" for major, minor in sorted(SUPPORTED_PYTHON_VERSIONS)])
+def test_a_real_dry_run_against_a_real_interpreter_succeeds(version):
     # The unit tests above pin the call shape; this one proves the shape works
     # against the uv on this machine, which is what the shape was wrong about.
-    ok, log = dr.uv_dry_run_install(["packaging==24.2"], python_version="3.12")
+    #
+    # Every version the interpreter ladder can return is covered, not just the
+    # one this host happens to have unpacked. A version whose environment cannot
+    # be built reports VENV_SETUP_FAILED, which reads as `failed`, which reads as
+    # can_install=False -- the original blocker, narrowed to a version band.
+    ok, log = dr.uv_dry_run_install(["packaging==24.2"], python_version=version)
     assert ok, log
     assert "externally managed" not in log
+    assert dr.VENV_SETUP_FAILED not in log

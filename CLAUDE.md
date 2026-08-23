@@ -114,7 +114,14 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_RL_DEFAULT_PAUSE_S`, `DATASMITH_RL_PAUSE_JITTER_S`,
   `DATASMITH_RL_MAX_RETRIES`, `DATASMITH_NEIGHBOR_WINDOW_DAYS`,
   `DATASMITH_NEIGHBOR_CAP`, `DATASMITH_BENCH_SCRAPE_MAX_FILE_BYTES`,
-  `DATASMITH_BENCH_SCRAPE_DIRS`.
+  `DATASMITH_BENCH_SCRAPE_DIRS`, `DATASMITH_ASV_PIP_ENV_TYPES`.
+- `DATASMITH_ASV_PIP_ENV_TYPES` (default `virtualenv,venv,existing`) is the
+  comma-separated set of `asv.conf.json` `environment_type` values whose
+  `matrix` names PyPI distributions. Every other value — `conda`, `mamba`,
+  `rattler`, site plugins such as `oggm_conda` — names conda packages, which
+  are a different namespace: `boost-cpp` and `libprotobuf` are not on PyPI at
+  all, and `geos`, `snappy`, `re2` and `zstd` resolve there to unrelated
+  projects. Under those, only asv's own `pip+` prefix reaches the seed.
 
 ## Supabase
 
