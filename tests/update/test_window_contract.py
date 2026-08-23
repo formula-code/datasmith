@@ -121,9 +121,14 @@ class _Selection:
         return {str(i["sha"]) for i in self.items}
 
 
-async def _run_stage(stage: str, tables: dict[str, list[dict[str, Any]]]) -> _Selection:
+async def _run_stage(
+    stage: str,
+    tables: dict[str, list[dict[str, Any]]],
+    *,
+    force: bool = False,
+) -> _Selection:
     """Run one stage in dry-run mode and return what it selected."""
-    pipeline = Pipeline(dry_run=True)
+    pipeline = Pipeline(dry_run=True, force=force)
     selection = _Selection()
     pipeline._log_dry_run_summary = selection  # type: ignore[method-assign]
     with patch("datasmith.update.pipeline.fetch_all", _fake_fetch_all(tables)):
@@ -219,6 +224,23 @@ class TestWindowContract:
         assert _selected_key(stage, _AT_END) not in selected, f"{stage} still uses an inclusive upper bound"
         assert _selected_key(stage, _LAST_SECOND) in selected, f"{stage} excluded the window's last second"
         assert _selected_key(stage, _MERGED_BEFORE) not in selected
+
+    async def test_force_still_honours_the_window(self) -> None:
+        """--force drops the resume predicate, leaving the window on its own.
+
+        Stage 3 skips classified PRs with ``is_null``; --force removes that
+        filter, so the merged_at bounds become the only thing selecting rows.
+        Without this case the parametrised tests above never measure them
+        unaccompanied.
+        """
+        tables = {
+            "pull_requests": _pull_requests(is_perf=True),
+            "packages": [],
+            "candidate_prs": [],
+            "repositories": [{"owner": _OWNER, "repo": _REPO, "description": "data frames"}],
+        }
+        selection = await _run_stage("classify_prs", tables, force=True)
+        assert selection.numbers == {_CREATED_BEFORE, _LAST_SECOND}
 
 
 def _selected_key(stage: str, number: int) -> Any:
