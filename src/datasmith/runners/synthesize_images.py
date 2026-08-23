@@ -122,10 +122,29 @@ def _build_pr_image(
     return pr_tag
 
 
+# Build without publishing. See _push_pr_image for why a trial run wants this.
+DATASMITH_SKIP_IMAGE_PUSH: bool = os.environ.get("DATASMITH_SKIP_IMAGE_PUSH", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
 def _push_pr_image(owner: str, repo: str, pr_tag: str) -> None:
-    """Push a previously-built PR image (and its repo parent) to DockerHub."""
+    """Push a previously-built PR image (and its repo parent) to DockerHub.
+
+    Set DATASMITH_SKIP_IMAGE_PUSH=1 to build without publishing. A trial run
+    that rebuilds many repositories to measure a build rate has no reason to
+    upload the results to a public registry, and pushing images built from
+    templates known to be defective is worse than pointless. The default stays
+    unchanged, so the pipeline behaves as before unless asked otherwise.
+    """
     from datasmith.docker.images import get_repo_image_name
     from datasmith.docker.publish import DockerHubPublisher
+
+    if DATASMITH_SKIP_IMAGE_PUSH:
+        logger.info("DATASMITH_SKIP_IMAGE_PUSH set; not pushing %s", pr_tag)
+        return
 
     publisher = DockerHubPublisher()
     repo_tag = get_repo_image_name(owner, repo)

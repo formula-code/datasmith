@@ -66,6 +66,10 @@ def _env() -> dict[str, str]:
     env["SUPABASE_URL"] = "http://127.0.0.1:54321"
     env["DATASMITH_DISABLE_DOCKER_PRUNE"] = "1"
     env["DATASMITH_SKIP_SIMILAR_CONTEXTS"] = "1"
+    # A trial measures a build rate. It has no reason to upload two dozen
+    # images to a public registry, and the push dominated wall clock in the
+    # 2026-08-23 run: building finished while stage 6 was still uploading.
+    env.setdefault("DATASMITH_SKIP_IMAGE_PUSH", "1")
     env.setdefault("TMPDIR", "/mnt/sdd2/tmp-prepass")
     return env
 
