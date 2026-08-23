@@ -245,3 +245,20 @@ class TestSymbolicCompliance:
         patch = "--- a/f.py\n+++ b/f.py\n-old\n+new"
         files = [{"filename": "src/core.py", "additions": 1, "deletions": 1}]
         assert symbolic_compliance("Update docs", patch=patch, file_changes=files) is False
+
+
+class TestModuleDocstringMatchesTheStageSplit:
+    """The docstring is the first thing a reader trusts, so it has to be true.
+
+    Stage 2 no longer drops anything: it stores every merged PR and records
+    the symbolic verdict alongside.  ``check_patch_size`` runs from stage 3,
+    where it gates the diff fetch and the LLM call rather than storage.
+    """
+
+    def test_docstring_does_not_claim_stage_2_drops_prs(self) -> None:
+        import datasmith.filters as filters_mod
+
+        doc = filters_mod.__doc__ or ""
+        assert "avoid storing irrelevant PRs" not in doc
+        assert "stage 3" in doc.lower()
+        assert "stores **every** merged PR" in doc or "stores every merged PR" in doc

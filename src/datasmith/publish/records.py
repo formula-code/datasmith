@@ -14,6 +14,19 @@ logger = get_logger("publish.records")
 
 MIN_HARBOR_SPEEDUP = 1.05
 
+# Exactly the columns :class:`FormulaCodeRecord` is built from, below.  This
+# used to be ``select="*"``, which pulls every column of ``pull_requests`` --
+# ``body``, ``rendered_problem``, ``problem_description``, ``patch`` and the
+# rest -- for every performance commit in the window.  That is the same shape
+# as the read that killed PostgREST with "cannot enlarge string buffer
+# containing 1073741822 bytes".  ``patch`` is still here because the record
+# requires it; what changes is that the other large text columns no longer
+# ride along for free.
+_RECORD_COLUMNS = (
+    "owner, repo, issue_number, merge_commit_sha, base_sha, merged_at, "
+    "rendered_problem, classification, difficulty, container_name, patch"
+)
+
 
 def records_to_parquet(records: list[FormulaCodeRecord]) -> bytes:
     """Serialize FormulaCodeRecords to Parquet bytes via pyarrow."""
@@ -63,7 +76,7 @@ def records_from_supabase(  # noqa: C901
 
     rows = fetch_all(
         "pull_requests",
-        select="*",
+        select=_RECORD_COLUMNS,
         filters=filters,
         is_null=is_null or None,
         **window_filters(start_date, end_date),
