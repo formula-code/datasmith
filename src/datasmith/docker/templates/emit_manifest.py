@@ -36,6 +36,15 @@ _STR_FIELDS = (
     "owner", "repo", "declared_commit", "head_at_seal",
     "image_digest", "lsv_sha", "reward_formula_id",
     "benchmark_dest", "benchmark_dir",
+    # How the package under test was built. "none" means the extension was
+    # compiled against the environment's own numpy; "isolated" means pip
+    # resolved its own build environment and the ABI guarantee is weaker.
+    "build_isolation",
+    "build_backend",
+    # Set only when numpy changed version across the install. An extension
+    # compiled against one numpy and imported against another passes the smoke
+    # check and mismeasures later.
+    "numpy_moved_during_install",
 )
 
 
