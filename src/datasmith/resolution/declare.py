@@ -50,12 +50,18 @@ def _matrix_requirements(matrix: Mapping[str, set[str]] | None) -> list[str]:
     The keys carry the package names.  Passing a bare version such as ``0.29.21``
     to the resolver treats it as a package name, so the key must not be dropped.
 
-    Three shapes of version set mean three different things, and conflating the
-    last two inverts the answer:
+    Four shapes of version set mean four different things, and conflating them
+    either inverts the answer or destroys the seed:
 
     * an empty set -- the matrix names the package with no version, meaning "any
       version": emit the bare name;
-    * a set holding at least one real version -- emit one pin per real version;
+    * a set holding exactly one real version -- emit that pin;
+    * a set holding several real versions -- the matrix asks for a *sweep*, which
+      a single environment cannot be.  Emitting one ``==`` pin per version makes
+      the set unsatisfiable and takes every unrelated requirement down with it
+      (lmfit-py names ``scipy`` at ``0.18`` and ``0.19``, and its whole seed came
+      back empty).  A seed is one environment, so it states the weakest true
+      thing: the bare name;
     * a set whose every entry is ``"None"`` -- ASV's ``null``, meaning "do not
       install in this combination".  Emit **nothing**.  Falling through to the
       bare name here would turn "never install cython" into "install any cython".
@@ -67,9 +73,9 @@ def _matrix_requirements(matrix: Mapping[str, set[str]] | None) -> list[str]:
             continue
         stated = {v for v in (str(x).strip() for x in versions) if v}
         real = {v for v in stated if v != "None"}
-        if real:
-            out.extend(f"{name}=={v}" for v in sorted(real))
-        elif not stated:
+        if len(real) == 1:
+            out.append(f"{name}=={next(iter(real))}")
+        elif real or not stated:
             out.append(name)
     return out
 

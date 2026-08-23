@@ -24,6 +24,7 @@ compilers -- while dominating the stage's runtime.
 from __future__ import annotations
 
 import contextlib
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,19 @@ RESOLVER_VERSION = "2026.08.23"
 #: ``env_nobuild``; older configs put the packages at the top level.
 _ASV_MATRIX_SECTIONS = ("req", "env", "env_nobuild")
 
+#: ``environment_type`` values whose matrix names PyPI distributions.  Everything
+#: else -- ``conda``, ``mamba``, ``rattler``, and site plugins such as
+#: ``oggm_conda`` -- names conda packages, which is a different namespace.
+DATASMITH_ASV_PIP_ENV_TYPES: frozenset[str] = frozenset(
+    part.strip().lower()
+    for part in os.environ.get("DATASMITH_ASV_PIP_ENV_TYPES", "virtualenv,venv,existing").split(",")
+    if part.strip()
+)
+
+#: asv's escape hatch inside a non-pip matrix: ``pip+foo`` states that ``foo`` is
+#: installed with pip, so it is a PyPI name whatever the environment type is.
+_ASV_PIP_PREFIX = "pip+"
+
 
 @dataclass(frozen=True)
 class ResolutionResult:
@@ -79,24 +93,43 @@ class ResolutionResult:
     resolver_version: str = RESOLVER_VERSION
 
 
-def _matrix_entries(matrix: object) -> dict[str, list[str]]:
-    """Read the packages an ASV ``matrix`` names, whichever shape it is written in.
+def _matrix_entries(matrix: object, environment_type: object = None) -> dict[str, list[str]]:
+    """Read the PyPI packages an ASV ``matrix`` names, in whichever shape it is written.
 
     asv >= 0.6 nests them: ``{"req": {"numpy": ["1.20", ""]}, "env": {...}}``.
     Reading such a config flat offers ``req`` and ``env`` to the resolver as
     package names, so the section keys are stepped through rather than into.
     Older configs name the packages at the top level, which is the fallback.
+
+    ``environment_type`` decides which namespace those keys are in, and it is the
+    whole of the decision -- the nesting says nothing about it.  Under ``conda``
+    (or ``mamba``, or a site plugin such as ``oggm_conda``) a matrix names conda
+    packages: ``boost-cpp``, ``libprotobuf``, ``lz4-c`` and ``thrift-cpp`` are not
+    on PyPI at all, so the compile fails and the whole seed is lost; worse,
+    ``geos``, ``snappy``, ``re2`` and ``zstd`` *do* resolve on PyPI, to unrelated
+    projects -- shapely's ``geos`` is a Flask application, and it dragged nine of
+    its dependencies into shapely's seed.  Design section 4.2 removes conda names
+    at source, so under a conda-family environment only asv's own ``pip+`` escape
+    hatch survives, which states a PyPI name explicitly.
     """
     if not isinstance(matrix, dict):
         return {}
+    pip_native = str(environment_type or "").strip().lower() in DATASMITH_ASV_PIP_ENV_TYPES or not environment_type
     req = matrix.get("req")
     entries = req if isinstance(req, dict) else {k: v for k, v in matrix.items() if k not in _ASV_MATRIX_SECTIONS}
     out: dict[str, list[str]] = {}
-    for name, value in entries.items():
+    for raw_name, value in entries.items():
+        name = str(raw_name)
+        if name.lower().startswith(_ASV_PIP_PREFIX):
+            name = name[len(_ASV_PIP_PREFIX) :]
+        elif not pip_native:
+            continue
+        if not name:
+            continue
         if isinstance(value, list | tuple | set):
-            out[str(name)] = [str(v) for v in value]
+            out[name] = [str(v) for v in value]
         else:
-            out[str(name)] = [str(value)]
+            out[name] = [str(value)]
     return out
 
 
@@ -139,7 +172,7 @@ def collect_asv_cfg(commit: Commit) -> ASVCfgAggregate:
                 install_command = " && ".join(map(str, install_command))
             aggregate.install_commands.add(str(install_command))
 
-        for name, versions in _matrix_entries(cfg.get("matrix")).items():
+        for name, versions in _matrix_entries(cfg.get("matrix"), cfg.get("environment_type")).items():
             aggregate.matrix.setdefault(name, set()).update(versions)
 
     return aggregate

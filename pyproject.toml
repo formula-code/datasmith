@@ -94,6 +94,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# `make test` and CI both run `-m "not slow"`. Registering the marker is what
+# makes a typo in it an error instead of a test that silently never runs.
+markers = [
+    "slow: builds or runs a real container, clones a real repository, or hits the network",
+]
 
 [tool.ruff]
 target-version = "py312"

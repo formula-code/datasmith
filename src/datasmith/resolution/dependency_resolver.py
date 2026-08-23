@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import tempfile
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -96,31 +97,65 @@ def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutof
     return out
 
 
+#: Prefix of the log a dry-run writes when it never ran, because the throwaway
+#: environment could not be built.  It names a fact about the host, not about the
+#: requirements, and must stay distinguishable from a resolution failure.
+VENV_SETUP_FAILED = "probe environment unavailable"
+
+
+def _venv_interpreter(venv_path: Path) -> Path:
+    """The interpreter inside a venv, POSIX layout unless the Windows one exists."""
+    windows = venv_path / "Scripts" / "python.exe"
+    if windows.exists():
+        return windows
+    return venv_path / "bin" / "python"
+
+
+def _run_dry_run(text: str, interpreter_args: list[str]) -> tuple[bool, str]:
+    cp = run_uv(["pip", "install", "--dry-run", "-r", "-", *interpreter_args], input_text=text)
+    ok = cp.returncode == 0
+    log = strip_ansi(cp.stdout.decode() + "\n" + cp.stderr.decode())
+    return ok, log
+
+
 def uv_dry_run_install(
     pinned: Iterable[str], *, python_version: str | None, venv_path: Path | None = None
 ) -> tuple[bool, str]:
-    """Run a dry-run install to validate that dependencies can be installed."""
+    """Run a dry-run install to validate that dependencies can be installed.
+
+    The target is always an interpreter uv is allowed to write to.  The previous
+    ``--python <version> --system`` fallback asked uv to install into whatever
+    interpreter that version resolved to, and on any host whose Pythons are
+    uv-managed -- which is every host this pipeline runs on -- uv refuses:
+    "externally managed ... should not be modified".  Every commit then came back
+    ``failed``, and the recorded status was the host's refusal rather than a fact
+    about the seed.  So when no usable venv is handed in, one is built for the
+    requested version and thrown away afterwards.
+
+    There is deliberately no ``--system`` path left to fall back to: if the
+    throwaway environment cannot be built, the answer says so with
+    :data:`VENV_SETUP_FAILED` instead of re-describing a host refusal as a
+    resolution failure.
+    """
     text_lines = seed_lines(pinned, context="uv pip install --dry-run")
     if not text_lines:
         return True, "No runtime dependencies."
     text = "\n".join(text_lines) + "\n"
-    args = ["pip", "install", "--dry-run", "-r", "-"]
 
     if venv_path and venv_path.exists():
-        python_exe = venv_path / "bin" / "python"
-        if not python_exe.exists():
-            python_exe = venv_path / "Scripts" / "python.exe"
-        if python_exe.exists():
-            args.extend(["--python", str(python_exe)])
-        elif python_version:
-            args.extend(["--python", python_version, "--system"])
-    elif python_version:
-        args.extend(["--python", python_version, "--system"])
+        return _run_dry_run(text, ["--python", str(_venv_interpreter(venv_path))])
 
-    cp = run_uv(args, input_text=text)
-    ok = cp.returncode == 0
-    log = strip_ansi(cp.stdout.decode() + "\n" + cp.stderr.decode())
-    return ok, log
+    if not python_version:
+        return _run_dry_run(text, [])
+
+    with tempfile.TemporaryDirectory(prefix="datasmith-probe-venv-") as tmpdir:
+        scratch = Path(tmpdir) / "venv"
+        cp = run_uv(["venv", str(scratch), "--python", python_version])
+        if cp.returncode != 0:
+            log = strip_ansi(cp.stdout.decode() + "\n" + cp.stderr.decode())
+            logger.debug("Could not build a Python %s probe environment: %s", python_version, log)
+            return False, f"{VENV_SETUP_FAILED}: no Python {python_version} environment could be built\n{log}"
+        return _run_dry_run(text, ["--python", str(_venv_interpreter(scratch))])
 
 
 def uv_build_and_read_metadata(project_dir: Path) -> tuple[str | None, str | None, list[str], str | None]:

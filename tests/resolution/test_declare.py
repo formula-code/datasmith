@@ -64,6 +64,21 @@ def test_a_matrix_entry_with_one_real_version_keeps_it():
     assert d.runtime == ["cython==0.29.21"]
 
 
+def test_a_matrix_sweep_does_not_become_two_conflicting_pins():
+    # lmfit-py benchmarks scipy at 0.18 and 0.19. Emitting one `==` pin per
+    # version makes the compile unsatisfiable, and the failure is not confined to
+    # scipy: `pin` returns nothing at all, so every unrelated requirement in the
+    # seed goes with it. A seed is one environment, so it states the weakest true
+    # thing about a sweep.
+    d = declare(_meta(core_deps={"numpy"}), {"scipy": {"0.18", "0.19"}})
+    assert d.runtime == ["numpy", "scipy"]
+
+
+def test_a_sweep_keeps_the_other_requirements_intact():
+    d = declare(_meta(core_deps={"numpy"}), {"scipy": {"0.18", "0.19"}, "cython": {"0.29.21"}})
+    assert d.runtime == ["cython==0.29.21", "numpy", "scipy"]
+
+
 def test_unparseable_declarations_are_recorded():
     d = declare(_meta(core_deps={"numpy", CORRUPTED_MARKER}), None)
     assert d.runtime == ["numpy"]

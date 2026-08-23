@@ -41,10 +41,16 @@ class ResolvePackagesRunner(BaseRunner):
         # The columns are still today's. The provenance the resolver now carries
         # -- probe_status, interpreter_source, cutoff_used, dropped_requirements
         # -- has nowhere to go until the schema migration adds it.
-        # ``can_install`` is the probe's verdict under its old name: the same
-        # dry-run, and "installable" is the same "clean, with the commit-date
-        # cutoff held". It stays a gate only until the stage 5 and 6 readers are
-        # removed.
+        # ``can_install`` is the probe's verdict under its old name, and it has to
+        # keep the old name's meaning while stages 5 and 6 still read it as a
+        # gate: "uv could install this". The predecessor tried the commit-date
+        # cutoff and then dropped it (``for strict_cutoff in (True, False)``) and
+        # set can_install from the dry-run either way, and a seed with nothing to
+        # install dry-ran clean. So ``unresolved`` (cutoff relaxed, dry-run clean)
+        # and ``empty`` (nothing to install) are both installable; only ``failed``
+        # is not. Reading it as ``== "installable"`` would add a cutoff condition
+        # the column never had and starve the two stages this redesign exists to
+        # unblock.
         row = {
             "owner": owner,
             "repo": repo,
@@ -57,7 +63,7 @@ class ResolvePackagesRunner(BaseRunner):
             "install_commands": None,
             "primary_root": result.primary_root,
             "resolution_strategy": None,
-            "can_install": result.probe_status == "installable",
+            "can_install": result.probe_status != "failed",
             "requires_python": None,
         }
 
