@@ -73,3 +73,50 @@ class TestSelectPinnedPrs:
             out = _select_pinned_prs(rows, wanted, _SELECT)
         assert len(out) == 2
         assert fetch.call_count == 1  # only the absent one is queried
+
+
+class TestReportDropped:
+    """A pinned task must never vanish silently between selection and assembly.
+
+    bottleneck#468 was selected by --tasks and then dropped, and the log read
+    "Synthesizing images for 0 PRs". Both skip reasons logged at DEBUG, so at
+    normal level the task simply disappeared. The cause was an empty
+    candidate_prs row, a requirement that only matters when an LLM runs.
+    """
+
+    def test_a_dropped_pinned_task_is_named_in_a_warning(self):
+        from datasmith.update.pipeline import _report_dropped
+
+        pinned = {("pydata", "bottleneck", 468), ("networkx", "networkx", 8148)}
+        items = [_row("networkx", "networkx", 8148)]
+        with patch("datasmith.update.pipeline.logger") as log:
+            _report_dropped(items, pinned, skipped_no_pkg=0, skipped_no_ctx=1)
+        assert log.warning.called
+        message = log.warning.call_args.args[0] % log.warning.call_args.args[1:]
+        assert "pydata/bottleneck#468" in message
+        assert "networkx/networkx#8148" not in message
+
+    def test_no_warning_when_every_pinned_task_survived(self):
+        from datasmith.update.pipeline import _report_dropped
+
+        pinned = {("networkx", "networkx", 8148)}
+        items = [_row("networkx", "networkx", 8148)]
+        with patch("datasmith.update.pipeline.logger") as log:
+            _report_dropped(items, pinned, skipped_no_pkg=0, skipped_no_ctx=0)
+        assert not log.warning.called
+
+    def test_skip_counts_are_reported_at_info(self):
+        from datasmith.update.pipeline import _report_dropped
+
+        with patch("datasmith.update.pipeline.logger") as log:
+            _report_dropped([], None, skipped_no_pkg=12, skipped_no_ctx=4065)
+        assert log.info.called
+        assert log.info.call_args.args[1:] == (12, 4065)
+
+    def test_nothing_is_logged_when_there_is_nothing_to_say(self):
+        from datasmith.update.pipeline import _report_dropped
+
+        with patch("datasmith.update.pipeline.logger") as log:
+            _report_dropped([], None, skipped_no_pkg=0, skipped_no_ctx=0)
+        assert not log.info.called
+        assert not log.warning.called

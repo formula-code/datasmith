@@ -38,6 +38,37 @@ def _parse_task_specs(specs: str) -> set[tuple[str, str, int]]:
     return out
 
 
+def _report_dropped(
+    items: list[dict[str, Any]],
+    pinned: set[tuple[str, str, int]] | None,
+    skipped_no_pkg: int,
+    skipped_no_ctx: int,
+) -> None:
+    """Say out loud which PRs were dropped between selection and assembly.
+
+    A pinned task that disappears here is the worst failure mode in this stage.
+    The log reads "Synthesizing images for 0 PRs", which looks like there is no
+    work rather than like a filter conflict. Both skip reasons were logged at
+    DEBUG, so at normal level a task simply vanished.
+    """
+    if pinned:
+        assembled = {(i["owner"], i["repo"], i["issue_number"]) for i in items}
+        lost = pinned - assembled
+        if lost:
+            logger.warning(
+                "synthesize_images: %d pinned task(s) were selected and then dropped "
+                "(no resolved packages, or no pr_context): %s",
+                len(lost),
+                ", ".join(f"{o}/{rp}#{n}" for o, rp, n in sorted(lost)),
+            )
+    if skipped_no_pkg or skipped_no_ctx:
+        logger.info(
+            "synthesize_images: skipped %d PR(s) with no resolved packages, %d with no pr_context",
+            skipped_no_pkg,
+            skipped_no_ctx,
+        )
+
+
 def _select_pinned_prs(
     rows: list[dict[str, Any]],
     wanted: set[tuple[str, str, int]],
@@ -614,6 +645,13 @@ class Pipeline:
 
         skipped_no_pkg = 0
         skipped_no_ctx = 0
+        # `pr_context` exists to give an LLM agent something to work with.
+        # TRY_DEFAULT never reads it, so requiring it blocks the no-agent path
+        # for a reason that only applies to the agent path. Corpus-wide that
+        # filter excludes 4065 of 12944 performance PRs, or 31%.
+        #
+        # When no LLM will run, attempt the build anyway.
+        require_context = self._agent != "none"
         items = []
         for r in rows:
             sha = r.get("merge_commit_sha", "")
@@ -630,7 +668,7 @@ class Pipeline:
                 )
                 continue
             # Skip PRs without a rendered context (non-empty issues + observations)
-            if (r["owner"], r["repo"], r["issue_number"]) not in eligible_prs:
+            if require_context and (r["owner"], r["repo"], r["issue_number"]) not in eligible_prs:
                 skipped_no_ctx += 1
                 logger.debug(
                     "Skipping %s/%s#%d: no eligible pr_context (empty issues_json or initial_observations)",
@@ -659,6 +697,7 @@ class Pipeline:
         if self._tasks_per_repo is not None:
             items = _cap_per_repo(items, self._tasks_per_repo)
 
+        _report_dropped(items, self._task_specs, skipped_no_pkg, skipped_no_ctx)
         logger.info("Synthesizing images for %d PRs", len(items))
 
         if self._dry_run:
