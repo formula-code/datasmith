@@ -39,7 +39,7 @@ def _sync_query_mock(pages: list[list[dict[str, Any]]]) -> tuple[MagicMock, Magi
     exactly which predicates fetch_all attached.
     """
     query = MagicMock()
-    for method in ("select", "eq", "is_", "gte", "lte", "lt", "neq", "order", "range"):
+    for method in ("select", "eq", "is_", "gte", "lte", "lt", "neq", "in_", "order", "range"):
         getattr(query, method).return_value = query
     query.execute.side_effect = [MagicMock(data=page) for page in pages]
     client = MagicMock()
@@ -50,7 +50,7 @@ def _sync_query_mock(pages: list[list[dict[str, Any]]]) -> tuple[MagicMock, Magi
 def _async_query_mock(pages: list[list[dict[str, Any]]]) -> tuple[MagicMock, MagicMock]:
     """Async twin of :func:`_sync_query_mock`; ``execute`` is awaitable."""
     query = MagicMock()
-    for method in ("select", "eq", "is_", "gte", "lte", "lt", "neq", "order", "range"):
+    for method in ("select", "eq", "is_", "gte", "lte", "lt", "neq", "in_", "order", "range"):
         getattr(query, method).return_value = query
     query.execute = AsyncMock(side_effect=[MagicMock(data=page) for page in pages])
     client = MagicMock()
@@ -434,7 +434,9 @@ class TestAFetchAll:
                 lte_filters={"created_at": "2026-08-31"},
                 lt_filters={"merged_at": "2026-09-01"},
                 neq_filters={"merge_commit_sha": ""},
+                in_filters={"issue_number": [1, 2, 3]},
             )
+        query.in_.assert_called_once_with("issue_number", [1, 2, 3])
         query.eq.assert_called_once_with("owner", "pandas-dev")
         query.is_.assert_called_once_with("container_name", "null")
         query.gte.assert_called_once_with("merged_at", "2026-08-01")
@@ -481,3 +483,45 @@ class TestABatchUpsert:
         assert table.upsert.call_count == 3
         assert [len(c.args[0]) for c in table.upsert.call_args_list] == [100, 100, 50]
         assert table.execute.await_count == 3
+
+
+class TestInFilters:
+    """``in_filters`` exists so a skip-set read can name the keys it wants.
+
+    Equality on ``(owner, repo)`` is not a substitute: it still returns every
+    row that repository ever produced, which for a 150-repository window is
+    the whole table again in 150 requests.
+    """
+
+    def test_values_are_passed_as_a_list(self) -> None:
+        client, query = _sync_query_mock([[]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            fetch_all("packages", select="owner, repo, sha", in_filters={"sha": ("a", "b")})
+        query.in_.assert_called_once_with("sha", ["a", "b"])
+
+    def test_several_columns_are_all_applied(self) -> None:
+        client, query = _sync_query_mock([[]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            fetch_all(
+                "candidate_prs",
+                select="owner, repo, issue_number",
+                in_filters={"owner": ["pandas-dev"], "repo": ["pandas", "pandas-stubs"]},
+            )
+        assert [c.args for c in query.in_.call_args_list] == [
+            ("owner", ["pandas-dev"]),
+            ("repo", ["pandas", "pandas-stubs"]),
+        ]
+
+    def test_an_in_filter_satisfies_the_large_select_guardrail(self) -> None:
+        """A key-scoped read of ``patch`` is bounded, so it must not be refused."""
+        client, query = _sync_query_mock([[]])
+        with patch("datasmith.utils.db.get_client", return_value=client):
+            rows = fetch_all("pull_requests", select="patch", in_filters={"issue_number": [1, 2]})
+        assert rows == []
+        query.in_.assert_called_once_with("issue_number", [1, 2])
+
+    async def test_async_sibling_applies_it_too(self) -> None:
+        client, query = _async_query_mock([[]])
+        with patch("datasmith.utils.db.get_async_client", return_value=client):
+            await afetch_all("packages", select="sha", in_filters={"sha": ["a"]})
+        query.in_.assert_called_once_with("sha", ["a"])

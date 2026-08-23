@@ -204,7 +204,7 @@ def _guard_large_select(table: str, select: str, has_filters: bool) -> None:
         f"refusing an unfiltered read of {offending!r} on table {table!r}: it streams a large "
         f"text column across every row and has already taken PostgREST down with an "
         f"out-of-memory abort. Narrow it with a filter "
-        f"(filters/gte_filters/lte_filters/lt_filters/neq_filters/is_null), ask for only the "
+        f"(filters/gte_filters/lte_filters/lt_filters/neq_filters/in_filters/is_null), ask for only the "
         f"columns you need, or use a server-side aggregate. To override, set "
         f"DATASMITH_LARGE_TABLES or DATASMITH_LARGE_COLUMNS in tokens.env."
     )
@@ -227,6 +227,7 @@ def _apply_query_parts(
     lte_filters: dict[str, Any] | None,
     lt_filters: dict[str, Any] | None,
     neq_filters: dict[str, Any] | None,
+    in_filters: dict[str, Sequence[Any]] | None,
     order_cols: Sequence[str],
 ) -> Any:
     """Attach every filter and ordering clause to *query*.
@@ -246,6 +247,8 @@ def _apply_query_parts(
         query = query.lt(col, val)
     for col, val in (neq_filters or {}).items():
         query = query.neq(col, val)
+    for col, values in (in_filters or {}).items():
+        query = query.in_(col, list(values))
     for col in order_cols:
         query = query.order(col)
     return query
@@ -269,6 +272,7 @@ def fetch_all(
     lte_filters: dict[str, Any] | None = None,
     lt_filters: dict[str, Any] | None = None,
     neq_filters: dict[str, Any] | None = None,
+    in_filters: dict[str, Sequence[Any]] | None = None,
     page_size: int = 1000,
     order_by: Sequence[str] | str | None = None,
 ) -> list[dict[str, Any]]:
@@ -283,6 +287,14 @@ def fetch_all(
     makes the boundary mean something different in the database than it
     does in the GitHub query it must agree with.
 
+    ``in_filters`` maps a column to the values it may take. It exists so a
+    skip-set read can be scoped to the keys the caller actually asked about
+    instead of pulling a whole table: an equality filter on ``(owner, repo)``
+    still returns every row that repository ever produced, which for a
+    150-repository window is the table again in 150 requests. Chunk the value
+    list at the call site — PostgREST puts it in the URL, and a few hundred
+    40-character SHAs exceed the usual 8 KB proxy ceiling.
+
     ``order_by`` must specify a stable (unique) key — otherwise
     Postgres is free to return rows in different orders across
     pages, silently dropping and duplicating rows. If the caller
@@ -296,7 +308,7 @@ def fetch_all(
     _guard_large_select(
         table,
         select,
-        any((filters, is_null, gte_filters, lte_filters, lt_filters, neq_filters)),
+        any((filters, is_null, gte_filters, lte_filters, lt_filters, neq_filters, in_filters)),
     )
     order_cols = _resolve_order_cols(table, order_by)
 
@@ -313,6 +325,7 @@ def fetch_all(
             lte_filters,
             lt_filters,
             neq_filters,
+            in_filters,
             order_cols,
         )
         resp = query.range(offset, offset + page_size - 1).execute()
@@ -336,6 +349,7 @@ async def afetch_all(
     lte_filters: dict[str, Any] | None = None,
     lt_filters: dict[str, Any] | None = None,
     neq_filters: dict[str, Any] | None = None,
+    in_filters: dict[str, Sequence[Any]] | None = None,
     page_size: int = 1000,
     order_by: Sequence[str] | str | None = None,
 ) -> list[dict[str, Any]]:
@@ -348,7 +362,7 @@ async def afetch_all(
     _guard_large_select(
         table,
         select,
-        any((filters, is_null, gte_filters, lte_filters, lt_filters, neq_filters)),
+        any((filters, is_null, gte_filters, lte_filters, lt_filters, neq_filters, in_filters)),
     )
     order_cols = _resolve_order_cols(table, order_by)
 
@@ -365,6 +379,7 @@ async def afetch_all(
             lte_filters,
             lt_filters,
             neq_filters,
+            in_filters,
             order_cols,
         )
         resp = await query.range(offset, offset + page_size - 1).execute()
