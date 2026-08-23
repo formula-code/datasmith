@@ -66,3 +66,64 @@ class TestDefaultTemplateLogging:
                 duration_s=1.0,
                 error_message=None,
             )
+
+
+class TestTheCallSiteIsActuallyWired:
+    """The tests above call `_log_default_attempt` directly, so they pass even if
+    the TRY_DEFAULT block never calls it.
+
+    That was proved by mutation: deleting the whole call site from the
+    TRY_DEFAULT block left the direct-call tests green. Task 5 reads this rate,
+    so a removed call site would make the trial silently measure zero with no
+    test objecting. These tests exercise the wiring instead of the method.
+    """
+
+    @patch("datasmith.agents.synthesizer.verify_context")
+    def test_a_failed_default_build_logs_a_row(self, mock_verify: MagicMock) -> None:
+        from datasmith.agents.sandbox import SandboxResult
+        from datasmith.agents.synthesizer import Synthesizer
+
+        mock_verify.return_value = SandboxResult(
+            success=False,
+            failure_json={"stage": "run", "return_code": 1, "error_message": "asv: command not found"},
+        )
+        synth = Synthesizer()
+        with (
+            patch.object(synth, "_check_cache", return_value=None),
+            patch.object(synth, "_find_similar", return_value=[]),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {}, None, False)),
+            patch.object(synth, "_log_attempt"),
+            patch.object(synth, "_log_default_attempt") as log_default,
+        ):
+            synth.run("networkx", "networkx", 8148, "ctx", sha="a" * 40)
+
+        assert log_default.called, (
+            "the TRY_DEFAULT block did not call _log_default_attempt. "
+            "Task 5's trial reads these rows, so it would measure zero silently."
+        )
+        kwargs = log_default.call_args.kwargs
+        assert kwargs["success"] is False
+        assert kwargs["owner"] == "networkx"
+        assert kwargs["issue_number"] == 8148
+
+    @patch("datasmith.agents.synthesizer.verify_context")
+    def test_a_successful_default_build_logs_a_row(self, mock_verify: MagicMock) -> None:
+        from datasmith.agents.sandbox import SandboxResult
+        from datasmith.agents.synthesizer import Synthesizer
+        from datasmith.docker.context import DockerContext
+
+        mock_verify.return_value = SandboxResult(
+            success=True,
+            docker_context=DockerContext(build_pkg_sh="#!/bin/bash\ntrue"),
+        )
+        synth = Synthesizer()
+        with (
+            patch.object(synth, "_check_cache", return_value=None),
+            patch.object(synth, "_find_similar", return_value=[]),
+            patch.object(synth, "_save_context"),
+            patch.object(synth, "_log_default_attempt") as log_default,
+        ):
+            synth.run("networkx", "networkx", 8148, "ctx", sha="a" * 40)
+
+        assert log_default.called
+        assert log_default.call_args.kwargs["success"] is True
