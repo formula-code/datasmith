@@ -38,6 +38,43 @@ def _parse_task_specs(specs: str) -> set[tuple[str, str, int]]:
     return out
 
 
+def _select_pinned_prs(
+    rows: list[dict[str, Any]],
+    wanted: set[tuple[str, str, int]],
+    select: str,
+) -> list[dict[str, Any]]:
+    """Reduce `rows` to exactly the PRs named by --tasks, fetching any that are missing.
+
+    An explicit spec set names the PRs the operator wants built, so it OVERRIDES
+    the date window rather than narrowing it. Without the override, pinning a
+    task outside the window selects nothing, and the log reads "no work to do"
+    rather than "you asked for a task the filter excluded".
+
+    Returns rows in sorted spec order, so a run is reproducible.
+    """
+    keyed = {(r["owner"], r["repo"], int(r["issue_number"])): r for r in rows}
+    # fetch_all has no OR support, and --tasks is a handful of specs, so one
+    # query per missing spec is both correct and cheap.
+    for owner, repo_name, number in sorted(wanted - set(keyed)):
+        for row in fetch_all(
+            "pull_requests",
+            select=select,
+            filters={"owner": owner, "repo": repo_name, "issue_number": number},
+        ):
+            keyed[(row["owner"], row["repo"], int(row["issue_number"]))] = row
+
+    selected = [keyed[key] for key in sorted(wanted) if key in keyed]
+    missing = wanted - set(keyed)
+    if missing:
+        logger.warning(
+            "synthesize_images: --tasks named %d PR(s) not found in pull_requests: %s",
+            len(missing),
+            ", ".join(f"{o}/{rp}#{n}" for o, rp, n in sorted(missing)),
+        )
+    logger.info("synthesize_images: --tasks filter selected %d PR(s)", len(selected))
+    return selected
+
+
 def _cap_per_repo(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """Return at most *limit* randomly-sampled items per (owner, repo)."""
     import random
@@ -124,7 +161,11 @@ class Pipeline:
         self._harbor_use_daytona = harbor_use_daytona
         self._harbor_rounds = harbor_rounds
         self._harbor_limit = harbor_limit
-        self._harbor_tasks = _parse_task_specs(harbor_tasks) if harbor_tasks else None
+        # Used by stage 6 (synthesize_images) and stage 7 (harbor_healthcheck).
+        # The parameter keeps its old name for callers; the attribute does not,
+        # because a name that says 'harbor' invites the next reader to assume
+        # stage 6 cannot use it.
+        self._task_specs = _parse_task_specs(harbor_tasks) if harbor_tasks else None
         self._completed_stages: list[str] = []
 
     def _log_dry_run_summary(
@@ -544,6 +585,9 @@ class Pipeline:
             query_kwargs["is_null"] = ["container_name"]
         rows = fetch_all("pull_requests", **query_kwargs)
 
+        if self._task_specs:
+            rows = _select_pinned_prs(rows, self._task_specs, query_kwargs["select"])
+
         # Join with packages table for env_payload and python_version
         pkg_rows = fetch_all(
             "packages",
@@ -669,8 +713,8 @@ class Pipeline:
         # Filter to the explicit --tasks spec set first, if provided. Each spec
         # names a specific PR the operator wants to triage, so an unmatched
         # spec is a hard error (fail fast before spinning up Harbor).
-        if self._harbor_tasks:
-            wanted = self._harbor_tasks
+        if self._task_specs:
+            wanted = self._task_specs
             matched = [r for r in ready if (r["owner"], r["repo"], int(r["issue_number"])) in wanted]
             got_keys = {(r["owner"], r["repo"], int(r["issue_number"])) for r in matched}
             missing = wanted - got_keys
@@ -687,7 +731,7 @@ class Pipeline:
         # Skip PRs that already have a successful harbor_runs row, unless --force
         # or --tasks (explicit triage request implies re-run).
         skipped_already_run = 0
-        if not self._force and not self._harbor_tasks:
+        if not self._force and not self._task_specs:
             hr_rows = fetch_all(
                 "harbor_runs",
                 select="owner, repo, sha, status, max_speedup",
