@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from datasmith.runners.base import BaseRunner
 
@@ -111,6 +114,68 @@ class TestItemFailureResilience:
         assert runner._failed == 1
         # Items 1, 2, 4, 5 should all have been processed
         assert set(runner.processed) == {1, 2, 4, 5}
+
+
+class TestEndOfStageSummary:
+    """Silence must stop meaning success.
+
+    The motivating run reported "154/154 repositories, zero failures" while
+    storing 35 PRs.  The stage had no way to say that was wrong, so every run
+    now ends with the counts and the error types behind them — including the
+    runs where nothing raised, because that run *had* no failures.
+    """
+
+    async def test_a_clean_run_still_says_what_it_did(self, caplog: pytest.LogCaptureFixture) -> None:
+        mock_client = _mock_supabase()
+        runner = _DummyRunner(n_concurrent=2)
+
+        with (
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+            caplog.at_level(logging.INFO, logger="datasmith.runners.base"),
+        ):
+            await runner.run([1, 2, 3])
+
+        summaries = [r.getMessage() for r in caplog.records if "finished" in r.getMessage()]
+        assert len(summaries) == 1, summaries
+        assert "test_runner finished: 3 item(s), 3 succeeded, 0 failed" in summaries[0]
+        assert "error types: none" in summaries[0]
+
+    async def test_the_summary_names_the_distinct_error_types(self, caplog: pytest.LogCaptureFixture) -> None:
+        mock_client = _mock_supabase()
+        side_effects: dict[int, Exception] = {
+            1: ValueError("bad"),
+            2: ValueError("also bad"),
+            3: KeyError("missing"),
+        }
+        runner = _DummyRunner(n_concurrent=1, side_effect=side_effects)
+
+        with (
+            patch("datasmith.runners.base.get_client", return_value=mock_client),
+            caplog.at_level(logging.INFO, logger="datasmith.runners.base"),
+        ):
+            await runner.run([1, 2, 3, 4, 5])
+
+        summary = next(r.getMessage() for r in caplog.records if "finished" in r.getMessage())
+        assert "5 item(s), 2 succeeded, 3 failed" in summary
+        assert "ValueError=2" in summary
+        assert "KeyError=1" in summary
+
+    async def test_error_types_do_not_leak_between_runs(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A second run reports its own outcome, not the first run's plus it."""
+        mock_client = _mock_supabase()
+        runner = _DummyRunner(n_concurrent=1, side_effect={1: ValueError("bad")})
+
+        with patch("datasmith.runners.base.get_client", return_value=mock_client):
+            await runner.run([1, 2])
+            runner._side_effect = {}
+            with caplog.at_level(logging.INFO, logger="datasmith.runners.base"):
+                await runner.run([3, 4])
+
+        # The last summary is the second run's; the first run's is still in the
+        # record list, which is exactly what makes leaking counters detectable.
+        summary = [r.getMessage() for r in caplog.records if "finished" in r.getMessage()][-1]
+        assert "2 item(s), 2 succeeded, 0 failed" in summary
+        assert "error types: none" in summary
 
 
 class TestRunnerIdFormat:

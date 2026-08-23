@@ -95,6 +95,14 @@ This checks:
 | Docker | Docker daemon is running |
 | GitHub | API access and remaining rate limit |
 
+It also prints three `[INFO]` lines that **cannot fail the run**: the GitHub
+token pool size and the hourly budget it buys, the measured median database
+round-trip latency (local Postgres and `db.formulacode.org` differ by roughly
+6x, and both are legitimate), and every resolved concurrency dial for stages
+2–5. Those are reports rather than checks because none of them has a threshold
+that is correct on every machine — they exist so an operator on a new host can
+see their real limits before wondering why a stage is slow.
+
 ## Reading a manifest programmatically
 
 Inspect any built image's sealed build manifest and evaluate the invariants
