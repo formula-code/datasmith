@@ -329,6 +329,29 @@ re-resolve lazily.
 
 ## 8. Out of scope
 
+- **Dynamic `install_requires` yields an empty seed** — found after implementation,
+  and the one place §2's "the seed may legitimately be empty" clause is currently
+  claiming more than it should.
+
+  quantumlib/Cirq resolves to `probe_status = "empty"` with zero dependencies. That
+  is **not** the accepted case. Cirq declares its dependencies; it declares them
+  through `install_requires=` reading a requirements file at setup-time, which the
+  static parser cannot follow. Verified on the audited SHA: `discover_candidates`
+  finds all 10 packaging roots, `select_primary_candidate` correctly picks `.`
+  (its distribution name `cirq` matches the repository), and **every one of the ten
+  — `cirq-core` included — reports `core_deps=0`**. So this is not the discover rung
+  mis-selecting, the way arrow's `python/` was; it is a declaration the parser
+  cannot see. The audit's predecessor reached 73 packages here, via the
+  `requirements*.txt` globbing this redesign deliberately removed.
+
+  The likely fix stays inside the contract: a requirements file that `setup.py`
+  *explicitly names* is a declaration, unlike a glob of every `requirements*.txt`
+  in the tree — that distinction is the whole basis of §4.2. Reading only the
+  specifically-referenced file would recover Cirq without reopening B4. This needs
+  its own change, and a decision on where "declared" ends.
+
+  Scale is unmeasured beyond the sample: 1 of 13 fixtures. Count it across the
+  corpus before sizing the fix.
 - Stage 3 classification, which has not run for April–August 2026 (8,799 PRs
   unclassified). That is why the audit used January 2026.
 - Stage 6's synthesis agent and its retry policy.
