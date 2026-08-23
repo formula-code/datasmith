@@ -97,6 +97,7 @@ class ImageManager:
         *,
         repo_url: str | None = None,
         py_version: str = "",
+        build_root: str = ".",
     ) -> str:
         ctx = context or _default_context()
         url = repo_url or f"https://github.com/{owner}/{repo}.git"
@@ -106,6 +107,10 @@ class ImageManager:
             "BASE_IMAGE": get_base_image_name(),
             "REPO_URL": url,
         }
+        # ``packages.primary_root`` is nullable and every legacy row predates
+        # this argument, so the fallback lives here -- the one choke point every
+        # caller routes through -- rather than at each call site.
+        build_args["BUILD_ROOT"] = build_root or "."
         if py_version:
             build_args["PY_VERSION"] = py_version
         self._docker.build(

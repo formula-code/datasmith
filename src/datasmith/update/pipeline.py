@@ -570,7 +570,7 @@ class Pipeline:
         # it, because this stage is the one that finds out whether it builds.
         pkg_rows = fetch_all(
             "packages",
-            select="owner, repo, sha, env_payload, python_version, probe_status",
+            select="owner, repo, sha, env_payload, python_version, probe_status, primary_root",
         )
         pkg_lookup: dict[tuple[str, str, str], dict[str, Any]] = {
             (p["owner"], p["repo"], p["sha"]): p for p in pkg_rows
@@ -630,6 +630,10 @@ class Pipeline:
                 "repo_description": repo_descriptions.get((r["owner"], r["repo"]), ""),
                 "env_payload": pkg.get("env_payload", ""),
                 "python_version": pkg.get("python_version", ""),
+                # The package root inside the repository. Discovered by stage 4
+                # and, until now, discarded: Dockerfile.repo hardcoded the
+                # repository root, so arrow built in the wrong directory.
+                "primary_root": pkg.get("primary_root") or ".",
                 "probe_status": pkg.get("probe_status"),
             })
         if self._tasks_per_repo is not None:

@@ -41,11 +41,14 @@ DATASMITH_NEIGHBOR_WINDOW_DAYS: int = int(os.environ.get("DATASMITH_NEIGHBOR_WIN
 DATASMITH_NEIGHBOR_CAP: int = int(os.environ.get("DATASMITH_NEIGHBOR_CAP", "40"))
 
 
-def _ensure_prerequisite_images(owner: str, repo: str, py_version: str = "") -> None:
+def _ensure_prerequisite_images(owner: str, repo: str, py_version: str = "", build_root: str = ".") -> None:
     """Build the base and repo Docker images if they don't exist locally.
 
     The three-tier hierarchy (base → repo → PR) requires each parent image
     to be present in the local daemon before the child can be built.
+
+    ``build_root`` is the row's ``primary_root`` — the package root inside the
+    repository. This runner is the only caller that has read it.
     """
     from datasmith.docker.images import ImageManager, get_base_image_name, get_repo_image_name
 
@@ -59,7 +62,7 @@ def _ensure_prerequisite_images(owner: str, repo: str, py_version: str = "") -> 
 
     if not mgr.image_exists(repo_tag):
         logger.info("Building missing repo image: %s", repo_tag)
-        mgr.build_repo_image(owner, repo, py_version=py_version)
+        mgr.build_repo_image(owner, repo, py_version=py_version, build_root=build_root)
 
 
 def _build_pr_image(
@@ -246,7 +249,7 @@ def _fetch_neighbor_items(
     # probe orders them, it does not exclude them.
     pkg_rows = fetch_all(
         "packages",
-        select="owner, repo, sha, env_payload, python_version, probe_status",
+        select="owner, repo, sha, env_payload, python_version, probe_status, primary_root",
         filters={"owner": owner, "repo": repo},
     )
     pkg_lookup = {(p["owner"], p["repo"], p["sha"]): p for p in pkg_rows}
@@ -294,6 +297,7 @@ def _fetch_neighbor_items(
             "repo_description": repo_description,
             "env_payload": pkg.get("env_payload", ""),
             "python_version": pkg.get("python_version", ""),
+            "primary_root": pkg.get("primary_root") or ".",
             # Carried for shape parity with pipeline._synthesize_images items.
             # Ordering lives in the pipeline, which owns the queue; a runner
             # importing from update/ would invert the dependency direction.
@@ -482,9 +486,10 @@ class SynthesizeImagesRunner(BaseRunner):
         issue_number = item["issue_number"]
         pr_context = item.get("pr_context", "")
         py_version = item.get("python_version", "")
+        build_root = item.get("primary_root") or "."
 
         # Ensure base and repo images exist before synthesis needs them
-        await asyncio.to_thread(self._ensure_prereqs, owner, repo, py_version)
+        await asyncio.to_thread(self._ensure_prereqs, owner, repo, py_version, build_root)
 
         # Render the problem statement before synthesis (skip if already rendered)
         if not pr_context:
@@ -640,12 +645,18 @@ class SynthesizeImagesRunner(BaseRunner):
             )
 
     @staticmethod
-    def _ensure_prereqs(owner: str, repo: str, py_version: str) -> None:
+    def _ensure_prereqs(owner: str, repo: str, py_version: str, build_root: str = ".") -> None:
         """Build base/repo images if missing, with dedup across threads.
 
         The interpreter is part of the key because it is part of the tag. Keyed
         on the repository alone, a second commit declaring a different Python
         reads as already done and its parent image is never built.
+
+        ``build_root`` is deliberately *not* part of the key: it is not part of
+        the tag either, so keying on it would rebuild the same tag with a
+        different working directory and let the last writer win. Two commits of
+        one repository that share an interpreter and disagree on
+        ``primary_root`` share an image, and the first one seen decides.
         """
         key = (owner, repo, py_version)
         if key in _prereq_done:
@@ -653,5 +664,5 @@ class SynthesizeImagesRunner(BaseRunner):
         with _prereq_lock:
             if key in _prereq_done:
                 return
-            _ensure_prerequisite_images(owner, repo, py_version)
+            _ensure_prerequisite_images(owner, repo, py_version, build_root)
             _prereq_done.add(key)

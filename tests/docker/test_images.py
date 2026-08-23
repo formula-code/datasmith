@@ -106,6 +106,7 @@ class TestBuildRepoImage:
             build_args={
                 "BASE_IMAGE": get_base_image_name(),
                 "REPO_URL": "https://github.com/pandas-dev/pandas.git",
+                "BUILD_ROOT": ".",
             },
             builder=_BUILDER,
         )
@@ -121,6 +122,7 @@ class TestBuildRepoImage:
             build_args={
                 "BASE_IMAGE": get_base_image_name(),
                 "REPO_URL": "https://github.com/pandas-dev/pandas.git",
+                "BUILD_ROOT": ".",
             },
             builder=_BUILDER,
         )
