@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import threading
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -153,8 +155,17 @@ class TestDiffFetchAndSizeGate:
 
     @staticmethod
     def _update(client: MagicMock) -> dict[str, Any]:
-        """The payload handed to ``pull_requests.update``."""
+        """The *last* payload handed to ``pull_requests.update``."""
         return dict(client.table.return_value.update.call_args.args[0])
+
+    @staticmethod
+    def _updates(client: MagicMock) -> list[dict[str, Any]]:
+        """Every payload handed to ``pull_requests.update``, in order.
+
+        A fetched patch is written on its own before the classifier runs, so a
+        classified PR produces two updates rather than one.
+        """
+        return [dict(call.args[0]) for call in client.table.return_value.update.call_args_list]
 
     async def test_missing_patch_is_fetched_then_classified(self) -> None:
         gh = self._gh()
@@ -171,7 +182,9 @@ class TestDiffFetchAndSizeGate:
         classifier.classify.assert_called_once_with("Optimize array slicing", _BIG_ENOUGH_PATCH, "")
         # The fetched patch is persisted, so a resumed run does not spend a
         # second REST call out of a budget that is already short.
-        assert self._update(client)["patch"] == _BIG_ENOUGH_PATCH
+        updates = self._updates(client)
+        assert {"patch": _BIG_ENOUGH_PATCH} in updates
+        assert updates[-1]["is_performance_commit"] is True
 
     async def test_stored_patch_is_not_refetched(self) -> None:
         gh = self._gh()
@@ -200,7 +213,10 @@ class TestDiffFetchAndSizeGate:
         # The third component of the symbolic screen, finally evaluated.
         assert update["is_performance_commit_symbolic"] is False
         # An oversized patch is exactly what must not be written table-wide.
-        assert "patch" not in update
+        # Checked across *every* update, not just the last: the fetched patch
+        # is now persisted in a write of its own, and that write must stay
+        # below the size gate rather than above it.
+        assert all("patch" not in update for update in self._updates(client))
 
     @pytest.mark.parametrize(
         ("status", "code"),
@@ -239,6 +255,45 @@ class TestDiffFetchAndSizeGate:
         client.table.return_value.update.assert_not_called()
         assert any(c.args[0] == "runner_failures" for c in client.table.call_args_list)
 
+    async def test_patch_survives_a_classifier_failure(self) -> None:
+        """The REST call must not be re-spent because an LLM call raised.
+
+        The resume predicate is ``is_performance_commit IS NULL``.  A
+        classifier failure leaves it NULL, so the row comes back next run — and
+        if the patch had been written in the same payload as the verdict, it
+        would come back empty and buy the same diff again.
+        """
+        gh = self._gh()
+        classifier = MagicMock()
+        classifier.classify.side_effect = RuntimeError("LLM backend refused the request")
+        judge = MagicMock()
+
+        item = _make_item()
+        item["patch"] = ""
+        client = await self._run(item, gh, classifier, judge)
+
+        updates = self._updates(client)
+        assert updates == [{"patch": _BIG_ENOUGH_PATCH}]
+        # The verdict was never written, so the row is still selected on resume.
+        assert all("is_performance_commit" not in update for update in updates)
+        # And the failure is visible rather than swallowed.
+        assert any(c.args[0] == "runner_failures" for c in client.table.call_args_list)
+
+    async def test_patch_survives_a_judge_failure(self) -> None:
+        """Same guarantee for the second LLM call, which only perf PRs reach."""
+        gh = self._gh()
+        classifier = MagicMock()
+        classifier.classify.return_value = (True, "vectorised")
+        judge = MagicMock()
+        judge.classify.side_effect = RuntimeError("judge timed out")
+
+        item = _make_item()
+        item["patch"] = ""
+        client = await self._run(item, gh, classifier, judge)
+
+        assert self._updates(client) == [{"patch": _BIG_ENOUGH_PATCH}]
+        gh.fetch_diff.assert_awaited_once()
+
     async def test_no_github_client_is_a_loud_error(self) -> None:
         """A runner built without a client says so instead of classifying ''."""
         classifier = MagicMock()
@@ -255,6 +310,73 @@ class TestDiffFetchAndSizeGate:
                 await runner._process_item(item)
 
         classifier.classify.assert_not_called()
+
+
+class TestExplicitLLMPool:
+    """The blocking classifier calls run on a pool this runner owns.
+
+    ``run_in_executor(None, ...)`` is the interpreter default, sized
+    ``min(32, cpu_count + 4)`` — a different number on every host and shared
+    with everything else in the process (spec section 6.4).
+    """
+
+    async def test_classifier_runs_on_the_runners_own_pool(self) -> None:
+        seen: list[str] = []
+
+        def _classify(*_args: Any) -> tuple[bool, str]:
+            seen.append(threading.current_thread().name)
+            return True, "vectorised"
+
+        def _judge(*_args: Any) -> MagicMock:
+            seen.append(threading.current_thread().name)
+            return MagicMock(category="algorithmic", difficulty="medium")
+
+        classifier = MagicMock()
+        classifier.classify.side_effect = _classify
+        judge = MagicMock()
+        judge.classify.side_effect = _judge
+
+        client = _mock_supabase()
+        with (
+            patch("datasmith.runners.classify_prs.get_client", return_value=client),
+            patch("datasmith.runners.base.get_client", return_value=client),
+        ):
+            runner = ClassifyPRsRunner(classifier, judge, n_concurrent=1)
+            await runner.run([_make_item()])
+
+        assert len(seen) == 2
+        assert all(name.startswith("classify-prs") for name in seen), seen
+
+    async def test_the_pool_is_bounded_and_shut_down(self) -> None:
+        peak = 0
+        live = 0
+        lock = threading.Lock()
+
+        def _classify(*_args: Any) -> tuple[bool, str]:
+            nonlocal peak, live
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            time.sleep(0.02)
+            with lock:
+                live -= 1
+            return False, "docs"
+
+        classifier = MagicMock()
+        classifier.classify.side_effect = _classify
+
+        client = _mock_supabase()
+        with (
+            patch("datasmith.runners.classify_prs.get_client", return_value=client),
+            patch("datasmith.runners.base.get_client", return_value=client),
+        ):
+            runner = ClassifyPRsRunner(classifier, MagicMock(), n_concurrent=8, max_workers=2)
+            await runner.run([_make_item(issue=n) for n in range(8)])
+
+        assert peak <= 2, f"{peak} concurrent classifier calls against a 2-thread pool"
+        # The pool dies with the stage rather than outliving it.
+        assert runner._executor is None
+        assert not any(t.name.startswith("classify-prs") for t in threading.enumerate())
 
 
 class TestRestPacing:

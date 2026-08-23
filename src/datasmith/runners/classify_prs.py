@@ -25,6 +25,7 @@ import asyncio
 import functools
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from datasmith.filters import check_patch_size
@@ -55,6 +56,21 @@ DATASMITH_CLASSIFY_DIFF_MIN_INTERVAL_S: float = float(os.environ.get("DATASMITH_
 # a hang.
 DATASMITH_CLASSIFY_DIFF_STALL_LOG_S: float = float(os.environ.get("DATASMITH_CLASSIFY_DIFF_STALL_LOG_S", "30"))
 
+# ---------------------------------------------------------------------------
+# A third budget, and the one dial that does *not* pace GitHub.  The two
+# ``classify`` calls are blocking DSPy requests, so they run on threads; the
+# thing they queue against is the LLM backend, not the REST budget and not the
+# disk.  It gets its own knob for the same reason stages 2 and 4 have theirs:
+# raising the dial that governs one backend must not silently raise the load
+# on another.
+#
+# The pool is explicit because ``run_in_executor(None, ...)`` is the
+# interpreter default sized ``min(32, cpu_count + 4)`` — a number that means
+# something different on every host, and that every other library in the
+# process shares (spec section 6.4).
+# ---------------------------------------------------------------------------
+DATASMITH_CLASSIFY_LLM_WORKERS: int = int(os.environ.get("DATASMITH_CLASSIFY_LLM_WORKERS", "8"))
+
 
 class ClassifyPRsRunner(BaseRunner):
     """Fetch each PR's diff, screen it on size, and classify what survives."""
@@ -65,6 +81,7 @@ class ClassifyPRsRunner(BaseRunner):
         judge: Any,
         github_client: Any = None,
         n_concurrent: int = 5,
+        max_workers: int | None = None,
     ) -> None:
         super().__init__(name="classify_prs", n_concurrent=n_concurrent)
         self._classifier = classifier
@@ -73,6 +90,31 @@ class ClassifyPRsRunner(BaseRunner):
         self._diff_sem = asyncio.Semaphore(max(1, DATASMITH_CLASSIFY_DIFF_CONCURRENCY))
         self._pace_lock = asyncio.Lock()
         self._next_fetch_at = 0.0
+        self._max_workers = max(1, DATASMITH_CLASSIFY_LLM_WORKERS if max_workers is None else max_workers)
+        self._executor: ThreadPoolExecutor | None = None
+
+    async def run(self, items: list[Any]) -> None:
+        """Run the stage against a pool this runner owns and shuts down.
+
+        Built here rather than in ``__init__`` so a runner that is constructed
+        and never run leaves no threads behind, and so the pool dies with the
+        stage even when the stage raises.
+        """
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            thread_name_prefix="classify-prs",
+        )
+        logger.info(
+            "Classifying with %d LLM worker thread(s), %d concurrent item(s), %d concurrent diff fetch(es)",
+            self._max_workers,
+            self._n_concurrent,
+            max(1, DATASMITH_CLASSIFY_DIFF_CONCURRENCY),
+        )
+        try:
+            await super().run(items)
+        finally:
+            self._executor.shutdown(wait=True)
+            self._executor = None
 
     async def _process_item(self, item: Any) -> None:
         """Process a PR dict with owner, repo, issue_number, description, patch."""
@@ -135,21 +177,33 @@ class ClassifyPRsRunner(BaseRunner):
             )
             return
 
+        if fetched:
+            # Persist what the REST call bought *before* spending an LLM call
+            # on it.  The resume predicate is ``is_performance_commit IS
+            # NULL``, so a classifier or judge failure re-selects this row on
+            # the next run; writing the patch afterwards would mean the row
+            # comes back with an empty patch and buys the same diff again out
+            # of a budget that is already short (roughly 5 616 fetches for
+            # July against 5 000 REST requests an hour, on one token).
+            #
+            # This write is deliberately after the size gate, never before it.
+            # Every measured size rejection was "too large", and storing large
+            # patches table-wide is what took PostgREST down with an
+            # out-of-memory abort.
+            self._update_pr(owner, repo, issue_number, {"patch": patch})
+
         loop = asyncio.get_running_loop()
 
         is_perf, _reason = await loop.run_in_executor(
-            None, functools.partial(self._classifier.classify, description, patch, file_change_summary)
+            self._executor, functools.partial(self._classifier.classify, description, patch, file_change_summary)
         )
 
         update: dict[str, Any] = {"is_performance_commit": is_perf}
-        if fetched:
-            # Persist what the REST call bought, so a run resumed after an LLM
-            # failure classifies from the stored patch instead of fetching it
-            # again out of a budget that is already short.
-            update["patch"] = patch
 
         if is_perf:
-            decision = await loop.run_in_executor(None, functools.partial(self._judge.classify, description, patch))
+            decision = await loop.run_in_executor(
+                self._executor, functools.partial(self._judge.classify, description, patch)
+            )
             update["classification"] = decision.category
             update["difficulty"] = decision.difficulty
 
