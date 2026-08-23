@@ -104,6 +104,13 @@ test runner. The base image already installs `hypothesis<5`, `pytest` and
 `versioneer` (`docker_build_base.sh:769`), `asv` (`:771`), and `pip setuptools wheel`
 (`docker_build_env.sh:262`).
 
+Two caveats on that base-image install, both verified at
+`docker_build_base.sh:769-777`: `hypothesis`, `pytest` and `versioneer` go in
+best-effort (`>/dev/null 2>&1 || true` — failure swallowed, output discarded), and on
+Python >= 3.9 `asv` is installed from **git HEAD**
+(`git+https://github.com/airspeed-velocity/asv`), unpinned. The measurement
+instrument itself therefore varies between base-image builds.
+
 The real harm is ownership. `env_payload` and the base image both claim the same
 packages and can pin them differently — an unconstrained `hypothesis` in
 `env_payload` overrides the base image's deliberate `hypothesis<5`. Tooling belongs
