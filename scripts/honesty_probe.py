@@ -223,6 +223,11 @@ def import_facts(import_name: str | None) -> dict:
 
 _ASV_PREFIXES = ("time_", "mem_", "peakmem_", "track_", "timeraw_")
 
+# A named tuple rather than a literal inside isinstance(). Ruff's UP038 wants
+# `X | Y` there, and that form needs Python 3.10 -- this probe runs with the
+# CONTAINER's interpreter, and the base image carries asv_3.7 through asv_3.12.
+_FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
+
 
 def _asv_benchmark_dir(conf: Path) -> Path | None:
     """`benchmark_dir` from the asv config, resolved against the config's dir.
@@ -259,12 +264,7 @@ def _count_source_benchmarks(bench_dir: Path) -> int:
         except (OSError, SyntaxError, ValueError):
             continue
         for node in ast.walk(tree):
-            # UP038 wants `X | Y` here. That form needs Python 3.10, and this
-            # probe runs with the CONTAINER's interpreter -- the base image
-            # carries asv_3.7 through asv_3.12. Keep the tuple.
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (  # noqa: UP038
-                node.name.startswith(_ASV_PREFIXES)
-            ):
+            if isinstance(node, _FUNCTION_NODES) and node.name.startswith(_ASV_PREFIXES):
                 total += 1
     return total
 
