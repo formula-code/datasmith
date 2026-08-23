@@ -70,6 +70,25 @@ def _supported(commit_date: dt.datetime) -> list[str]:
     return sorted(out, key=_as_tuple, reverse=True)
 
 
+def _declared_version(value: object) -> str:
+    """Coerce one declared version to ``"major.minor"``.
+
+    ``ASVCfgAggregate.pythons`` holds ``set[tuple[int, ...]]``, so a plain
+    ``str(value)`` reads ``(3, 10)`` as ``"(3, 10)"`` -- a string that matches no
+    supported interpreter, silently emptying the asv rung and dropping the choice
+    to the commit-date default.  A three-part ``"3.10.2"`` narrows to ``"3.10"``
+    for the same reason: the ladder compares minor versions.
+    """
+    if isinstance(value, tuple | list):
+        text = ".".join(str(part) for part in value)
+    else:
+        text = str(value)
+    parts = text.strip().split(".")
+    if len(parts) > 2 and parts[0].isdigit() and parts[1].isdigit():
+        return f"{parts[0]}.{parts[1]}"
+    return text.strip()
+
+
 def trove_versions_from_classifiers(classifiers: Iterable[str]) -> list[str]:
     """Extract ``3.x`` versions from trove classifiers, newest first.
 
@@ -88,7 +107,7 @@ def select_interpreter(
     *,
     requires_python: str | None,
     trove_versions: Iterable[str],
-    asv_pythons: Iterable[str],
+    asv_pythons: Iterable[str | tuple[int, ...]],
     commit_date: dt.datetime,
 ) -> InterpreterChoice:
     """Pick the newest supported interpreter the project declares.
@@ -96,6 +115,10 @@ def select_interpreter(
     Rungs are tried in order and the first that yields a usable version wins.  A
     declaration nothing can satisfy -- pymc's ``>=3.6,<3.7``, say -- falls through
     to the next rung rather than failing the commit.
+
+    ``asv_pythons`` takes the shape the repository actually holds them in --
+    ``ASVCfgAggregate.pythons`` is a set of ``(3, 10)`` tuples -- as well as
+    ``"3.10"`` strings.
     """
     available = _supported(commit_date)
     if not available:
@@ -113,8 +136,9 @@ def select_interpreter(
             if allowed:
                 return InterpreterChoice(version=allowed[0], source="requires-python")
 
-    for candidates, source in ((trove_versions, "trove"), (asv_pythons, "asv")):
-        declared = {str(v).strip() for v in candidates}
+    rungs: tuple[tuple[Iterable[object], str], ...] = ((trove_versions, "trove"), (asv_pythons, "asv"))
+    for candidates, source in rungs:
+        declared = {_declared_version(v) for v in candidates}
         allowed = [v for v in available if v in declared]
         if allowed:
             return InterpreterChoice(version=allowed[0], source=source)

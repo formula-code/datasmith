@@ -75,3 +75,16 @@ def test_selection_is_deterministic():
 )
 def test_trove_extraction(classifiers, expected):
     assert trove_versions_from_classifiers(classifiers) == expected
+
+
+def test_asv_rung_reads_the_tuples_the_repo_actually_holds():
+    # ASVCfgAggregate.pythons is set[tuple[int, ...]]. Read as str((3, 10)) it
+    # says "(3, 10)", matches nothing, and the choice drops silently to the
+    # commit-date default.
+    c = select_interpreter(requires_python=None, trove_versions=[], asv_pythons={(3, 10)}, commit_date=JAN_2026)
+    assert c == InterpreterChoice(version="3.10", source="asv")
+
+
+def test_asv_rung_narrows_a_patch_version_to_its_minor():
+    c = select_interpreter(requires_python=None, trove_versions=[], asv_pythons=["3.10.2"], commit_date=JAN_2026)
+    assert c == InterpreterChoice(version="3.10", source="asv")

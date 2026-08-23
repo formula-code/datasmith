@@ -336,7 +336,13 @@ def select_primary_candidate(  # noqa: C901
     """Heuristic to select the primary package root from multiple candidates."""
     norm = lambda p: str(Path(p).as_posix().strip("./")) or "."
     paths = []
-    for cmd in install_cmds:
+    # ``install_cmds`` is a set, and a set of strings iterates in hash order.
+    # Reading it directly made the first matching root depend on the hash seed,
+    # so a monorepo whose asv configs name two roots -- arrow, scipp,
+    # MDAnalysis -- answered differently from run to run. Token order *inside*
+    # one command still decides, because there the first path argument is the
+    # package the command means to install.
+    for cmd in sorted(install_cmds):
         toks = shlex.split(cmd)
         for t in toks:
             base = t.split("[", 1)[0]

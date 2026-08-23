@@ -47,3 +47,27 @@ def test_shallowest_path_wins_as_the_final_tiebreak():
     cands = {"deep/nested/pkg": _cand("deep/nested/pkg"), "pkg": _cand("pkg")}
     analyzed = {k: CandidateMeta() for k in cands}
     assert select_primary_candidate("x/y", cands, set(), analyzed) == "pkg"
+
+
+def test_install_command_order_does_not_decide_the_root():
+    # A list stands in for the production set: a set of the same strings always
+    # iterates the same way inside one process, so only an ordered input can
+    # show that the order stopped deciding. The two roots differ in depth, so
+    # the install commands genuinely decide here -- the sorted fallback would
+    # answer "pkg", the install commands answer "deep/nested/pkg".
+    cands = {"pkg": _cand("pkg"), "deep/nested/pkg": _cand("deep/nested/pkg")}
+    analyzed = {k: CandidateMeta() for k in cands}
+    cmds = ["pip install ./deep/nested/pkg", "pip install ./pkg"]
+
+    forward = select_primary_candidate("x/y", cands, cmds, analyzed)
+    reverse = select_primary_candidate("x/y", cands, list(reversed(cmds)), analyzed)
+    assert forward == reverse == "deep/nested/pkg"
+
+
+def test_install_commands_as_a_set_pick_the_same_root():
+    # The production shape: a monorepo whose two asv configs each name their own
+    # package root, aggregated into one set by the orchestrator.
+    cands = {"pkg": _cand("pkg"), "deep/nested/pkg": _cand("deep/nested/pkg")}
+    analyzed = {k: CandidateMeta() for k in cands}
+    cmds = {"pip install ./deep/nested/pkg", "pip install ./pkg"}
+    assert select_primary_candidate("x/y", cands, cmds, analyzed) == "deep/nested/pkg"
