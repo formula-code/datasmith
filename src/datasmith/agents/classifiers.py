@@ -176,21 +176,32 @@ class PerfClassifier:
     def classify(
         self, problem_description: str, github_patch: str = "", file_change_summary: str = ""
     ) -> tuple[bool, str]:
-        try:
-            predictor = self._get_predictor()
-            result = predictor(
-                problem_description=problem_description,
-                github_patch=github_patch,
-                file_change_summary=file_change_summary,
-            )
-            label = str(getattr(result, "label", "NO"))
-            is_perf = label.strip().upper().startswith("YES")
-            reasoning = str(getattr(result, "reasoning", ""))
-        except Exception:
-            logger.exception("PerfClassifier failed")
-            return False, "Classification failed"
-        else:
-            return is_perf, reasoning
+        """Return ``(is_performance, reasoning)``, or raise if the model could not answer.
+
+        Raising is the point.  This used to catch every exception and return
+        ``(False, "Classification failed")``, which stage 3 then wrote as
+        ``is_performance_commit = False``.  The resume predicate is
+        ``is_performance_commit IS NULL``, so a transient model timeout became
+        a permanent exclusion that no re-run would revisit, and it was
+        indistinguishable from a PR the model had genuinely judged.  Across
+        the roughly 9 400 calls a July-plus-August run makes, a one percent
+        error rate silently discards about ninety commits.
+
+        Letting it propagate costs one ``runner_failures`` row and leaves the
+        column NULL, so the next run picks the PR up again.
+        """
+        predictor = self._get_predictor()
+        result = predictor(
+            problem_description=problem_description,
+            github_patch=github_patch,
+            file_change_summary=file_change_summary,
+        )
+        label = str(getattr(result, "label", "")).strip().upper()
+        reasoning = str(getattr(result, "reasoning", ""))
+        if not label.startswith(("YES", "NO")):
+            # An unparseable label is a failure to classify, not a negative.
+            raise ValueError(f"PerfClassifier returned an unusable label: {label[:80]!r}")
+        return label.startswith("YES"), reasoning
 
 
 class ClassifyJudge:

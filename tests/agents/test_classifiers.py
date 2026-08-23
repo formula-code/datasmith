@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from datasmith.agents.classifiers import ClassificationDecision, ClassifyJudge, OptimizationType, PerfClassifier
 
@@ -109,13 +112,33 @@ class TestPerfClassifier:
             is_perf, _ = classifier.classify("speed up", "diff", "| file | +10 | -5 |")
         assert is_perf is True
 
-    def test_perf_classifier_exception(self) -> None:
-        """On exception, returns (False, 'Classification failed')."""
+    def test_perf_classifier_propagates_failure(self) -> None:
+        """A model that cannot answer must raise, never report "not performance".
+
+        This test previously asserted the opposite: that a failure returned
+        ``(False, "Classification failed")``.  Stage 3 wrote that as
+        ``is_performance_commit = False`` and the resume predicate is
+        ``is_performance_commit IS NULL``, so a transient error permanently
+        excluded the PR and looked exactly like a real negative.
+        """
         classifier = PerfClassifier()
-        with patch.dict("sys.modules", {"dspy": None}):
-            is_perf, reason = classifier.classify("test", "patch")
+        with patch.dict("sys.modules", {"dspy": None}), pytest.raises(Exception, match=r".*"):
+            classifier.classify("test", "patch")
+
+    def test_unparseable_label_is_a_failure_not_a_negative(self) -> None:
+        """A label that is neither YES nor NO must raise rather than read as NO."""
+        classifier = PerfClassifier()
+        classifier._predictor = MagicMock(return_value=SimpleNamespace(label="MAYBE?", reasoning="hedged"))
+        with pytest.raises(ValueError, match="unusable label"):
+            classifier.classify("test", "patch")
+
+    def test_no_label_is_a_real_negative(self) -> None:
+        """A genuine NO still returns cleanly — the raise must not swallow it."""
+        classifier = PerfClassifier()
+        classifier._predictor = MagicMock(return_value=SimpleNamespace(label="NO", reasoning="docs only"))
+        is_perf, reason = classifier.classify("test", "patch")
         assert is_perf is False
-        assert "failed" in reason.lower()
+        assert reason == "docs only"
 
 
 class TestClassifyJudge:
