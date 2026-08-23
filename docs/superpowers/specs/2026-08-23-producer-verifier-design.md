@@ -104,7 +104,7 @@ Enforced in `severity.py`, in our code. **Not** in the verifier's prompt.
 | measurement timed out | |
 | asv exec failed | |
 | oracle patch failed | |
-| numpy moved during install | |
+| numpy moved by a **major or minor** version during install | |
 
 Two notes on the split.
 
@@ -130,6 +130,16 @@ distribution that is present on PyPI, or appears anywhere in the resolved
 `env_payload`, the claim is rejected and the cause reverts to `missing
 dependency`. Only a module with no installable provider can be a capability
 gap.
+
+**`numpy_moved_during_install` carries a tolerance, and that is deliberate.**
+The breadcrumb was wired on 2026-08-23 and has been observed on exactly two
+builds, on neither of which it fired -- including datashader, which took the
+isolated fallback, the path most likely to move numpy. A hard gate whose
+true-rate has never been observed is a gate with an unknown false-positive
+rate, and this one has no override path by construction. So it fires on a
+major or minor change only. A patch-level move is recorded and does not gate.
+If that tolerance proves wrong the evidence will be in the manifest, because
+the raw before-and-after pair is recorded either way.
 
 An attempt to waive a hard check is ignored and logged as a verifier-side
 violation. This is the structural answer to the standing objection that a
@@ -158,7 +168,22 @@ stateDiagram-v2
 
 **Mode A, build failed.** No image exists, so there is nothing to run. The
 verifier judges the build log and returns the same typed report. This is the
-mode that fires on the backend-missing cluster.
+mode that fires on the backend-missing cluster, 7 of 22 failures.
+
+Mode A was probed separately, because the first feasibility probe was Mode B
+shaped and proved nothing about it. Given the real `BackendUnavailable` log
+from `TileDB-Inc/TileDB-Py#2269`, the verifier returned valid JSON on the first
+attempt, named `scikit_build_core.build` as the missing backend, identified
+`docker_build_pkg.sh` and its exit code, graded it hard, and gave the remedy
+that the eventual fix implemented. It also returned an `evidence_you_lack` list
+naming the `pyproject.toml` and the build script it could not see, which
+validates the request channel from the verifier's side as well as the
+producer's.
+
+Mode A is nonetheless a thinner instrument than Mode B. It sees a log and
+nothing else, which is close to what `_format_prior_attempts` already feeds
+back today. Its value over the status quo is the typed report and the
+no-progress rule below, not deeper insight.
 
 **Mode B, container built.** The verifier runs its battery inside the image and
 collects facts first-hand. A rejected build still leaves a `-final` image, so
@@ -266,6 +291,19 @@ run the command, so failure to execute is a finding about the container.
 A labelled set of 16, every one with a local image already, so the first run
 rebuilds nothing.
 
+**Each entry is pinned by image digest, not by tag**, and the digest is stored
+next to the label along with the template revision that built it. Tags are
+mutable. A later rebuild moves `:<sha>-final` silently, and the set would then
+measure the verifier against labels drawn from a different container than the
+one it inspects.
+
+The pairing was checked by hand when the set was drawn: every image's creation
+time falls inside the window of the `error_logs` row its label came from.
+fluids (image 12:45:58, row 12:48:54, 263s run) and datashader (image 12:45:53,
+row 12:56:45, 734s run) both come from the post-fix rebuild rather than the
+earlier trial. The digest pinning exists so that stays true without being
+rechecked.
+
 | class | n | tasks | expected |
 |---|---|---|---|
 | honest, accepted 2026-08-23 | 4 | networkx#8148, bottleneck#468, trackintel#596, xbatcher#167 | accept |
@@ -283,6 +321,20 @@ integration test asserts on both.
 The measurement is **agreement against the labels**, reported as a confusion
 matrix, with every disagreement inspected by hand. "It accepted the right
 number" is not the result.
+
+### Pass criterion
+
+`DATASMITH_PV_ENABLED` flips to 1 only when all three hold:
+
+1. **Both negative controls rejected.** `attack-demo:1` and pysindy#139. A hard
+   assertion, not a rate.
+2. **Zero false accepts in the hard-grounds class.** A container rejected for a
+   hard reason must not be accepted.
+3. **Every disagreement explained.** Not necessarily resolved -- a disagreement
+   may be the label being wrong -- but read, with its cause written down.
+
+A false *reject* does not block the flip. It costs one rebuild round. A false
+accept puts a bad container in the dataset.
 
 Only 7 of 1858 `candidate_containers` rows carry a `build_manifest`, so the
 verifier must work from a freshly sealed manifest and never from stored state.
@@ -304,8 +356,12 @@ All `DATASMITH_`-prefixed and readable from `tokens.env`, per CLAUDE.md.
 
 1. **Should producer and verifier use different models?** Different backends
    would give genuinely independent priors. Same-model verification may inherit
-   the producer's blind spots. Not resolved. The tunables allow either, so this
-   can be measured on the validation set rather than argued.
+   the producer's blind spots, which is the exact failure this design exists to
+   prevent. All three feasibility probes used codex for both roles, so the
+   **independence claim is currently untested** -- they show the channel works,
+   not that the judgment is independent. The tunables allow either pairing, and
+   the validation set must be run once with different backends before the
+   same-model default is accepted.
 2. **What happens to the soft set after validation?** The severity table is a
    starting position. `pytest_pass_ratio` is being recorded on every run,
    including rejected ones, precisely so the threshold can be set from evidence.
