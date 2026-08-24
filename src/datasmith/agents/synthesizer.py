@@ -6,7 +6,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from datasmith.agents.rate_limit import RateLimitError
 from datasmith.agents.rate_limit import check as check_rate_limit
@@ -15,6 +15,11 @@ from datasmith.agents.tamper_audit import TamperResult, classify_context
 from datasmith.docker.context import DockerContext
 from datasmith.docker.manifest import evaluate_invariants
 from datasmith.utils import get_client, get_logger
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    from datasmith.agents.reflexive.loop import LoopOutcome
+    from datasmith.agents.reflexive.schema import ProducerPlan
+    from datasmith.agents.reflexive.severity import GradedReport
 
 logger = get_logger("agents.synthesizer")
 
@@ -38,6 +43,7 @@ class SynthesisState(str, enum.Enum):
     TRY_SIMILAR = "try_similar"
     TRY_DEFAULT = "try_default"
     LLM_GENERATE = "llm_generate"
+    PRODUCE_VERIFY = "produce_verify"
     FAIL = "fail"
 
 
@@ -284,6 +290,54 @@ class Synthesizer:
                 issue_number,
             )
 
+        # State: PRODUCE_VERIFY — the reflexive producer/verifier loop.
+        #
+        # Replaces LLM_GENERATE when DATASMITH_PV_ENABLED is set. The states
+        # above are untouched: a repo the stock template already builds never
+        # reaches here, and that path costs nothing.
+        #
+        # In this path pytest runs only in the verifier's battery and
+        # severity.py grades the verdict. The legacy `rc != 0` gate in
+        # run_tests applies to TRY_SIMILAR and TRY_DEFAULT only -- otherwise a
+        # container would be rejected on an exit code before the verifier could
+        # weigh it, and the entire soft column would be unreachable.
+        from datasmith.agents.reflexive.loop import DATASMITH_PV_ENABLED
+
+        if DATASMITH_PV_ENABLED and self._agent != "none":
+            self._trace.append(SynthesisState.PRODUCE_VERIFY)
+            outcome = self._run_produce_verify(
+                owner=owner,
+                repo=repo,
+                sha=sha,
+                issue_number=issue_number,
+                repo_image=repo_image,
+                env_payload=env_payload,
+                python_version=python_version,
+                base_sha=base_sha,
+                solution_patch=solution_patch,
+            )
+            if outcome.accepted and outcome.context is not None:
+                self._save_context(
+                    owner,
+                    repo,
+                    sha,
+                    issue_number,
+                    outcome.context,
+                    resource_metrics=outcome.resource_metrics,
+                    build_manifest=outcome.build_manifest,
+                )
+                return outcome.context
+            logger.info(
+                "PRODUCE_VERIFY failed for %s/%s#%d after %d round(s): %s",
+                owner,
+                repo,
+                issue_number,
+                outcome.rounds,
+                outcome.stop_reason,
+            )
+            self._trace.append(SynthesisState.FAIL)
+            return None
+
         # State: LLM_GENERATE (sandbox-based)
         # Skip LLM generation when using the "none" agent — rely only on similar contexts.
         if self._agent == "none":
@@ -381,6 +435,119 @@ class Synthesizer:
         self._trace.append(SynthesisState.FAIL)
         logger.warning("All synthesis attempts failed for %s/%s#%d", owner, repo, issue_number)
         return None
+
+    def _run_produce_verify(
+        self,
+        owner: str,
+        repo: str,
+        sha: str,
+        issue_number: int,
+        repo_image: str,
+        env_payload: str,
+        python_version: str,
+        base_sha: str,
+        solution_patch: str,
+    ) -> LoopOutcome:
+        """Drive the reflexive loop for one task.
+
+        Producer and verifier get SEPARATE agent instances so their contexts
+        cannot merge, even when both resolve to the same backend.
+        """
+        import tempfile
+
+        from datasmith.agents.installed.base import get_agent
+        from datasmith.agents.reflexive.loop import run_loop
+        from datasmith.agents.reflexive.producer import revise as producer_revise
+        from datasmith.agents.reflexive.verifier import verify as verifier_verify
+
+        producer_agent = get_agent([os.environ.get("DATASMITH_PV_PRODUCER_AGENT", "codex")])
+        verifier_agent = get_agent([os.environ.get("DATASMITH_PV_VERIFIER_AGENT", "codex")])
+
+        # `verify_context` runs local_ci.py, which runs run_tests, which fails
+        # on `rc != 0`. Using it here would re-create the exact contradiction
+        # the spec settled: a fluids-shaped container would come back
+        # success=False from the LEGACY pytest gate, mode would become
+        # build_failed, and the verifier would never receive an image to run
+        # its battery against -- so it could never waive anything and the whole
+        # soft column would be unreachable.
+        #
+        # So PRODUCE_VERIFY builds the image WITHOUT the test gate. In this
+        # path pytest runs only in the verifier's battery.
+        last: dict[str, SandboxResult | None] = {"result": None}
+
+        def build(context: DockerContext) -> tuple[bool, str | None, str]:
+            result = verify_context(
+                owner=owner,
+                repo=repo,
+                sha=sha,
+                repo_image=repo_image,
+                env_payload=env_payload,
+                python_version=python_version,
+                context=context,
+                base_sha=base_sha,
+                solution_patch=solution_patch,
+                run_tests_gate=False,
+            )
+            # Keep the whole result. The manifest is what stage 8 gates on, and
+            # a PV-accepted container landing in candidate_containers with a
+            # NULL build_manifest is indistinguishable from one built before
+            # manifests existed.
+            last["result"] = result
+            log = json.dumps(result.failure_json or {})[:200000]
+            # The tag comes from the result, never assumed. verify_context
+            # serves TRY_SIMILAR and does not necessarily tag what this caller
+            # would guess.
+            tag = result.image_tag if result.success else None
+            return bool(result.success), tag, log
+
+        def on_accept() -> tuple[dict | None, dict]:
+            result = last["result"]
+            if result is None:
+                return None, {}
+            return result.build_manifest, result.resource_metrics
+
+        with tempfile.TemporaryDirectory(prefix="fc-pv-") as tmp:
+            workdir = Path(tmp)
+            context = _load_default_context()
+            for filename, field_name in DockerContext._FILE_MAP.items():
+                (workdir / filename).write_text(getattr(context, field_name), encoding="utf-8")
+
+            def revise_and_audit(
+                ctx: DockerContext, graded: GradedReport
+            ) -> tuple[DockerContext | None, ProducerPlan | None]:
+                """Producer edit, then the tamper audit on what it produced.
+
+                The legacy path runs classify_context after TRY_DEFAULT and
+                after every LLM_GENERATE attempt. PRODUCE_VERIFY must too, or
+                producer-side tampering is checked by nobody: the battery
+                collects functional facts, and `tamper_audit` would be a check
+                id nothing can ever emit. The producer is the agent with motive
+                here.
+                """
+                revised, plan = producer_revise(ctx, graded, producer_agent, workdir)
+                if revised is None:
+                    return None, plan
+                tamper = classify_context(revised)
+                if tamper.tampered:
+                    logger.error(
+                        "PRODUCE_VERIFY tamper audit failed for %s/%s#%d: %s",
+                        owner,
+                        repo,
+                        issue_number,
+                        tamper.as_list(),
+                    )
+                    self._log_tamper(owner, repo, sha, issue_number, 0, tamper, "produce_verify")
+                    return None, plan
+                return revised, plan
+
+            return run_loop(
+                context=context,
+                build=build,
+                verify=lambda image, log, mode: verifier_verify(image, log, verifier_agent, mode),
+                revise=revise_and_audit,
+                workdir=workdir,
+                on_accept=on_accept,
+            )
 
     def _check_cache(self, owner: str, repo: str, sha: str) -> DockerContext | None:
         if not sha:
