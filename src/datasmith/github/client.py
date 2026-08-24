@@ -320,10 +320,35 @@ class GitHubClient:
             )
         return self._http
 
-    def _auth_headers(self) -> dict[str, str]:
-        token = self._pool.get_token()
-        self._last_token = token
-        return {"Authorization": f"Bearer {token}"}
+    async def _auth_headers(self) -> dict[str, str]:
+        """Get a usable token, awaiting a rate-limit reset rather than sleeping through it.
+
+        ``TokenPool.get_token`` blocks the calling thread when every token is
+        exhausted.  On the event loop that stops the whole stage: no logging,
+        no other requests, no progress, and nothing to distinguish it from a
+        crash.  A stage 3 run wedged exactly this way -- twenty silent minutes
+        while GitHub reported a full 5 000/5 000 budget, because a single bad
+        rate-limit report had marked the only token spent.
+
+        Awaiting keeps the loop alive, so the periodic notice below actually
+        gets printed and the other in-flight items keep moving.
+        """
+        waited = 0.0
+        while True:
+            token, wait = self._pool.try_get_token()
+            if token is not None:
+                self._last_token = token
+                return {"Authorization": f"Bearer {token}"}
+            if waited == 0.0 or waited % 30 < 5:
+                logger.warning(
+                    "All %d GitHub token(s) are rate-limited; waiting %.0fs (waited %.0fs so far)",
+                    self._pool.size,
+                    wait,
+                    waited,
+                )
+            step = min(wait, 5.0)
+            await asyncio.sleep(step)
+            waited += step
 
     async def _request(
         self,
@@ -344,7 +369,7 @@ class GitHubClient:
         retries = DATASMITH_GH_RETRIES if _retries is None else _retries
         client = await self._client()
         extra_headers = kwargs.pop("headers", {})
-        headers = {**self._auth_headers(), **extra_headers}
+        headers = {**await self._auth_headers(), **extra_headers}
 
         last_exc: Exception | None = None
         resp: httpx.Response | None = None
@@ -367,7 +392,7 @@ class GitHubClient:
                     exc,
                 )
                 await asyncio.sleep(_backoff_delay(attempt))
-                headers = {**self._auth_headers(), **extra_headers}
+                headers = {**await self._auth_headers(), **extra_headers}
                 continue
 
             if resp.status_code in _MISSING_STATUSES:
@@ -398,7 +423,7 @@ class GitHubClient:
                 # exhausted, which stalls the whole event loop; sleeping first
                 # means the reset has passed by the time we ask.
                 await asyncio.sleep(delay)
-                headers = {**self._auth_headers(), **extra_headers}
+                headers = {**await self._auth_headers(), **extra_headers}
                 continue
             resp.raise_for_status()
             return resp

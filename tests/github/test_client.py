@@ -6,6 +6,7 @@ Everything here runs offline against fixtures; nothing reaches GitHub.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from datetime import UTC, datetime, timedelta
@@ -1435,3 +1436,64 @@ class TestTruncatedGraphQLBody:
             pytest.raises(GitHubGraphQLError, match="not valid JSON"),
         ):
             await gh.graphql("query{viewer{login}}")
+
+
+class TestTokenWaitDoesNotBlockTheEventLoop:
+    """An exhausted token must be awaited, never slept through.
+
+    ``TokenPool.get_token`` sleeps the calling thread.  Called from a coroutine
+    that stops the event loop outright: no logging, no other requests, no
+    progress, and nothing that distinguishes it from a crash.  A stage 3 run
+    wedged this way for twenty minutes while GitHub reported a full 5000/5000
+    budget, because one bad rate-limit report had marked the only token spent.
+    """
+
+    async def test_other_tasks_keep_running_while_a_token_is_exhausted(self) -> None:
+        pool = TokenPool(["only"])
+        pool.report_rate_limit("only", remaining=0, reset_at=time.time() + 30)
+        gh = GitHubClient(pool)
+
+        ticks = 0
+
+        async def _heartbeat() -> None:
+            nonlocal ticks
+            for _ in range(5):
+                await asyncio.sleep(0)
+                ticks += 1
+
+        # Time the whole operation, not a window inside it.  Two weaker
+        # versions of this test passed against a thread-blocking implementation
+        # (verified by mutation, 31s vs 0.9s): scheduling order decides whether
+        # the heartbeat runs before or after the block, so any assertion scoped
+        # to part of the run can miss it.  Cancellation cannot be serviced while
+        # the thread is parked, so total elapsed time is the honest signal.
+        started = time.monotonic()
+        waiter = asyncio.ensure_future(gh._auth_headers())
+        await _heartbeat()
+        waiter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiter
+        elapsed = time.monotonic() - started
+
+        assert ticks == 5, "the event loop was blocked while waiting for a token"
+        assert elapsed < 1.0, (
+            f"took {elapsed:.1f}s to cancel a token wait; a coroutine that awaits is "
+            "cancellable immediately, one that sleeps its thread is not"
+        )
+
+    async def test_it_returns_once_the_reset_passes(self) -> None:
+        pool = TokenPool(["only"])
+        pool.report_rate_limit("only", remaining=0, reset_at=time.time() + 0.05)
+        gh = GitHubClient(pool)
+        headers = await asyncio.wait_for(gh._auth_headers(), timeout=10)
+        assert headers["Authorization"] == "Bearer only"
+
+    def test_a_bogus_reset_cannot_wedge_the_pool_forever(self) -> None:
+        """A malformed header used to be trusted verbatim and killed the pool."""
+        from datasmith.utils.tokens import DATASMITH_TOKEN_MAX_RESET_S
+
+        pool = TokenPool(["only"])
+        pool.report_rate_limit("only", remaining=0, reset_at=time.time() + 10**9)
+        token, wait = pool.try_get_token()
+        assert token is None
+        assert wait <= DATASMITH_TOKEN_MAX_RESET_S + 1
