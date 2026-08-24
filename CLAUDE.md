@@ -65,6 +65,13 @@ fc-data --stage 7 --harbor-limit 10                                    # Smoke t
 8. **publish** — Build, verify, and publish Docker images to DockerHub. Only publishes PRs with at least one successful **Daytona** `harbor_runs` row whose `max_speedup >= 1.05`.
 9. **scrape_benchmark_source** — For each `(owner, repo)` in `candidate_containers`, check out the repo at its container SHA, AST-parse every ASV-style benchmark function under the repo's `benchmark_dir`, and upsert one row per `(owner, repo, benchmark_without_params)` into `benchmark_codes` for the FormulaCode website's data sync.
 
+Stage 6 has two synthesis paths. `TRY_DEFAULT` uses the stock template and
+needs no agent. `PRODUCE_VERIFY` (behind `DATASMITH_PV_ENABLED`) runs a
+reflexive loop between a producer agent that owns `docker_build_pkg.sh` and
+`docker_build_run.sh` and a verifier agent that runs the container and grades
+it. Severity is decided in `agents/reflexive/severity.py`, never in the
+verifier's prompt.
+
 ### Dataset verification (`dataset/`)
 
 Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a multi-stage Dockerfile, shell build scripts, and validation scripts. The verification loop is:
@@ -116,6 +123,13 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_RL_MAX_RETRIES`, `DATASMITH_NEIGHBOR_WINDOW_DAYS`,
   `DATASMITH_NEIGHBOR_CAP`, `DATASMITH_BENCH_SCRAPE_MAX_FILE_BYTES`,
   `DATASMITH_BENCH_SCRAPE_DIRS`.
+  The producer/verifier loop (stage 6, `agents/reflexive/`) adds
+  `DATASMITH_PV_ENABLED`, `DATASMITH_PV_MAX_ROUNDS`,
+  `DATASMITH_PV_AGENT_TIMEOUT_S`, `DATASMITH_PV_BATTERY_TIMEOUT_S`,
+  `DATASMITH_PV_EVIDENCE_BUDGET`, `DATASMITH_PV_PRODUCER_AGENT` and
+  `DATASMITH_PV_VERIFIER_AGENT`. `DATASMITH_PV_ENABLED` is off by default and
+  must stay off until the 16-container validation set passes — see
+  `docs/superpowers/specs/2026-08-23-producer-verifier-design.md` section 9.
 
 ## Supabase
 
