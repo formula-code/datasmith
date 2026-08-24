@@ -44,7 +44,12 @@ DATASMITH_PV_BATTERY_TIMEOUT_S: int = int(os.environ.get("DATASMITH_PV_BATTERY_T
 # and asv at /opt/conda/envs/$ENV_NAME/bin/asv.
 #
 # So every env-only binary goes through `micromamba run -n "$ENV_NAME"`.
-_IN_ENV = 'cd "$REPO_ROOT" && micromamba run -n "$ENV_NAME"'
+# `set -o pipefail` is load-bearing on every piped command below. Without it
+# `cmd | tail -N` reports TAIL's exit status, so a command that died still
+# yields rc=0 -- the same inversion as a host-side timeout returning success,
+# which silently verified about 34% of candidate_containers. A verifier that
+# keys on rc would read every pipelined command as fine.
+_IN_ENV = 'set -o pipefail; cd "$REPO_ROOT" && micromamba run -n "$ENV_NAME"'
 
 # Counts asv-convention benchmark functions from SOURCE. Inlined rather than
 # calling a script, because no such script exists in the image and parsing
@@ -130,7 +135,10 @@ BATTERY_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # honesty_probe.py is standalone by design -- its own docstring says it
     # "must not import anything from datasmith" -- so it mounts read-only and
     # runs under the container's interpreter.
-    ("integrity_probe", ("bash", "-lc", 'micromamba run -n "$ENV_NAME" python /opt/fc_probe.py 2>&1 | tail -60')),
+    (
+        "integrity_probe",
+        ("bash", "-lc", 'set -o pipefail; micromamba run -n "$ENV_NAME" python /opt/fc_probe.py 2>&1 | tail -60'),
+    ),
 )
 
 

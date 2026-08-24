@@ -108,3 +108,40 @@ def test_the_probe_is_mounted_read_only_not_baked_into_the_image() -> None:
 
     source = inspect.getsource(battery._docker_runner)
     assert "/opt/fc_probe.py:ro" in source, "the probe mount must be read-only"
+
+
+class TestPipelinesDoNotMaskFailure:
+    """`cmd | tail -N` reports TAIL's exit status, not cmd's.
+
+    Every pipelined battery command ended in `2>&1 | tail -N`, so a command
+    that died still produced rc=0. Demonstrated by the Task 3 auditor: the
+    payload raised SyntaxError and BatteryFact.rc was 0.
+
+    That is the same inversion as a host-side timeout returning success, which
+    silently verified about 34% of candidate_containers. A verifier that keys
+    on rc would read every pipelined command as fine.
+    """
+
+    def test_every_pipelined_command_sets_pipefail(self) -> None:
+        for name, argv in BATTERY_COMMANDS:
+            joined = " ".join(argv)
+            if "|" not in joined:
+                continue
+            assert "pipefail" in joined, f"{name} pipes without pipefail, so rc reports tail's status"
+
+    def test_pipefail_actually_propagates_the_failure(self) -> None:
+        """Guards the guard: prove the shell behaves as the fix assumes."""
+        import subprocess
+
+        without = subprocess.run(
+            ["bash", "-lc", 'python -c "raise SystemExit(3)" 2>&1 | tail -5'],
+            capture_output=True,
+            text=True,
+        )
+        with_pf = subprocess.run(
+            ["bash", "-lc", 'set -o pipefail; python -c "raise SystemExit(3)" 2>&1 | tail -5'],
+            capture_output=True,
+            text=True,
+        )
+        assert without.returncode == 0, "the masking this test exists to prevent"
+        assert with_pf.returncode == 3, "pipefail must surface the real status"
