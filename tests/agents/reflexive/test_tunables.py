@@ -37,10 +37,33 @@ def test_every_pv_constant_is_documented_in_claude_md() -> None:
 
 
 def test_no_undocumented_pv_constant_exists() -> None:
-    """A knob added later must be documented too."""
+    """A knob added later must be documented too.
+
+    Scans ALL of src/datasmith, not just the reflexive subpackage. The first
+    version globbed `reflexive/*.py` only, so DATASMITH_PV_PRODUCER_AGENT and
+    DATASMITH_PV_VERIFIER_AGENT -- which live in synthesizer.py -- escaped the
+    guard entirely while its docstring promised otherwise.
+    """
     documented = (_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     found: set[str] = set()
-    for path in _PKG.glob("*.py"):
-        found |= set(re.findall(r'os\.environ\.get\("(DATASMITH_[A-Z0-9_]+)"', path.read_text(encoding="utf-8")))
+    for path in (_ROOT / "src" / "datasmith").rglob("*.py"):
+        for name in re.findall(r'os\.environ\.get\("(DATASMITH_PV_[A-Z0-9_]+)"', path.read_text(encoding="utf-8")):
+            found.add(name)
+    assert found, "the detector found no PV knobs at all; it is broken"
     missing = sorted(n for n in found if n not in documented)
     assert not missing, f"undocumented tunables: {missing}"
+
+
+def test_every_pv_knob_is_read_at_module_scope() -> None:
+    """CLAUDE.md's tunable pattern: read the env at module top.
+
+    A knob read inside a function is invisible to the grep that finds every
+    other knob in this codebase, and cannot be overridden by tokens.env in the
+    way the convention promises.
+    """
+    offenders: list[str] = []
+    for path in (_ROOT / "src" / "datasmith").rglob("*.py"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "DATASMITH_PV_" in line and "os.environ.get(" in line and line.startswith((" ", "\t")):
+                offenders.append(f"{path.name}: {line.strip()[:80]}")
+    assert not offenders, "PV knobs read below module scope:\n  " + "\n  ".join(offenders)

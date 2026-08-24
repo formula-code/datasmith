@@ -37,6 +37,17 @@ logger = get_logger("agents.synthesizer")
 DATASMITH_SKIP_SIMILAR_CONTEXTS: bool = os.environ.get("DATASMITH_SKIP_SIMILAR_CONTEXTS", "") not in ("", "0")
 
 
+# Which backend plays each role. Read at module scope, per CLAUDE.md's tunable
+# pattern -- these were read inside the call site, which is unreachable to the
+# `os.environ.get(...)` grep that finds every other knob in this codebase.
+#
+# Defaulting both to codex means the two roles share a model. The spec records
+# that the INDEPENDENCE claim is therefore untested: the probes show the
+# channel works, not that the judgement is independent.
+DATASMITH_PV_PRODUCER_AGENT: str = os.environ.get("DATASMITH_PV_PRODUCER_AGENT", "codex")
+DATASMITH_PV_VERIFIER_AGENT: str = os.environ.get("DATASMITH_PV_VERIFIER_AGENT", "codex")
+
+
 class SynthesisState(str, enum.Enum):
     CHECK_CACHE = "check_cache"
     FIND_SIMILAR = "find_similar"
@@ -460,8 +471,8 @@ class Synthesizer:
         from datasmith.agents.reflexive.producer import revise as producer_revise
         from datasmith.agents.reflexive.verifier import verify as verifier_verify
 
-        producer_agent = get_agent([os.environ.get("DATASMITH_PV_PRODUCER_AGENT", "codex")])
-        verifier_agent = get_agent([os.environ.get("DATASMITH_PV_VERIFIER_AGENT", "codex")])
+        producer_agent = get_agent([DATASMITH_PV_PRODUCER_AGENT])
+        verifier_agent = get_agent([DATASMITH_PV_VERIFIER_AGENT])
 
         # `verify_context` runs local_ci.py, which runs run_tests, which fails
         # on `rc != 0`. Using it here would re-create the exact contradiction
