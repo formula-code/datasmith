@@ -565,6 +565,11 @@ def _check_file_integrity(task_dir: Path) -> str | None:
 # ::TestLocalCiSync fails if the two drift apart.
 _MANIFEST_PATH = "/opt/formulacode/build_manifest.json"
 
+# Set from --skip-test-gate by main(); a run flag, not a tunable, so it is
+# deliberately NOT read from the environment. False means the legacy
+# behaviour: pytest's exit code fails the run.
+_SKIP_TEST_GATE = False
+
 
 def _c_timed_out(b: dict, v: dict) -> bool | None:
     return None if v.get("test_timed_out") is None else v["test_timed_out"] is False
@@ -623,12 +628,16 @@ def _c_oracle_patch(b: dict, v: dict) -> bool | None:
 # form would treat "not yet populated" as a violation, which is precisely
 # the inversion this task exists to prevent.
 _FATAL_INVARIANTS = (
-    # Unreachable via verify()'s own control flow: run_tests() already
-    # returns ok=False on timeout, and verify() returns before
-    # check_fatal_invariants runs in that path. Retained (not dead code)
-    # because the merged manifest -- including this field -- is persisted
-    # and re-evaluated downstream by datasmith.docker.manifest.evaluate_invariants,
-    # which has no such short-circuit.
+    # Reached only under --skip-test-gate: in the default path run_tests()
+    # returns ok=False on timeout and verify() returns before
+    # check_fatal_invariants runs. Under the skipped gate this is the
+    # fail-closed backstop -- a timed-out test run still sets
+    # test_timed_out=True in the merged manifest, so it fails here rather
+    # than being laundered into a success. Retained (not dead code) either
+    # way, because the merged manifest -- including this field -- is
+    # persisted and re-evaluated downstream by
+    # datasmith.docker.manifest.evaluate_invariants, which has no such
+    # short-circuit.
     ("test_timed_out", _c_timed_out),
     ("discovered_n_zero", _c_discovered_n),
     # INERT pending a producer for BENCHMARK_DEST: see the matching comment
@@ -784,14 +793,22 @@ def verify(task_dir: Path) -> bool:
         manifest.setdefault("verify", {}).update(verify_fields)
         metrics["build_manifest"] = manifest
 
-    if not ok:
+    # The manifest merge above still happens: skipping the GATE must not skip
+    # collecting the facts, or PRODUCE_VERIFY would accept a container whose
+    # manifest is empty.
+    if not ok and not _SKIP_TEST_GATE:
         print(f"Tests failed for {task_dir.name}")
         _write_failure(task_dir, "tests", stdout=stdout, stderr=stderr, rc=rc, metrics=metrics)
         return False
+    if not ok:
+        print(f"Tests failed for {task_dir.name} -- gate skipped, the verifier grades it")
 
     # Measurement -- prove the container can MEASURE a speedup, not just
-    # build. Runs only after tests pass so a doomed attempt never pays the
-    # ~14-minute median cost.
+    # build. In the default path it runs only after tests pass, so a doomed
+    # attempt never pays the ~14-minute median cost. Under --skip-test-gate
+    # that trade is deliberately reversed: the verifier needs the measurement
+    # facts to grade a container whose pytest run is failing for reasons
+    # severity.py may waive.
     patch_path = str((task_dir / "solution.patch").resolve())
     m_ok, m_stdout, m_stderr, m_rc = run_measure(tag, patch_path, metrics=metrics)
     if manifest is not None:
@@ -818,7 +835,8 @@ def verify(task_dir: Path) -> bool:
         _write_failure(task_dir, "invariants", stdout=stdout, stderr=detail, rc=1, metrics=metrics)
         return False
 
-    print(f"Tests passed for {task_dir.name}")
+    if ok:
+        print(f"Tests passed for {task_dir.name}")
 
     _write_success(task_dir, tag, metrics=metrics)
     print(f"SUCCESS: {task_dir.name}")
@@ -832,6 +850,15 @@ def main() -> None:
         type=Path,
         default=Path("task"),
         help="Task directory (default: task/)",
+    )
+    parser.add_argument(
+        "--skip-test-gate",
+        action="store_true",
+        help=(
+            "Build and seal, but do not fail on pytest's exit code. Used by "
+            "PRODUCE_VERIFY, where pytest runs in the verifier's battery and "
+            "severity.py grades the verdict instead."
+        ),
     )
     parser.add_argument(
         "--test-timeout",
@@ -848,6 +875,10 @@ def main() -> None:
     if args.test_timeout is not None:
         global DATASMITH_VERIFY_TEST_TIMEOUT_S
         DATASMITH_VERIFY_TEST_TIMEOUT_S = args.test_timeout
+
+    if args.skip_test_gate:
+        global _SKIP_TEST_GATE
+        _SKIP_TEST_GATE = True
 
     ok = verify(args.task)
     sys.exit(0 if ok else 1)

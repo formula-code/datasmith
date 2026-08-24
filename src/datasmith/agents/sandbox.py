@@ -111,6 +111,11 @@ class SandboxResult:
     local_ci.py. Distinct from a real verifier failure, and should not
     consume the synthesizer's per-PR attempt budget."""
 
+    # The tag the build actually produced. Callers must never reconstruct it:
+    # verify_context serves TRY_SIMILAR and does not necessarily tag what
+    # another caller would guess.
+    image_tag: str = ""
+
 
 class SandboxRunner:
     """Launch an installed CLI agent in a sandboxed workspace to iteratively fix Docker builds."""
@@ -472,6 +477,25 @@ def _extract_resource_metrics(
     return {}
 
 
+def _extract_image_tag(success_file: Path) -> str:
+    """Read the tag local_ci.py actually built, or "" if it never got that far.
+
+    ``local_ci.py`` records it as ``local_image`` in
+    ``verification_success.json``. Read rather than reconstructed: the tag
+    is local_ci.py's to name, and a caller that rebuilt the string would
+    drift the moment that naming changes.
+    """
+    if not success_file.exists():
+        return ""
+    try:
+        data = json.loads(success_file.read_text())
+    except Exception:
+        logger.debug("Failed to read local_image from success file")
+        return ""
+    tag = data.get("local_image")
+    return tag if isinstance(tag, str) else ""
+
+
 def _extract_build_manifest(success_file: Path, failure_file: Path, failure_json: dict | None) -> dict | None:
     """Pull ``build_manifest`` out of the verification JSON files.
 
@@ -542,11 +566,19 @@ def verify_context(
     timeout_s: int = 3600,
     base_sha: str = "",
     solution_patch: str = "",
+    run_tests_gate: bool = True,
 ) -> SandboxResult:
     """Build and verify a :class:`DockerContext` without launching an agent.
 
     Used by ``Synthesizer.TRY_SIMILAR`` to test whether a previously
     successful build context works for a new commit in the same repository.
+
+    ``run_tests_gate=False`` builds the image and seals the manifest but does
+    NOT fail on pytest's exit code. PRODUCE_VERIFY needs that: in its path
+    pytest runs only in the verifier's battery and severity.py grades the
+    verdict. Leaving the gate on there would reject a container before the
+    verifier could weigh it, which is the contradiction the design settled.
+    Defaults to True so TRY_SIMILAR and TRY_DEFAULT are unchanged.
     """
     start = time.time()
     docker_templates = Path(__file__).parents[1] / "docker" / "templates"
@@ -616,9 +648,11 @@ def verify_context(
         shutil.copy2(str(src_verify), str(workspace / "local_ci.py"))
 
         # Run local_ci.py directly (no agent)
+        skip_gate = [] if run_tests_gate else ["--skip-test-gate"]
+        local_ci_argv = [sys.executable, str(workspace / "local_ci.py"), "--task", str(task_dir), *skip_gate]
         try:
             proc = subprocess.run(
-                [sys.executable, str(workspace / "local_ci.py"), "--task", str(task_dir)],
+                local_ci_argv,
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
@@ -651,6 +685,7 @@ def verify_context(
 
         resource_metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
         build_manifest = _extract_build_manifest(success_file, failure_file, failure_json)
+        tag = _extract_image_tag(success_file)
 
         return SandboxResult(
             success=success,
@@ -660,6 +695,7 @@ def verify_context(
             agent_output=output,
             resource_metrics=resource_metrics,
             build_manifest=build_manifest,
+            image_tag=tag,
         )
 
 
