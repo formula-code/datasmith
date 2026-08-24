@@ -13,8 +13,8 @@ from datasmith.agents.reflexive.schema import Cause, CheckResult, RejectionRepor
 from datasmith.agents.reflexive.severity import classify, grade
 
 
-def _check(cid: str, cause: Cause, **kw) -> CheckResult:
-    return CheckResult(id=cid, verdict="fail", cause=cause, evidence="e", remedy="r", **kw)
+def _check(cid: str, cause: Cause, evidence_override: str = "e", **kw) -> CheckResult:
+    return CheckResult(id=cid, verdict="fail", cause=cause, evidence=evidence_override, remedy="r", **kw)
 
 
 class TestClassify:
@@ -168,3 +168,64 @@ class TestGrade:
         graded = grade(report)
         assert graded.accepted is True
         assert graded.hard_failures == ()
+
+
+class TestSeamsFoundByAudit:
+    """Three weaknesses in the plan's own code, found auditing Task 2.
+
+    The plan is the authority for what to build, not for whether it is right.
+    All three sit in the module whose entire job is to be unbypassable.
+    """
+
+    def test_a_whitespace_only_waiver_does_not_count_as_argued(self) -> None:
+        """`grade` promised a waiver must be ARGUED, not merely asserted.
+
+        It enforced that with truthiness, so "   " passed and the container
+        was accepted on a waiver that says nothing.
+        """
+        report = RejectionReport(
+            verdict=Verdict.ACCEPT,
+            mode="container_built",
+            checks=[_check("pytest_pass_ratio", Cause.OTHER, waiver_reason="   ")],
+        )
+        assert grade(report).accepted is False
+
+    def test_a_real_waiver_still_counts(self) -> None:
+        report = RejectionReport(
+            verdict=Verdict.ACCEPT,
+            mode="container_built",
+            checks=[_check("pytest_pass_ratio", Cause.OTHER, waiver_reason="5 numba failures, commit-invariant")],
+        )
+        assert grade(report).accepted is True
+
+    def test_a_smoke_test_failing_on_a_missing_module_is_hard(self) -> None:
+        """`repo_smoke_test` was unconditionally SOFT.
+
+        That is a broader waiver than pytest_collect or import_sweep get. A
+        smoke test that fails because nothing is installed is a missing
+        dependency, and the producer can fix it.
+        """
+        assert classify("repo_smoke_test", Cause.MODULE_NOT_FOUND) is Severity.HARD
+
+    def test_a_smoke_test_failing_on_a_host_facility_stays_soft(self) -> None:
+        assert classify("repo_smoke_test", Cause.IMPORT_RAISED_ON_HOST_FACILITY) is Severity.SOFT
+
+    def test_a_violation_is_recorded_once_not_twice(self) -> None:
+        """A check that both contradicts its evidence AND falsely claims SOFT
+        appended its id twice, so a caller counting violations double-counted."""
+        report = RejectionReport(
+            verdict=Verdict.ACCEPT,
+            mode="container_built",
+            checks=[
+                _check(
+                    "tamper_audit",
+                    Cause.IMPORT_RAISED_ON_HOST_FACILITY,
+                    evidence_override="ModuleNotFoundError: No module named 'x'",
+                    severity=Severity.SOFT,
+                    waiver_reason="no GPU",
+                )
+            ],
+        )
+        graded = grade(report)
+        assert graded.violations == ("tamper_audit",)
+        assert graded.accepted is False

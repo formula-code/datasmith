@@ -27,7 +27,14 @@ HARD_CHECK_IDS: frozenset[str] = frozenset({
 })
 
 # Checks whose severity depends on the observed cause.
-_SOFT_CHECK_IDS: frozenset[str] = frozenset({"pytest_pass_ratio", "repo_smoke_test"})
+# Soft whatever the cause. Only the pass ratio qualifies: a test that FAILS is
+# a statement about the repository, not about whether we built it.
+#
+# `repo_smoke_test` used to live here and does not any more. Unconditional
+# softness gave it a broader waiver than pytest_collect or import_sweep get,
+# and a smoke test that fails because nothing is installed is a missing
+# dependency the producer can fix.
+_SOFT_CHECK_IDS: frozenset[str] = frozenset({"pytest_pass_ratio"})
 
 # Only this cause can make a check soft. Everything else is hard.
 #
@@ -43,7 +50,7 @@ _SOFTENING_CAUSES: frozenset[Cause] = frozenset({Cause.IMPORT_RAISED_ON_HOST_FAC
 # non-empty waiver_reason. That relocated the standing cheating concern from
 # the producer to a persuaded verifier, which is worse: the verifier is the
 # thing we were trusting.
-_CAUSE_DISCRIMINATED_CHECK_IDS: frozenset[str] = frozenset({"pytest_collect", "import_sweep"})
+_CAUSE_DISCRIMINATED_CHECK_IDS: frozenset[str] = frozenset({"pytest_collect", "import_sweep", "repo_smoke_test"})
 
 # A host-facility claim whose own evidence names ModuleNotFoundError is
 # self-contradicting: nothing was installed, so nothing can have raised for
@@ -83,9 +90,9 @@ class GradedReport:
 def grade(report: RejectionReport) -> GradedReport:
     """Decide the verdict from the checks, ignoring the agent's own verdict.
 
-    A soft failure must carry a written waiver_reason. A waiver has to be
-    argued, not merely asserted, and the reason is what a human reads when the
-    container is later found to be bad.
+    A soft failure must carry a waiver_reason with actual content. A waiver has
+    to be argued, not merely asserted, and the reason is what a human reads
+    when the container is later found to be bad. Whitespace does not argue.
     """
     hard: list[str] = []
     soft: list[str] = []
@@ -96,14 +103,16 @@ def grade(report: RejectionReport) -> GradedReport:
             continue
         actual = classify(check.id, check.cause, check.evidence)
         if contradicts_host_facility_claim(check.cause, check.evidence):
-            violations.append(check.id)
+            if check.id not in violations:
+                violations.append(check.id)
             logger.error(
                 "verifier claimed a host-facility cause for %r while its own evidence "
                 "names ModuleNotFoundError; graded hard",
                 check.id,
             )
         if check.severity is Severity.SOFT and actual is Severity.HARD:
-            violations.append(check.id)
+            if check.id not in violations:
+                violations.append(check.id)
             logger.error(
                 "verifier tried to waive hard check %r as soft (cause=%s, reason=%r); ignored",
                 check.id,
@@ -112,9 +121,11 @@ def grade(report: RejectionReport) -> GradedReport:
             )
         if actual is Severity.HARD:
             hard.append(check.id)
-        elif check.waiver_reason:
+        elif (check.waiver_reason or "").strip():
             soft.append(check.id)
         else:
+            # A waiver has to be ARGUED. Truthiness alone accepted "   ", which
+            # says nothing and still admitted the container.
             hard.append(check.id)
 
     return GradedReport(
