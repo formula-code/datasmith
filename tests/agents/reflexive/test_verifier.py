@@ -127,3 +127,45 @@ class TestVerify:
         verify("img:1", "", agent, mode="container_built", runner=self._runner())
         prompt = agent.exec.call_args[0][0]
         assert "never edit" in prompt.lower() or "read-only" in prompt.lower()
+
+
+class TestTheVerifierStructurallyCannotSeeTheBuildScripts:
+    """A substring check is not an isolation guarantee.
+
+    `test_the_prompt_never_contains_the_producer_scripts_as_writable` asserts
+    only that "read-only" or "never edit" appears in the prompt. It would pass
+    unchanged if the prompt embedded the full text of docker_build_pkg.sh.
+
+    The real guarantee is structural: `verify` is never handed a DockerContext,
+    so it has nothing to leak. Enforced here so a later signature change cannot
+    quietly weaken it.
+    """
+
+    def test_verify_does_not_accept_a_docker_context(self) -> None:
+        import inspect
+
+        from datasmith.agents.reflexive.verifier import verify
+
+        params = inspect.signature(verify).parameters
+        for name, param in params.items():
+            annotation = str(param.annotation)
+            assert "DockerContext" not in annotation, (
+                f"verify() takes {name}: {annotation} -- the verifier must not receive the build context"
+            )
+
+    def test_the_prompt_never_carries_shell_script_bodies(self) -> None:
+        """Belt and braces: a real prompt, checked for script content."""
+        from unittest.mock import MagicMock
+
+        from datasmith.agents.installed.base import AgentResult
+        from datasmith.agents.reflexive.verifier import verify
+
+        agent = MagicMock()
+        agent.name.return_value = "codex"
+        agent.exec.return_value = AgentResult(
+            success=True, output='{"verdict":"accept","mode":"build_failed","checks":[],"evidence_you_lack":[]}'
+        )
+        verify(None, "some build log", agent, mode="build_failed")
+        prompt = agent.exec.call_args[0][0]
+        for marker in ("#!/usr/bin/env bash", "#!/bin/bash", "micromamba activate", "PIP_NO_BUILD_ISOLATION"):
+            assert marker not in prompt, f"prompt carries build-script content: {marker!r}"
