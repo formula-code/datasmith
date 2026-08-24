@@ -55,16 +55,21 @@ _NOISE = (
 
 def _signature(build_log: str) -> str:
     """The line that says WHY. Deterministic, unlike agent-invented ids."""
+    # Truncation and the pipe substitution must match scripts/prepass_trial.py
+    # EXACTLY. They did not: this took [:110] and skipped the substitution
+    # while prepass took [:90] and replaced "|" with "/". The agreement test
+    # written to catch that drift used only branch-1 cases with no pipe, so it
+    # passed while asserting something untrue.
     lines = [ln.strip() for ln in (build_log or "").splitlines() if ln.strip()]
     for ln in reversed(lines):
         if any(marker in ln for marker in _NAMED_CAUSES):
-            return ln[:110]
+            return ln[:90].replace("|", "/")
     for ln in reversed(lines):
         if any(ln.startswith(n) for n in _NOISE):
             continue
         body = re.sub(r"^[#\d.\s]+", "", ln)
         if len(body) > 12:
-            return body[:110]
+            return body[:90].replace("|", "/")
     return "no signature"
 
 

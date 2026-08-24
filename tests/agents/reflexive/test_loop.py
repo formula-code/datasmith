@@ -195,11 +195,23 @@ def test_the_duplicated_signature_agrees_with_the_prepass_one() -> None:
     spec.loader.exec_module(mod)
 
     cases = [
+        # branch 1: a named cause
         "2.15 pip._vendor.pyproject_hooks._impl.BackendUnavailable: Cannot import 'hatchling.build'\n------",
         "!!!!!! Interrupted: 2 errors during collection !!!!!!\nFORMULACODE_SNAPSHOT_END",
         "8.6 ModuleNotFoundError: No module named 'salem'\n------",
         "0.3 fatal: reference is not a tree: abc123\n------",
         "5.5 requirements are unsatisfiable.\n------",
+        # branch 2: no named cause, so the last non-noise line wins. The
+        # original five cases all hit branch 1, so the two implementations
+        # could differ here (they did: [:110] against [:90]) and this test
+        # still passed.
+        "9.9 " + ("x" * 200) + "\n------",
+        "3.1 something went wrong in a way we do not name\n------",
+        # a pipe: prepass replaces it to protect its markdown table, and the
+        # loop must do the same or the two disagree.
+        "8.6 ModuleNotFoundError: No module named 'a|b'\n------",
+        # nothing usable at all
+        "------\nFORMULACODE_SNAPSHOT_END",
     ]
     for case in cases:
         assert loop_sig(case) == mod._signature({"error_message": case}), f"drifted on {case[:40]!r}"
