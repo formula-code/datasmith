@@ -56,32 +56,51 @@ _IN_ENV = 'set -o pipefail; cd "$REPO_ROOT" && micromamba run -n "$ENV_NAME"'
 # imports nothing -- a benchmark module with a missing optional dependency
 # still counts.
 _COUNT_SOURCE = r"""
-import ast, json, os, sys
+import ast, os
+
 conf = os.environ.get("CONF_NAME") or ""
 if not os.path.isabs(conf):
     conf = os.path.join(os.environ.get("REPO_ROOT", "/workspace/repo"), conf)
-try:
-    raw = open(conf, encoding="utf-8", errors="replace").read()
-    stripped = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("//"))
-    bench = json.loads(stripped).get("benchmark_dir") or ""
-    if not os.path.isabs(bench):
-        bench = os.path.join(os.path.dirname(conf), bench)
-    pref = ("time_", "mem_", "peakmem_", "track_", "timeraw_")
-    n = 0
-    for root, _d, files in os.walk(bench):
-        for name in files:
-            if not name.endswith(".py"):
-                continue
-            try:
-                tree = ast.parse(open(os.path.join(root, name), encoding="utf-8", errors="replace").read())
-            except Exception:
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(pref):
-                    n += 1
-    print(n)
-except Exception as exc:
-    print("ERR: %s" % exc)
+
+
+def load_conf(path):
+    # asv.conf.json is JSONC, not JSON. 12 of the 16 validation-set configs
+    # carry an inline `// for git` after a value or a trailing comma before a
+    # brace, and the first draft of this script dropped only WHOLE comment
+    # lines -- so json.loads raised on 12 of 16 and every one of them printed
+    # ERR, which the verifier graded as a hard failure of a healthy container.
+    # asv's own loader is the definition of what this file means, so use it.
+    try:
+        from asv import util
+        try:
+            return util.load_json(path, js_comments=True)
+        except TypeError:
+            return util.load_json(path)
+    except Exception:
+        return {}
+
+
+# benchmark_dir is optional -- asv resolves it relative to the config's own
+# directory and most configs omit it. An unparseable config must not stop the
+# count either: walking the config's directory still finds the benchmark
+# package underneath it, which is a superset, never a silent zero.
+bench = load_conf(conf).get("benchmark_dir") or ""
+if not os.path.isabs(bench):
+    bench = os.path.join(os.path.dirname(conf), bench)
+pref = ("time_", "mem_", "peakmem_", "track_", "timeraw_")
+n = 0
+for root, _d, files in os.walk(bench):
+    for name in files:
+        if not name.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(open(os.path.join(root, name), encoding="utf-8", errors="replace").read())
+        except Exception:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(pref):
+                n += 1
+print(n)
 """
 
 # `shlex.quote`, NOT `repr`. `repr` escapes the newlines into literal
@@ -110,7 +129,20 @@ BATTERY_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (
         "asv_discover",
-        ("bash", "-lc", f'{_IN_ENV} asv run --bench just-discover --config "$CONF_NAME" --python=same 2>&1 | tail -20'),
+        (
+            "bash",
+            "-lc",
+            # --machine is not optional. Every `docker run --rm` gets a fresh
+            # random hostname, asv has no machine record under that name, and
+            # `asv run` exits 1 with "no information stored about machine
+            # <hostname>" -- on EVERY container, healthy or not. Our own
+            # docker_build_final.sh, run-tests.sh and profile.sh all pass
+            # --machine=dockertest for exactly this reason, and the templates
+            # seal that record into ~/.asv-machine.json at build time, so the
+            # name is a protocol identifier here rather than a tunable.
+            f'{_IN_ENV} asv run --bench just-discover --config "$CONF_NAME" --python=same '
+            "--machine=dockertest 2>&1 | tail -20",
+        ),
     ),
     ("source_benchmark_count", ("bash", "-lc", f"{_IN_ENV} python -c {_COUNT_SOURCE_ARG} 2>&1 | tail -3")),
     (

@@ -8,6 +8,14 @@ run this command, so failure to execute is a finding about the container.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
 from datasmith.agents.reflexive.battery import BATTERY_COMMANDS, run_battery
 
 
@@ -145,3 +153,87 @@ class TestPipelinesDoNotMaskFailure:
         )
         assert without.returncode == 0, "the masking this test exists to prevent"
         assert with_pf.returncode == 3, "pipefail must surface the real status"
+
+
+def test_asv_discover_pins_the_machine_name() -> None:
+    """Without --machine, asv_discover fails on EVERY container.
+
+    `docker run --rm` hands the container a fresh random hostname, asv has no
+    machine record under that name, and `asv run` exits 1 with "no information
+    stored about machine <hostname>". The first validation run rejected a
+    healthy 10/10 networkx container on exactly that, and would have rejected
+    all 16 -- a gate that fails identically on every input measures nothing.
+    Our own run-tests.sh and profile.sh pass --machine=dockertest, and the
+    templates seal that record into the image.
+    """
+    argv = dict(BATTERY_COMMANDS)["asv_discover"]
+    assert "--machine=dockertest" in " ".join(argv)
+
+
+def _run_count_source(conf_dir: Path, env_extra: dict[str, str] | None = None) -> str:
+    from datasmith.agents.reflexive.battery import _COUNT_SOURCE
+
+    env = {**os.environ, "CONF_NAME": "asv.conf.json", "REPO_ROOT": str(conf_dir)}
+    env.update(env_extra or {})
+    proc = subprocess.run([sys.executable, "-c", _COUNT_SOURCE], capture_output=True, text=True, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+_JSONC_CONF = """\
+{
+    // A line comment, which the first draft did handle.
+    "version": 1,
+    "project": "demo",
+    "branches": ["main"], // an INLINE comment, which it did not.
+    "benchmark_dir": "bench",
+    "matrix": {
+        "numpy": [],
+    }
+}
+"""
+
+
+def test_the_source_count_survives_a_jsonc_config(tmp_path: Path) -> None:
+    """asv.conf.json is JSONC, and 12 of the 16 validation configs prove it.
+
+    Inline `// for git` after a value and a trailing comma before a brace both
+    defeat `json.loads`, and the first draft printed `ERR: ...` -- which the
+    verifier graded as a hard failure of a perfectly healthy container.
+    """
+    conf_dir = tmp_path / "conf"
+    (conf_dir / "bench").mkdir(parents=True)
+    (conf_dir / "asv.conf.json").write_text(_JSONC_CONF, encoding="utf-8")
+    (conf_dir / "bench" / "b.py").write_text("def time_a(): pass\ndef track_b(): pass\n", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(_JSONC_CONF)  # the config really is not plain JSON
+
+    out = _run_count_source(conf_dir)
+    assert "ERR" not in out, out
+    assert out.splitlines()[-1] == "2", out
+
+
+def test_the_source_count_prefers_asvs_own_loader(tmp_path: Path) -> None:
+    """asv's loader is the definition of what asv.conf.json means.
+
+    A stub asv on the path that points benchmark_dir somewhere else must move
+    the count, or the script is silently ignoring it and guessing.
+    """
+    conf_dir = tmp_path / "conf"
+    (conf_dir / "bench").mkdir(parents=True)
+    (conf_dir / "elsewhere").mkdir(parents=True)
+    (conf_dir / "asv.conf.json").write_text(_JSONC_CONF, encoding="utf-8")
+    (conf_dir / "bench" / "b.py").write_text("def time_a(): pass\ndef track_b(): pass\n", encoding="utf-8")
+    (conf_dir / "elsewhere" / "c.py").write_text("def time_only_one(): pass\n", encoding="utf-8")
+
+    stub = tmp_path / "stub"
+    (stub / "asv").mkdir(parents=True)
+    (stub / "asv" / "__init__.py").write_text("", encoding="utf-8")
+    (stub / "asv" / "util.py").write_text(
+        "def load_json(path, api_version=None, js_comments=False):\n    return {'benchmark_dir': 'elsewhere'}\n",
+        encoding="utf-8",
+    )
+
+    out = _run_count_source(conf_dir, {"PYTHONPATH": str(stub)})
+    assert out.splitlines()[-1] == "1", out
