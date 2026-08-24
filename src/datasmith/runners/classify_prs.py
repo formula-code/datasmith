@@ -155,7 +155,14 @@ class ClassifyPRsRunner(BaseRunner):
             patch = diff.text
             fetched = True
 
-        if not check_patch_size(patch):
+        # Off the event loop.  check_patch_size can fall through to tiktoken,
+        # which is CPU-bound BPE over the whole diff, and PostHog patches reach
+        # 150 KB.  Called inline it stalled the loop for minutes at a time:
+        # every other item stopped, the pacer stopped, and the stall logger
+        # built to report exactly this could not run either, so the stage went
+        # silent and looked like a deadlock.
+        size_ok = await asyncio.get_running_loop().run_in_executor(self._executor, check_patch_size, patch)
+        if not size_ok:
             # The last component of the symbolic screen, evaluated where the
             # diff is.  Stage 2 wrote is_performance_commit_symbolic from the
             # title filter and file compliance alone; this completes it.

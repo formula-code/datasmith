@@ -143,7 +143,28 @@ def estimate_tokens(text: str) -> int:
 
 
 def check_patch_size(patch: str) -> bool:
-    """Return True if patch token count is within acceptable bounds."""
+    """Return True if patch token count is within acceptable bounds.
+
+    Decides from length alone whenever length is conclusive, because
+    tokenising is not cheap and this runs on every candidate PR.  A token is
+    at least one character, so:
+
+    * fewer than ``MIN_PATCH_TOKENS`` characters cannot reach the floor;
+    * at most ``MAX_PATCH_TOKENS`` characters cannot exceed the ceiling.
+
+    Only a patch between those two bounds is genuinely ambiguous and worth
+    encoding.  This matters more than it looks: ``tiktoken`` is CPU-bound BPE,
+    and PostHog diffs reach 150 KB.  Stage 3 called this straight from its
+    coroutine, so a single large patch stalled the whole event loop -- every
+    other item, the pacer, and the logging that was supposed to report the
+    stall.  The caller now also runs it off the loop; this keeps most calls
+    from needing a thread at all.
+    """
+    length = len(patch)
+    if length < MIN_PATCH_TOKENS:
+        return False
+    if length <= MAX_PATCH_TOKENS:
+        return True
     n = estimate_tokens(patch)
     return MIN_PATCH_TOKENS <= n <= MAX_PATCH_TOKENS
 
