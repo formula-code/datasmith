@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from datasmith.agents.classifiers import (
     ClassifyJudge,
     OptimizationType,
     PerfClassifier,
+    _truncate_to_tokens,
 )
 
 
@@ -274,3 +276,49 @@ class TestPerfClassifierInstructions:
         with patch.dict("sys.modules", {"dspy": mock_dspy}), contextlib.suppress(Exception):
             classifier._get_predictor()
         assert captured.get("doc") == PERF_CLASSIFIER_INSTRUCTIONS
+
+
+class TestPerfClassifierTruncatesItsPatch:
+    """An oversized patch must be cut, not sent and retried forever.
+
+    ClassifyJudge always truncated; PerfClassifier never did.  A patch larger
+    than the model's context came back as ContextWindowExceededError, which no
+    retry can fix because the patch is the same size next time -- and because a
+    failed classify correctly leaves is_performance_commit NULL, the stage 3
+    resume predicate re-selected that row on every future run.
+    """
+
+    def test_oversized_patch_is_truncated_before_the_call(self) -> None:
+        seen: dict[str, str] = {}
+
+        def _capture(**kw: Any) -> Any:
+            seen.update(kw)
+            return SimpleNamespace(label="NO", reasoning="r")
+
+        classifier = PerfClassifier()
+        classifier._predictor = _capture
+        huge = "x " * 400_000
+        classifier.classify("t", huge)
+        assert len(seen["github_patch"]) < len(huge)
+        assert "TRUNCATED" in seen["github_patch"]
+
+    def test_small_patch_is_passed_through_untouched(self) -> None:
+        seen: dict[str, str] = {}
+
+        def _capture(**kw: Any) -> Any:
+            seen.update(kw)
+            return SimpleNamespace(label="NO", reasoning="r")
+
+        classifier = PerfClassifier()
+        classifier._predictor = _capture
+        patch = "--- a/x.py\n+++ b/x.py\n@@\n-slow\n+fast\n"
+        classifier.classify("t", patch)
+        assert seen["github_patch"] == patch
+
+    def test_truncation_survives_a_missing_tiktoken(self) -> None:
+        """Returning the text untouched is what let the overflow through."""
+        huge = "x " * 400_000
+        with patch.dict("sys.modules", {"tiktoken": None}):
+            out = _truncate_to_tokens(huge, 1000)
+        assert len(out) < len(huge)
+        assert "TRUNCATED" in out

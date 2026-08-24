@@ -190,6 +190,42 @@ answer YES", admitted ``CI: Bump dask`` and ``DOC: whats new v0.20``.
 """
 
 
+DATASMITH_CLASSIFY_PATCH_TOKENS: int = int(
+    os.environ.get("DATASMITH_CLASSIFY_PATCH_TOKENS", os.environ.get("DSPY_MAX_TOKENS", "16000"))
+)
+"""Token ceiling on the patch handed to :class:`PerfClassifier`.
+
+Separate from the stage 3 size gate.  The gate decides whether a PR is worth
+classifying at all; this decides how much of an accepted patch the model is
+shown, and exists so a patch can never overflow the model's context.
+"""
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Cut *text* to *max_tokens*, marking the cut so the model knows it happened.
+
+    Falls back to a characters-per-token estimate when tiktoken is missing,
+    because returning the text untouched is what allowed a context overflow to
+    reach the model in the first place.
+    """
+    if not text:
+        return text
+    try:
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        tokens = enc.encode(text)
+        if len(tokens) <= max_tokens:
+            return text
+        return enc.decode(tokens[: max_tokens - 10]) + "\n\n// [TRUNCATED DUE TO LENGTH]"
+    except Exception:
+        # ~4 characters per token, the same heuristic filters.estimate_tokens falls back to.
+        limit = max_tokens * 4
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "\n\n// [TRUNCATED DUE TO LENGTH]"
+
+
 class PerfClassifier:
     """Binary classifier: is this PR a performance improvement?"""
 
@@ -235,9 +271,16 @@ class PerfClassifier:
         column NULL, so the next run picks the PR up again.
         """
         predictor = self._get_predictor()
+        # Truncate before the call, never after a failure.  ClassifyJudge has
+        # always done this and PerfClassifier never did, so an oversized patch
+        # reached the model and came back as ContextWindowExceededError.  That
+        # is unrecoverable by retry -- the patch is the same size next time --
+        # and since a failed classify leaves is_performance_commit NULL, the
+        # resume predicate re-selected the row on every subsequent run.  A
+        # permanent failure dressed as a transient one.
         result = predictor(
             problem_description=problem_description,
-            github_patch=github_patch,
+            github_patch=_truncate_to_tokens(github_patch, DATASMITH_CLASSIFY_PATCH_TOKENS),
             file_change_summary=file_change_summary,
         )
         label = str(getattr(result, "label", "")).strip().upper()
