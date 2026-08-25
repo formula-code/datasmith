@@ -271,6 +271,34 @@ def _warn_unstable_pagination(table: str) -> None:
 WINDOW_COLUMN = "merged_at"
 
 
+def excluded_repos() -> set[tuple[str, str]]:
+    """Return the ``(owner, repo)`` pairs taken out of ingestion.
+
+    Driven by ``repositories.ingest_enabled`` (migration 00030) rather than an
+    env knob, so the reason and the date travel with the data and an operator on
+    another machine sees the same state.
+
+    One helper for every stage that honours it, for the same reason
+    :func:`window_filters` exists: the ingestion window was wrong for months
+    because it was hand-written per stage and nothing forced the copies to
+    agree. An exclusion honoured in stage 2 and forgotten in stage 3 would waste
+    exactly the budget it was added to save.
+
+    Fails open. If the column does not exist yet -- a database that has not run
+    00030 -- this returns an empty set and ingestion behaves as it always did,
+    because refusing to ingest anything is a far worse failure than ingesting a
+    repository that produces nothing.
+    """
+    try:
+        rows = fetch_all("repositories", select="owner, repo", filters={"ingest_enabled": False})
+    except Exception:
+        logger.warning(
+            "repositories.ingest_enabled is unavailable (migration 00030 not applied?); ingesting every repository",
+        )
+        return set()
+    return {(r["owner"], r["repo"]) for r in rows}
+
+
 def window_filters(start_date: str | None, end_date: str | None) -> dict[str, Any]:
     """Return the ``fetch_all`` kwargs that select one pipeline run's window.
 

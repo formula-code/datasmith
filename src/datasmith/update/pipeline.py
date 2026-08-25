@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from datasmith.utils import get_client, get_logger
-from datasmith.utils.db import fetch_all, window_filters
+from datasmith.utils.db import excluded_repos, fetch_all, window_filters
 
 logger = get_logger("update.pipeline")
 
@@ -462,7 +462,13 @@ class Pipeline:
         from datasmith.utils.tokens import TokenPool
 
         rows = fetch_all("repositories", select="owner, repo")
-        items = [(r["owner"], r["repo"]) for r in rows]
+        # Repositories that have never produced a container are dropped here
+        # rather than downstream, so they cost nothing at all: no GraphQL, no
+        # stored PRs, and therefore no diff fetch or LLM call later either.
+        skip = excluded_repos()
+        items = [(r["owner"], r["repo"]) for r in rows if (r["owner"], r["repo"]) not in skip]
+        if skip:
+            logger.info("scrape_commits: skipping %d repository(ies) excluded from ingestion", len(skip))
 
         if self._dry_run:
             self._log_dry_run_summary(
@@ -511,6 +517,21 @@ class Pipeline:
         if not self._force:
             classify_kwargs["is_null"] = ["is_performance_commit"]
         rows = fetch_all("pull_requests", **classify_kwargs)
+        # Stage 2 stops storing NEW rows for an excluded repository, but rows it
+        # stored before the exclusion are still here and would each cost a REST
+        # call and an LLM call. Filtered in Python rather than in the query
+        # because PostgREST has no NOT IN over composite keys, and the excluded
+        # set is a handful of pairs.
+        skip = excluded_repos()
+        if skip:
+            before = len(rows)
+            rows = [r for r in rows if (r["owner"], r["repo"]) not in skip]
+            if before != len(rows):
+                logger.info(
+                    "classify_prs: skipped %d PR(s) from %d excluded repository(ies)",
+                    before - len(rows),
+                    len(skip),
+                )
         items = [
             {
                 "owner": r["owner"],
