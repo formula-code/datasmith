@@ -132,6 +132,12 @@ def measure_block(
         "benchmarks_impactable_n": impactable_n,
         "benchmarks_measured_n": measured_n,
         "benchmarks_degenerate_n": degenerate_n,
+        # Selected to run but produced no result at all (worker killed on
+        # timeout / errored). Distinct from `degenerate`, which DID return a
+        # value that could not be turned into a ratio. None when the LSV in
+        # this image predates the field, so an invariant over it SKIPS rather
+        # than reading a missing count as zero.
+        "benchmarks_dropped_n": measure.get("dropped_count"),
         "geomean_speedup": geomean_fn(values) if values else None,
         "max_speedup": max(values) if values else None,
     }

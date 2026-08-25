@@ -52,7 +52,22 @@ def detect_source_root() -> Path:
     config_path = Path("/tests/config.json")
     if not config_path.exists():
         config_path = Path("/workspace/repo/tests/config.json")
-    config = json.loads(config_path.read_text())
+    # /tests/config.json is a HARBOR TRIAL artifact. It does not exist during
+    # stage-6 verification, where measure.sh runs lsv_init inside a freshly
+    # built image with nothing mounted. Reading it unconditionally makes
+    # detect_source_root raise FileNotFoundError before LSV is even imported,
+    # so no baseline is ever recorded -- which is exactly the failure momepy#237
+    # was rejected for, and the failure pysindy#139's tampered stub converted
+    # into a fabricated 1.0x. An absent config is normal; treat it as empty.
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+        except (OSError, ValueError):
+            config = {}
+    else:
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
     patch = config.get("patch", "")
     paths = re.findall(r"diff --git a/([^ ]+)", patch)
 
@@ -68,6 +83,23 @@ def detect_source_root() -> Path:
     roots = {p.split("/")[0] for p in paths if "/" in p} - skip
 
     pkg = config.get("repo_name", "").split("/")[-1].replace("-", "_")
+
+    # Without the Harbor config there is no repo_name, so recover the package
+    # name from the git remote. Every task image is a clone, so origin is set.
+    if not pkg:
+        try:
+            origin = subprocess.check_output(
+                ["git", "-C", str(REPO_ROOT), "remote", "get-url", "origin"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            origin = ""
+        if origin:
+            pkg = origin.rstrip("/").rsplit("/", 1)[-1]
+            if pkg.endswith(".git"):
+                pkg = pkg[: -len(".git")]
+            pkg = pkg.replace("-", "_")
 
     if len(roots) == 1 and next(iter(roots)) not in src_layout_holders:
         cand = REPO_ROOT / next(iter(roots))
@@ -89,6 +121,19 @@ def detect_source_root() -> Path:
             cand = (REPO_ROOT / layout / pkg) if layout else (REPO_ROOT / pkg)
             if cand.is_dir():
                 return cand
+
+    # Last resort before handing LSV a path that does not exist: any top-level
+    # importable package. Prefer one matching pkg, else the shallowest by name.
+    top_level_pkgs = [
+        d
+        for d in REPO_ROOT.iterdir()
+        if d.is_dir() and (d / "__init__.py").is_file() and d.name not in skip
+    ]
+    if top_level_pkgs:
+        for cand in top_level_pkgs:
+            if pkg and cand.name == pkg:
+                return cand
+        return sorted(top_level_pkgs, key=lambda d: (len(d.parts), d.name))[0]
 
     return REPO_ROOT / (pkg or "src")
 
@@ -281,6 +326,23 @@ def main() -> None:
     parser.add_argument(
         "--rounds", type=int, default=1, help="Number of timing rounds (default: 1)"
     )
+    # `rounds` is consumed master-side by asv/runner.py's get_rounds and
+    # MULTIPLIES the worker's per-round sample count: pooled = rounds x repeat.
+    # The auto-repeat halving in asv_runner reads the WORKER's self.rounds --
+    # set in TimeBenchmark.__init__ from the repo's own class attr and never
+    # re-read by _load_vars() -- so --rounds is strictly monotone in samples.
+    # --repeat IS re-read worker-side, but setting it switches the per-round
+    # budget from max_time=20s to max_time=self.timeout, and an overrun is
+    # dropped silently by _extract_deltas. None = leave asv on auto.
+    parser.add_argument(
+        "--repeat", type=int, default=None, help="Samples per round (default: asv auto)"
+    )
+    parser.add_argument(
+        "--warmup-time",
+        type=float,
+        default=None,
+        help="Warmup seconds before timing (default: asv auto)",
+    )
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -297,7 +359,7 @@ def main() -> None:
     print(f"[{_ts()}] [lsv_init] source_root={source_root}")
     print(f"[{_ts()}] [lsv_init] config_path={config_path}")
     print(f"[{_ts()}] [lsv_init] branch={branch_name}")
-    print(f"[{_ts()}] [lsv_init] rounds={args.rounds}")
+    print(f"[{_ts()}] [lsv_init] rounds={args.rounds} repeat={args.repeat} warmup_time={args.warmup_time}")
 
     from asv.contrib.lightspeed import LightspeedSession
 
@@ -321,7 +383,11 @@ def main() -> None:
     print("=" * 64)
 
     init_result = session.initialize_diffcheck(
-        source_root=source_root, force=True, rounds=args.rounds
+        source_root=source_root,
+        force=True,
+        rounds=args.rounds,
+        repeat=args.repeat,
+        warmup_time=args.warmup_time,
     )
 
     print(

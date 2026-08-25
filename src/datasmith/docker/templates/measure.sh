@@ -30,6 +30,33 @@ set -u
 
 PATCH_FILE="${1:-/tmp/solution.patch}"
 ROUNDS="${DATASMITH_VERIFY_MEASURE_ROUNDS:-2}"
+# `rounds` is consumed MASTER-side only (asv/runner.py get_rounds), so it
+# MULTIPLIES whatever the worker decides: pooled samples per leg =
+# rounds x per_round_repeat. `repeat` is consumed worker-side and is
+# re-read from extra_params by TimeBenchmark._load_vars().
+#
+# asv_runner's `if self.rounds > 1: max_repeat //= 2` halving reads the
+# WORKER's self.rounds -- set once in __init__ from the repo's own class
+# attr and NEVER re-read by _load_vars() -- so raising --rounds does not
+# trigger extra halving. --rounds is strictly monotone in sample count.
+#
+# Setting --repeat explicitly is NOT free: asv_runner switches the
+# per-round time budget from the auto path's max_time=20s (10s when the
+# repo declares rounds>1) to max_time=self.timeout (fallback 60s). A
+# benchmark that then overruns is killed master-side, comes back as
+# result=None, and lightspeed's _extract_deltas drops it with a bare
+# `continue` -- shrinking the geomean base with no error recorded.
+# Prefer raising rounds; leave repeat on auto unless you have measured
+# the timeout exposure for the repos involved.
+#
+# The >= 6 target comes from asv._stats.is_different's own guard
+# p_min = 1/binom(n_a+n_b, min(n_a,n_b)): 5+5 -> 0.00397 > p_threshold
+# 0.002, 6+6 -> 0.00108. Empty = leave asv on auto.
+REPEAT="${DATASMITH_VERIFY_MEASURE_REPEAT:-}"
+WARMUP_S="${DATASMITH_VERIFY_MEASURE_WARMUP_S:-}"
+LSV_TUNING=()
+[ -n "$REPEAT" ]   && LSV_TUNING+=(--repeat "$REPEAT")
+[ -n "$WARMUP_S" ] && LSV_TUNING+=(--warmup-time "$WARMUP_S")
 PATCH_INFO=/opt/formulacode/patch_info.json
 export LSV_OUTPUT_DIR="${LSV_OUTPUT_DIR:-/logs/artifacts/lsv}"
 
@@ -67,8 +94,8 @@ if ! "${PY_RUN[@]}" -c "import asv.contrib.lightspeed" >/dev/null 2>&1; then
 fi
 
 # ── 2. Baseline at the base commit ───────────────────────────────────────
-echo "[measure] LSV init (rounds=${ROUNDS}) ..."
-"${PY_RUN[@]}" /opt/lsv/lsv_init.py --rounds "$ROUNDS" || \
+echo "[measure] LSV init (rounds=${ROUNDS} repeat=${REPEAT:-auto} warmup=${WARMUP_S:-auto}) ..."
+"${PY_RUN[@]}" /opt/lsv/lsv_init.py --rounds "$ROUNDS" "${LSV_TUNING[@]+"${LSV_TUNING[@]}"}" || \
   echo "[measure] WARNING: lsv_init exited non-zero; continuing to record the failure"
 
 # ── 3. Apply the oracle patch (benchmark/asv sections dropped) ───────────
@@ -81,9 +108,9 @@ echo "[measure] applying oracle patch from ${PATCH_FILE} ..."
   --out "$PATCH_INFO" || echo "[measure] WARNING: apply_oracle_patch exited non-zero"
 
 # ── 4. Measure the impacted set after the patch ──────────────────────────
-echo "[measure] LSV measure (rounds=${ROUNDS}) ..."
+echo "[measure] LSV measure (rounds=${ROUNDS} repeat=${REPEAT:-auto} warmup=${WARMUP_S:-auto}) ..."
 "${PY_RUN[@]}" /opt/lsv/lsv_measure.py \
-  --base-commit "$BASE_SHA" --rounds "$ROUNDS" || \
+  --base-commit "$BASE_SHA" --rounds "$ROUNDS" "${LSV_TUNING[@]+"${LSV_TUNING[@]}"}" || \
   echo "[measure] WARNING: lsv_measure exited non-zero; continuing to record the failure"
 
 # ── 5. Emit the block ────────────────────────────────────────────────────

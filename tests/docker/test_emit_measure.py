@@ -200,3 +200,51 @@ class TestLsvUnavailable:
         fns = m.load_parser_fns(str(_PARSER))
         b = m.measure_block(_lsv({}), _patch_info(), "sha", 2, *fns, "")
         assert b["measure_error"] is None
+
+
+class TestDroppedBenchmarks:
+    """`benchmarks_dropped_n` must be three-valued.
+
+    A benchmark that asv SELECTED but returned no result for (worker killed on
+    timeout, or errored) is discarded by lightspeed's ``_extract_deltas`` with a
+    bare ``continue``. The geomean then covers a smaller population, and a
+    shrinking measured set looks exactly like a genuinely quieter one.
+
+    The failure this guards is the reverse: an LSV predating
+    ``MeasureResult.dropped`` cannot report drops at all, so the count must be
+    ``None`` (invariant SKIPS) and never ``0`` (invariant reads "no drops" and
+    PASSES). Observed live on networkx#8148, where
+    ``time_betweenness_centrality-3`` vanished from 8 of 12 measure runs while a
+    ``getattr(..., [])`` default reported ``dropped_count == 0`` throughout.
+    """
+
+    def test_absent_key_is_none_not_zero(self):
+        m = _load()
+        lsv = _lsv({"mod.C.time_a": {"baseline": 0.4, "current": 0.2}})
+        lsv["measure"].pop("dropped_count", None)
+        assert _block(m, lsv)["benchmarks_dropped_n"] is None
+
+    def test_zero_is_preserved_as_zero(self):
+        m = _load()
+        lsv = _lsv({"mod.C.time_a": {"baseline": 0.4, "current": 0.2}})
+        lsv["measure"]["dropped_count"] = 0
+        assert _block(m, lsv)["benchmarks_dropped_n"] == 0
+
+    def test_a_real_drop_is_reported(self):
+        m = _load()
+        lsv = _lsv({"mod.C.time_a": {"baseline": 0.4, "current": 0.2}})
+        lsv["measure"]["dropped_count"] = 3
+        assert _block(m, lsv)["benchmarks_dropped_n"] == 3
+
+    def test_dropped_is_independent_of_degenerate(self):
+        """A dropped benchmark never appears in `benchmarks`; a degenerate one does."""
+        m = _load()
+        lsv = _lsv({
+            "mod.C.time_a": {"baseline": 0.4, "current": 0.2},
+            "mod.C.time_b": {"baseline": None, "current": 0.2},
+        })
+        lsv["measure"]["dropped_count"] = 2
+        b = _block(m, lsv)
+        assert b["benchmarks_measured_n"] == 1
+        assert b["benchmarks_degenerate_n"] == 1
+        assert b["benchmarks_dropped_n"] == 2
