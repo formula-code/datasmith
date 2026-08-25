@@ -184,4 +184,53 @@ def select_interpreter(
         if allowed:
             return InterpreterChoice(version=allowed[0], source=source)
 
+    # Nothing declared was usable. Distinguish "the project said nothing" from
+    # "the project said something this operator does not build", because they
+    # call for different actions and the version chosen is the same either way.
+    #
+    # The first real run made the difference matter: PostHog declares
+    # ``==3.13.13`` on 2,775 commits, and with the ceiling at 3.12 every one of
+    # them recorded ``commit-date`` -- indistinguishable from a repository that
+    # declares nothing at all. 99% of that run's ``commit-date`` rows were this
+    # case. ``ceiling-clamped`` says which knob to turn.
+    if _clamped_by_ceiling(requires_python, trove_versions, asv_pythons, commit_date):
+        return InterpreterChoice(version=available[0], source="ceiling-clamped")
     return InterpreterChoice(version=available[0], source="commit-date")
+
+
+def _clamped_by_ceiling(
+    requires_python: str | None,
+    trove_versions: Iterable[str],
+    asv_pythons: Iterable[str | tuple[int, ...]],
+    commit_date: dt.datetime,
+) -> bool:
+    """Would some rung have matched if ``DATASMITH_PYTHON_CEILING`` were higher?
+
+    Re-runs the same rungs against the interpreters the ceiling excluded. Only
+    the ceiling is lifted -- the floor and the commit date still apply, so a
+    declaration that is merely too old, or names an interpreter that did not
+    exist yet, is not reported as clamped.
+    """
+    floor = _as_tuple(DATASMITH_PYTHON_FLOOR)
+    ceiling = _as_tuple(DATASMITH_PYTHON_CEILING)
+    above = [
+        f"{key[0]}.{key[1]}"
+        for key, released in PY_RELEASES.items()
+        if key >= floor and key > ceiling and released <= commit_date
+    ]
+    if not above:
+        return False
+
+    if requires_python:
+        try:
+            spec = SpecifierSet(requires_python)
+        except InvalidSpecifier:
+            spec = None
+        if spec is not None and any(_declares_minor(spec, v) for v in above):
+            return True
+
+    for candidates in (trove_versions, asv_pythons):
+        declared = {_declared_version(v) for v in candidates}
+        if any(v in declared for v in above):
+            return True
+    return False

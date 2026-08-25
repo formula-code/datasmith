@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2, rmtree
 
-DATASMITH_LSV_ROUNDS: int = int(os.environ.get("DATASMITH_LSV_ROUNDS", "5"))
-
 from datasmith.harbor_adapter.utils import (
+    DATASMITH_LSV_ROUNDS,
     render_dockerfile,
     render_instruction_md,
     render_run_setup_sh,

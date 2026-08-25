@@ -34,7 +34,7 @@ class AperiodicBenchmarks:
     param_names = ["graph"]
 
     def setup(self, graph):
-        self.graphs_dict = dict(zip(self.params, self._graphs))
+        self.graphs_dict = dict(zip(self.params, self._graphs, strict=False))
 
     def time_is_aperiodic(self, graph):
         _ = nx.is_aperiodic(self.graphs_dict[graph])

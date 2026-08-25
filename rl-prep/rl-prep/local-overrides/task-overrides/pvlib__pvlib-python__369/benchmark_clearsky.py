@@ -1,11 +1,10 @@
 import os
 from unittest.mock import patch
 
-from pandas import date_range
-
 import pvlib
 import pvlib.clearsky
 import scipy.io
+from pandas import date_range
 
 # Load mat file once at import time — ~340ms per call otherwise, masking speedup.
 _MAT_FP = os.path.join(os.path.dirname(pvlib.__file__), "data", "LinkeTurbidities.mat")
@@ -26,19 +25,12 @@ class TimeLookupLinkeTurbidity:
 
     def time_lookup_linke_turbidity_large(self):
         with patch("scipy.io.loadmat", return_value=_CACHED_MAT):
-            pvlib.clearsky.lookup_linke_turbidity(
-                _TIMES_LARGE, self.latitude, self.longitude
-            )
+            pvlib.clearsky.lookup_linke_turbidity(_TIMES_LARGE, self.latitude, self.longitude)
 
     def time_lookup_linke_turbidity_small(self):
         with patch("scipy.io.loadmat", return_value=_CACHED_MAT):
-            pvlib.clearsky.lookup_linke_turbidity(
-                _TIMES_SMALL, self.latitude, self.longitude
-            )
+            pvlib.clearsky.lookup_linke_turbidity(_TIMES_SMALL, self.latitude, self.longitude)
 
     def time_lookup_linke_turbidity_no_interp(self):
         with patch("scipy.io.loadmat", return_value=_CACHED_MAT):
-            pvlib.clearsky.lookup_linke_turbidity(
-                _TIMES_SMALL, self.latitude, self.longitude,
-                interp_turbidity=False
-            )
+            pvlib.clearsky.lookup_linke_turbidity(_TIMES_SMALL, self.latitude, self.longitude, interp_turbidity=False)

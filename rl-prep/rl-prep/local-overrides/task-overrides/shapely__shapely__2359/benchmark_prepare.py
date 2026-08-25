@@ -5,8 +5,9 @@ The oracle adds scalar dispatch: when given a single Geometry object, shapely.is
 calls lib.is_prepared_scalar() directly instead of going through the ufunc machinery.
 This eliminates ufunc overhead for per-geometry is_prepared calls.
 """
-import shapely
+
 import numpy as np
+import shapely
 
 
 class PrepareSuite:

@@ -5,6 +5,7 @@ result in the retrieval loop) with `getattr(backend, 'supports_timeout', False)`
 This overhead is most visible in n_jobs=1 mode where there is no parallel
 execution cost to mask it.
 """
+
 from joblib import Parallel, delayed
 
 
@@ -22,6 +23,4 @@ class SequentialParallelSuite:
         Parallel(n_jobs=1)(delayed(_identity)(i) for i in range(n_calls))
 
     def time_parallel_n_jobs_1_with_timeout(self, n_calls):
-        Parallel(n_jobs=1, timeout=60)(
-            delayed(_identity)(i) for i in range(n_calls)
-        )
+        Parallel(n_jobs=1, timeout=60)(delayed(_identity)(i) for i in range(n_calls))

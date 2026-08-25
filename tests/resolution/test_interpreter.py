@@ -124,3 +124,37 @@ def test_asv_rung_reads_the_tuples_the_repo_actually_holds():
 def test_asv_rung_narrows_a_patch_version_to_its_minor():
     c = select_interpreter(requires_python=None, trove_versions=[], asv_pythons=["3.10.2"], commit_date=JAN_2026)
     assert c == InterpreterChoice(version="3.10", source="asv")
+
+
+def test_a_declaration_above_the_ceiling_says_so():
+    # PostHog declares ==3.13.13 on 2,775 commits. With the ceiling at 3.12 every
+    # one recorded "commit-date", which reads as "this project declares nothing".
+    # It declares plenty; this operator just does not build it.
+    c = select_interpreter(requires_python="==3.13.13", trove_versions=[], asv_pythons=[], commit_date=JAN_2026)
+    assert c == InterpreterChoice(version="3.12", source="ceiling-clamped")
+
+
+def test_a_genuinely_undeclared_project_still_says_commit_date():
+    c = select_interpreter(requires_python=None, trove_versions=[], asv_pythons=[], commit_date=JAN_2026)
+    assert c.source == "commit-date"
+
+
+def test_an_unsatisfiable_low_declaration_is_not_clamped():
+    # pymc's >=3.6,<3.7 fails for the opposite reason -- too old, not too new.
+    # Reporting it as ceiling-clamped would send the reader to the wrong knob.
+    c = select_interpreter(requires_python=">=3.6,<3.7", trove_versions=[], asv_pythons=[], commit_date=JAN_2026)
+    assert c.source == "commit-date"
+
+
+def test_a_declaration_that_did_not_exist_yet_is_not_clamped():
+    # 3.13 released 2024-10-07; a 2020 commit declaring it is not the ceiling's doing.
+    c = select_interpreter(requires_python=">=3.13", trove_versions=[], asv_pythons=[], commit_date=JUL_2020)
+    assert c.source == "commit-date"
+
+
+def test_raising_the_ceiling_makes_the_declaration_win(monkeypatch):
+    import datasmith.resolution.interpreter as interp
+
+    monkeypatch.setattr(interp, "DATASMITH_PYTHON_CEILING", "3.13")
+    c = interp.select_interpreter(requires_python="==3.13.13", trove_versions=[], asv_pythons=[], commit_date=JAN_2026)
+    assert c == InterpreterChoice(version="3.13", source="requires-python")
