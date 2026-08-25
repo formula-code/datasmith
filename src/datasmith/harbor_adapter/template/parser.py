@@ -605,6 +605,7 @@ def write_reward(
     snapshots: dict,
     lsv_error: str | None = None,
     *,
+    is_oracle: bool = False,
     patch: dict | None = None,
     lsv_init_summary: dict | None = None,
     lsv_measure_raw: dict | None = None,
@@ -673,8 +674,28 @@ def write_reward(
 
     (reward_dir / "reward.json").write_text(json.dumps(reward_data, indent=2))
 
-    # reward.txt — float speedup geometric mean
-    speedup_value = speedup_levels["level4"] if speedup_levels else 0.0
+    # reward.txt — shaped reward for RL training.
+    # Formula: g = raw geomean speedup (level4), h = oracle speedup (default 1.0).
+    #   Oracle runs:             raw g (not graded)
+    #   Broke tests/snapshots:  -PENALTY
+    #   0 <= g <= 1:             FLOOR + (1-FLOOR)*g
+    #   g > 1:                   1 + ALPHA * min(log(g) / max(log(h), DENOM_FLOOR), C)
+    # TODO: fetch h per (owner, repo, issue) from lsv_baseline_cache for normalized scaling.
+    import math as _math
+    _PENALTY = 1.0; _FLOOR = 0.25; _ALPHA = 2.5
+    _DENOM_FLOOR = _math.log(1.08); _C = 2.0
+    g = (speedup_levels.get("level4") or 0.0) if speedup_levels else 0.0
+    if is_oracle:
+        speedup_value = g
+    else:
+        h = 1.0  # TODO: fetch oracle speedup from DB
+        if not tests_passed or not snapshots_passed:
+            speedup_value = -_PENALTY
+        elif g <= 1.0:
+            speedup_value = _FLOOR + (1.0 - _FLOOR) * g
+        else:
+            _denom = max(_math.log(h) if h > 1.0 else -1e9, _DENOM_FLOOR)
+            speedup_value = 1.0 + _ALPHA * min(_math.log(g) / _denom, _C)
     (reward_dir / "reward.txt").write_text(str(speedup_value))
 
     print(f"[parser] reward.txt = {speedup_value}")
@@ -802,6 +823,7 @@ def main() -> None:
         snapshot_block,
         lsv_error=lsv_error,
         invariants=invariants,
+        is_oracle=(args.agent_key == "oracle"),
         patch=patch_info,
         lsv_init_summary=lsv_init_summary,
         lsv_measure_raw=measure_results,
