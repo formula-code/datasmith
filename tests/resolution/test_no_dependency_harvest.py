@@ -19,12 +19,12 @@ from dataclasses import fields
 from pathlib import Path
 
 import pytest
+from git import Actor, Repo
 
 from datasmith.resolution import metadata_parser
 from datasmith.resolution.declare import declare
 from datasmith.resolution.metadata_parser import analyze_candidate_meta, discover_candidates
 from datasmith.resolution.models import Candidate
-from git import Actor, Repo
 
 PYPROJECT = """\
 [project]

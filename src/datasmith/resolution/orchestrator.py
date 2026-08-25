@@ -31,9 +31,9 @@ from pathlib import Path
 from typing import Any
 
 import json5
+from git import Commit
 
 from datasmith.utils import get_logger
-from git import Commit
 
 from .cache import cache_completion
 from .constants import CACHE_LOCATION
