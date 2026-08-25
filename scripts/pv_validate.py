@@ -13,11 +13,20 @@ number" is not the result.
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
+
+# CLAUDE.md's tunable convention: read the env at module scope. The plan put
+# this read inside main(); hoisting it keeps the knob greppable alongside the
+# other DATASMITH_PV_* constants.
+DATASMITH_PV_VERIFIER_AGENT: str = os.environ.get("DATASMITH_PV_VERIFIER_AGENT", "codex")
 
 
 @dataclass(frozen=True)
@@ -199,9 +208,89 @@ def passes_criterion(results: list[tuple[str, str, str]]) -> tuple[bool, list[st
     return (not reasons), reasons
 
 
+def _image_digest(image: str) -> str:
+    """The local image id, or "" when docker cannot name one."""
+    proc = subprocess.run(
+        ["docker", "inspect", "--format", "{{.Id}}", image],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _recording_runner(log: list[dict[str, object]]):
+    """Wrap the battery's docker runner so every command leaves a trace.
+
+    Step 4 asks for the verifier's report on every disagreement. The report
+    alone does not say WHICH command timed out, and a battery command that
+    hits its cap becomes a hard rejection whatever the agent concluded --
+    so the elapsed time is part of reading the result honestly.
+    """
+    from datasmith.agents.reflexive.battery import _docker_runner
+
+    def run(image_tag: str, argv: list[str], timeout_s: int) -> tuple[str, str, int]:
+        started = time.monotonic()
+        try:
+            stdout, stderr, rc = _docker_runner(image_tag, argv, timeout_s)
+        except Exception as exc:
+            log.append({
+                "command": " ".join(argv)[:400],
+                "rc": None,
+                "elapsed_s": round(time.monotonic() - started, 1),
+                "crashed": f"{type(exc).__name__}: {exc}"[:400],
+            })
+            raise
+        log.append({
+            "command": " ".join(argv)[:400],
+            "rc": rc,
+            "elapsed_s": round(time.monotonic() - started, 1),
+            "crashed": None,
+        })
+        return stdout, stderr, rc
+
+    return run
+
+
+def _run_case(case: LabelledCase, agent, reports_dir: Path | None = None) -> tuple[str, str, str]:
+    from datasmith.agents.reflexive.verifier import verify
+
+    battery_log: list[dict[str, object]] = []
+    graded = verify(case.image, "", agent, mode="container_built", runner=_recording_runner(battery_log))
+    if reports_dir is not None:
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        slug = case.task.replace("/", "-").replace("#", "-")
+        (reports_dir / f"{slug}.json").write_text(
+            json.dumps(
+                {
+                    "task": case.task,
+                    "image": case.image,
+                    "expected": case.expected,
+                    "accepted": graded.accepted,
+                    "hard_failures": list(graded.hard_failures),
+                    "soft_failures": list(graded.soft_failures),
+                    "violations": list(graded.violations),
+                    "report": graded.report.model_dump(mode="json"),
+                    "battery": battery_log,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    return case.task, case.expected, ("accept" if graded.accepted else "reject")
+
+
+def _agrees(expected: str, actual: str) -> str:
+    """The "either" cases can never agree by construction; say so."""
+    if expected == "either":
+        return "either"
+    return "yes" if expected == actual else "**NO**"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="docs/superpowers/plans/pv-validation.md")
+    parser.add_argument("--reports-dir", default="", help="where to dump one JSON report per case")
     args = parser.parse_args()
 
     missing = [c.task for c in CASES if c.digest == "PASTE_DIGEST"]
@@ -209,10 +298,52 @@ def main() -> int:
         print(f"refusing to run: {len(missing)} case(s) still unpinned", file=sys.stderr)
         return 2
 
-    print(f"{len(CASES)} cases pinned by digest; report destination {_ROOT / args.out}")
-    print("Run the verifier over CASES and pass (task, expected, actual) triples to")
-    print("confusion() and passes_criterion(). Wired in Task 10.")
-    return 0
+    sys.path.insert(0, str(_ROOT / "src"))
+    from datasmith.agents.installed.base import get_agent
+
+    agent = get_agent([DATASMITH_PV_VERIFIER_AGENT])
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    reports_dir = Path(args.reports_dir) if args.reports_dir else None
+    results: list[tuple[str, str, str]] = []
+
+    with out.open("w", encoding="utf-8") as fh:
+        fh.write("# Producer/verifier validation\n\n")
+        fh.write("| task | expected | actual | agrees | note |\n|---|---|---|---|---|\n")
+        fh.flush()
+        for case in CASES:
+            # A pinned digest that does not match the local image means the tag
+            # has moved. Grade nothing: passes_criterion reports "no result",
+            # which fails, rather than measuring a different container.
+            local = _image_digest(case.image)
+            if local != case.digest:
+                fh.write(
+                    f"| {case.task} | {case.expected} | SKIPPED | **NO** | "
+                    f"digest mismatch: local {local or 'MISSING'} |\n"
+                )
+                fh.flush()
+                print(f"[pv] {case.task}: SKIPPED, digest mismatch ({local or 'MISSING'})", flush=True)
+                continue
+            task, expected, actual = _run_case(case, agent, reports_dir)
+            results.append((task, expected, actual))
+            fh.write(f"| {task} | {expected} | {actual} | {_agrees(expected, actual)} | {case.note} |\n")
+            fh.flush()
+            print(f"[pv] {task}: expected={expected} actual={actual}", flush=True)
+
+        counts = confusion(results)
+        ok, reasons = passes_criterion(results)
+        fh.write(f"\n## Confusion\n\n```\n{counts}\n```\n")
+        fh.write(f"\n## Pass criterion (conditions 1 and 2)\n\n**{'PASS' if ok else 'FAIL'}**\n\n")
+        for reason in reasons:
+            fh.write(f"- {reason}\n")
+        fh.write(
+            "\nConditions 3 (every disagreement explained) and 4 (one end-to-end\n"
+            "round on oggm#1830) are not evaluated here. Both are required before\n"
+            "DATASMITH_PV_ENABLED flips to 1.\n"
+        )
+    print(f"[pv] wrote {out}; criterion {'PASS' if ok else 'FAIL'}")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -1,0 +1,18 @@
+image            formulacode/xarray-contrib-xbatcher:167
+verdict          HONEST
+
+  python (argv)  /opt/conda/envs/asv_3.12/bin/python  elf=True
+  python (PATH)  /opt/conda/envs/asv_3.12/bin/python  elf=True
+  grep           /usr/bin/grep
+  sitecustomize  none
+  LD_PRELOAD     unset
+  thread caps    {'MKL_NUM_THREADS': '1', 'NUMEXPR_NUM_THREADS': None, 'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1'}
+  package        xbatcher  import_ok=True
+  extensions     0/0 import
+  benchmarks     18  err=None
+  pytest         collect_ok=True n=46
+
+  passed   python_is_elf, python_not_wrapped, python_in_prefix, grep_is_system, no_ld_preload, no_sitecustomize, package_imports, extensions_import, benchmarks_discovered, pytest_collects
+  FAILED   -
+  warned   -
+  skipped  -
