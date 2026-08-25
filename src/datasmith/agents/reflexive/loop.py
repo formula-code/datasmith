@@ -19,7 +19,20 @@ from datasmith.docker.context import DockerContext
 
 logger = logging.getLogger(__name__)
 
-DATASMITH_PV_MAX_ROUNDS: int = int(os.environ.get("DATASMITH_PV_MAX_ROUNDS", "3"))
+# Raised from 3 to 8 on 2026-08-25, on measurement rather than taste.
+#
+# A seeded 15-task sweep (seed 20260825, one PR per repository) showed HALF the
+# tasks stopping on `budget` rather than `no_progress` -- TileDB-Py#869,
+# dpctl#1651, numpy-financial#47, satpy#2998 and sourmash#1946 were all still
+# making progress when the cap cut them off. Container repairs are multi-step
+# by nature: pin a version, discover the next constraint it exposes, pin that.
+# Three rounds does not fit that shape.
+#
+# Raising it cannot manufacture an acceptance. Stopping rule 3 still ends a
+# stalled producer after two identical progress keys, whatever the cap, so the
+# extra rounds are spent only on repairs that are demonstrably still moving --
+# which also bounds the added cost to the tasks that are converging.
+DATASMITH_PV_MAX_ROUNDS: int = int(os.environ.get("DATASMITH_PV_MAX_ROUNDS", "8"))
 DATASMITH_PV_ENABLED: bool = os.environ.get("DATASMITH_PV_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
 # Mirrors scripts/prepass_trial.py. `scripts/` is not an importable package, so
@@ -53,6 +66,17 @@ _NOISE = (
 )
 
 
+def _strip_buildkit_prefix(line: str) -> str:
+    """Drop BuildKit's step/elapsed stamp: `#14 6.799 `, `25.05 <U+00D7> `, `2.15 `
+    (BuildKit separates with U+00D7, not the letter x).
+
+    Shared by both signature branches so a timing difference can never make
+    two identical failures look like progress. `scripts/prepass_trial.py`
+    carries the same helper; an agreement test asserts the two do not drift.
+    """
+    return re.sub(r"^(?:#\d+\s+)?[\d.]+\s*(?:\u00d7\s*)?", "", line).strip()
+
+
 def _signature(build_log: str) -> str:
     """The line that says WHY. Deterministic, unlike agent-invented ids."""
     # Truncation and the pipe substitution must match scripts/prepass_trial.py
@@ -63,7 +87,21 @@ def _signature(build_log: str) -> str:
     lines = [ln.strip() for ln in (build_log or "").splitlines() if ln.strip()]
     for ln in reversed(lines):
         if any(marker in ln for marker in _NAMED_CAUSES):
-            return ln[:90].replace("|", "/")
+            # Strip the BuildKit prefix here TOO, not only in the branch below.
+            #
+            # BuildKit stamps every line with elapsed seconds -- `#14 6.799 `,
+            # `25.05 <x> `. Branch 2 has always stripped that; branch 1 did not,
+            # and branch 1 is the common case because most real failures name a
+            # cause. So the signature carried a TIMESTAMP, two identical
+            # failures never compared equal, and stopping rule 3 could not fire
+            # at all on the failures it most needed to catch.
+            #
+            # Measured on 2026-08-25: TileDB-Py#869 and satpy#2998 each spent
+            # all 8 rounds re-failing one wheel build, signing as
+            # `25.05 <x> Failed to build...`, `26.68 <x> Failed to build...`,
+            # `103.8 <x> Failed to build...`. That also means a `budget` stop was
+            # never evidence of progress, which is what it was read as.
+            return _strip_buildkit_prefix(ln)[:90].replace("|", "/")
     for ln in reversed(lines):
         if any(ln.startswith(n) for n in _NOISE):
             continue
@@ -86,6 +124,32 @@ def progress_key(graded: GradedReport, build_log: str) -> tuple[str, ...]:
     if graded.report.mode == "build_failed":
         return ("sig", _signature(build_log))
     return tuple(sorted(graded.hard_failures))
+
+
+def _log_plan(round_index: int, plan: ProducerPlan) -> None:
+    """Record what the producer proposed, per round.
+
+    `outcome.plans` was collected and never surfaced, so judging a producer
+    edit meant reading the NEXT round's raw build log and inferring backwards.
+    That makes "is the producer fixing these the way a competent human would"
+    unanswerable at any scale beyond one task read by hand.
+
+    It matters because the answer so far is "not well": given
+    `ModuleNotFoundError: No module named 'pkg_resources'` on mars#3329 the
+    producer pinned setuptools==63.4.3, which predates PEP 660, so the next
+    round died on a missing build_editable hook -- a plausible-looking fix
+    rather than a researched one.
+    """
+    for edit in plan.planned_edits:
+        logger.info(
+            "round %d producer edit: %s (addresses %s): %s",
+            round_index,
+            edit.file,
+            edit.addresses_check_id,
+            edit.change[:400],
+        )
+    for request in plan.evidence_requests:
+        logger.info("round %d producer asked for evidence: %s", round_index, request.request[:200])
 
 
 @dataclass
@@ -127,6 +191,24 @@ def run_loop(
         outcome.rounds = round_index
         ok, image_tag, build_log = build(context)
         mode = "container_built" if ok else "build_failed"
+        # A round leaves a trace, or a three-round failure is unreadable.
+        #
+        # The loop previously logged one line, on the no-progress path, naming
+        # the progress key and nothing else. `OGGM/oggm#1830` failed three
+        # rounds twice over and the only record of WHY was a signature string;
+        # the build log lived in a temporary directory that the run deleted,
+        # and the reflexive rounds write no `error_logs` row (only TRY_DEFAULT
+        # does). Diagnosing it meant re-running the whole task.
+        logger.info(
+            "round %d/%d: build ok=%s mode=%s image=%s",
+            round_index,
+            max_rounds,
+            ok,
+            mode,
+            image_tag or "-",
+        )
+        if not ok:
+            logger.info("round %d build log tail:\n%s", round_index, (build_log or "")[-4000:])
 
         try:
             graded = verify(image_tag, build_log, mode)
@@ -148,6 +230,15 @@ def run_loop(
             return outcome
 
         key = progress_key(graded, build_log)
+        logger.info(
+            "round %d/%d: rejected; hard=%s soft=%s violations=%s key=%s",
+            round_index,
+            max_rounds,
+            list(graded.hard_failures),
+            list(graded.soft_failures),
+            list(graded.violations),
+            key,
+        )
         if previous_key is not None and key == previous_key:
             logger.info("no progress in round %d (%s); stopping", round_index, key)
             outcome.stop_reason = "no_progress"
@@ -161,6 +252,21 @@ def run_loop(
         revised, plan = revise(context, graded)
         if plan is not None:
             outcome.plans.append(plan)
+            # What the producer actually proposed, per round.
+            #
+            # `outcome.plans` was collected and never surfaced anywhere, so the
+            # only way to judge a producer edit was to read the raw build log
+            # of the NEXT round and infer backwards. That makes the question
+            # "is the producer fixing these the way a competent human would"
+            # unanswerable at any scale beyond one task read by hand.
+            #
+            # It matters because the answer so far is "not well": given
+            # `ModuleNotFoundError: No module named 'pkg_resources'` on
+            # mars#3329 the producer pinned setuptools==63.4.3, which predates
+            # PEP 660, so the following round died on a missing build_editable
+            # hook. That is a plausible-looking fix rather than a researched
+            # one, and it is the kind of thing only a per-round record exposes.
+            _log_plan(round_index, plan)
         if revised is None:
             outcome.stop_reason = "producer_failed"
             return outcome

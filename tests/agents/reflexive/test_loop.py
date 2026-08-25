@@ -215,3 +215,284 @@ def test_the_duplicated_signature_agrees_with_the_prepass_one() -> None:
     ]
     for case in cases:
         assert loop_sig(case) == mod._signature({"error_message": case}), f"drifted on {case[:40]!r}"
+
+
+class TestTheBuildLogHandedToTheLoopCanBeSigned:
+    """The defect that stopped OGGM/oggm#1830 after three rounds.
+
+    `synthesizer._run_produce_verify.build()` used to hand the loop
+    `json.dumps(result.failure_json or {})`. That is ONE line beginning with
+    `{`, and `_signature` skips lines beginning with `{` -- correctly, since in
+    a real build log they are noise. So the entire log was discarded and every
+    mode-A round that did not happen to contain a named cause signed as
+    "no signature". Two genuinely different failures compared equal, rule 3
+    fired, and the loop stopped while the producer was still making progress.
+
+    These tests are about the SHAPE of the log the loop is given, which is why
+    they live next to `_signature` rather than in the synthesizer's tests.
+    """
+
+    def test_a_single_line_json_log_cannot_be_signed(self) -> None:
+        """The old shape. Kept as the thing the fix has to avoid producing."""
+        import json as _json
+
+        from datasmith.agents.reflexive.loop import _signature
+
+        one = _json.dumps({"stage": "build", "return_code": 1, "error_message": "gcc: fatal error"})
+        two = _json.dumps({"stage": "build", "return_code": 1, "error_message": "pyproj wheel failed"})
+        assert _signature(one) == _signature(two) == "no signature", (
+            "if this ever stops holding, the fix below is no longer needed"
+        )
+
+    def test_indented_json_survives_the_brace_filter(self) -> None:
+        """The fallback shape, for a failure with no captured stdout."""
+        import json as _json
+
+        from datasmith.agents.reflexive.loop import _signature
+
+        one = _json.dumps({"stage": "build", "error_message": "gcc: fatal error, no input files"}, indent=2)
+        two = _json.dumps({"stage": "build", "error_message": "pyproj wheel build failed"}, indent=2)
+        assert _signature(one) != "no signature"
+        assert _signature(one) != _signature(two), "two different failures must not collapse"
+
+    def test_two_different_builds_get_different_progress_keys(self) -> None:
+        """End to end over `progress_key`, which is what rule 3 compares."""
+        import json as _json
+
+        from datasmith.agents.reflexive.loop import progress_key
+        from datasmith.agents.reflexive.schema import RejectionReport, Verdict
+        from datasmith.agents.reflexive.severity import grade
+
+        graded = grade(RejectionReport(verdict=Verdict.REJECT, mode="build_failed", checks=[]))
+
+        def log_for(failure: dict, stdout: str) -> str:
+            detail = _json.dumps(failure, indent=2) if failure else ""
+            return f"{detail}\n{stdout}"[-200000:]
+
+        first = log_for(
+            {"stage": "build", "return_code": 1},
+            "#15 8.6 ModuleNotFoundError: No module named 'salem'\n------",
+        )
+        second = log_for(
+            {"stage": "build", "return_code": 1},
+            "#15 9.1 error: subprocess-exited-with-error while building pyproj\n------",
+        )
+        assert progress_key(graded, first) != progress_key(graded, second)
+        assert progress_key(graded, first) == progress_key(graded, first), "must stay deterministic"
+
+    def test_the_synthesizer_no_longer_hands_the_loop_a_bare_json_dump(self) -> None:
+        """The call site is where the shape is decided, so assert on it.
+
+        A behavioural test would need a real container build. This checks the
+        one line that caused the defect, and the accompanying behaviour tests
+        above cover what the shape has to achieve.
+        """
+        import inspect
+
+        from datasmith.agents.synthesizer import Synthesizer
+
+        source = inspect.getsource(Synthesizer._run_produce_verify)
+        assert "json.dumps(result.failure_json or {})[:200000]" not in source
+        assert "result.agent_output" in source, "the real build log must reach the loop"
+
+
+class TestEveryRoundLeavesATrace:
+    """A three-round failure has to be readable without re-running the task.
+
+    OGGM/oggm#1830 failed three rounds twice, and the only record was the
+    progress key on the no-progress line. The build log lived in a
+    TemporaryDirectory the run deleted, and the reflexive rounds write no
+    `error_logs` row -- only TRY_DEFAULT does. Diagnosing it cost a full
+    re-run each time, which at 100-container scale is not a cost anyone pays.
+    """
+
+    @staticmethod
+    def _graded(hard: bool):
+        from datasmith.agents.reflexive.schema import Cause, CheckResult, RejectionReport, Verdict
+        from datasmith.agents.reflexive.severity import grade
+
+        checks = (
+            [CheckResult(id="asv_exec_failed", verdict="fail", cause=Cause.OTHER, evidence="e", remedy="")]
+            if hard
+            else []
+        )
+        return grade(RejectionReport(verdict=Verdict.REJECT, mode="build_failed", checks=checks))
+
+    def test_a_failing_round_logs_the_build_log_and_the_reason(self, caplog) -> None:
+        import logging
+        from pathlib import Path
+
+        from datasmith.agents.reflexive.loop import run_loop
+
+        graded = self._graded(hard=True)
+        # The sentinel must NOT be the line `_signature` picks, or the test
+        # passes on the `key=` field alone and says nothing about the tail.
+        # A named cause on the last line wins the signature, so the sentinel
+        # above it can only reach the log through the build-log tail.
+        logs = [
+            "SENTINEL_ROUND_1_LOG_LINE\nModuleNotFoundError: No module named 'salem'",
+            "SENTINEL_ROUND_2_LOG_LINE\nModuleNotFoundError: No module named 'pyproj'",
+        ]
+        seen = {"n": 0}
+
+        def build(ctx):
+            i = seen["n"]
+            seen["n"] += 1
+            return False, None, logs[min(i, len(logs) - 1)]
+
+        with caplog.at_level(logging.INFO, logger="datasmith.agents.reflexive.loop"):
+            outcome = run_loop(
+                context=object(),
+                build=build,
+                verify=lambda image, log, mode: graded,
+                revise=lambda ctx, g: (ctx, None),
+                workdir=Path("."),
+                max_rounds=2,
+            )
+
+        assert outcome.accepted is False
+        text = caplog.text
+        assert "salem" in text, "the signature must be logged"
+        assert "SENTINEL_ROUND_1_LOG_LINE" in text, (
+            "the build log TAIL must reach the operator, not just its one-line signature"
+        )
+        assert "asv_exec_failed" in text, "the hard failure must be named"
+        assert "round 1/2" in text and "round 2/2" in text, "each round must be identifiable"
+
+
+class TestTheFailureDetailIsSignableAsRealLines:
+    """The second way the build log reached the loop unsignable.
+
+    `json.dumps(x, indent=2)` indents the STRUCTURE but leaves newlines inside
+    string VALUES escaped, so a whole build stdout stays on one line. When
+    `agent_output` is empty -- which it is on the docker-build failure path --
+    that line is the entire log, and `_signature` falls back to the generic
+    wrapper for every failure alike.
+
+    mars#3329: round 1 failed on a missing `pkg_resources`, round 2 on a PEP
+    660 `build_editable` hook. Different failures, identical signatures, loop
+    stopped for "no progress" at round 2.
+    """
+
+    @staticmethod
+    def _failure(stdout: str) -> dict:
+        return {
+            "stage": "pkg",
+            "return_code": 1,
+            "error_message": "Build failed at stage 'pkg': Docker build failed (rc=1)",
+            "stdout": TestTheFailureDetailIsSignableAsRealLines._PREAMBLE + stdout,
+        }
+
+    # A real build log, whose preamble is identical across rounds. The first
+    # version of this fixture had no preamble and no embedded newlines, so
+    # nothing collapsed and the test below failed -- correctly. The collapse
+    # needs BOTH properties: escaped newlines put the log on one line, and a
+    # shared preamble longer than `_signature`'s [:90] truncation makes the
+    # prefixes equal.
+    _PREAMBLE = (
+        "#14 1.0 Collecting package metadata and building wheels for the project, "
+        "resolving dependencies from the pinned env_payload\n"
+    ) * 2
+
+    def test_json_dumps_collapses_two_different_failures(self) -> None:
+        """The shape being replaced. If this stops holding, the fix is moot."""
+        import json as _json
+
+        from datasmith.agents.reflexive.loop import _signature
+
+        a = _json.dumps(self._failure("#14 2.9 ModuleNotFoundError: No module named 'pkg_resources'"), indent=2)
+        b = _json.dumps(self._failure("#14 10.8 ERROR: missing the 'build_editable' hook"), indent=2)
+        assert _signature(a) == _signature(b), "two different failures must collapse under the OLD shape"
+        assert _signature(a).startswith('"stdout"'), "the signature is a prefix of the escaped log line"
+
+    def test_the_real_formatter_keeps_them_apart(self) -> None:
+        from datasmith.agents.reflexive.loop import _signature
+        from datasmith.agents.synthesizer import _default_failure_message
+
+        a = _default_failure_message(self._failure("#14 2.9 ModuleNotFoundError: No module named 'pkg_resources'"))
+        b = _default_failure_message(self._failure("#14 10.8 ERROR: missing the 'build_editable' hook"))
+        assert _signature(a) != _signature(b), "two different build failures must not compare equal"
+        assert "pkg_resources" in _signature(a)
+
+    def test_the_synthesizer_uses_the_real_formatter(self) -> None:
+        import inspect
+
+        from datasmith.agents.synthesizer import Synthesizer
+
+        source = inspect.getsource(Synthesizer._run_produce_verify)
+        assert "_default_failure_message(result.failure_json)" in source
+        assert "json.dumps(result.failure_json, indent=2)" not in source
+
+
+class TestTheSignatureIgnoresBuildKitTiming:
+    """The bug that made stopping rule 3 unable to fire.
+
+    BuildKit stamps every log line with elapsed seconds -- `#14 6.799 `,
+    `25.05 <x> `. `_signature` branch 2 has always stripped that; branch 1 did
+    not, and branch 1 is the common case because most real failures name a
+    cause. So the signature carried a timestamp, two IDENTICAL failures never
+    compared equal, and the no-progress rule could not fire on exactly the
+    failures it existed to catch.
+
+    Measured 2026-08-25: TileDB-Py#869 and satpy#2998 each spent all 8 rounds
+    re-failing one wheel build, signing as `25.05 <x> Failed to build...`,
+    `26.68 <x> Failed to build...`, `103.8 <x> Failed to build...`. It also
+    means a `budget` stop was never evidence of progress, which is how it was
+    read at first.
+    """
+
+    WHEEL_A = "25.05 \u00d7 Failed to build installable wheels for some pyproject.toml based projects"
+    WHEEL_B = "103.8 \u00d7 Failed to build installable wheels for some pyproject.toml based projects"
+    MOD_A = "#14 6.799   ModuleNotFoundError: No module named 'pkg_resources'"
+    MOD_B = "#14 9.060   ModuleNotFoundError: No module named 'pkg_resources'"
+
+    def test_the_same_wheel_failure_signs_identically(self) -> None:
+        from datasmith.agents.reflexive.loop import _signature
+
+        assert _signature(self.WHEEL_A) == _signature(self.WHEEL_B)
+
+    def test_the_same_missing_module_signs_identically(self) -> None:
+        from datasmith.agents.reflexive.loop import _signature
+
+        assert _signature(self.MOD_A) == _signature(self.MOD_B)
+
+    def test_no_timing_survives_into_the_signature(self) -> None:
+        from datasmith.agents.reflexive.loop import _signature
+
+        for line in (self.WHEEL_A, self.WHEEL_B, self.MOD_A, self.MOD_B):
+            sig = _signature(line)
+            assert not sig[:1].isdigit(), f"signature still starts with a timing stamp: {sig!r}"
+            assert "#" not in sig[:4]
+
+    def test_different_failures_still_differ(self) -> None:
+        """Stripping must not flatten genuinely distinct causes together."""
+        from datasmith.agents.reflexive.loop import _signature
+
+        other = "#14 6.024   ModuleNotFoundError: No module named 'skbuild'"
+        assert _signature(self.MOD_A) != _signature(other)
+        assert _signature(self.MOD_A) != _signature(self.WHEEL_A)
+
+    def test_rule_three_can_now_fire_on_a_repeated_failure(self) -> None:
+        """End to end over progress_key, which is what the rule compares."""
+        from datasmith.agents.reflexive.loop import progress_key
+        from datasmith.agents.reflexive.schema import RejectionReport, Verdict
+        from datasmith.agents.reflexive.severity import grade
+
+        graded = grade(RejectionReport(verdict=Verdict.REJECT, mode="build_failed", checks=[]))
+        assert progress_key(graded, self.WHEEL_A) == progress_key(graded, self.WHEEL_B)
+
+    def test_both_implementations_strip_the_same_way(self) -> None:
+        """loop.py and scripts/prepass_trial.py must not drift on this."""
+        import importlib.util
+        import sys
+        from pathlib import Path as _P
+
+        from datasmith.agents.reflexive.loop import _strip_buildkit_prefix as loop_strip
+
+        root = _P(__file__).parents[3]
+        spec = importlib.util.spec_from_file_location("_pp_strip", root / "scripts" / "prepass_trial.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["_pp_strip"] = mod
+        spec.loader.exec_module(mod)
+        for line in (self.WHEEL_A, self.MOD_A, "2.15 BackendUnavailable: Cannot import 'hatchling.build'", "plain"):
+            assert loop_strip(line) == mod._strip_buildkit_prefix(line), f"drifted on {line!r}"

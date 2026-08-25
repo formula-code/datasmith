@@ -185,6 +185,11 @@ _NOISE = (
 )
 
 
+def _strip_buildkit_prefix(line: str) -> str:
+    """Drop BuildKit's step/elapsed stamp. Mirrors loop.py; kept in sync by a test."""
+    return re.sub(r"^(?:#\d+\s+)?[\d.]+\s*(?:\u00d7\s*)?", "", line).strip()
+
+
 def _signature(row: dict) -> str:
     """The line that says WHY, not the first line of a build log.
 
@@ -196,7 +201,9 @@ def _signature(row: dict) -> str:
     # Prefer a line that names a known cause, wherever it sits in the log.
     for ln in reversed(lines):
         if any(marker in ln for marker in _NAMED_CAUSES):
-            return ln[:110].replace("|", "/")
+            # See loop.py `_strip_buildkit_prefix`: a timing stamp in the
+            # signature stops two identical failures comparing equal.
+            return _strip_buildkit_prefix(ln)[:110].replace("|", "/")
     for ln in reversed(lines):
         if any(ln.startswith(n) for n in _NOISE):
             continue
