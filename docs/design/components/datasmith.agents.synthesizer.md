@@ -215,7 +215,7 @@ await runner.run(pr_items)
 
 Each item is dispatched via `asyncio.to_thread()` so multiple PRs are synthesized concurrently without blocking the event loop. Failed items raise `RuntimeError` and are logged to `runner_failures` — the runner never aborts.
 
-Items now include additional fields passed through to the sandbox: `env_payload`, `python_version`, and optionally `base_context`. These are sourced from the `packages` table (populated by the `resolve_packages` pipeline stage) rather than from columns on `pull_requests`. The synthesize stage joins `pull_requests` with `packages` on `(owner, repo, merge_commit_sha = sha)` to obtain resolution data. PRs without a corresponding `packages` row (or where `can_install = FALSE`) are skipped.
+Items now include additional fields passed through to the sandbox: `env_payload`, `python_version`, and optionally `base_context`. These are sourced from the `packages` table (populated by the `resolve_packages` pipeline stage) rather than from columns on `pull_requests`. The synthesize stage joins `pull_requests` with `packages` on `(owner, repo, merge_commit_sha = sha)` to obtain resolution data. A PR without a corresponding `packages` row is skipped; **a PR whose seed the probe disliked is not.** `can_install` no longer gates — stage 4 gates nothing — and `probe_status` orders the queue instead, best-first. See [the pipeline guide](../../guide/pipeline.md#stage-4-resolve-packages).
 
 ## What was removed (2026-03-21)
 

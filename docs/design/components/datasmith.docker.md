@@ -39,7 +39,7 @@ graph LR
 ## 3-Tier Image Hierarchy
 
 1. **Base image** (`formulacode/base:latest`): Common dependencies shared across all repositories.
-2. **Repository image** (`formulacode/{owner}-{repo}:latest`): Repository-level dependencies (e.g. `formulacode/pandas-dev-pandas:latest`).
+2. **Repository image** (`formulacode/{owner}-{repo}:py{python_version}`): Repository-level dependencies (e.g. `formulacode/pandas-dev-pandas:py3.11`). The tag names what varies inside the image: the interpreter, and — when the package root is not the repository root — a suffix naming that root (`formulacode/apache-arrow:py3.11-python-<digest>`). A repository whose commits disagree on either fact gets one image per distinct pair, because both decide what the image contains.
 3. **PR image** (`formulacode/{owner}-{repo}-{issue_number}:latest`): PR-specific build script applied on top of the repository image.
 
 `build_image` checks each tier top-down — if the base and repo images exist, it only builds the PR layer.
@@ -118,7 +118,7 @@ Multi-stage Dockerfile in `src/datasmith/docker/Dockerfile` implements all 6 sta
 ### Image hierarchy (New)
 
 1. **Base image** (`formulacode/base:latest`): Common dependencies shared across all repositories. This maps to the `base` tag in the old hierarchy.
-2. **Repository image** (`formulacode/{owner}-{repo}:latest`): Repository-level dependencies (e.g. `formulacode/pandas-dev-pandas:latest`). This maps to the `env` tag in the old hierarchy. **The environment layer installs pinned dependencies from the `packages` table** — `env_payload` (JSON array of versioned requirements resolved by `ds.resolution`) and uses the `python_version` selected by temporal filtering. Without resolution data, this layer cannot install the correct packages and the Docker build will fail or produce an incomplete environment. See `datasmith.resolution.md`. The package installation is kept as a PR-specific step as it can differ depending on when the PR was made (e.g., old PRs may use a different package installation method than new PRs).
+2. **Repository image** (`formulacode/{owner}-{repo}:py{python_version}`, plus a package-root suffix when `packages.primary_root` is not the repository root): Repository-level dependencies (e.g. `formulacode/pandas-dev-pandas:py3.11`). This maps to the `env` tag in the old hierarchy. **The environment layer installs pinned dependencies from the `packages` table** — `env_payload` (JSON array of versioned requirements resolved by `ds.resolution`) and uses the `python_version` selected by temporal filtering. Without resolution data, this layer cannot install the correct packages and the Docker build will fail or produce an incomplete environment. See `datasmith.resolution.md`. The package installation is kept as a PR-specific step as it can differ depending on when the PR was made (e.g., old PRs may use a different package installation method than new PRs).
 3. **PR image** (`formulacode/{owner}-{repo}-{issue_number}:latest`): PR-specific build script applied on top of the repository image. This maps to the `pkg` + `run` + `final` stages in the old hierarchy, but combined into a single PR-specific layer since they are all tightly coupled to the PR's code changes.
 
 `build_image` checks each tier top-down — if the base and repo images exist, it only builds the PR layer.

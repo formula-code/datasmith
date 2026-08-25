@@ -7,5 +7,9 @@ ARG REPO_URL
 ARG COMMIT_SHA=""
 RUN git clone "$REPO_URL" /workspace/repo && \
     if [ -n "$COMMIT_SHA" ]; then cd /workspace/repo && git checkout "$COMMIT_SHA"; fi
-WORKDIR /workspace/repo
+# The package root inside the repository. Most repos build at the root, but
+# apache/arrow's package lives in python/, MDAnalysis' in package/, and Qiskit's
+# in qiskit_pkg/. Stage 4 discovers this and it used to be discarded.
+ARG BUILD_ROOT="."
+WORKDIR /workspace/repo/${BUILD_ROOT}
 ENTRYPOINT ["/bin/bash"]

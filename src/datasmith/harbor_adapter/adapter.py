@@ -6,6 +6,7 @@ from pathlib import Path
 from shutil import copy2, rmtree
 
 from datasmith.harbor_adapter.utils import (
+    DATASMITH_LSV_ROUNDS,
     render_dockerfile,
     render_instruction_md,
     render_run_setup_sh,
@@ -207,7 +208,7 @@ class FormulaCodeAdapter:
         cpus: int = 2,
         memory: str = "4G",
         storage: str = "10G",
-        rounds: int = 1,
+        rounds: int = DATASMITH_LSV_ROUNDS,
         verifier_env: dict[str, str] | None = None,
         expected_n: int | None = None,
     ) -> Path:

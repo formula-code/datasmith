@@ -24,6 +24,17 @@ import pytest
 _VERIFY = Path(__file__).parents[2] / "dataset" / "verify.py"
 
 
+# ``dataset/`` is gitignored (.gitignore:216) and was removed from git in
+# e37cf3a, so the module this file tests is present only in a checkout that
+# happens to carry the untracked directory. Without this guard the whole class
+# errors on collection in CI, in a fresh clone, and in any git worktree -- which
+# reads as a broken test suite rather than as an absent optional input.
+pytestmark = pytest.mark.skipif(
+    not (Path(__file__).parents[2] / "dataset" / "verify.py").exists(),
+    reason="dataset/ is untracked (gitignored); verify.py is not in this checkout",
+)
+
+
 def _load(monkeypatch=None):
     spec = importlib.util.spec_from_file_location("dataset_verify", _VERIFY)
     mod = importlib.util.module_from_spec(spec)

@@ -1,0 +1,27 @@
+{
+  "cutoff_relaxed": false,
+  "cutoff_used": "2026-01-26T13:27:28Z",
+  "dropped_requirements": [],
+  "env_payload": [
+    "cython==3.2.4",
+    "joblib==1.5.3",
+    "meson==1.10.1",
+    "meson-python==0.19.0",
+    "numpy==2.4.1",
+    "packaging==26.0",
+    "pyproject-metadata==0.10.0",
+    "scipy==1.17.0",
+    "threadpoolctl==3.6.0"
+  ],
+  "interpreter_source": "requires-python",
+  "owner_repo": "scikit-learn/scikit-learn",
+  "package_name": "scikit-learn",
+  "package_version": null,
+  "primary_root": ".",
+  "probe_status": "installable",
+  "python_version": "3.12",
+  "repo_name": "scikit-learn/scikit-learn",
+  "requires_python": ">=3.11",
+  "resolver_version": "2026.08.23",
+  "sha": "e2bea55682dc1e7742122836a68dbeafdffc39d5"
+}

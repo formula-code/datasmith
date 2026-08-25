@@ -1,0 +1,23 @@
+{
+  "cutoff_relaxed": false,
+  "cutoff_used": "2026-01-01T14:52:10Z",
+  "dropped_requirements": [],
+  "env_payload": [
+    "immutabledict==4.2.2",
+    "ordered-set==4.1.0",
+    "packaging==25.0",
+    "setuptools-scm==9.2.2",
+    "typing-extensions==4.15.0"
+  ],
+  "interpreter_source": "requires-python",
+  "owner_repo": "xdslproject/xdsl",
+  "package_name": "xdsl",
+  "package_version": null,
+  "primary_root": ".",
+  "probe_status": "installable",
+  "python_version": "3.12",
+  "repo_name": "xdslproject/xdsl",
+  "requires_python": ">=3.10",
+  "resolver_version": "2026.08.23",
+  "sha": "967368601973697b82aa1720aac0af4bc496a121"
+}

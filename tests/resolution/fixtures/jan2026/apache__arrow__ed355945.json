@@ -1,0 +1,22 @@
+{
+  "cutoff_relaxed": false,
+  "cutoff_used": "2026-01-21T10:35:07Z",
+  "dropped_requirements": [],
+  "env_payload": [
+    "cython==3.2.4",
+    "numpy==2.4.1",
+    "packaging==25.0",
+    "setuptools-scm==9.2.2"
+  ],
+  "interpreter_source": "requires-python",
+  "owner_repo": "apache/arrow",
+  "package_name": "pyarrow",
+  "package_version": null,
+  "primary_root": "python",
+  "probe_status": "installable",
+  "python_version": "3.12",
+  "repo_name": "apache/arrow",
+  "requires_python": ">=3.10",
+  "resolver_version": "2026.08.23",
+  "sha": "ed355945d223575649f7e77e65453320d8bb771a"
+}

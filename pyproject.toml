@@ -21,6 +21,7 @@ dependencies = [
     "huggingface-hub>=0.20",
     "jinja2>=3.1.6",
     "json5>=0.9",
+    "packaging>=23.0",
     "portkey-ai>=1.14.3",
     "pyarrow>=14.0",
     "pydantic>=2.0",
@@ -93,7 +94,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["slow: tests that build or run real containers"]
+# `make test` and CI both run `-m "not slow"`. Registering the marker is what
+# makes a typo in it an error instead of a test that silently never runs.
+markers = [
+    "slow: builds or runs a real container, clones a real repository, or hits the network",
+]
 
 [tool.ruff]
 target-version = "py312"

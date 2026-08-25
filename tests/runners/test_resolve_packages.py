@@ -1,16 +1,23 @@
-"""Tests for datasmith.runners.resolve_packages — ResolvePackagesRunner.
+"""Tests for datasmith.runners.resolve_packages.
 
-Stage 4 clones repositories and runs ``uv pip compile``, so its parallelism is
-a property of the machine.  It used to run on ``run_in_executor(None, ...)``,
-the interpreter's default pool sized ``min(32, cpu_count + 4)`` — which means
-something different on every host and becomes 32 concurrent clones on a
-128-core one.  These tests pin the pool down: explicit, bounded, owned, and
-shut down even when the stage raises.
+Two things are pinned here, because two separate changes converged on this file.
+
+The runner must persist every field the resolver produces — the predecessor
+hardcoded ``requires_python`` to ``None`` while the parsed value was computed
+upstream and discarded, and wrote three columns nothing ever read.
+
+And its parallelism must stay a property the operator sets. Stage 4 clones
+repositories and runs ``uv pip compile``, so it used to run on
+``run_in_executor(None, ...)`` — the interpreter's default pool, sized
+``min(32, cpu_count + 4)``, which means something different on every host and
+becomes 32 concurrent clones on a 128-core one. The pool is explicit, bounded,
+owned, and shut down even when the stage raises.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,8 +26,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from datasmith.resolution.orchestrator import RESOLVER_VERSION, ResolutionResult
 from datasmith.runners.base import BaseRunner
-from datasmith.runners.resolve_packages import ResolvePackagesRunner
+from datasmith.runners.resolve_packages import ResolvePackagesRunner, build_row
 
 
 def _mock_supabase() -> MagicMock:
@@ -37,18 +45,61 @@ def _item(sha: str = "abc123def456") -> dict[str, Any]:
     return {"owner": "pandas-dev", "repo": "pandas", "sha": sha}
 
 
-def _result() -> dict[str, Any]:
-    return {
-        "package_name": "pandas",
-        "package_version": "2.2.0",
-        "python_version": "3.11",
-        "final_dependencies": ["numpy==1.26.4"],
-        "build_command": ["pip install -e ."],
-        "install_command": ["pip install -e ."],
+def _result(**kw: Any) -> ResolutionResult:
+    # A literal rather than dict(...): ruff's C408 rejects the call form, and the
+    # two are the same object.
+    base: dict[str, Any] = {
+        "owner_repo": "h5py/h5py",
+        "sha": "abc123",
+        "package_name": "h5py",
+        "package_version": "3.15.1",
         "primary_root": ".",
-        "resolution_strategy": "pyproject",
-        "can_install": True,
+        "requires_python": ">=3.9",
+        "python_version": "3.11",
+        "interpreter_source": "requires-python",
+        "env_payload": ["numpy==2.4.1"],
+        "probe_status": "installable",
+        "probe_log": "ok",
+        "cutoff_used": "2026-01-22T00:00:00Z",
+        "cutoff_relaxed": False,
+        "dropped_requirements": [],
+        "resolver_version": RESOLVER_VERSION,
     }
+    base.update(kw)
+    return ResolutionResult(**base)
+
+
+def test_row_carries_provenance():
+    row = build_row("h5py", "h5py", "abc123", _result())
+    assert row["resolver_version"] == RESOLVER_VERSION
+    assert row["interpreter_source"] == "requires-python"
+    assert row["cutoff_used"] == "2026-01-22T00:00:00Z"
+    assert row["resolved_at"]
+    assert row["uv_version"]
+
+
+def test_requires_python_is_stored_not_nulled():
+    # The predecessor hardcoded this to None while the parsed value was computed
+    # and discarded.
+    row = build_row("h5py", "h5py", "abc123", _result())
+    assert row["requires_python"] == ">=3.9"
+
+
+def test_env_payload_is_json_encoded():
+    row = build_row("h5py", "h5py", "abc123", _result())
+    assert json.loads(row["env_payload"]) == ["numpy==2.4.1"]
+
+
+def test_dropped_requirements_round_trip():
+    dropped = [{"raw": "pyuwsgi;sys.platform!='win32'", "reason": "unparseable requirement"}]
+    row = build_row("h5py", "h5py", "abc123", _result(dropped_requirements=dropped))
+    assert json.loads(row["dropped_requirements"]) == dropped
+
+
+def test_retired_columns_are_not_written():
+    row = build_row("h5py", "h5py", "abc123", _result())
+    for retired in ("build_commands", "install_commands", "resolution_strategy"):
+        assert retired not in row
 
 
 class TestBoundedThreadPool:
@@ -93,7 +144,7 @@ class TestBoundedThreadPool:
         live = 0
         guard = threading.Lock()
 
-        def _analyze(sha: str, repo: str) -> dict[str, Any]:
+        def _analyze(sha: str, repo: str) -> ResolutionResult:
             nonlocal peak, live
             with guard:
                 live += 1
@@ -159,9 +210,11 @@ class TestPersistence:
         rows = [c.args[0] for c in client.table.return_value.upsert.call_args_list if "sha" in c.args[0]]
         assert len(rows) == 1
         row = rows[0]
+        # owner/repo/sha come from the item, not from the result -- build_row is
+        # told which commit it is writing for.
         assert row["owner"] == "pandas-dev"
         assert row["sha"] == "abc123def456"
-        assert row["env_payload"] == '["numpy==1.26.4"]'
+        assert row["env_payload"] == '["numpy==2.4.1"]'
 
     async def test_none_result_writes_nothing(self) -> None:
         client = _mock_supabase()

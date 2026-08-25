@@ -70,7 +70,7 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 1. **scrape_repos** — Fetch repository metadata from GitHub
 2. **scrape_commits** — Scrape merged PRs via `GitHubClient.fetch_merged_prs`, which windows `merged_at` server-side through GitHub's search API and bisects the range when the 1000-result cap would truncate the answer. GraphQL-only apart from a ~1% REST fallback for PRs whose `files(first: 100)` list is truncated; no diffs are fetched here. A truncated leaf (`Truncated`) or a missing repository (`RepositoryNotFoundError`) fails that repository rather than reading as a healthy zero
 3. **classify_prs** — Fetch each candidate PR's diff, apply the `check_patch_size` gate, and only then call the LLM. Three outcomes stay distinct: an oversized patch is recorded with both `is_performance_commit` and `is_performance_commit_symbolic` false and no model call; a diff GitHub definitively will not serve records `is_performance_commit` false and leaves the symbolic column alone, because the size gate never ran; a failed request raises and lands in `runner_failures`. A fetched patch is persisted so a resumed run does not buy the same diff twice
-4. **resolve_packages** — Resolve Python dependencies via `uv pip compile`, persist to `packages` table
+4. **resolve_packages** — Emit one dependency **seed** per commit, and the story of how it was reached. Six units compose it: `discover` picks the packaging root, `declare` reads only what the project states it needs, `interpreter` walks a declared ladder (`requires-python` → trove classifiers → `asv.conf.json` `pythons` → newest release at commit date) and records the rung in `interpreter_source`, `pin` runs one `uv pip compile` with the commit date as `--exclude-newer`, `probe` dry-runs the result, and the row is written. What it deliberately does not read: `requirements*.txt` globs, `environment.yml`, and import statements — so a project that declares nothing gets an empty seed and says so, rather than a list of invented PyPI names. Benchmark tooling (`asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer`) is stripped from both the declared set and the compiled one: the base image owns it, and a second owner only starts a version fight. **The stage gates nothing.** `can_install` is retained, nullable, and no longer read or written; `probe_status` (`installable` → `unresolved` → `failed` → `empty`) orders the stage 5 queue best-first and excludes nobody. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container.
 5. **render_problems** — Scrape linked issues and render deconstructed problem contexts
 6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
 7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
@@ -156,7 +156,8 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_RL_DEFAULT_PAUSE_S`, `DATASMITH_RL_PAUSE_JITTER_S`,
   `DATASMITH_RL_MAX_RETRIES`, `DATASMITH_NEIGHBOR_WINDOW_DAYS`,
   `DATASMITH_NEIGHBOR_CAP`, `DATASMITH_BENCH_SCRAPE_MAX_FILE_BYTES`,
-  `DATASMITH_BENCH_SCRAPE_DIRS`. Ingestion (stages 2–5) adds four families:
+  `DATASMITH_BENCH_SCRAPE_DIRS`, `DATASMITH_ASV_PIP_ENV_TYPES`,
+  `DATASMITH_PYTHON_FLOOR`, `DATASMITH_PYTHON_CEILING`. Ingestion (stages 2–5) adds four families:
   GitHub search and retry — `DATASMITH_GH_SEARCH_CAP`,
   `DATASMITH_GH_SEARCH_PAGE_SIZE`, `DATASMITH_GH_SEARCH_MAX_PAGES`,
   `DATASMITH_GH_MIN_SHARD_SECONDS`, `DATASMITH_GH_RETRIES`,
@@ -195,6 +196,22 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   separate knobs so raising one cannot trip the other's rate limits, and
   never size a pool from an implicit `cpu_count()` — `run_in_executor(None,
   ...)` silently means something different on every host.
+- `DATASMITH_PYTHON_FLOOR` (default `3.8`) and `DATASMITH_PYTHON_CEILING`
+  (default `3.12`) bound stage 4's interpreter ladder. The floor is the oldest
+  interpreter the container toolchain still supports; the ceiling is the newest
+  it is known to build against, and it is a ceiling on purpose — a fresh run
+  must not silently start choosing an interpreter no existing image was built
+  with. Raise the ceiling only together with a base-image rebuild **and a
+  regeneration of `tests/resolution/fixtures/jan2026/`** — all 13 golden
+  fixtures record the ceiling as their `python_version`, so a raise fails
+  every one of them at once.
+- `DATASMITH_ASV_PIP_ENV_TYPES` (default `virtualenv,venv,existing`) is the
+  comma-separated set of `asv.conf.json` `environment_type` values whose
+  `matrix` names PyPI distributions. Every other value — `conda`, `mamba`,
+  `rattler`, site plugins such as `oggm_conda` — names conda packages, which
+  are a different namespace: `boost-cpp` and `libprotobuf` are not on PyPI at
+  all, and `geos`, `snappy`, `re2` and `zstd` resolve there to unrelated
+  projects. Under those, only asv's own `pip+` prefix reaches the seed.
 
 ## Supabase
 
@@ -238,8 +255,8 @@ Note that `00016` and `00017` used `GRANT ALL ... TO anon` rather than `GRANT SE
 | Table | Purpose | Populated by |
 |-------|---------|-------------|
 | `pull_requests` | All scraped PRs with classification, patches, rendered problems, container names | Stages 1-3, 5-6 |
-| `packages` | Resolved `env_payload` (pinned deps) and `python_version` per commit | Stage 4 |
-| `candidate_containers` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA, plus `build_manifest` (sealed build facts merged with verify observations) and `manifest_warnings` (non-fatal invariant ids). `build_manifest IS NULL` identifies rows built before manifests existed. | Stage 6 (on success) |
+| `packages` | One seed per `(owner, repo, sha)`: `env_payload` (pinned deps) and `python_version`, plus `interpreter_source` (which ladder rung chose that interpreter), `primary_root`, `requires_python`, the advisory `probe_status` / `probe_log`, `dropped_requirements` (JSON-encoded text, like `env_payload` — every requirement that was refused, with its reason), and provenance: `resolver_version`, `uv_version`, `resolved_at`, `cutoff_used` (null when the commit-date cutoff had to be relaxed). `can_install` is deprecated — nullable, no longer read or written; `resolver_version = 'legacy'` marks the rows the predecessor wrote. | Stage 4 |
+| `candidate_containers` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA, plus `build_manifest` (sealed build facts merged with verify observations), `manifest_warnings` (non-fatal invariant ids), and `verification_state` (`unverified` / `verified`, with `verified_at`). `build_manifest IS NULL` identifies rows built before manifests existed; `verification_state = 'unverified'` identifies rows built before the honesty gate applied to them. | Stage 6 (on success) |
 | `harbor_runs` | One row per Harbor oracle trial for a synthesized container: `max_speedup`, `geomean_speedup`, `n_benchmarks`, `wallclock_sec`, `reward_payload`, `status`. One-to-many FK on `candidate_containers(owner, repo, sha)`. | Stage 7 |
 | `benchmark_information` | Per-benchmark speedup measurements from terminal-bench eval runs: one row per (run, owner/repo/issue, benchmark, agent, model). `speedup` is `(agent/nop)/(oracle/nop)` so 1.0 = parity with the human expert. `benchmark_type` (`time`/`mem`/`peakmem`/`track`) is a generated column derived from the ASV naming convention. Loaded out-of-band via `scripts/load_benchmark_information.py`. | (manual) |
 | `benchmark_codes` | One row per `(owner, repo, benchmark_without_params)` carrying the Python source of each ASV benchmark function plus its setup. Joined to `benchmark_information` on `(owner, repo, benchmark_name)` by the FormulaCode website. | Stage 9 |
@@ -255,7 +272,7 @@ Note that `00016` and `00017` used `GRANT ALL ... TO anon` rather than `GRANT SE
 
 ### Migrations
 
-SQL migrations live in `supabase/migrations/`, numbered `00001_` upward (currently through `00027_`). The sequence has gaps because numbers get claimed on branches before they land: `00018_lsv_cache_drop_cpu_model.sql` lives on `origin/lsv-cache-integration`, and `00024` is authored in a separate working tree (per `00025`'s header) — `00026` re-lands that same table under a number that is free here. So check other branches before claiming a number, and record in the file header why you skipped one. `00027_pull_requests_window_indexes.sql` adds the two indexes the stage 2–5 window predicates need on `pull_requests` — `merged_at` for the stage-wide scan, `(owner, repo, merged_at)` for the per-repository skip set — and deliberately grants nothing to `anon`.
+SQL migrations live in `supabase/migrations/`, numbered `00001_` upward (currently through `00029_`). The sequence has gaps because numbers get claimed on branches before they land: `00018_lsv_cache_drop_cpu_model.sql` lives on `origin/lsv-cache-integration`, and `00024` is authored in a separate working tree (per `00025`'s header) — `00026` re-lands that same table under a number that is free here. So check other branches before claiming a number, and record in the file header why you skipped one. `00027_pull_requests_window_indexes.sql` adds the two indexes the stage 2–5 window predicates need on `pull_requests` — `merged_at` for the stage-wide scan, `(owner, repo, merged_at)` for the per-repository skip set — and deliberately grants nothing to `anon`. `00028_packages_resolution_v2.sql` carries the stage 4 redesign's provenance columns, and `00029_candidate_containers_verification_state.sql` adds `verification_state` — every pre-existing row defaults to `unverified`, because the corpus predates the honesty gate and has not earned the label.
 
 To apply a new migration against the local instance:
 

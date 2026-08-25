@@ -7,7 +7,13 @@ declared Python version, dependency matrix and build commands were all discarded
 
 from __future__ import annotations
 
-from datasmith.resolution.orchestrator import collect_asv_cfg
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from datasmith.resolution.orchestrator import collect_asv_cfg as _collect_asv_cfg
 
 # Shape taken from pandas-dev/pandas asv_bench/asv.conf.json.
 PANDAS_CFG = {
@@ -44,6 +50,36 @@ NESTED_CFG = {
         "env": {"OMP_NUM_THREADS": ["1"]},
     },
 }
+
+
+@pytest.fixture(autouse=True)
+def _cfg_dir(tmp_path: Path):
+    """Give the config-file reader a directory to read from.
+
+    ``collect_asv_cfg`` takes a commit and finds the configs itself, because that
+    is where the reader has to live once the config decides an interpreter. These
+    tests supply the parsed shapes directly, so ``asv_finder`` is stubbed to hand
+    back files holding them. Every assertion below is unchanged.
+    """
+    yield tmp_path
+
+
+def collect_asv_cfg(cfgs: list, _dir: Path | None = None):
+    """Write *cfgs* to files and read them back through the real aggregator."""
+    directory = _dir or Path(collect_asv_cfg._dir)
+    paths = []
+    for i, cfg in enumerate(cfgs):
+        f = directory / f"asv.{i}.conf.json"
+        f.write_text(json.dumps(cfg))
+        paths.append(f)
+    with patch("datasmith.resolution.orchestrator.asv_finder", return_value=paths):
+        return _collect_asv_cfg(commit=None)
+
+
+@pytest.fixture(autouse=True)
+def _bind_dir(tmp_path: Path):
+    collect_asv_cfg._dir = str(tmp_path)
+    yield
 
 
 class TestPythons:
@@ -89,10 +125,30 @@ class TestMatrix:
         agg = collect_asv_cfg([PANDAS_CFG])
         assert agg.matrix["numpy"] == set()
 
-    def test_null_version_is_dropped_not_stringified(self):
-        """ASV uses null to mean "do not install". `str(None)` would leak "None"."""
+    def test_null_version_survives_as_a_sentinel(self):
+        """ASV's null means "do not install in this combination".
+
+        The predecessor dropped it here, which is what this test asserted when it
+        was written. That is safe only while nothing distinguishes an empty
+        version set from a null one -- and ``declare`` does: an empty set means
+        "any version" and emits the bare name, while a null means "never" and
+        emits nothing. Collapsing them here would turn "never install pytables"
+        into "install any pytables", so the sentinel is carried and resolved in
+        ``_matrix_requirements``, the one reader that needs to know.
+        """
         agg = collect_asv_cfg([PANDAS_CFG])
-        assert agg.matrix["pytables"] == set()
+        assert agg.matrix["pytables"] == {"None"}
+
+    def test_the_null_sentinel_installs_nothing_downstream(self):
+        """What the sentinel is for -- asserted where it actually matters."""
+        from datasmith.resolution.declare import declare
+        from datasmith.resolution.models import CandidateMeta
+
+        agg = collect_asv_cfg([PANDAS_CFG])
+        declared = declare(CandidateMeta(), agg.matrix)
+        assert not any(r.startswith("pytables") for r in declared.runtime)
+        # ...while a genuinely unpinned entry in the same matrix does install.
+        assert "numpy" in declared.runtime
 
     def test_grouped_matrix_reads_the_req_group(self):
         agg = collect_asv_cfg([NESTED_CFG])

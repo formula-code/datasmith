@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import posixpath
+import re
 from pathlib import Path
 
 from python_on_whales import DockerClient
@@ -37,11 +40,59 @@ def get_base_image_name() -> str:
     return f"{_docker_namespace()}/base:latest"
 
 
-def get_repo_image_name(owner: str, repo: str) -> str:
-    """Return the canonical tag for a repository image."""
+# Longest slug kept from a package root before the digest is appended. The
+# digest, not the slug, is what makes two roots distinct, so this is a
+# readability budget rather than a correctness one.
+DATASMITH_IMAGE_ROOT_SLUG_CHARS: int = int(os.environ.get("DATASMITH_IMAGE_ROOT_SLUG_CHARS", "32"))
+
+
+def _build_root_slug(build_root: str) -> str:
+    """Return the tag component that names a non-default package root.
+
+    The repository root — ``""``, ``"."``, ``"./"``, ``"/"`` — yields the empty
+    string, so the overwhelming majority of rows keep the tag they already
+    have and nothing rebuilds for them. Anything else is sanitised into a
+    legal tag component and suffixed with a digest of the *normalised* root,
+    because sanitising and truncating both lose information:
+    ``python/adbc_driver_bigquery`` and ``python/adbc_driver_flightsql`` are
+    two real roots of one repository, and a tag they share is the bug this
+    function exists to prevent.
+    """
+    root = posixpath.normpath(build_root.strip() or ".").lstrip("/")
+    if root in ("", "."):
+        return ""
+    slug = re.sub(r"[^a-z0-9_.]+", "-", root.lower()).strip("-._")[:DATASMITH_IMAGE_ROOT_SLUG_CHARS].strip("-._")
+    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:8]
+    return f"{slug}-{digest}" if slug else digest
+
+
+def get_repo_image_name(owner: str, repo: str, py_version: str = "", build_root: str = "") -> str:
+    """Return the canonical tag for a repository image.
+
+    The interpreter belongs in the tag because it is baked into the image. When
+    it was not, one image per repository was built from whichever commit ran
+    first, and 88% of repositories have commits that disagree on the
+    interpreter — so most containers ran a Python their env_payload was never
+    pinned against.
+
+    ``build_root`` belongs in the tag for the same reason: it is the image's
+    ``WORKDIR``, it varies per commit, and a repository whose commits disagree
+    on it would otherwise get one image whose working directory is decided by
+    whichever commit ran first. Qiskit is the worst case — 384 rows whose own
+    root is the repository root sharing a tag with rows rooted at
+    ``qiskit_pkg``. The repository root adds nothing to the tag, so the common
+    case is unchanged.
+
+    An empty ``py_version`` yields ``:latest``, which is what images built
+    before this change are tagged with.
+    """
     owner = owner.lower()
     repo = repo.lower()
-    return f"{_docker_namespace()}/{owner}-{repo}:latest".lower()
+    tag = f"py{py_version}" if py_version else "latest"
+    slug = _build_root_slug(build_root)
+    if slug:
+        tag = f"{tag}-{slug}"
+    return f"{_docker_namespace()}/{owner}-{repo}:{tag}".lower()
 
 
 def get_pr_image_name(owner: str, repo: str, issue_number: int) -> str:
@@ -86,15 +137,20 @@ class ImageManager:
         *,
         repo_url: str | None = None,
         py_version: str = "",
+        build_root: str = ".",
     ) -> str:
         ctx = context or _default_context()
         url = repo_url or f"https://github.com/{owner}/{repo}.git"
-        tag = get_repo_image_name(owner, repo)
+        tag = get_repo_image_name(owner, repo, py_version, build_root)
         logger.info("Building repo image: %s", tag)
         build_args: dict[str, str] = {
             "BASE_IMAGE": get_base_image_name(),
             "REPO_URL": url,
         }
+        # ``packages.primary_root`` is nullable and every legacy row predates
+        # this argument, so the fallback lives here -- the one choke point every
+        # caller routes through -- rather than at each call site.
+        build_args["BUILD_ROOT"] = build_root or "."
         if py_version:
             build_args["PY_VERSION"] = py_version
         self._docker.build(
@@ -117,11 +173,15 @@ class ImageManager:
         commit_sha: str = "HEAD",
         env_payload: str = "[]",
         py_version: str = "",
+        build_root: str = "",
         benchmark_dest: str = "",
     ) -> str:
         ctx = context or _default_context()
         tag = get_pr_image_name(owner, repo, issue_number)
-        repo_image = get_repo_image_name(owner, repo)
+        # ``build_root`` names the parent, it is not a build arg here: the
+        # WORKDIR it selects is already sealed into the repository image, and
+        # a PR image that names the wrong parent fails at FROM.
+        repo_image = get_repo_image_name(owner, repo, py_version, build_root)
         logger.info("Building PR image: %s", tag)
         build_args: dict[str, str] = {
             "REPO_IMAGE": repo_image,
