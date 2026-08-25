@@ -112,9 +112,15 @@ class TestTheCallSiteIsActuallyWired:
         from datasmith.agents.synthesizer import Synthesizer
         from datasmith.docker.context import DockerContext
 
+        # image_tag is not decoration. TRY_DEFAULT now runs the host image scan
+        # before it saves, and an image it cannot name is not clean -- so a
+        # stub that reports success without a tag is refused, falls through to
+        # LLM_GENERATE, and spawns a real agent. The real `verify_context`
+        # always extracts a tag from verification_success.json on success.
         mock_verify.return_value = SandboxResult(
             success=True,
             docker_context=DockerContext(build_pkg_sh="#!/bin/bash\ntrue"),
+            image_tag="formulacode/networkx-networkx:8148",
         )
         synth = Synthesizer()
         with (
@@ -122,6 +128,10 @@ class TestTheCallSiteIsActuallyWired:
             patch.object(synth, "_find_similar", return_value=[]),
             patch.object(synth, "_save_context"),
             patch.object(synth, "_log_default_attempt") as log_default,
+            # The scan itself is covered by tests/agents/test_try_default_host_scan.py.
+            # Here it is stubbed clean so this test measures what it names --
+            # that a successful default build logs a row -- without needing docker.
+            patch("datasmith.agents.synthesizer._host_scan_findings", return_value=[]),
         ):
             synth.run("networkx", "networkx", 8148, "ctx", sha="a" * 40)
 

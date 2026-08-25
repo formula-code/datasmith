@@ -48,6 +48,31 @@ DATASMITH_PV_PRODUCER_AGENT: str = os.environ.get("DATASMITH_PV_PRODUCER_AGENT",
 DATASMITH_PV_VERIFIER_AGENT: str = os.environ.get("DATASMITH_PV_VERIFIER_AGENT", "codex")
 
 
+def _host_scan_findings(image_tag: str | None) -> list[str]:
+    """Fatal findings from reading the image on the HOST, or [] when clean.
+
+    Nothing from the image runs: `image_integrity` uses `docker create`
+    (never started) plus `docker export`, walked as a tar. See
+    `agents/reflexive/image_integrity.py` for why the previous in-container
+    probe could not be trusted.
+
+    An image we cannot scan is NOT clean. A missing tag, a docker failure and a
+    crash all return a finding, because "we could not look" and "we looked and
+    it was fine" must never be the same answer -- that inversion is what let a
+    tampered container through in the first place.
+    """
+    from datasmith.agents.reflexive.image_integrity import collect_and_evaluate
+
+    if not image_tag:
+        return ["image_scan_failed: the build reported success but named no image to scan"]
+    try:
+        integrity = collect_and_evaluate(image_tag)
+    except Exception as exc:
+        logger.exception("host image scan raised on %s", image_tag)
+        return [f"image_scan_failed: {type(exc).__name__}: {exc}"[:500]]
+    return [f"{f.check_id}: {f.detail.splitlines()[0][:300]}" for f in integrity.findings]
+
+
 class SynthesisState(str, enum.Enum):
     CHECK_CACHE = "check_cache"
     FIND_SIMILAR = "find_similar"
@@ -279,18 +304,51 @@ class Synthesizer:
                     self._default_failures[(owner, repo)] = fail_count + 1
                     failed_attempts.append((default_ctx, result))
                 else:
-                    logger.info("Default template build succeeded for %s/%s#%d", owner, repo, issue_number)
-                    self._tried_default_repos.add((owner, repo))
-                    self._save_context(
-                        owner,
-                        repo,
-                        sha,
-                        issue_number,
-                        default_ctx,
-                        resource_metrics=result.resource_metrics,
-                        build_manifest=result.build_manifest,
-                    )
-                    return default_ctx
+                    # `classify_context` above audits the BUILD SCRIPTS. It says
+                    # nothing about the image those scripts produced, and this
+                    # is the path most containers take: a repository the stock
+                    # template builds first time returns here and never reaches
+                    # PRODUCE_VERIFY, so until now nothing image-scanned it.
+                    #
+                    # Measured, not inferred: networkx#8148 was rebuilt through
+                    # this path on 2026-08-24, sealed a manifest recording 140
+                    # benchmarks, and was never scanned. At scale most of the
+                    # corpus arrives this way, so a gate that only covers the
+                    # repair path is a gate over the minority of containers.
+                    #
+                    # The scan is deterministic, needs no agent, and costs ~90s
+                    # against a build that costs 300-700s.
+                    scan = _host_scan_findings(result.image_tag)
+                    if scan:
+                        logger.error(
+                            "Default template host image scan failed for %s/%s#%d: %s",
+                            owner,
+                            repo,
+                            issue_number,
+                            scan,
+                        )
+                        self._default_failures[(owner, repo)] = fail_count + 1
+                        failed_attempts.append((default_ctx, result))
+                    else:
+                        logger.info("Default template build succeeded for %s/%s#%d", owner, repo, issue_number)
+                        self._tried_default_repos.add((owner, repo))
+                        # The verifier runs here too, or `verified` is
+                        # unreachable on the path most containers take and the
+                        # corpus can never be counted. A rejection is NOT a
+                        # failure of the build -- the image is kept, and stays
+                        # `unverified` until something accepts it.
+                        accepted = self._verify_built_image(owner, repo, issue_number, result.image_tag)
+                        self._save_context(
+                            owner,
+                            repo,
+                            sha,
+                            issue_number,
+                            default_ctx,
+                            resource_metrics=result.resource_metrics,
+                            build_manifest=result.build_manifest,
+                            verified=accepted,
+                        )
+                        return default_ctx
             else:
                 self._default_failures[(owner, repo)] = fail_count + 1
                 failed_attempts.append((default_ctx, result))
@@ -328,6 +386,17 @@ class Synthesizer:
                 solution_patch=solution_patch,
             )
             if outcome.accepted and outcome.context is not None:
+                # `verified=True` here, not just on the TRY_DEFAULT branch.
+                #
+                # An accepted PRODUCE_VERIFY outcome holds all four facts by
+                # construction: the image built (mode was container_built), the
+                # host scan ran inside `verify()` and found nothing, the
+                # verifier accepted, and `on_accept` carried the sealed
+                # manifest out. Omitting the flag here left the REPAIR path --
+                # the one condition 4 is about -- unable to record a pass.
+                #
+                # numpy-financial#47 hit exactly that on 2026-08-25: it closed
+                # the loop at round 5/8 and was stored `unverified`.
                 self._save_context(
                     owner,
                     repo,
@@ -336,6 +405,7 @@ class Synthesizer:
                     outcome.context,
                     resource_metrics=outcome.resource_metrics,
                     build_manifest=outcome.build_manifest,
+                    verified=True,
                 )
                 return outcome.context
             logger.info(
@@ -504,7 +574,53 @@ class Synthesizer:
             # NULL build_manifest is indistinguishable from one built before
             # manifests existed.
             last["result"] = result
-            log = json.dumps(result.failure_json or {})[:200000]
+            # The build LOG, not a one-line JSON summary of it.
+            #
+            # `loop._signature` decides whether two rounds failed the SAME way,
+            # and it skips any line beginning with `{` -- correctly, because in
+            # a real build log those lines are noise. A `json.dumps()` blob is
+            # one line beginning with `{`, so the whole log was discarded and
+            # every mode-A round that did not happen to contain a named cause
+            # signed as "no signature". Two genuinely different failures then
+            # compared EQUAL, and the loop's no-progress rule stopped it while
+            # the producer was still making progress.
+            #
+            # Observed on OGGM/oggm#1830: three rounds, three different builds,
+            # stop_reason=no_progress, and nothing in the log to say why.
+            #
+            # `agent_output` is local_ci.py's stdout, which carries the docker
+            # build output. The structured failure goes FIRST and the raw log
+            # LAST, because `_signature` scans in reverse and the real log is
+            # the better answer; the JSON is indented so that if it is all we
+            # have, its lines survive the `{` filter instead of collapsing.
+            # `_default_failure_message`, NOT `json.dumps`. This line has now
+            # been wrong twice, in two different ways, and the second way was
+            # invisible until the first was fixed:
+            #
+            #   1. `json.dumps(x)` is ONE line beginning with `{`, which
+            #      `_signature` skips wholesale -> every round signed as
+            #      "no signature".
+            #   2. `json.dumps(x, indent=2)` indents the STRUCTURE, but string
+            #      VALUES keep their newlines escaped as \n, so the whole build
+            #      stdout stays on ONE line. `_signature` truncates to [:90],
+            #      so the signature becomes a PREFIX of that line -- i.e. a
+            #      prefix of the build log's preamble, which is identical for
+            #      any two builds of the same project. Verified directly: two
+            #      failures differing only in their tail sign identically as
+            #      `"stdout": "#14 1.0 Collecting package metadata and ...`.
+            #
+            # Observed on mars-project/mars#3329: round 1 failed on a missing
+            # `pkg_resources`, round 2 on a PEP 660 `build_editable` hook after
+            # the producer pinned an old setuptools -- genuinely different
+            # failures, identical signatures, loop stopped at round 2 for
+            # "no progress" while the producer was still making some.
+            #
+            # `_default_failure_message` already renders stage, message, stderr
+            # and stdout as real lines; it is what TRY_DEFAULT logs.
+            detail = _default_failure_message(result.failure_json) if result.failure_json else ""
+            # Tail, not head: the cause of a failure is at the END of a build
+            # log, and `[:200000]` would keep the beginning and drop it.
+            log = f"{detail}\n{result.agent_output or ''}"[-200000:]
             # The tag comes from the result, never assumed. verify_context
             # serves TRY_SIMILAR and does not necessarily tag what this caller
             # would guess.
@@ -866,6 +982,40 @@ class Synthesizer:
         except Exception:
             logger.debug("Failed to log tamper detection to Supabase", exc_info=True)
 
+    def _verify_built_image(self, owner: str, repo: str, issue_number: int, image_tag: str | None) -> bool:
+        """Run the verifier against an already-built image. Never raises.
+
+        Used by TRY_DEFAULT, where the image exists but PRODUCE_VERIFY is never
+        reached. Returns False on every uncertain path -- no agent configured,
+        no image, an exception -- because `verified` is a claim and the absence
+        of evidence is not evidence.
+
+        This is the same `verify()` that `scripts/pv_validate.py` runs against
+        the labelled set, so acceptance here means what it means there.
+        """
+        from datasmith.agents.reflexive.loop import DATASMITH_PV_ENABLED
+
+        if not (DATASMITH_PV_ENABLED and self._agent and self._agent != "none" and image_tag):
+            return False
+        try:
+            from datasmith.agents.installed.base import get_agent
+            from datasmith.agents.reflexive.verifier import verify as verifier_verify
+
+            graded = verifier_verify(image_tag, "", get_agent([DATASMITH_PV_VERIFIER_AGENT]), mode="container_built")
+        except Exception:
+            logger.exception("verifier raised on a default-template image for %s/%s#%d", owner, repo, issue_number)
+            return False
+        if not graded.accepted:
+            logger.info(
+                "Default template image for %s/%s#%d built and scanned clean but the verifier "
+                "did not accept it (hard=%s); stored as unverified",
+                owner,
+                repo,
+                issue_number,
+                list(graded.hard_failures),
+            )
+        return graded.accepted
+
     def _save_context(
         self,
         owner: str,
@@ -876,6 +1026,7 @@ class Synthesizer:
         resource_metrics: dict | None = None,
         env_payload_override: str | None = None,
         build_manifest: dict | None = None,
+        verified: bool = False,
     ) -> None:
         """Persist the agent-edited scripts to the ``candidate_containers`` table.
 
@@ -908,6 +1059,14 @@ class Synthesizer:
             warnings = evaluate_invariants(build_manifest).warnings
             if warnings:
                 row["manifest_warnings"] = warnings
+        # `verified` is a claim, and only code holding ALL FOUR facts may make
+        # it: the image built, the HOST scan found nothing, the verifier
+        # accepted, and a manifest was sealed. Callers pass verified=True only
+        # after all four; there is no path that sets it by hand, and migration
+        # 00029 defaults every row to 'unverified' so an omission fails closed.
+        if verified and build_manifest:
+            row["verification_state"] = "verified"
+            row["verified_at"] = datetime.datetime.now(datetime.UTC).isoformat()
         client.table("candidate_containers").upsert(row).execute()
         logger.info("Saved context for %s/%s@%s", owner, repo, sha[:12])
 
