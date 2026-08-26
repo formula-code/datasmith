@@ -237,3 +237,71 @@ def test_the_source_count_prefers_asvs_own_loader(tmp_path: Path) -> None:
 
     out = _run_count_source(conf_dir, {"PYTHONPATH": str(stub)})
     assert out.splitlines()[-1] == "1", out
+
+
+class TestATimedOutContainerIsKilled:
+    """`subprocess.run(timeout=...)` kills the docker client, not the container.
+
+    Without a name to kill, a timed-out container runs on detached and `--rm`
+    only fires when it eventually exits by itself. On 2026-08-25 that left 13
+    containers alive for up to 274 minutes against a 40-minute timeout, one of
+    them running 776 Ray workers, with the host at load 372 on 128 cores doing
+    work nothing was waiting for.
+    """
+
+    def _fake_docker(self, monkeypatch, *, times_out: bool):
+        import subprocess as sp
+
+        from datasmith.agents.reflexive import battery as bat
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            if times_out and cmd[:2] == ["docker", "run"]:
+                raise sp.TimeoutExpired(cmd, kwargs.get("timeout", 1))
+
+            class _P:
+                stdout, stderr, returncode = "out", "", 0
+
+            return _P()
+
+        monkeypatch.setattr(bat.subprocess, "run", fake_run)
+        return bat, calls
+
+    def test_the_run_is_named_so_it_can_be_killed(self, monkeypatch) -> None:
+        bat, calls = self._fake_docker(monkeypatch, times_out=False)
+        bat._docker_runner("img:1", ["python", "-c", "pass"], 30)
+        run_cmd = calls[0]
+        assert "--name" in run_cmd, "an unnamed container cannot be killed on timeout"
+
+    def test_a_timeout_force_removes_the_container(self, monkeypatch) -> None:
+        import subprocess as sp
+
+        bat, calls = self._fake_docker(monkeypatch, times_out=True)
+        with pytest.raises(sp.TimeoutExpired):
+            bat._docker_runner("img:1", ["python", "-c", "pass"], 30)
+        names = [c[c.index("--name") + 1] for c in calls if "--name" in c]
+        removals = [c for c in calls if c[:3] == ["docker", "rm", "-f"]]
+        assert removals, "a timed-out container must be force-removed"
+        assert removals[0][3] == names[0], "and it must remove the container it started"
+
+    def test_the_container_is_cpu_capped(self, monkeypatch) -> None:
+        """An uncapped container sizes its worker pool from the host's cores."""
+        bat, calls = self._fake_docker(monkeypatch, times_out=False)
+        monkeypatch.setattr(bat, "DATASMITH_PV_BATTERY_CPUS", 8.0)
+        bat._docker_runner("img:1", ["python", "-c", "pass"], 30)
+        assert "--cpus" in calls[0]
+
+    def test_the_cap_can_be_switched_off(self, monkeypatch) -> None:
+        bat, calls = self._fake_docker(monkeypatch, times_out=False)
+        monkeypatch.setattr(bat, "DATASMITH_PV_BATTERY_CPUS", 0.0)
+        bat._docker_runner("img:1", ["python", "-c", "pass"], 30)
+        assert "--cpus" not in calls[0]
+
+    def test_a_timeout_still_becomes_a_fact_not_a_raise(self, monkeypatch) -> None:
+        """run_battery's contract: a crash is a finding, never an exception."""
+        bat, _calls = self._fake_docker(monkeypatch, times_out=True)
+        facts = bat.run_battery("img:1", timeout_s=1)
+        assert facts, "the battery must still report"
+        assert all(f.crashed for f in facts)

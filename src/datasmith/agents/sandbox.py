@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +28,30 @@ from datasmith.docker.context import DockerContext
 from datasmith.utils import get_logger
 
 logger = get_logger("agents.sandbox")
+
+# Wall-clock for ONE verification: build + tests + measurement, together.
+#
+# This used to be 3600 s -- the same budget `local_ci.py` gives to tests ALONE
+# and to measurement ALONE (`DATASMITH_VERIFY_TEST_TIMEOUT_S`,
+# `DATASMITH_VERIFY_MEASURE_TIMEOUT_S`, both 3600). An outer wrapper no larger
+# than one of its own steps kills work that is still inside its allowance, and
+# it does so silently: the run comes back as `Timed out after 3600s`, which is
+# indistinguishable from a hang.
+#
+# Measured on the verified corpus 2026-08-26, tests + measurement alone:
+# bottleneck#305 3351 s (93% of the old budget, and it only fit because its
+# build was cached), bottleneck#298 2615 s, uxarray#1118 2039 s, networkx#8138
+# 1693 s, tiled#1283 1555 s. Add a build and the largest repos cannot finish
+# inside an hour at all -- which is why every repo with a big test suite or a
+# large benchmark suite had never produced a verified container, while 103
+# rounds burned on `Timed out after 3600s`.
+#
+# 5400 covers the observed maximum with room for a cold build. It is a
+# trade-off, not a free win: a genuinely hung task now costs more before the
+# stall detector ends it, and only 3 of 38 tasks that hit a timeout ever went
+# on to be accepted. Lower it if hung tasks start dominating again.
+DATASMITH_VERIFY_TIMEOUT_S: int = int(os.environ.get("DATASMITH_VERIFY_TIMEOUT_S", "5400"))
+
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -555,6 +580,39 @@ def _render_agents_md(
     )
 
 
+def _kill_labelled_containers(run_label: str) -> int:
+    """Force-remove every container carrying ``fc.run=<run_label>``.
+
+    Best-effort by design: this runs on a path that is already failing, and a
+    docker hiccup here must not replace a timeout result with an exception.
+    Returns how many it removed, for the log line.
+    """
+    try:
+        listed = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"label=fc.run={run_label}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        ).stdout.split()
+    except Exception:
+        logger.warning("could not list containers for %s", run_label)
+        return 0
+    removed = 0
+    for cid in listed:
+        try:
+            if (
+                subprocess.run(["docker", "rm", "-f", cid], capture_output=True, check=False, timeout=120).returncode
+                == 0
+            ):
+                removed += 1
+        except Exception:
+            logger.warning("could not remove container %s for %s", cid, run_label)
+    if removed:
+        logger.warning("verification timed out; force-removed %d container(s) for %s", removed, run_label)
+    return removed
+
+
 def verify_context(
     owner: str,
     repo: str,
@@ -563,7 +621,7 @@ def verify_context(
     env_payload: str,
     python_version: str,
     context: DockerContext,
-    timeout_s: int = 3600,
+    timeout_s: int = DATASMITH_VERIFY_TIMEOUT_S,
     base_sha: str = "",
     solution_patch: str = "",
     run_tests_gate: bool = True,
@@ -650,15 +708,25 @@ def verify_context(
         # Run local_ci.py directly (no agent)
         skip_gate = [] if run_tests_gate else ["--skip-test-gate"]
         local_ci_argv = [sys.executable, str(workspace / "local_ci.py"), "--task", str(task_dir), *skip_gate]
+        # Tag every container this verification starts, so a timeout can kill
+        # them. Killing local_ci.py does NOT stop its containers -- they run in
+        # the daemon, and local_ci deliberately omits `--rm` so it can collect
+        # metrics after exit. Its own cleanup never runs when it is killed from
+        # here, which is how containers survived 90+ minutes against a 3600 s
+        # timeout on 2026-08-25/26 and put the host at load 372 on 128 cores.
+        run_label = f"verify-{uuid.uuid4().hex[:12]}"
+        env = {**os.environ, "FC_RUN_LABEL": run_label}
         try:
             proc = subprocess.run(
                 local_ci_argv,
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
+                env=env,
             )
             output = proc.stdout
         except subprocess.TimeoutExpired:
+            _kill_labelled_containers(run_label)
             return SandboxResult(
                 success=False,
                 failure_json={

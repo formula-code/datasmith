@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1008,3 +1009,184 @@ class TestEveryCopySourceReachesTheTaskDir:
         lsv_tuples = re.findall(r'for fname in \("lsv_init\.py".*?\):', src)
         assert len(lsv_tuples) == 2, f"expected 2 LSV copy loops, found {len(lsv_tuples)}"
         assert lsv_tuples[0] == lsv_tuples[1]
+
+
+class TestAVerificationTimeoutKillsItsContainers:
+    """Killing local_ci.py does not stop the containers it started.
+
+    `verify_context` runs local_ci.py under `subprocess.run(timeout=...)`.
+    When that fires, Python kills local_ci while its container keeps running
+    in the daemon -- and local_ci deliberately omits `--rm` so it can collect
+    metrics after exit, so its own cleanup is the only thing that would have
+    removed the container, and it never runs.
+
+    Measured 2026-08-25/26: containers surviving 90+ minutes against a 3600 s
+    timeout, with the host at load 372 on 128 cores doing work nothing was
+    waiting for. The container name is a uuid the parent never sees, so the
+    label is what makes cleanup possible.
+    """
+
+    def test_labelled_containers_are_force_removed(self, monkeypatch) -> None:
+        import datasmith.agents.sandbox as sb
+
+        calls: list[list[str]] = []
+
+        class _P:
+            stdout = "abc123 def456"
+            returncode = 0
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return _P()
+
+        monkeypatch.setattr(sb.subprocess, "run", fake_run)
+        removed = sb._kill_labelled_containers("verify-deadbeef")
+        assert removed == 2
+        assert calls[0][:3] == ["docker", "ps", "-q"]
+        assert "label=fc.run=verify-deadbeef" in calls[0]
+        assert [c for c in calls if c[:3] == ["docker", "rm", "-f"]], "must force-remove what it listed"
+
+    def test_it_never_raises_on_a_docker_failure(self, monkeypatch) -> None:
+        """This runs on a path that is already failing; an exception here would
+        replace a timeout result with a crash."""
+        import datasmith.agents.sandbox as sb
+
+        def boom(cmd, **kwargs):
+            raise OSError("docker is gone")
+
+        monkeypatch.setattr(sb.subprocess, "run", boom)
+        assert sb._kill_labelled_containers("verify-x") == 0
+
+    def test_nothing_to_remove_is_not_an_error(self, monkeypatch) -> None:
+        import datasmith.agents.sandbox as sb
+
+        class _P:
+            stdout = ""
+            returncode = 0
+
+        monkeypatch.setattr(sb.subprocess, "run", lambda cmd, **kw: _P())
+        assert sb._kill_labelled_containers("verify-y") == 0
+
+    def test_local_ci_labels_the_containers_it_starts(self) -> None:
+        """The parent can only clean up what the child labelled."""
+        from pathlib import Path
+
+        src = Path(sb_path()).read_text()
+        assert 'os.environ.get("FC_RUN_LABEL"' in src, "local_ci must read the label"
+        assert '"--label", f"fc.run={run_label}"' in src, "and apply it to docker run"
+
+
+def sb_path() -> str:
+    from pathlib import Path
+
+    import datasmith
+
+    return str(Path(datasmith.__file__).parent / "agents" / "templates" / "local_ci.py")
+
+
+class TestTheVerificationTimeoutCoversItsOwnSteps:
+    """An outer wrapper must not be smaller than the steps it wraps.
+
+    `verify_context` bounds build + tests + measurement together. It was 3600 s
+    — the same budget `local_ci.py` gives to tests alone and to measurement
+    alone. Work still inside its own allowance was killed, and the result came
+    back as `Timed out after 3600s`, indistinguishable from a hang.
+
+    Measured on the verified corpus 2026-08-26 (tests + measurement, excluding
+    build): bottleneck#305 3351 s, bottleneck#298 2615 s, uxarray#1118 2039 s.
+    The first cleared the old budget by 249 s and only because its build was
+    cached. 103 rounds across the grind burned on this timeout.
+    """
+
+    def test_the_outer_budget_exceeds_the_inner_ones(self) -> None:
+        import datasmith.agents.sandbox as sb
+
+        test_s = int(os.environ.get("DATASMITH_VERIFY_TEST_TIMEOUT_S", "3600"))
+        measure_s = int(os.environ.get("DATASMITH_VERIFY_MEASURE_TIMEOUT_S", "3600"))
+        longest_step = max(test_s, measure_s)
+        assert longest_step < sb.DATASMITH_VERIFY_TIMEOUT_S, "the wrapper must outlive any single step it wraps"
+
+    def test_it_covers_the_largest_observed_real_run(self) -> None:
+        """bottleneck#305: 68 s of tests plus 3283 s of measurement."""
+        import datasmith.agents.sandbox as sb
+
+        assert sb.DATASMITH_VERIFY_TIMEOUT_S >= 3351, "the corpus already contains a run this long"
+
+    def test_it_is_overridable(self, monkeypatch) -> None:
+        """A hung-task problem is fixed by lowering this, not by editing code."""
+        import importlib
+
+        monkeypatch.setenv("DATASMITH_VERIFY_TIMEOUT_S", "1234")
+        import datasmith.agents.sandbox as sb
+
+        try:
+            importlib.reload(sb)
+            assert sb.DATASMITH_VERIFY_TIMEOUT_S == 1234
+        finally:
+            monkeypatch.delenv("DATASMITH_VERIFY_TIMEOUT_S", raising=False)
+            importlib.reload(sb)
+
+    def test_verify_context_defaults_to_the_knob(self) -> None:
+        import inspect
+
+        import datasmith.agents.sandbox as sb
+
+        sig = inspect.signature(sb.verify_context)
+        assert sig.parameters["timeout_s"].default == sb.DATASMITH_VERIFY_TIMEOUT_S
+
+
+class TestTheTimeoutHandlerActuallyCallsTheCleanup:
+    """Asserted over the AST, not the source text.
+
+    The isolated tests for `_kill_labelled_containers` all passed with the call
+    removed from `verify_context`'s timeout handler — they proved the helper
+    works, not that anything invokes it. A string search would be little
+    better: the helper's name appears in comments and in its own definition.
+
+    This walks the `except subprocess.TimeoutExpired` handler inside
+    `verify_context` and requires a call to the helper in its body, which is
+    the thing that actually stops containers outliving the run.
+    """
+
+    @staticmethod
+    def _timeout_handlers():
+        import ast
+        import inspect
+        import textwrap
+
+        import datasmith.agents.sandbox as sb
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(sb.verify_context)))
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler):
+                continue
+            names = [n.attr for n in ast.walk(node.type) if isinstance(n, ast.Attribute)] if node.type else []
+            if "TimeoutExpired" in names:
+                found.append(node)
+        return found
+
+    def test_a_timeout_handler_exists(self) -> None:
+        assert self._timeout_handlers(), "verify_context must handle its own timeout"
+
+    def test_every_timeout_handler_cleans_up_its_containers(self) -> None:
+        import ast
+
+        for handler in self._timeout_handlers():
+            called = {n.func.id for n in ast.walk(handler) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            assert "_kill_labelled_containers" in called, (
+                "a timeout that leaves its containers running is how the host reached "
+                "load 372 with work nothing was waiting for"
+            )
+
+    def test_the_run_label_is_passed_to_the_child(self) -> None:
+        """The child can only label what the parent told it to label."""
+        import ast
+        import inspect
+        import textwrap
+
+        import datasmith.agents.sandbox as sb
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(sb.verify_context)))
+        keys = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value == "FC_RUN_LABEL"]
+        assert keys, "verify_context must export FC_RUN_LABEL to local_ci.py"

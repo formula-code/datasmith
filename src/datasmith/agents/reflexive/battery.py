@@ -17,6 +17,7 @@ import logging
 import os
 import shlex
 import subprocess
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,14 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DATASMITH_PV_BATTERY_TIMEOUT_S: int = int(os.environ.get("DATASMITH_PV_BATTERY_TIMEOUT_S", "1800"))
+
+# Cores a single battery container may use. 0 disables the limit.
+#
+# modin, dask and pymc size their worker pools from the visible core
+# count, so one uncapped container spawns a worker per host core and
+# starves everything running beside it -- 776 Ray workers from three
+# modin containers on 2026-08-25.
+DATASMITH_PV_BATTERY_CPUS: float = float(os.environ.get("DATASMITH_PV_BATTERY_CPUS", "8"))
 
 # Each entry is (fact_name, argv). argv runs inside the image via the runner.
 # Nothing here writes: the verifier's posture is read-only.
@@ -191,15 +200,36 @@ _PROBE_SRC = Path(__file__).resolve().parents[4] / "scripts" / "honesty_probe.py
 
 
 def _docker_runner(image_tag: str, argv: list[str], timeout_s: int) -> tuple[str, str, int]:
+    """Run one battery command in the image, and make sure it cannot outlive us.
+
+    `subprocess.run(timeout=...)` kills the docker CLIENT, not the container.
+    Without a name to kill, a timed-out container keeps running detached and
+    `--rm` only fires whenever it finally exits on its own. On 2026-08-25 that
+    left 13 containers alive for up to 274 minutes against a 40-minute timeout
+    -- one modin image was running 776 Ray workers, and the machine sat at load
+    372 on 128 cores doing work no one was waiting for.
+
+    `--name` gives the timeout path something to kill. `--cpus` bounds the
+    blast radius of a single container: modin, dask and pymc all size their
+    worker pools from the visible core count, so an uncapped container claims
+    the whole host and starves every task running beside it.
+    """
     mounts: list[str] = []
     if _PROBE_SRC.is_file():
         mounts = ["-v", f"{_PROBE_SRC}:/opt/fc_probe.py:ro"]
-    proc = subprocess.run(
-        ["docker", "run", "--rm", *mounts, "--entrypoint", argv[0], image_tag, *argv[1:]],
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-    )
+    name = f"fc-battery-{uuid.uuid4().hex[:12]}"
+    limits = ["--cpus", str(DATASMITH_PV_BATTERY_CPUS)] if DATASMITH_PV_BATTERY_CPUS else []
+    try:
+        proc = subprocess.run(
+            ["docker", "run", "--rm", "--name", name, *limits, *mounts, "--entrypoint", argv[0], image_tag, *argv[1:]],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, check=False, timeout=120)
+        logger.warning("battery command timed out after %ss; killed container %s", timeout_s, name)
+        raise
     return proc.stdout, proc.stderr, proc.returncode
 
 

@@ -245,6 +245,21 @@ def _run_container_with_timeout(
     """
     name = f"fc-{uuid.uuid4().hex[:8]}"
     cmd = ["docker", "run", "--name", name, "--pull", "never"]
+    # Label every container with the run that owns it.
+    #
+    # This process can be killed from outside: sandbox.py runs local_ci.py
+    # under `subprocess.run(timeout=...)`, and when that fires Python kills
+    # THIS process while the container keeps running in the daemon. The
+    # cleanup below never executes, and `docker run` was started without
+    # `--rm` on purpose (metrics are collected after exit), so nothing
+    # removes it. Observed 2026-08-25/26: containers surviving 90+ minutes
+    # against a 3600 s timeout, one host at load 372 on 128 cores.
+    #
+    # The label gives the parent something to clean up by, since the name is
+    # a uuid it never sees.
+    run_label = os.environ.get("FC_RUN_LABEL", "")
+    if run_label:
+        cmd += ["--label", f"fc.run={run_label}"]
     for spec in mounts or []:
         cmd += ["-v", spec]
     cmd += [image_tag, *command]
