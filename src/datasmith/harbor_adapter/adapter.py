@@ -106,6 +106,24 @@ class FormulaCodeAdapter:
         ]:
             copy2(self.template_dir / name, paths.environment_dir / name)
 
+    def _write_cache_files(self, paths: HarborTaskPaths, deps_db: bytes | None) -> None:
+        """Populate ``environment/cache/`` with the pre-surveyed LSV deps DB.
+
+        The directory is created unconditionally -- even on a cache miss -- and
+        seeded with a ``.gitkeep`` so the Dockerfile's ``COPY cache/`` directive
+        always has a source and the build never fails. When ``deps_db`` is
+        present (a hit staged by the runner), it is written as
+        ``lightspeed_deps.db``; the Dockerfile bakes it to
+        ``/opt/lsv/cache/lightspeed_deps.db``, where lsv_init.py stages it before
+        ``load_baselines`` (which requires the surveyed DB on disk first). A miss
+        leaves only ``.gitkeep``, so lsv_init falls through to force=True.
+        """
+        cache_dir = paths.environment_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / ".gitkeep").write_text("")
+        if deps_db:
+            (cache_dir / "lightspeed_deps.db").write_bytes(deps_db)
+
     def _write_instruction_md(self, rec: FormulaCodeRecord, paths: HarborTaskPaths) -> None:
         """Generate instruction.md file."""
         instruction_content = render_instruction_md(rec.instructions)
@@ -217,6 +235,7 @@ class FormulaCodeAdapter:
         verifier_env: dict[str, str] | None = None,
         expected_n: int | None = None,
         render_env: dict[str, str] | None = None,
+        deps_db: bytes | None = None,
     ) -> Path:
         """Generate a complete Harbor task directory for the given FormulaCodeRecord.
 
@@ -237,6 +256,11 @@ class FormulaCodeAdapter:
         That is the common case (the column is hand-declared and usually
         NULL), and the invariant then skips. Emitting a key that is always
         empty would make the wiring look live when it is not.
+
+        ``deps_db`` is the pre-surveyed LSV deps DB the runner fetched from
+        ``lsv_deps_cache`` for this task; it is baked into the image so lsv_init
+        can skip the survey pass. ``None`` bakes only an empty ``cache/``
+        placeholder, leaving lsv_init on force=True.
         """
         out_dir = self.out_root / rec.task_dir_name
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -246,6 +270,7 @@ class FormulaCodeAdapter:
 
         # Copy static template files
         self._copy_template_files(paths)
+        self._write_cache_files(paths, deps_db)
 
         # Generate all task files
         self._write_instruction_md(rec, paths)

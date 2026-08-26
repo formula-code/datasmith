@@ -3,7 +3,7 @@ FROM {{ base_image }}
 # Install required system packages
 RUN apt-get update && apt-get install -y git tmux asciinema
 RUN curl -LsSf https://astral.sh/uv/0.7.13/install.sh | sh
-RUN mkdir -p /logs /opt/lsv /tests
+RUN mkdir -p /logs /opt/lsv /opt/lsv/cache /tests
 
 # Copy environment setup scripts
 COPY entrypoint.sh /entrypoint.sh
@@ -15,6 +15,11 @@ COPY lsv_init.py lsv_measure.py lsv_cache_writeback.py parser.py upload.py pytes
 # lsv_init.py reads /tests/config.json during setup.sh — bake it in too.
 # Harbor's verifier later overwrites this with identical content.
 COPY config.json /tests/config.json
+
+# Pre-surveyed LSV deps DB (lsv_deps_cache), when the runner staged one. The
+# adapter always creates environment/cache/ (with a .gitkeep) so this COPY has a
+# source even on a cache miss; lsv_init reads lightspeed_deps.db from here.
+COPY cache/ /opt/lsv/cache/
 
 RUN chmod +x /entrypoint.sh
 ENV PYTHONPATH=/opt/lsv:${PYTHONPATH:-}
