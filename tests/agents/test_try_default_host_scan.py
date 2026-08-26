@@ -170,7 +170,7 @@ class TestTheCallSitePassesTheVerdictThrough:
 
     @staticmethod
     def _drive(monkeypatch, verifier_accepts: bool) -> dict:
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
 
         from datasmith.agents.sandbox import SandboxResult
         from datasmith.agents.synthesizer import Synthesizer
@@ -178,6 +178,14 @@ class TestTheCallSitePassesTheVerdictThrough:
 
         captured: dict = {}
         synth = Synthesizer(agent="codex")
+        # A rejected default build now FALLS THROUGH to PRODUCE_VERIFY instead
+        # of returning, so the producer has to be stubbed or this drives a real
+        # agent. The verdict being asserted is written before that happens.
+        stalled = MagicMock()
+        stalled.accepted = False
+        stalled.context = None
+        stalled.rounds = 1
+        stalled.stop_reason = "no_progress"
         with (
             patch("datasmith.agents.synthesizer.verify_context") as mock_verify,
             patch.object(synth, "_check_cache", return_value=None),
@@ -185,6 +193,7 @@ class TestTheCallSitePassesTheVerdictThrough:
             patch.object(synth, "_log_default_attempt"),
             patch("datasmith.agents.synthesizer._host_scan_findings", return_value=[]),
             patch.object(synth, "_verify_built_image", return_value=verifier_accepts),
+            patch.object(synth, "_run_produce_verify", return_value=stalled),
             patch.object(synth, "_save_context", side_effect=lambda *a, **k: captured.update(k)),
         ):
             mock_verify.return_value = SandboxResult(
@@ -253,3 +262,130 @@ class TestTheRepairPathAlsoRecordsVerification:
                 "the PRODUCE_VERIFY acceptance path must record the verification it earned; "
                 f"got verified={kwargs.get('verified')!r}"
             )
+
+
+class TestTryDefaultIsSkippedWhenAContextIsAlreadyStored:
+    """A stored context for this sha means the stock template did not build it.
+
+    That is the only way such a row is written: agent-authored scripts land in
+    `candidate_containers` because TRY_DEFAULT failed first. Re-running the
+    template costs a full 300-700s build to re-learn the same fact. Measured
+    over 39 TRY_DEFAULT attempts on tasks in exactly that state (the
+    2026-08-24 sweeps plus the 2026-08-25 grind): 39 failures, 0 successes.
+
+    PRODUCE_VERIFY seeds from the same stored context, so the cheap path is not
+    lost -- it is the same scripts, one build earlier.
+    """
+
+    @staticmethod
+    def _synth(agent="codex"):
+        from datasmith.agents.synthesizer import Synthesizer
+
+        return Synthesizer(agent=agent)
+
+    def _synth_with(self, monkeypatch, *, stored, pv_on, agent="codex"):
+        import datasmith.agents.reflexive.loop as loop_mod
+        from datasmith.agents.synthesizer import Synthesizer
+
+        monkeypatch.setattr(loop_mod, "DATASMITH_PV_ENABLED", pv_on)
+        synth = Synthesizer(agent=agent)
+        monkeypatch.setattr(
+            Synthesizer,
+            "_stored_producer_scripts",
+            lambda self, o, r, sh: ("pkg", "run") if stored else None,
+        )
+        return synth
+
+    def test_a_stored_context_supersedes_the_default_attempt(self, monkeypatch) -> None:
+        synth = self._synth_with(monkeypatch, stored=True, pv_on=True)
+        assert synth._stored_context_supersedes_default("o", "r", "sha") is True
+
+    def test_no_stored_context_still_takes_the_cheap_path(self, monkeypatch) -> None:
+        synth = self._synth_with(monkeypatch, stored=False, pv_on=True)
+        assert synth._stored_context_supersedes_default("o", "r", "sha") is False
+
+    def test_the_default_is_never_skipped_when_pv_is_off(self, monkeypatch) -> None:
+        """With the flag off, TRY_DEFAULT is the only path that builds anything."""
+        synth = self._synth_with(monkeypatch, stored=True, pv_on=False)
+        assert synth._stored_context_supersedes_default("o", "r", "sha") is False
+
+    def test_the_default_is_never_skipped_without_an_agent(self, monkeypatch) -> None:
+        """`--agent none` has no producer, so PRODUCE_VERIFY cannot consume the
+        stored context. Skipping here would leave the run with no path at all."""
+        synth = self._synth_with(monkeypatch, stored=True, pv_on=True, agent="none")
+        assert synth._stored_context_supersedes_default("o", "r", "sha") is False
+
+
+class TestARejectedDefaultBuildReachesTheProducer:
+    """A build the verifier rejects is exactly what the producer repairs.
+
+    The TRY_DEFAULT branch used to return unconditionally once the image built
+    and scanned clean. If the verifier then rejected it -- overwhelmingly on
+    `pytest_pass_ratio` -- the task ended with an `unverified` row that nothing
+    would revisit. On 2026-08-25 `dask/dask#6137`, `dask/dask#6186` and
+    `UXARRAY/uxarray#1118` all died that way inside one hour, each having
+    produced a container that built and scanned clean.
+    """
+
+    def _run_with_rejected_default(self, monkeypatch, *, accepted: bool):
+        from unittest.mock import MagicMock
+
+        import datasmith.agents.reflexive.loop as loop_mod
+        import datasmith.agents.synthesizer as syn
+        from datasmith.agents.sandbox import SandboxResult
+        from datasmith.agents.synthesizer import Synthesizer
+
+        monkeypatch.setattr(loop_mod, "DATASMITH_PV_ENABLED", True)
+        monkeypatch.setattr(
+            syn,
+            "verify_context",
+            lambda **kw: SandboxResult(
+                success=True,
+                image_tag="formulacode/x:1",
+                build_manifest={"build": {}},
+                resource_metrics={},
+            ),
+        )
+        monkeypatch.setattr(syn, "_host_scan_findings", lambda tag: [])
+        monkeypatch.setattr(Synthesizer, "_check_cache", lambda *a, **k: None)
+        monkeypatch.setattr(Synthesizer, "_find_similar_contexts", lambda *a, **k: [], raising=False)
+        monkeypatch.setattr(Synthesizer, "_save_context", MagicMock())
+        monkeypatch.setattr(Synthesizer, "_verify_built_image", lambda *a, **k: accepted)
+        monkeypatch.setattr(Synthesizer, "_stored_producer_scripts", lambda *a, **k: None)
+
+        seen: dict = {}
+
+        def fake_pv(self, **kwargs):
+            seen.update(kwargs)
+            outcome = MagicMock()
+            outcome.accepted = False
+            outcome.context = None
+            outcome.rounds = 1
+            outcome.stop_reason = "no_progress"
+            return outcome
+
+        monkeypatch.setattr(Synthesizer, "_run_produce_verify", fake_pv)
+
+        synth = Synthesizer(agent="codex")
+        synth.run(
+            owner="o",
+            repo="r",
+            issue_number=1,
+            pr_context="ctx",
+            sha="deadbeefcafe",
+            repo_image="img",
+            env_payload="{}",
+            python_version="3.12",
+            force=True,
+        )
+        return seen, synth
+
+    def test_a_rejected_default_build_is_handed_to_the_producer(self, monkeypatch) -> None:
+        seen, _ = self._run_with_rejected_default(monkeypatch, accepted=False)
+        assert seen, "PRODUCE_VERIFY was never reached after the rejection"
+        assert seen.get("seed_context") is not None, "the loop must start from the build that already works"
+
+    def test_an_accepted_default_build_still_short_circuits(self, monkeypatch) -> None:
+        """An accepted container must not spend agent budget being re-repaired."""
+        seen, _ = self._run_with_rejected_default(monkeypatch, accepted=True)
+        assert not seen, "an accepted default build must return without invoking the producer"

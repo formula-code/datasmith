@@ -238,9 +238,43 @@ class Synthesizer:
         #     `max_default_failures_per_repo` consecutive failures we stop
         #     retrying to avoid burning hours on structurally broken repos
         #     (e.g. every PR's env_payload is incompatible with the base image).
+        # Set when TRY_DEFAULT builds an image the verifier then rejects. That
+        # context is known to build, which makes it a better PRODUCE_VERIFY
+        # seed than either the template or an older stored row.
+        default_rejected_ctx: DockerContext | None = None
         fail_count = self._default_failures.get((owner, repo), 0)
         already_succeeded = (owner, repo) in self._tried_default_repos
         too_many_failures = fail_count >= self._max_default_failures_per_repo
+        # A stored context for THIS sha exists only because the stock template
+        # did not build this commit -- that is the only way a row gets written
+        # with agent-authored scripts. Re-running the template against it costs
+        # a full 300-700s build to re-learn that.
+        #
+        # 39 TRY_DEFAULT attempts across the 2026-08-24 sweeps and the
+        # 2026-08-25 grind produced 0 successes. That population MIXES tasks
+        # with and without a stored context, so it bounds the template's rate
+        # on this corpus rather than isolating the stored-context case -- do
+        # not read it as licence to widen the skip. The skip rests on the
+        # stronger argument above: the row exists only because the template
+        # failed for this sha. For a task with no stored row, TRY_DEFAULT is
+        # the only cheap path and it does still succeed (bluesky/tiled#1283).
+        #
+        # PRODUCE_VERIFY seeds from the same stored context, so nothing is
+        # lost by going straight there.
+        #
+        # Scoped to the exact sha, and only when PRODUCE_VERIFY can actually
+        # run. A task with no stored context still takes the cheap path first.
+        has_stored_context = False
+        if not (already_succeeded or too_many_failures):
+            has_stored_context = self._stored_context_supersedes_default(owner, repo, sha)
+            if has_stored_context:
+                logger.info(
+                    "Skipping TRY_DEFAULT for %s/%s#%d — a stored context exists for this sha, "
+                    "so the stock template is known not to build it",
+                    owner,
+                    repo,
+                    issue_number,
+                )
         if already_succeeded:
             logger.debug(
                 "Skipping TRY_DEFAULT for %s/%s#%d — default already succeeded for this repo",
@@ -257,7 +291,7 @@ class Synthesizer:
                 fail_count,
                 self._max_default_failures_per_repo,
             )
-        if (not already_succeeded) and (not too_many_failures):
+        if not (already_succeeded or too_many_failures or has_stored_context):
             self._trace.append(SynthesisState.TRY_DEFAULT)
             default_ctx = _load_default_context()
             default_started = time.monotonic()
@@ -348,7 +382,36 @@ class Synthesizer:
                             build_manifest=result.build_manifest,
                             verified=accepted,
                         )
-                        return default_ctx
+                        if accepted or not self._produce_verify_available():
+                            # With PRODUCE_VERIFY unavailable the only path
+                            # left is LLM_GENERATE, a full sandbox agent. The
+                            # legacy contract is that a default build which
+                            # succeeds ends the task, and quietly spending an
+                            # LLM_GENERATE attempt on every rejected container
+                            # is not a change this branch should make.
+                            return default_ctx
+                        # A REJECTED build is exactly what the producer exists
+                        # to repair, so do not stop here.
+                        #
+                        # This branch used to return unconditionally. The image
+                        # built and scanned clean, the verifier rejected it --
+                        # overwhelmingly on `pytest_pass_ratio` -- and the task
+                        # ended with an `unverified` row that nothing would
+                        # ever revisit. dask#6137, dask#6186 and uxarray#1118
+                        # all died that way on 2026-08-25 within one hour.
+                        #
+                        # The context is already saved, so the build is not
+                        # lost if the producer fails. Falling through hands the
+                        # loop a context that is KNOWN to build, which is a far
+                        # better starting point than the template it would
+                        # otherwise seed from.
+                        logger.info(
+                            "Default template image for %s/%s#%d was rejected; handing it to the producer",
+                            owner,
+                            repo,
+                            issue_number,
+                        )
+                        default_rejected_ctx = default_ctx
             else:
                 self._default_failures[(owner, repo)] = fail_count + 1
                 failed_attempts.append((default_ctx, result))
@@ -384,6 +447,7 @@ class Synthesizer:
                 python_version=python_version,
                 base_sha=base_sha,
                 solution_patch=solution_patch,
+                seed_context=default_rejected_ctx,
             )
             if outcome.accepted and outcome.context is not None:
                 # `verified=True` here, not just on the TRY_DEFAULT branch.
@@ -517,6 +581,111 @@ class Synthesizer:
         logger.warning("All synthesis attempts failed for %s/%s#%d", owner, repo, issue_number)
         return None
 
+    def _produce_verify_available(self) -> bool:
+        """Can the reflexive producer/verifier loop actually run?"""
+        from datasmith.agents.reflexive.loop import DATASMITH_PV_ENABLED
+
+        return bool(DATASMITH_PV_ENABLED) and self._agent != "none"
+
+    def _stored_context_supersedes_default(self, owner: str, repo: str, sha: str) -> bool:
+        """Should TRY_DEFAULT be skipped because a stored context already exists?
+
+        True only when PRODUCE_VERIFY can actually consume that context: the
+        flag is on, an agent is available, and a row exists for THIS sha. If
+        any of those is false the stock template is still the cheapest path
+        that can produce a container at all, and skipping it would delete the
+        only route for an agent-less run.
+        """
+        if not self._produce_verify_available():
+            return False
+        return self._stored_producer_scripts(owner, repo, sha) is not None
+
+    def _stored_producer_scripts(self, owner: str, repo: str, sha: str) -> tuple[str, str] | None:
+        """The producer-owned scripts a previous run already got working, if any.
+
+        `--force` re-runs a task from the stock template, so a container that
+        earned a pass under older code repeats its entire repair to earn it
+        again -- xdslproject/xdsl#1332 was rejected at round 1 on
+        `pytest_collect` after a prior run had solved exactly that. Seeding the
+        loop from the stored scripts starts it where the last run finished.
+
+        Only `docker_build_pkg.sh` and `docker_build_run.sh` are carried over:
+        those are the two files the producer owns, and taking the rest from the
+        template keeps template fixes live. Nothing here marks anything
+        verified -- the loop still builds, scans, and grades from scratch.
+        """
+        try:
+            from datasmith.utils.db import fetch_all
+
+            rows = fetch_all(
+                "candidate_containers",
+                select="build_pkg_sh,build_run_sh",
+                filters={"owner": owner, "repo": repo, "sha": sha},
+            )
+        except Exception:
+            logger.warning("could not read stored context for %s/%s@%s", owner, repo, sha[:12])
+            return None
+        if not rows:
+            return None
+        pkg = (rows[0].get("build_pkg_sh") or "").strip()
+        run = (rows[0].get("build_run_sh") or "").strip()
+        if not pkg and not run:
+            return None
+        return pkg, run
+
+    def _seed_for_loop(self, owner: str, repo: str, sha: str, seed_context: DockerContext | None) -> DockerContext:
+        """Where the producer/verifier loop should start from.
+
+        Preference order:
+
+        1. A context TRY_DEFAULT just built that the verifier rejected. It is
+           known to build, so round 1 grades the actual defect rather than
+           spending itself re-deriving a working build.
+        2. The stored context for this exact sha, carrying only the two
+           producer-owned scripts.
+        3. The stock template.
+
+        Stored contexts are AGENT-AUTHORED. This module's header records that
+        128 repositories' stored contexts install a sitecustomize shim into
+        site-packages, which then runs inside the measured benchmark process --
+        that is why TRY_SIMILAR can be switched off. Seeding without an audit
+        would smuggle those back in through a different door. The host image
+        scan is still the gate; the audit is here so a known-tampered row costs
+        zero rounds instead of eight.
+        """
+        context = _load_default_context()
+        if seed_context is not None:
+            logger.info(
+                "PRODUCE_VERIFY starting from the rejected default build for %s/%s@%s",
+                owner,
+                repo,
+                sha[:12],
+            )
+            return seed_context
+
+        stored = self._stored_producer_scripts(owner, repo, sha)
+        if stored is None:
+            return context
+        pkg, run = stored
+        seeded = context.model_copy(
+            update={
+                "build_pkg_sh": pkg or context.build_pkg_sh,
+                "build_run_sh": run or context.build_run_sh,
+            }
+        )
+        tamper = classify_context(seeded)
+        if tamper.tampered:
+            logger.warning(
+                "stored context for %s/%s@%s is tampered (%s); starting from the template",
+                owner,
+                repo,
+                sha[:12],
+                tamper.as_list(),
+            )
+            return context
+        logger.info("PRODUCE_VERIFY seeded from stored context for %s/%s@%s", owner, repo, sha[:12])
+        return seeded
+
     def _run_produce_verify(
         self,
         owner: str,
@@ -528,6 +697,7 @@ class Synthesizer:
         python_version: str,
         base_sha: str,
         solution_patch: str,
+        seed_context: DockerContext | None = None,
     ) -> LoopOutcome:
         """Drive the reflexive loop for one task.
 
@@ -635,7 +805,7 @@ class Synthesizer:
 
         with tempfile.TemporaryDirectory(prefix="fc-pv-") as tmp:
             workdir = Path(tmp)
-            context = _load_default_context()
+            context = self._seed_for_loop(owner, repo, sha, seed_context)
             for filename, field_name in DockerContext._FILE_MAP.items():
                 (workdir / filename).write_text(getattr(context, field_name), encoding="utf-8")
 

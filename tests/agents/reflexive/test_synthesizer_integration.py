@@ -83,7 +83,7 @@ class TestTheBranchActuallyRuns:
             resource_metrics={"peak_mem_gb": 1.5},
         )
 
-    def _run(self, monkeypatch, *, verify_accepts: bool, tampered: bool = False):
+    def _run(self, monkeypatch, *, verify_accepts: bool, tampered: bool = False, stored_rows=None, db_raises=False):
         """Drive one round with every collaborator stubbed."""
         from unittest.mock import MagicMock
 
@@ -122,6 +122,15 @@ class TestTheBranchActuallyRuns:
             lambda ctx, graded, agent, workdir: (ctx.model_copy(update={"build_pkg_sh": "edited"}), None),
         )
         monkeypatch.setattr(syn, "classify_context", lambda ctx: tamper)
+
+        # The stored-context read must never reach a live database from a test.
+        def fake_fetch_all(table, **kwargs):
+            calls.setdefault("fetch_all", []).append((table, kwargs))
+            if db_raises:
+                raise RuntimeError("postgrest is down")
+            return list(stored_rows or [])
+
+        monkeypatch.setattr("datasmith.utils.db.fetch_all", fake_fetch_all)
 
         synth = self._synth()
         synth._trace = []
@@ -171,3 +180,106 @@ class TestTheBranchActuallyRuns:
         assert outcome.stop_reason == "producer_failed"
         assert synth._log_tamper.called, "a tampered revision must reach error_logs"
         assert synth._log_tamper.call_args[0][-1] == "produce_verify"
+
+
+class TestTheLoopStartsFromWhatAlreadyWorked:
+    """`--force` used to restart every task from the stock template.
+
+    A container that earned a pass under older code then had to repeat its
+    entire repair to earn it again: xdslproject/xdsl#1332 was rejected at
+    round 1 on `pytest_collect` even though a prior run had already solved
+    exactly that, because the scripts holding the fix were in the database and
+    the loop never read them. With 248 already-built rows to re-run, that is
+    the difference between one round and five.
+
+    Seeding changes where the loop STARTS, never what it concludes: the image
+    is rebuilt, the host scan re-run, and the verifier re-grades from scratch.
+    """
+
+    def _context_seen_by_the_build(self, calls):
+        assert calls["verify_context"], "verify_context was never called"
+        return calls["verify_context"][0]["context"]
+
+    def test_the_stored_scripts_seed_the_first_round(self, monkeypatch) -> None:
+        runner = TestTheBranchActuallyRuns()
+        _outcome, calls, _s = runner._run(
+            monkeypatch,
+            verify_accepts=True,
+            stored_rows=[{"build_pkg_sh": "STORED PKG", "build_run_sh": "STORED RUN"}],
+        )
+        context = self._context_seen_by_the_build(calls)
+        assert context.build_pkg_sh == "STORED PKG"
+        assert context.build_run_sh == "STORED RUN"
+
+    def test_the_template_is_used_when_nothing_is_stored(self, monkeypatch) -> None:
+        from datasmith.agents.synthesizer import _load_default_context
+
+        runner = TestTheBranchActuallyRuns()
+        _outcome, calls, _s = runner._run(monkeypatch, verify_accepts=True, stored_rows=[])
+        context = self._context_seen_by_the_build(calls)
+        assert context.build_pkg_sh == _load_default_context().build_pkg_sh
+
+    def test_a_database_failure_falls_back_to_the_template(self, monkeypatch) -> None:
+        """An unreadable row must not abort synthesis -- it is an optimisation."""
+        from datasmith.agents.synthesizer import _load_default_context
+
+        runner = TestTheBranchActuallyRuns()
+        outcome, calls, _s = runner._run(monkeypatch, verify_accepts=True, db_raises=True)
+        context = self._context_seen_by_the_build(calls)
+        assert context.build_pkg_sh == _load_default_context().build_pkg_sh
+        assert outcome.accepted is True
+
+    def test_only_the_producer_owned_scripts_carry_over(self, monkeypatch) -> None:
+        """Template fixes to the other scripts must stay live.
+
+        If a stored row could overwrite `docker_build_env.sh`, every re-run
+        would resurrect the environment script that shipped whenever that row
+        was written, and template-level fixes would silently not apply.
+        """
+        from datasmith.agents.synthesizer import _load_default_context
+
+        runner = TestTheBranchActuallyRuns()
+        _outcome, calls, _s = runner._run(
+            monkeypatch,
+            verify_accepts=True,
+            stored_rows=[{"build_pkg_sh": "STORED PKG", "build_run_sh": "STORED RUN", "build_env_sh": "STALE ENV"}],
+        )
+        context = self._context_seen_by_the_build(calls)
+        assert context.build_env_sh == _load_default_context().build_env_sh
+        assert context.build_env_sh != "STALE ENV"
+
+    def test_an_empty_stored_row_does_not_blank_the_scripts(self, monkeypatch) -> None:
+        """A row whose scripts are empty strings must not produce an empty build."""
+        from datasmith.agents.synthesizer import _load_default_context
+
+        runner = TestTheBranchActuallyRuns()
+        _outcome, calls, _s = runner._run(
+            monkeypatch,
+            verify_accepts=True,
+            stored_rows=[{"build_pkg_sh": "   ", "build_run_sh": ""}],
+        )
+        context = self._context_seen_by_the_build(calls)
+        assert context.build_pkg_sh == _load_default_context().build_pkg_sh
+
+    def test_a_tampered_stored_context_is_not_seeded(self, monkeypatch) -> None:
+        """The hazard TRY_SIMILAR is switched off to avoid.
+
+        Stored contexts are agent-authored, and this module's header records
+        that 128 repositories' stored contexts install a sitecustomize shim
+        into site-packages. Seeding without an audit would carry those back in
+        through a door the `DATASMITH_SKIP_SIMILAR_CONTEXTS` switch does not
+        cover. The host image scan is still the gate; this keeps a known-bad
+        row from spending eight rounds proving it.
+        """
+        from datasmith.agents.synthesizer import _load_default_context
+
+        runner = TestTheBranchActuallyRuns()
+        _outcome, calls, _s = runner._run(
+            monkeypatch,
+            verify_accepts=True,
+            tampered=True,
+            stored_rows=[{"build_pkg_sh": "SHIM PKG", "build_run_sh": "SHIM RUN"}],
+        )
+        context = self._context_seen_by_the_build(calls)
+        assert context.build_pkg_sh == _load_default_context().build_pkg_sh
+        assert context.build_pkg_sh != "SHIM PKG"
