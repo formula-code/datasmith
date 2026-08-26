@@ -4,6 +4,27 @@ Called from setup.sh before the agent runs. Creates a LightspeedSession,
 runs initialize_diffcheck to build the dependency database and baseline
 timing, then captures a snapshot of the benchmark environment.
 
+Baseline cache
+--------------
+``initialize_diffcheck`` runs two passes -- a coverage survey and a
+base-commit timing pass -- and the timing pass dominates. Both are skipped
+when the deps DB already holds the survey AND a baseline for every benchmark
+(see the LSV fork, ``asv/contrib/lightspeed/session.py``). This module reuses
+that cache across trials:
+
+* deps DB (survey, resource-independent) -- staged by the runner into
+  ``/opt/lsv/cache/lightspeed_deps.db`` at build time, if available.
+* baselines (resource-keyed) -- fetched at runtime from datasmith's own
+  Supabase (``lsv_baseline_cache``), because only inside the sandbox can we
+  read the CPU model that keys them. The key blends runner-supplied attrs
+  (``cpu_count``/``mem_bytes`` -- the cgroup limits the runner asked Harbor to
+  pin) with ``detected_cpu_model`` read from ``/proc/cpuinfo`` here.
+
+A miss on either layer degrades to today's behaviour: ``force=True`` re-runs
+both passes. The hit/miss decision is recorded in ``lsv_cache_state.json`` for
+the post-trial writeback, and the resolved key in ``lsv_resource_attrs.json``
+so the writeback reuses identical values.
+
 Usage:
     python /tests/lsv_init.py [--rounds N]
 """
@@ -14,11 +35,16 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
+from typing import Any
 
 
 def _ts() -> str:
@@ -30,6 +56,148 @@ OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
 SNAPSHOT_DIR = Path(os.environ.get("SNAPSHOT_DIR", "/logs/artifacts/.snapshots"))
 SNAPSHOT_FILTER = os.environ.get("FORMULACODE_SNAPSHOT_FILTER", r".*")
 SNAPSHOT_TIMEOUT = os.environ.get("FORMULACODE_SNAPSHOT_TIMEOUT", "30")
+
+# The runner bakes a cached, baseline-stripped deps DB (the coverage survey)
+# to this path at build time when one is available. Absent on the first run of
+# a task and whenever the cache is disabled -- both fall through to force=True.
+CACHED_DEPS_DB = Path(os.environ.get("LSV_CACHED_DEPS_DB", "/opt/lsv/cache/lightspeed_deps.db"))
+
+
+# /proc/cpuinfo and /proc/meminfo inside the sandbox report the underlying
+# physical host (Daytona's full hardware), not the cgroup limit -- so cpu_count
+# and mem_bytes must come from the runner (what it asked Harbor to pin), never
+# from /proc. detected_cpu_model is the ONE attr we do read from /proc here: it
+# is exactly the host-level fact we want, because Daytona's `default`
+# machine_class fans one (cpu, mem) request across several EPYC SKUs
+# (9254/9334/9354P) that benchmark differently, and a baseline must not replay
+# across them.
+_MODEL_RE = re.compile(r"^model name\s*:\s*(.+)$", re.MULTILINE)
+
+
+def _detect_cpu_model() -> str:
+    """First ``model name`` from /proc/cpuinfo, or '' if unreadable."""
+    try:
+        text = Path("/proc/cpuinfo").read_text()
+    except OSError:
+        return ""
+    m = _MODEL_RE.search(text)
+    return m.group(1).strip() if m else ""
+
+
+def _read_resource_attrs() -> dict[str, Any]:
+    """Build the 11-column cache key for this trial: seven runner-supplied
+    attrs (via setup.sh's render_env block), ``cpu_count``/``mem_bytes`` (the
+    pinned cgroup limits, also runner-supplied), and ``detected_cpu_model``
+    read from /proc/cpuinfo inside this sandbox."""
+
+    def _int(v: str) -> int:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "env": os.environ.get("LSV_ENV", ""),
+        "container_name": os.environ.get("LSV_CONTAINER_NAME", ""),
+        "image_digest": os.environ.get("LSV_IMAGE_DIGEST", ""),
+        "machine_class": os.environ.get("LSV_MACHINE_CLASS", ""),
+        "docker_host_id": os.environ.get("LSV_DOCKER_HOST_ID", ""),
+        "cpu_count": _int(os.environ.get("LSV_CPU_COUNT", "")),
+        "mem_bytes": _int(os.environ.get("LSV_MEM_BYTES", "")),
+        "detected_cpu_model": _detect_cpu_model(),
+    }
+
+
+def _datasmith_headers() -> dict[str, str] | None:
+    """Auth headers for datasmith's own Supabase (not Harbor's project).
+
+    Returns None when the service key is absent, which disables the cache. The
+    User-Agent override matters: Cloudflare's bot-fight rule blocks the default
+    ``Python-urllib`` UA before Access sees the request. Mirrors
+    ``lsv_cache_writeback._service_headers``.
+    """
+    key = os.environ.get("DATASMITH_SUPABASE_SERVICE_KEY", "")
+    if not key:
+        return None
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "apikey": key,
+        "Accept": "application/json",
+        "User-Agent": "datasmith-lsv-init/1.0",
+    }
+    cf_id = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_ID", "")
+    cf_secret = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_SECRET", "")
+    if cf_id and cf_secret:
+        headers["CF-Access-Client-Id"] = cf_id
+        headers["CF-Access-Client-Secret"] = cf_secret
+    return headers
+
+
+def _parse_task_id(task_id: str) -> tuple[str, str, int] | None:
+    """Parse ``owner__repo__<issue>`` (double-underscore, matching the runner's
+    ``rec.task_dir_name``). Returns None on a malformed id."""
+    try:
+        owner, repo, issue_str = task_id.rsplit("__", 2)
+        if not owner or not repo:
+            return None
+        return owner, repo, int(issue_str)
+    except (ValueError, IndexError):
+        return None
+
+
+def _fetch_baselines_from_cache(attrs: dict[str, Any]) -> dict[str, Any] | None:
+    """Look up an exact-match ``lsv_baseline_cache`` row on datasmith Supabase.
+
+    Returns the cached ``baselines`` JSONB, or None on miss / missing creds /
+    network failure -- every None path falls through to a fresh measure.
+    """
+    base_url = os.environ.get("DATASMITH_SUPABASE_URL", "")
+    headers = _datasmith_headers()
+    task_id = os.environ.get("LSV_TASK_ID", "")
+    if not base_url or not headers or not task_id:
+        print(f"[{_ts()}] [lsv_init] cache: skip baseline lookup (creds/task_id missing)")
+        return None
+    parsed = _parse_task_id(task_id)
+    if parsed is None:
+        print(f"[{_ts()}] [lsv_init] cache: could not parse LSV_TASK_ID={task_id!r}")
+        return None
+    owner, repo, issue = parsed
+
+    qs = [
+        "select=baselines",
+        f"owner=eq.{urllib.parse.quote(owner)}",
+        f"repo=eq.{urllib.parse.quote(repo)}",
+        f"issue_number=eq.{issue}",
+    ]
+    for k, v in attrs.items():
+        qs.append(f"{k}=eq.{urllib.parse.quote(str(v))}")
+    url = f"{base_url}/rest/v1/lsv_baseline_cache?" + "&".join(qs)
+    if not url.startswith(("https://", "http://")):
+        return None
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            rows = json.loads(resp.read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        print(f"[{_ts()}] [lsv_init] cache: baseline lookup failed ({exc})")
+        return None
+    if not rows:
+        return None
+    return rows[0].get("baselines") or None
+
+
+def _append_profile_export(name: str, value: str) -> None:
+    """Append ``export NAME=value`` to the shared asv profile file so a later
+    process in the trial (test.sh sources it) sees the variable. Idempotent:
+    an existing entry for ``name`` is left as-is."""
+    line = f"export {name}={value}\n"
+    profile_path = Path("/etc/profile.d/asv_build_vars.sh")
+    if profile_path.exists():
+        if name not in profile_path.read_text():
+            with open(profile_path, "a") as f:
+                f.write(line)
+    else:
+        profile_path.write_text(line)
 
 
 def detect_source_root() -> Path:
@@ -377,14 +545,55 @@ def main() -> None:
 
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
 
+    # ── Resolve the cache key and persist it for the writeback ───────────
+    # Single source of truth: lsv_cache_writeback.py reads the same file, so
+    # lookup and upsert can never disagree on '' vs "" for empty fields.
+    resource_attrs = _read_resource_attrs()
+    (OUTPUT_DIR / "lsv_resource_attrs.json").write_text(json.dumps(resource_attrs, indent=2))
+    print(
+        f"[{_ts()}] [lsv_init] resource_attrs: env={resource_attrs['env']!r} "
+        f"machine_class={resource_attrs['machine_class']!r} "
+        f"docker_host_id={resource_attrs['docker_host_id']!r} "
+        f"cpu_count={resource_attrs['cpu_count']} mem_bytes={resource_attrs['mem_bytes']} "
+        f"detected_cpu_model={resource_attrs['detected_cpu_model']!r}"
+    )
+
+    # ── Cache layer 1: deps DB (survey), pre-staged by the runner ────────
+    deps_was_cached = False
+    baselines_was_cached = False
+    if CACHED_DEPS_DB.exists() and CACHED_DEPS_DB.stat().st_size > 0:
+        session.deps_db_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(CACHED_DEPS_DB, session.deps_db_path)
+        deps_was_cached = True
+        print(f"[{_ts()}] [lsv_init] cache: staged deps DB from {CACHED_DEPS_DB}")
+
+    # ── Cache layer 2: baselines (resource-keyed, fetched at runtime) ────
+    # load_baselines needs the deps DB present first (it raises otherwise), so
+    # only attempt it once the survey has been staged.
+    if deps_was_cached:
+        cached_baselines = _fetch_baselines_from_cache(resource_attrs)
+        if cached_baselines:
+            try:
+                n = session.load_baselines(cached_baselines)
+                baselines_was_cached = True
+                print(f"[{_ts()}] [lsv_init] cache: loaded {n} baselines from lsv_baseline_cache")
+            except Exception as exc:  # noqa: BLE001 -- any failure falls through to a fresh measure
+                print(f"[{_ts()}] [lsv_init] cache: load_baselines failed ({exc}); measuring fresh")
+
+    # A full hit (survey + every baseline present) lets initialize_diffcheck
+    # short-circuit both passes. Anything less: force=True guarantees a fresh
+    # measure rather than trusting a partially populated DB -- identical to the
+    # historical unconditional force=True behaviour.
+    full_hit = deps_was_cached and baselines_was_cached
+
     # Run initialize_diffcheck
     print("=" * 64)
-    print(f"[{_ts()}] [phase] LSV initialize_diffcheck")
+    print(f"[{_ts()}] [phase] LSV initialize_diffcheck (force={not full_hit})")
     print("=" * 64)
 
     init_result = session.initialize_diffcheck(
         source_root=source_root,
-        force=True,
+        force=not full_hit,
         rounds=args.rounds,
         repeat=args.repeat,
         warmup_time=args.warmup_time,
@@ -427,6 +636,24 @@ def main() -> None:
     }
     (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(init_data, indent=2))
 
+    # ── Record cache hit/miss for the post-trial writeback ──────────────
+    # Any miss tells lsv_cache_writeback.py which layer to upload so the next
+    # trial on the same (task, hardware) hits.
+    cache_state = {
+        "deps_was_cached": deps_was_cached,
+        "baselines_was_cached": baselines_was_cached,
+        "deps_db_path": str(session.deps_db_path),
+    }
+    (OUTPUT_DIR / "lsv_cache_state.json").write_text(json.dumps(cache_state, indent=2))
+
+    # Surface the baseline hit to parser.py (which runs later in test.sh, a
+    # separate process) via the sourced profile file. Invariant #20
+    # (baseline_from_cache) reads it: a cached oracle baseline replayed to a
+    # warm agent run is flagged advisory, gating nothing.
+    _append_profile_export(
+        "FORMULACODE_BASELINE_FROM_CACHE", "1" if baselines_was_cached else "0"
+    )
+
     # Snapshot capture (oracle only — production runs download pre-built snapshots)
     agent_name = os.environ.get("HARBOR_AGENT_NAME", "").lower()
     if agent_name == "oracle":
@@ -437,16 +664,7 @@ def main() -> None:
         print(f"[{_ts()}] [lsv_init] Skipping snapshot capture (non-oracle run)")
 
     # Export BENCHMARK_DIR for downstream scripts
-    benchmark_dir_str = str(session.benchmark_dir)
-    profile_line = f"export BENCHMARK_DIR={benchmark_dir_str}\n"
-    profile_path = Path("/etc/profile.d/asv_build_vars.sh")
-    if profile_path.exists():
-        existing = profile_path.read_text()
-        if "BENCHMARK_DIR" not in existing:
-            with open(profile_path, "a") as f:
-                f.write(profile_line)
-    else:
-        profile_path.write_text(profile_line)
+    _append_profile_export("BENCHMARK_DIR", str(session.benchmark_dir))
 
     print(f"[{_ts()}] [lsv_init] Complete. Results at {OUTPUT_DIR}")
 
