@@ -149,6 +149,39 @@ for version in $TARGET_VERSIONS; do
   # git -C "$REPO_ROOT" submodule update --init --recursive
   # micromamba install -y -n "$ENV_NAME" -c conda-forge openblas libopenmp
   # export CFLAGS="${CFLAGS:-} -Wno-error=incompatible-pointer-types"
+  #
+  # shapely: GEOS must come from conda-forge, not from the system.
+  #
+  # setup.py finds GEOS through `geos-config` on PATH. The base image already
+  # has Ubuntu's at /usr/bin/geos-config, so GEOS *is* found -- it reports
+  # `--version 3.10.2`, `--includes /usr/include` and
+  # `--clibs -L/usr/lib/x86_64-linux-gnu -lgeos_c`. The compile, however, runs
+  # under the conda toolchain (x86_64-conda-linux-gnu-cc) with its own
+  # sysroot, so adding /usr/include drags Ubuntu's glibc headers into a
+  # conda-sysroot build and it dies in bits/wchar2.h with
+  #     error: implicit declaration of function '__mbsnrtowcs_chk'
+  # long before it reaches any GEOS symbol. That message names glibc, not
+  # GEOS, which is why this reads as a toolchain bug rather than a missing
+  # dependency, and why the fix is not "install libgeos-dev".
+  #
+  # Installing geos into the env puts geos-config in the env's own bin --
+  # which `micromamba run -n` puts ahead of /usr/bin -- so includes and libs
+  # both resolve inside the conda prefix and the headers stay consistent.
+  #
+  # env_payload cannot carry it: shapely's asv.conf.json declares
+  # `"environment_type": "conda"` with `"matrix": {"geos": []}`, and stage 4
+  # only reads an asv matrix as PyPI names for the environment types in
+  # DATASMITH_ASV_PIP_ENV_TYPES (virtualenv/venv/existing). Under a conda
+  # matrix `geos` is a conda package, so the resolver correctly refuses to
+  # invent a PyPI distribution for it -- it has to be installed here.
+  #
+  # Guarded on the origin URL, like the dask/joblib/astropy blocks above, so
+  # it is inert for every other repository.
+  if [[ "$ORIGIN_URL" =~ github\.com/shapely/shapely(\.git)?$ ]]; then
+    log "shapely: installing GEOS from conda-forge into $ENV_NAME"
+    micromamba install -y -n "$ENV_NAME" -c conda-forge geos
+    micromamba run -n "$ENV_NAME" geos-config --version
+  fi
   # -----------------------------------------------------------------
 
   # --no-build-isolation needs the PEP 517 backend already present in the env.
