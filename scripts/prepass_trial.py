@@ -182,6 +182,26 @@ _NOISE = (
     "}",
     "=====",
     "!!!!!",
+    # local_ci.py's stage-only summary of a build failure. It is the last line
+    # of the captured stdout, so the reverse scan lands on it whenever the
+    # failure has no named cause, and every distinct failure at a given stage
+    # signs identically. Must match loop.py's _NOISE exactly.
+    "Build failed at stage",
+    "Build failed:",
+)
+# Noise matched ANYWHERE in the line, not just at its start.
+#
+# `_NOISE` is a startswith test, which is right for BuildKit's own markers.
+# local_ci.py's summary reaches the log twice in different shapes: bare on
+# stdout ("Build failed at stage 'pkg': ..."), which startswith catches, and
+# stage-prefixed via `_default_failure_message` ("pkg: Build failed at stage
+# 'pkg': ..."), which it does not. The second form names a stage and nothing
+# else, so letting it become a signature makes every distinct failure at that
+# stage compare equal -- the exact defect the startswith entries were added to
+# fix, surviving in the shape they miss.
+_NOISE_CONTAINS = (
+    "Build failed at stage",
+    "Build failed:",
 )
 
 
@@ -205,7 +225,7 @@ def _signature(row: dict) -> str:
             # signature stops two identical failures comparing equal.
             return _strip_buildkit_prefix(ln)[:110].replace("|", "/")
     for ln in reversed(lines):
-        if any(ln.startswith(n) for n in _NOISE):
+        if any(ln.startswith(n) for n in _NOISE) or any(n in ln for n in _NOISE_CONTAINS):
             continue
         body = re.sub(r"^[#\d.\s]+", "", ln)
         if len(body) > 12:

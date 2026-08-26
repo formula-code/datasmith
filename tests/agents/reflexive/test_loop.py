@@ -104,18 +104,70 @@ class TestRunLoop:
         assert outcome.rounds == 2
 
     def test_no_progress_stops_before_the_budget_is_spent(self) -> None:
-        """Same hard failures twice. Stop -- a third build learns nothing."""
+        """The same hard failure, round after round, must end the loop.
+
+        It ends on the repeat COUNT, not on the first repetition. Over 38
+        recorded PV failures the detector -- not the round budget -- ended 27
+        of them, 12 at round 2, which gave the producer a single attempt at
+        each failure. It still stops well short of the budget.
+        """
         outcome = run_loop(
             context=DockerContext(),
             build=self._build([(False, "same log")]),
             verify=lambda image, log, mode: _graded("pep517_backend"),
             revise=lambda ctx, graded: (ctx, None),
             workdir=Path("/tmp"),
-            max_rounds=5,
+            max_rounds=8,
         )
         assert outcome.accepted is False
         assert outcome.stop_reason == "no_progress"
-        assert outcome.rounds == 2, "round 1 establishes the key, round 2 repeats it"
+        assert outcome.rounds == 3, "round 1 sets the key; rounds 2 and 3 repeat it"
+        assert outcome.rounds < 8, "the detector, not the budget, must end it"
+
+    def test_the_producer_gets_a_second_attempt_at_the_same_failure(self, monkeypatch) -> None:
+        """One attempt per failure was the single largest source of dead runs.
+
+        A producer whose SECOND edit fixes the build must reach that edit. With
+        a single-shot detector the loop returned `no_progress` at round 2 and
+        the fix was never built.
+        """
+        builds = [(False, "same log"), (False, "same log"), (True, "fixed")]
+        seen: list[str] = []
+
+        def build(ctx):
+            ok, log = builds[min(len(seen), len(builds) - 1)]
+            seen.append(log)
+            return ok, ("formulacode/x:1" if ok else None), log
+
+        def verify(image, log, mode):
+            return _graded() if log == "fixed" else _graded("pep517_backend")
+
+        outcome = run_loop(
+            context=DockerContext(),
+            build=build,
+            verify=verify,
+            revise=lambda ctx, graded: (ctx, None),
+            workdir=Path("/tmp"),
+            max_rounds=8,
+        )
+        assert outcome.accepted is True, "the third build must be reached"
+        assert outcome.rounds == 3
+
+    def test_the_stall_threshold_is_tunable(self, monkeypatch) -> None:
+        """A single-shot detector must remain reachable via the env knob."""
+        import datasmith.agents.reflexive.loop as loop_mod
+
+        monkeypatch.setattr(loop_mod, "DATASMITH_PV_STALL_REPEATS", 1)
+        outcome = run_loop(
+            context=DockerContext(),
+            build=self._build([(False, "same log")]),
+            verify=lambda image, log, mode: _graded("pep517_backend"),
+            revise=lambda ctx, graded: (ctx, None),
+            workdir=Path("/tmp"),
+            max_rounds=8,
+        )
+        assert outcome.stop_reason == "no_progress"
+        assert outcome.rounds == 2
 
     def test_the_budget_stops_a_loop_that_keeps_changing(self) -> None:
         logs = [(False, f"distinct failure {i}") for i in range(10)]
@@ -212,6 +264,17 @@ def test_the_duplicated_signature_agrees_with_the_prepass_one() -> None:
         "8.6 ModuleNotFoundError: No module named 'a|b'\n------",
         # nothing usable at all
         "------\nFORMULACODE_SNAPSHOT_END",
+        # local_ci.py's stage-only summary. It must be treated as noise by
+        # BOTH, or a signature drifts the moment a build fails without naming
+        # a cause -- which is the common case.
+        "9.1 could not find a compiler\nBuild failed at stage 'pkg': Docker build failed (rc=1)",
+        "Build failed at stage 'env': Docker build failed (rc=1)",
+        "Build failed: something generic",
+        # `_default_failure_message` renders the same summary STAGE-PREFIXED,
+        # which a startswith test misses. Both copies must skip it, or a
+        # signature drifts the moment the raw build log is absent.
+        "pkg: Build failed at stage 'pkg': Docker build failed (rc=1)",
+        "9.2 error: no C compiler\nenv: Build failed at stage 'env': Docker build failed (rc=1)",
     ]
     for case in cases:
         assert loop_sig(case) == mod._signature({"error_message": case}), f"drifted on {case[:40]!r}"
@@ -496,3 +559,68 @@ class TestTheSignatureIgnoresBuildKitTiming:
         spec.loader.exec_module(mod)
         for line in (self.WHEEL_A, self.MOD_A, "2.15 BackendUnavailable: Cannot import 'hatchling.build'", "plain"):
             assert loop_strip(line) == mod._strip_buildkit_prefix(line), f"drifted on {line!r}"
+
+
+class TestTheStageOnlySummaryIsNotASignature:
+    """`Build failed at stage 'pkg': Docker build failed (rc=1)` names a stage
+    and nothing else.
+
+    It is the last line local_ci.py prints, so a reverse scan lands on it for
+    any failure without a named cause. Measured across the 2026-08-25 grind, it
+    covered 10 rounds and its `'env'` sibling another 9 -- so two genuinely
+    different failures at the same stage compared EQUAL and the no-progress
+    rule stopped loops that were still making progress. The real build output
+    is rendered into the log ahead of it from `failure.json`.
+    """
+
+    def test_two_different_failures_at_one_stage_sign_differently(self) -> None:
+        from datasmith.agents.reflexive.loop import _signature
+
+        a = "12.0 error: could not find a working compiler\nBuild failed at stage 'pkg': Docker build failed (rc=1)"
+        b = "9.0 error: hdf5 headers are missing\nBuild failed at stage 'pkg': Docker build failed (rc=1)"
+        assert _signature(a) != _signature(b), "the stall detector cannot tell these apart"
+
+    def test_the_summary_itself_is_never_the_signature(self) -> None:
+        from datasmith.agents.reflexive.loop import _signature
+
+        log = "4.2 error: hdf5 headers are missing\nBuild failed at stage 'env': Docker build failed (rc=1)"
+        assert "Build failed at stage" not in _signature(log)
+
+    def test_the_same_failure_still_signs_the_same(self) -> None:
+        """Rule 3 must still fire when nothing actually changed."""
+        from datasmith.agents.reflexive.loop import _signature
+
+        a = "12.0 error: could not find a working compiler\nBuild failed at stage 'pkg': Docker build failed (rc=1)"
+        b = "88.7 error: could not find a working compiler\nBuild failed at stage 'pkg': Docker build failed (rc=1)"
+        assert _signature(a) == _signature(b), "elapsed seconds must not make two identical failures differ"
+
+
+class TestTheStagePrefixedSummaryIsAlsoNoise:
+    """`_default_failure_message` renders the summary as `"pkg: Build failed at
+    stage 'pkg': ..."`.
+
+    `_NOISE` is a startswith test, so it catches the bare form on stdout and
+    misses this one. A stage-prefixed summary naming no cause is exactly as
+    useless a signature as the bare one, and it is what survives when the raw
+    build log is empty.
+    """
+
+    def test_the_stage_prefixed_form_is_skipped(self) -> None:
+        from datasmith.agents.reflexive.loop import _signature
+
+        assert _signature("pkg: Build failed at stage 'pkg': Docker build failed (rc=1)") == "no signature"
+
+    def test_two_stages_do_not_masquerade_as_different_failures(self) -> None:
+        """Without this they differ only by the stage word, which invents
+        progress where there was none."""
+        from datasmith.agents.reflexive.loop import _signature
+
+        a = _signature("pkg: Build failed at stage 'pkg': Docker build failed (rc=1)")
+        b = _signature("env: Build failed at stage 'env': Docker build failed (rc=1)")
+        assert a == b == "no signature"
+
+    def test_a_real_cause_still_wins_over_the_summary(self) -> None:
+        from datasmith.agents.reflexive.loop import _signature
+
+        log = "9.2 error: no C compiler found\npkg: Build failed at stage 'pkg': Docker build failed (rc=1)"
+        assert _signature(log) == "error: no C compiler found"

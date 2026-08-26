@@ -35,6 +35,20 @@ logger = logging.getLogger(__name__)
 DATASMITH_PV_MAX_ROUNDS: int = int(os.environ.get("DATASMITH_PV_MAX_ROUNDS", "8"))
 DATASMITH_PV_ENABLED: bool = os.environ.get("DATASMITH_PV_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
+# How many CONSECUTIVE identical progress keys end the loop.
+#
+# The loop used to stop the moment a key repeated once, which gave the producer
+# exactly ONE attempt at any given failure. Measured over 38 recorded PV
+# failures, 27 ended on `no_progress` -- 12 of them at round 2 -- while only 4
+# ever reached the round budget. The stall detector, not the budget, was
+# ending the run, so raising DATASMITH_PV_MAX_ROUNDS from 3 to 8 changed almost
+# nothing.
+#
+# 2 means the producer gets two attempts at the same signature before the loop
+# calls it stalled. The budget still caps the total, so a hopeless task costs
+# at most max_rounds either way.
+DATASMITH_PV_STALL_REPEATS: int = int(os.environ.get("DATASMITH_PV_STALL_REPEATS", "2"))
+
 # Mirrors scripts/prepass_trial.py. `scripts/` is not an importable package, so
 # the scan is duplicated rather than imported; a test asserts the two agree.
 _NAMED_CAUSES = (
@@ -63,6 +77,31 @@ _NOISE = (
     "}",
     "=====",
     "!!!!!",
+    # local_ci.py's own summary of a build failure. It names the STAGE and
+    # nothing else, and it is the last line of `agent_output`, so the reverse
+    # scan lands on it whenever the failure has no named cause. Every distinct
+    # failure at the same stage then signs identically -- measured on
+    # 2026-08-25, `Build failed at stage 'pkg': Docker build failed (rc=1)`
+    # covered 10 rounds and `'env'` another 9, so the no-progress rule fired on
+    # rounds that had actually changed the failure. The real build output is in
+    # `failure.json`, which `_default_failure_message` renders into the log
+    # ahead of this line; skipping the summary lets the scan reach it.
+    "Build failed at stage",
+    "Build failed:",
+)
+# Noise matched ANYWHERE in the line, not just at its start.
+#
+# `_NOISE` is a startswith test, which is right for BuildKit's own markers.
+# local_ci.py's summary reaches the log twice in different shapes: bare on
+# stdout ("Build failed at stage 'pkg': ..."), which startswith catches, and
+# stage-prefixed via `_default_failure_message` ("pkg: Build failed at stage
+# 'pkg': ..."), which it does not. The second form names a stage and nothing
+# else, so letting it become a signature makes every distinct failure at that
+# stage compare equal -- the exact defect the startswith entries were added to
+# fix, surviving in the shape they miss.
+_NOISE_CONTAINS = (
+    "Build failed at stage",
+    "Build failed:",
 )
 
 
@@ -103,7 +142,7 @@ def _signature(build_log: str) -> str:
             # never evidence of progress, which is what it was read as.
             return _strip_buildkit_prefix(ln)[:90].replace("|", "/")
     for ln in reversed(lines):
-        if any(ln.startswith(n) for n in _NOISE):
+        if any(ln.startswith(n) for n in _NOISE) or any(n in ln for n in _NOISE_CONTAINS):
             continue
         body = re.sub(r"^[#\d.\s]+", "", ln)
         if len(body) > 12:
@@ -167,6 +206,36 @@ class LoopOutcome:
     resource_metrics: dict = field(default_factory=dict)
 
 
+def _stalled(
+    key: tuple[str, ...], previous_key: tuple[str, ...] | None, repeats: int, round_index: int
+) -> tuple[bool, int]:
+    """Has the loop stopped learning? Returns (stop, new repeat count).
+
+    A key that differs from the last one resets the count: the producer changed
+    something the verifier could see. A key that repeats increments it, and the
+    loop stops once it has repeated `DATASMITH_PV_STALL_REPEATS` times.
+    """
+    if previous_key is None or key != previous_key:
+        return False, 0
+    repeats += 1
+    if repeats >= DATASMITH_PV_STALL_REPEATS:
+        logger.info(
+            "no progress in round %d (%s) after %d identical round(s); stopping",
+            round_index,
+            key,
+            repeats,
+        )
+        return True, repeats
+    logger.info(
+        "round %d repeated the key %s (%d/%d before stalling)",
+        round_index,
+        key,
+        repeats,
+        DATASMITH_PV_STALL_REPEATS,
+    )
+    return False, repeats
+
+
 def run_loop(
     context: DockerContext,
     build: Callable[[DockerContext], tuple[bool, str | None, str]],
@@ -186,6 +255,7 @@ def run_loop(
     """
     outcome = LoopOutcome(accepted=False, rounds=0, context=context)
     previous_key: tuple[str, ...] | None = None
+    repeats = 0
 
     for round_index in range(1, max_rounds + 1):
         outcome.rounds = round_index
@@ -239,8 +309,8 @@ def run_loop(
             list(graded.violations),
             key,
         )
-        if previous_key is not None and key == previous_key:
-            logger.info("no progress in round %d (%s); stopping", round_index, key)
+        stop, repeats = _stalled(key, previous_key, repeats, round_index)
+        if stop:
             outcome.stop_reason = "no_progress"
             return outcome
         previous_key = key
