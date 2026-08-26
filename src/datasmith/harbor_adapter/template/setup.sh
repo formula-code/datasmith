@@ -17,6 +17,14 @@ export OWNER REPO ISSUE_NUMBER TASK_ID
 # reads this to decide whether to capture the oracle snapshot baseline.
 export HARBOR_AGENT_NAME="oracle"
 
+# LSV baseline cache: creds for datasmith's own Supabase + the resource key
+# fields, baked here for the same reason as HARBOR_AGENT_NAME ([verifier.env]
+# does not reach setup.sh on Daytona). Empty unless the runner enabled the
+# cache, in which case lsv_init.py reads these to look baselines up.
+{%- for k, v in render_env.items() %}
+export {{ k }}={{ v | shell_quote }}
+{%- endfor %}
+
 setup_start=$(date +%s)
 # Track which phase we're currently in so the exit trap can report WHERE
 # setup crashed, not just the exit code. Updated at every phase boundary

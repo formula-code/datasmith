@@ -98,6 +98,7 @@ class FormulaCodeAdapter:
             "entrypoint.sh",
             "lsv_init.py",
             "lsv_measure.py",
+            "lsv_cache_writeback.py",
             "parser.py",
             "upload.py",
             "pytest_runner.py",
@@ -146,6 +147,7 @@ class FormulaCodeAdapter:
         paths: HarborTaskPaths,
         run_pytest: bool = True,
         rounds: int = 1,
+        render_env: dict[str, str] | None = None,
     ) -> None:
         """Generate test files (test.sh, config.json)."""
         # test.sh
@@ -156,6 +158,7 @@ class FormulaCodeAdapter:
             issue_number=rec.issue_number,
             run_pytest=run_pytest,
             rounds=rounds,
+            render_env=render_env,
         )
         test_sh_path = paths.tests_dir / "test.sh"
         test_sh_path.write_text(test_sh_content)
@@ -179,6 +182,7 @@ class FormulaCodeAdapter:
         rec: FormulaCodeRecord,
         paths: HarborTaskPaths,
         rounds: int = 1,
+        render_env: dict[str, str] | None = None,
     ) -> None:
         """Generate solution files (solve.sh, setup.sh)."""
         # solve.sh
@@ -195,6 +199,7 @@ class FormulaCodeAdapter:
             issue_number=rec.issue_number,
             rounds=rounds,
             extra_setup_commands=extra_setup_commands,
+            render_env=render_env,
         )
         setup_sh_path = paths.tests_dir / "setup.sh"
         setup_sh_path.write_text(setup_sh_content)
@@ -211,8 +216,14 @@ class FormulaCodeAdapter:
         rounds: int = DATASMITH_LSV_ROUNDS,
         verifier_env: dict[str, str] | None = None,
         expected_n: int | None = None,
+        render_env: dict[str, str] | None = None,
     ) -> Path:
         """Generate a complete Harbor task directory for the given FormulaCodeRecord.
+
+        ``render_env`` is baked as ``export K=V`` lines into setup.sh and test.sh
+        (see ``render_run_setup_sh``). Stage 7 uses it to hand the LSV baseline
+        cache its datasmith Supabase creds and resource key; ``None`` bakes
+        nothing, leaving both scripts byte-identical to the pre-cache output.
 
         ``expected_n`` is the operator-declared count of benchmarks this PR
         should impact, read from ``formulacode_task_overrides``. It is injected
@@ -242,7 +253,7 @@ class FormulaCodeAdapter:
             verifier_env = {**(verifier_env or {}), "FORMULACODE_EXPECTED_N": str(expected_n)}
         self._write_task_toml(rec, paths, timeout_sec, cpus, memory, storage, verifier_env=verifier_env)
         self._write_environment_files(rec, paths)
-        self._write_test_files(rec, paths, run_pytest, rounds)
-        self._write_solution_files(rec, paths, rounds)
+        self._write_test_files(rec, paths, run_pytest, rounds, render_env=render_env)
+        self._write_solution_files(rec, paths, rounds, render_env=render_env)
 
         return out_dir
