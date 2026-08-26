@@ -1,19 +1,21 @@
-"""LSV baseline cache writeback — runs from test.sh after lsv_measure.
+"""LSV cache writeback — runs from test.sh after lsv_measure.
 
-Reads ``lsv_cache_state.json`` (written by lsv_init.py this trial) and, when the
-baseline layer was a MISS, upserts the freshly measured baselines into
-``lsv_baseline_cache`` on datasmith's own Supabase so the next trial on the same
-(task, hardware) hits and skips the timing pass.
+Reads ``lsv_cache_state.json`` (written by lsv_init.py this trial) and, on a
+MISS, persists the freshly measured facts to datasmith's own Supabase so the
+next trial on the same task/hardware hits and skips a pass:
 
-Oracle-only: only the oracle trial produces canonical baselines. An agent run
+* baselines (resource-keyed) -> ``lsv_baseline_cache`` (00031), on a baseline
+  miss. Skips the base-commit timing pass.
+* the coverage survey (resource-independent) -> ``lsv_deps_cache`` (00032), on a
+  deps miss. Skips the survey pass. Uploaded baselines-stripped so no per-host
+  timing rows leak across hardware.
+
+Oracle-only: only the oracle trial produces canonical facts. An agent run
 measures post-patch code, so letting it write would corrupt the very baseline
 future agent runs compare against. This self-gates on ``HARBOR_AGENT_NAME``, and
 test.sh only invokes it on the oracle branch.
 
 Stdlib only (``urllib`` + ``sqlite3``) so nothing extra is baked into the image.
-
-The deps-DB (survey) layer is written separately; this module owns the baseline
-table only.
 
 Usage (invoked from test.sh; all inputs from env):
     python /opt/lsv/lsv_cache_writeback.py
@@ -23,8 +25,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -129,6 +133,68 @@ def _read_baselines(deps_db_path: Path) -> dict[str, dict[str, float | int]]:
             "number": num,
         }
     return out
+
+
+def _survey_bytes(deps_db_path: Path) -> bytes | None:
+    """Return the survey-only deps DB as bytes: a copy with every baseline row
+    deleted and the WAL checkpointed into the main file.
+
+    The DELETE strips the resource-DEPENDENT timings (they live in
+    lsv_baseline_cache under a hardware key); the survey that remains is
+    resource-independent and safe to reuse on any host. ``PRAGMA
+    wal_checkpoint(TRUNCATE)`` is load-bearing: without it the deleted rows
+    survive in the WAL and get uploaded anyway, reintroducing exactly the
+    cross-host timing pollution the DELETE removed. Operates on a copy so the
+    live DB the trial still uses is untouched. Returns None if absent/unreadable.
+    """
+    if not deps_db_path.exists() or deps_db_path.stat().st_size == 0:
+        return None
+    tmp_dir = tempfile.mkdtemp(prefix="lsv_deps_")
+    try:
+        tmp_db = Path(tmp_dir) / "survey.db"
+        shutil.copy(deps_db_path, tmp_db)
+        with sqlite3.connect(tmp_db) as con:
+            con.execute("DELETE FROM baseline")
+            con.commit()
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return tmp_db.read_bytes()
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _upsert_deps_cache_row(
+    base_url: str,
+    *,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    survey: bytes,
+) -> None:
+    """Upsert the survey blob into ``lsv_deps_cache`` keyed by the task alone.
+    BYTEA moves through PostgREST as PostgreSQL's hex form: send ``\\x<hex>`` and
+    Postgres parses it back to the raw bytes (the runner reverses this on read)."""
+    row = {
+        "owner": owner,
+        "repo": repo,
+        "issue_number": issue_number,
+        "deps_db": "\\x" + survey.hex(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    headers = {
+        **_service_headers(),
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    _request(
+        f"{base_url}/rest/v1/lsv_deps_cache?on_conflict=owner,repo,issue_number",
+        "POST",
+        headers,
+        data=json.dumps(row).encode(),
+        content_type="application/json",
+    )
+    print(
+        f"[{_ts()}] [cache_writeback] upserted lsv_deps_cache for "
+        f"{owner}/{repo}#{issue_number} ({len(survey)} bytes)"
+    )
 
 
 def _upsert_baseline_cache_row(
@@ -257,14 +323,15 @@ def main() -> int:
         return 0
 
     state = json.loads(CACHE_STATE_PATH.read_text())
+    deps_was_cached = bool(state.get("deps_was_cached"))
     baselines_was_cached = bool(state.get("baselines_was_cached"))
     deps_db_path = Path(state.get("deps_db_path") or "")
     print(
-        f"[{_ts()}] [cache_writeback] state: baselines_was_cached={baselines_was_cached} "
-        f"deps_db_path={deps_db_path}"
+        f"[{_ts()}] [cache_writeback] state: deps_was_cached={deps_was_cached} "
+        f"baselines_was_cached={baselines_was_cached} deps_db_path={deps_db_path}"
     )
-    if baselines_was_cached:
-        print(f"[{_ts()}] [cache_writeback] baselines were a cache hit, nothing to write back")
+    if deps_was_cached and baselines_was_cached:
+        print(f"[{_ts()}] [cache_writeback] full cache hit, nothing to write back")
         return 0
 
     task_id = os.environ.get("LSV_TASK_ID", "")
@@ -274,27 +341,45 @@ def main() -> int:
         return 0
     owner, repo, issue_number = parsed
 
-    attrs = _read_resource_attrs()
-    if not attrs["env"]:
-        print(f"[{_ts()}] [cache_writeback] SKIP: missing LSV_ENV (resource columns not provided)")
-        return 0
+    rc = 0
 
-    try:
-        baselines = _read_baselines(deps_db_path)
-        if not baselines:
-            print(f"[{_ts()}] [cache_writeback] no baselines in {deps_db_path}, nothing to write")
-            return 0
-        _upsert_baseline_cache_row(
-            base_url,
-            owner=owner, repo=repo, issue_number=issue_number,
-            attrs=attrs, baselines=baselines,
-        )
-    except Exception as exc:  # noqa: BLE001 -- writeback is best-effort, never fails the trial
-        print(f"[{_ts()}] [cache_writeback] baselines writeback FAILED: {exc}")
-        return 1
+    # Deps (survey) layer: task-keyed, resource-independent. Upload only on a
+    # miss; a hit means the staged survey is already canonical.
+    if not deps_was_cached:
+        try:
+            survey = _survey_bytes(deps_db_path)
+            if survey is None:
+                print(f"[{_ts()}] [cache_writeback] no deps DB at {deps_db_path}, nothing to upload")
+            else:
+                _upsert_deps_cache_row(
+                    base_url, owner=owner, repo=repo, issue_number=issue_number, survey=survey
+                )
+        except Exception as exc:  # noqa: BLE001 -- best-effort, never fails the trial
+            print(f"[{_ts()}] [cache_writeback] deps writeback FAILED: {exc}")
+            rc = 1
+
+    # Baseline layer: resource-keyed. Needs the full hardware key (env etc.).
+    if not baselines_was_cached:
+        attrs = _read_resource_attrs()
+        if not attrs["env"]:
+            print(f"[{_ts()}] [cache_writeback] SKIP baselines: missing LSV_ENV (resource columns not provided)")
+        else:
+            try:
+                baselines = _read_baselines(deps_db_path)
+                if not baselines:
+                    print(f"[{_ts()}] [cache_writeback] no baselines in {deps_db_path}, nothing to write")
+                else:
+                    _upsert_baseline_cache_row(
+                        base_url,
+                        owner=owner, repo=repo, issue_number=issue_number,
+                        attrs=attrs, baselines=baselines,
+                    )
+            except Exception as exc:  # noqa: BLE001 -- best-effort, never fails the trial
+                print(f"[{_ts()}] [cache_writeback] baselines writeback FAILED: {exc}")
+                rc = 1
 
     print(f"[{_ts()}] [cache_writeback] done")
-    return 0
+    return rc
 
 
 if __name__ == "__main__":
