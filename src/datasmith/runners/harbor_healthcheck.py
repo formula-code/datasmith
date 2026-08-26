@@ -315,7 +315,10 @@ def _materialize_tasks(
             if deps_db:
                 logger.info(
                     "LSV survey cache hit for %s/%s#%d (%d bytes)",
-                    rec.owner, rec.repo, rec.issue_number, len(deps_db),
+                    rec.owner,
+                    rec.repo,
+                    rec.issue_number,
+                    len(deps_db),
                 )
         try:
             adapter.generate_task(
