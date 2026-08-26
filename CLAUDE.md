@@ -74,7 +74,7 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 5. **render_problems** — Scrape linked issues and render deconstructed problem contexts
 6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
 7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
-8. **publish** — Build, verify, and publish Docker images to DockerHub. Only publishes PRs with at least one successful **Daytona** `harbor_runs` row whose `max_speedup >= 1.05`.
+8. **publish** — Build, verify, and publish Docker images to DockerHub. Two gates, and a PR must clear both: it needs at least one successful `harbor_runs` row whose `max_speedup >= 1.05` in an admitted environment (`DATASMITH_PUBLISH_ENVIRONMENTS`, default **daytona** only), *and* its `candidate_containers` row must be `verification_state = 'verified'`. The harbor row says the container is fast; `verification_state` says it is honest, and neither substitutes for the other — `harbor_runs` outlives the container generation that produced it, so a pre-honesty-gate row can carry a fast trial. That second gate is deliberately **not** a knob.
 9. **scrape_benchmark_source** — For each `(owner, repo)` in `candidate_containers`, check out the repo at its container SHA, AST-parse every ASV-style benchmark function under the repo's `benchmark_dir`, and upsert one row per `(owner, repo, benchmark_without_params)` into `benchmark_codes` for the FormulaCode website's data sync.
 
 Stage 6 has two synthesis paths. `TRY_DEFAULT` uses the stock template and
@@ -175,13 +175,26 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_GH_SEARCH_CONCURRENCY` (bounds the bisection fan-out, so a
   PostHog-scale month cannot burst ~80 concurrent GraphQL POSTs from a
   one-token pool into GitHub's secondary rate limit),
-  `DATASMITH_PREFLIGHT_DB_PINGS`; and the database read guards —
+  `DATASMITH_PREFLIGHT_DB_PINGS`; publication —
+  `DATASMITH_PUBLISH_ENVIRONMENTS` (comma-separated Harbor environments
+  whose runs may gate stage 8; default `daytona`, since local Docker
+  trials share the build host and their timings move with load — set it
+  to `docker,daytona` only deliberately, and record that you did;
+  it does **not** relax `MIN_HARBOR_SPEEDUP`); and the database read guards —
   `DATASMITH_KEY_FILTER_CHUNK`, `DATASMITH_LARGE_TABLES`,
   `DATASMITH_LARGE_COLUMNS` (the last two are comma-separated name sets,
   not numbers).
   The producer/verifier loop (stage 6, `agents/reflexive/`) adds
   `DATASMITH_PV_ENABLED`, `DATASMITH_PV_MAX_ROUNDS`,
+  `DATASMITH_PV_STALL_REPEATS` (how many consecutive identical progress
+  keys end the loop; 1 restores the original single-shot detector, which
+  ended 27 of 38 recorded failures — 12 of them at round 2, giving the
+  producer one attempt per failure),
   `DATASMITH_PV_AGENT_TIMEOUT_S`, `DATASMITH_PV_BATTERY_TIMEOUT_S`,
+  `DATASMITH_PV_BATTERY_CPUS` (cores one battery container may use; 0
+  disables the cap. modin, dask and pymc size their worker pools from
+  the visible core count, so an uncapped container claims the whole
+  host — three modin containers once ran 776 Ray workers between them),
   `DATASMITH_PV_EVIDENCE_BUDGET`, `DATASMITH_PV_PRODUCER_AGENT` and
   `DATASMITH_PV_VERIFIER_AGENT`, plus three for the host-side image scan
   (`agents/reflexive/image_integrity.py`) --

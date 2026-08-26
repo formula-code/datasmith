@@ -77,7 +77,12 @@ class TestRecordsFromSupabase:
             },
         ]
 
-        with patch("datasmith.publish.records.fetch_all", side_effect=[fake_rows, fake_harbor_rows]) as mock_fetch:
+        fake_verified_rows = [{"owner": "org", "repo": "repo", "sha": "abc"}]
+
+        with patch(
+            "datasmith.publish.records.fetch_all",
+            side_effect=[fake_rows, fake_harbor_rows, fake_verified_rows],
+        ) as mock_fetch:
             records = records_from_supabase(start_date="2024-01-01", end_date="2024-12-31")
 
         assert len(records) == 1
@@ -101,7 +106,7 @@ class TestRecordsFromSupabase:
         still selected because the record requires it; the point is that
         ``body``, ``problem_description`` and the rest no longer ride along.
         """
-        with patch("datasmith.publish.records.fetch_all", side_effect=[[], []]) as mock_fetch:
+        with patch("datasmith.publish.records.fetch_all", side_effect=[[], [], []]) as mock_fetch:
             records_from_supabase(start_date="2024-01-01", end_date="2024-12-31")
 
         select = mock_fetch.call_args_list[0][1]["select"]
@@ -121,3 +126,62 @@ class TestRecordsFromSupabase:
             "container_name",
             "patch",
         }
+
+
+class TestWhichHarborEnvironmentsMayGatePublication:
+    """The gate is a knob, not a hardcoded string — but a narrow one.
+
+    Default stays Daytona-only: local Docker trials share the build host with
+    everything else and their timings move with load. An operator without
+    Daytona access would otherwise have to edit the gate itself, and a gate
+    edited under deadline is a gate that quietly stops gating.
+
+    No `importlib.reload` here. Reloading rebinds the module's globals and
+    breaks every `from datasmith.publish.records import ...` reference held
+    elsewhere, so a patch lands on the new module while the stale function
+    object keeps the real `fetch_all` — which is exactly how an earlier
+    version of these tests made `tests/update/test_window_contract.py` read
+    the live database and fail.
+    """
+
+    def _captured_filters(self, monkeypatch, envs: tuple[str, ...]):
+        from unittest.mock import patch
+
+        import datasmith.publish.records as rec
+
+        monkeypatch.setattr(rec, "DATASMITH_PUBLISH_ENVIRONMENTS", envs)
+        captured: dict = {}
+
+        def fake_fetch_all(table, **kwargs):
+            if table == "harbor_runs":
+                captured["in_filters"] = kwargs.get("in_filters")
+            return []
+
+        with patch.object(rec, "fetch_all", side_effect=fake_fetch_all):
+            rec.records_from_supabase("2017-01-01", "2030-12-31")
+        return captured
+
+    def test_the_default_is_daytona_only(self) -> None:
+        import datasmith.publish.records as rec
+
+        assert rec._publish_environments("daytona") == ("daytona",)
+
+    def test_the_query_uses_whatever_is_configured(self, monkeypatch) -> None:
+        captured = self._captured_filters(monkeypatch, ("docker", "daytona"))
+        assert captured["in_filters"] == {"environment": ["docker", "daytona"]}
+
+    def test_daytona_only_is_the_shipped_behaviour(self, monkeypatch) -> None:
+        captured = self._captured_filters(monkeypatch, ("daytona",))
+        assert captured["in_filters"] == {"environment": ["daytona"]}
+
+    def test_whitespace_and_blanks_are_tolerated(self) -> None:
+        import datasmith.publish.records as rec
+
+        assert rec._publish_environments(" docker , , daytona ") == ("docker", "daytona")
+
+    def test_widening_the_environment_does_not_relax_the_speedup_floor(self, monkeypatch) -> None:
+        """The whole point of the gate survives the knob."""
+        import datasmith.publish.records as rec
+
+        monkeypatch.setattr(rec, "DATASMITH_PUBLISH_ENVIRONMENTS", ("docker",))
+        assert rec.MIN_HARBOR_SPEEDUP == 1.05
