@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 from textwrap import dedent
 
@@ -19,6 +20,10 @@ _TEMPLATE_ENV = Environment(
     autoescape=False,
     keep_trailing_newline=True,
 )
+# Used by the render_env export blocks in setup.sh/test.sh: bake host-supplied
+# values (cache creds + LSV_* key fields) as shell-safe `export K=V` lines,
+# because Harbor's [verifier.env] does not reach setup.sh on Daytona.
+_TEMPLATE_ENV.filters["shell_quote"] = shlex.quote
 
 
 # ========== Harbor-style template helpers ==========
@@ -151,8 +156,13 @@ def render_test_sh(
     issue_number: int,
     run_pytest: bool = True,
     rounds: int = DATASMITH_LSV_ROUNDS,
+    render_env: dict[str, str] | None = None,
 ) -> str:
-    """Render test.sh for phase orchestration and verifier execution."""
+    """Render test.sh for phase orchestration and verifier execution.
+
+    ``render_env`` is baked as ``export K=V`` lines so the LSV cache creds and
+    key fields reach the verifier process; empty by default (no exports).
+    """
     return _render_template(
         "test.sh",
         base_commit=base_commit,
@@ -161,6 +171,7 @@ def render_test_sh(
         issue_number=issue_number,
         run_pytest=run_pytest,
         rounds=rounds,
+        render_env=render_env or {},
     )
 
 
@@ -176,8 +187,14 @@ def render_run_setup_sh(
     issue_number: int,
     rounds: int = DATASMITH_LSV_ROUNDS,
     extra_setup_commands: str = "",
+    render_env: dict[str, str] | None = None,
 ) -> str:
-    """Render setup.sh with task metadata and extra setup commands."""
+    """Render setup.sh with task metadata and extra setup commands.
+
+    ``render_env`` is baked as ``export K=V`` lines so lsv_init.py (which runs
+    from setup.sh, where Harbor's [verifier.env] does not reach on Daytona) sees
+    the LSV cache creds and key fields; empty by default (no exports).
+    """
     return _render_template(
         "setup.sh",
         owner=owner,
@@ -185,4 +202,5 @@ def render_run_setup_sh(
         issue_number=issue_number,
         rounds=rounds,
         extra_setup_commands=extra_setup_commands or "",
+        render_env=render_env or {},
     )

@@ -98,12 +98,31 @@ class FormulaCodeAdapter:
             "entrypoint.sh",
             "lsv_init.py",
             "lsv_measure.py",
+            "lsv_cache_writeback.py",
             "parser.py",
             "upload.py",
             "pytest_runner.py",
             "jinja_patch_plugin_pandas.py",
         ]:
             copy2(self.template_dir / name, paths.environment_dir / name)
+
+    def _write_cache_files(self, paths: HarborTaskPaths, deps_db: bytes | None) -> None:
+        """Populate ``environment/cache/`` with the pre-surveyed LSV deps DB.
+
+        The directory is created unconditionally -- even on a cache miss -- and
+        seeded with a ``.gitkeep`` so the Dockerfile's ``COPY cache/`` directive
+        always has a source and the build never fails. When ``deps_db`` is
+        present (a hit staged by the runner), it is written as
+        ``lightspeed_deps.db``; the Dockerfile bakes it to
+        ``/opt/lsv/cache/lightspeed_deps.db``, where lsv_init.py stages it before
+        ``load_baselines`` (which requires the surveyed DB on disk first). A miss
+        leaves only ``.gitkeep``, so lsv_init falls through to force=True.
+        """
+        cache_dir = paths.environment_dir / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / ".gitkeep").write_text("")
+        if deps_db:
+            (cache_dir / "lightspeed_deps.db").write_bytes(deps_db)
 
     def _write_instruction_md(self, rec: FormulaCodeRecord, paths: HarborTaskPaths) -> None:
         """Generate instruction.md file."""
@@ -146,6 +165,7 @@ class FormulaCodeAdapter:
         paths: HarborTaskPaths,
         run_pytest: bool = True,
         rounds: int = 1,
+        render_env: dict[str, str] | None = None,
     ) -> None:
         """Generate test files (test.sh, config.json)."""
         # test.sh
@@ -156,6 +176,7 @@ class FormulaCodeAdapter:
             issue_number=rec.issue_number,
             run_pytest=run_pytest,
             rounds=rounds,
+            render_env=render_env,
         )
         test_sh_path = paths.tests_dir / "test.sh"
         test_sh_path.write_text(test_sh_content)
@@ -179,6 +200,7 @@ class FormulaCodeAdapter:
         rec: FormulaCodeRecord,
         paths: HarborTaskPaths,
         rounds: int = 1,
+        render_env: dict[str, str] | None = None,
     ) -> None:
         """Generate solution files (solve.sh, setup.sh)."""
         # solve.sh
@@ -195,6 +217,7 @@ class FormulaCodeAdapter:
             issue_number=rec.issue_number,
             rounds=rounds,
             extra_setup_commands=extra_setup_commands,
+            render_env=render_env,
         )
         setup_sh_path = paths.tests_dir / "setup.sh"
         setup_sh_path.write_text(setup_sh_content)
@@ -211,8 +234,15 @@ class FormulaCodeAdapter:
         rounds: int = DATASMITH_LSV_ROUNDS,
         verifier_env: dict[str, str] | None = None,
         expected_n: int | None = None,
+        render_env: dict[str, str] | None = None,
+        deps_db: bytes | None = None,
     ) -> Path:
         """Generate a complete Harbor task directory for the given FormulaCodeRecord.
+
+        ``render_env`` is baked as ``export K=V`` lines into setup.sh and test.sh
+        (see ``render_run_setup_sh``). Stage 7 uses it to hand the LSV baseline
+        cache its datasmith Supabase creds and resource key; ``None`` bakes
+        nothing, leaving both scripts byte-identical to the pre-cache output.
 
         ``expected_n`` is the operator-declared count of benchmarks this PR
         should impact, read from ``formulacode_task_overrides``. It is injected
@@ -226,6 +256,11 @@ class FormulaCodeAdapter:
         That is the common case (the column is hand-declared and usually
         NULL), and the invariant then skips. Emitting a key that is always
         empty would make the wiring look live when it is not.
+
+        ``deps_db`` is the pre-surveyed LSV deps DB the runner fetched from
+        ``lsv_deps_cache`` for this task; it is baked into the image so lsv_init
+        can skip the survey pass. ``None`` bakes only an empty ``cache/``
+        placeholder, leaving lsv_init on force=True.
         """
         out_dir = self.out_root / rec.task_dir_name
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -235,6 +270,7 @@ class FormulaCodeAdapter:
 
         # Copy static template files
         self._copy_template_files(paths)
+        self._write_cache_files(paths, deps_db)
 
         # Generate all task files
         self._write_instruction_md(rec, paths)
@@ -242,7 +278,7 @@ class FormulaCodeAdapter:
             verifier_env = {**(verifier_env or {}), "FORMULACODE_EXPECTED_N": str(expected_n)}
         self._write_task_toml(rec, paths, timeout_sec, cpus, memory, storage, verifier_env=verifier_env)
         self._write_environment_files(rec, paths)
-        self._write_test_files(rec, paths, run_pytest, rounds)
-        self._write_solution_files(rec, paths, rounds)
+        self._write_test_files(rec, paths, run_pytest, rounds, render_env=render_env)
+        self._write_solution_files(rec, paths, rounds, render_env=render_env)
 
         return out_dir
