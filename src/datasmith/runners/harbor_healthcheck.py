@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,41 @@ from datasmith.utils.overrides import expected_n_for, fetch_overrides
 logger = get_logger("runners.harbor_healthcheck")
 
 MIN_SPEEDUP_GATE = 1.05  # mirrored by publish/records.py
+
+# ── LSV baseline cache knobs ────────────────────────────────────────────────
+# Master switch. Off => the runner injects no cache creds/key, so lsv_init falls
+# back to force=True and behaves exactly as before the cache existed.
+DATASMITH_LSV_CACHE_ENABLED: bool = os.environ.get("DATASMITH_LSV_CACHE_ENABLED", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
+# Cache-key fields for where a trial ran. docker keys on the host id (baselines
+# don't transfer between dev hosts); daytona keys on the machine_class (plus the
+# in-sandbox detected_cpu_model, since one class spans several EPYC SKUs).
+DATASMITH_DOCKER_HOST_ID: str = os.environ.get("DATASMITH_DOCKER_HOST_ID", socket.gethostname())
+DATASMITH_DAYTONA_MACHINE_CLASS: str = os.environ.get("DATASMITH_DAYTONA_MACHINE_CLASS", "default")
+
+# Trial cgroup pins. These are BOTH written to the trial (task.toml cpus +
+# EnvironmentConfig override_memory_mb) AND recorded as the cache-key
+# cpu_count/mem_bytes, so the key describes the hardware the trial actually got.
+# Memory defaults to 32 GB on both environments -- matching the pre-cache
+# hardcoded pin (lsv_init OOMs large repos like sklearn under 4 GB); lower it
+# deliberately per environment if needed.
+DATASMITH_HARBOR_TRIAL_CPUS_DOCKER: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_CPUS_DOCKER", "2"))
+DATASMITH_HARBOR_TRIAL_CPUS_DAYTONA: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_CPUS_DAYTONA", "2"))
+DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER", "32768"))
+DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA: int = int(os.environ.get("DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA", "32768"))
+
+
+def _trial_pins(use_daytona: bool) -> tuple[int, int]:
+    """(cpu_count, mem_mb) the runner pins for a trial in this environment. The
+    single authority for both the actual pin and the cache key, so they cannot
+    drift apart."""
+    if use_daytona:
+        return DATASMITH_HARBOR_TRIAL_CPUS_DAYTONA, DATASMITH_HARBOR_TRIAL_MEMORY_MB_DAYTONA
+    return DATASMITH_HARBOR_TRIAL_CPUS_DOCKER, DATASMITH_HARBOR_TRIAL_MEMORY_MB_DOCKER
 
 
 def _patch_harbor_trial_name() -> None:
@@ -85,17 +122,116 @@ def _build_verifier_env() -> dict[str, str]:
     return env
 
 
+def _build_base_verifier_env() -> dict[str, str]:
+    """Creds for datasmith's OWN Supabase (the LSV cache's home), prefixed
+    ``DATASMITH_`` so they never collide with the Harbor ``SUPABASE_*`` names the
+    container already carries for upload.py.
+
+    Returns ``{}`` when the service key is absent, which disables the cache. The
+    URL must be reachable from inside the trial container: a Daytona (or remote
+    docker) sandbox cannot reach a ``127.0.0.1`` instance, so the cache only
+    works when ``SUPABASE_URL`` is the ``db.formulacode.org`` tunnel (see
+    CLAUDE.md remote-access); a localhost URL simply yields cache misses.
+    """
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_KEY", "")
+    if not url or not key:
+        return {}
+    env = {
+        "DATASMITH_SUPABASE_URL": url,
+        "DATASMITH_SUPABASE_SERVICE_KEY": key,
+    }
+    for k in ("DATASMITH_CF_ACCESS_CLIENT_ID", "DATASMITH_CF_ACCESS_CLIENT_SECRET"):
+        v = os.environ.get(k)
+        if v:
+            env[k] = v
+    return env
+
+
+def _resolve_image_digest(container_name: str | None) -> str:
+    """Best-effort stable digest for the task image, so a rebuild under the same
+    name (different deps -> different timings) does not reuse a stale baseline.
+    Falls back to the container_name (still stable per image); never raises."""
+    if not container_name:
+        return ""
+    try:
+        out = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", container_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        digest = (out.stdout or "").strip()
+        if "@" in digest:
+            return "manifest:" + digest.split("@", 1)[1][:32]
+    except Exception as exc:
+        logger.debug("image digest lookup failed for %s (%s); using container_name", container_name, exc)
+    return container_name
+
+
+def _compute_resource_attrs(
+    *,
+    use_daytona: bool,
+    container_name: str | None,
+    image_digest: str,
+    cpu_count: int,
+    mem_mb: int,
+) -> dict[str, str]:
+    """The runner-supplied portion of the lsv_baseline_cache key -- every column
+    except ``detected_cpu_model``, which lsv_init reads from /proc inside the
+    sandbox. Values are strings for baking into shell exports; the in-container
+    code coerces cpu_count/mem_bytes back to int."""
+    return {
+        "env": "daytona" if use_daytona else "docker",
+        "container_name": container_name or "",
+        "image_digest": image_digest,
+        "machine_class": DATASMITH_DAYTONA_MACHINE_CLASS if use_daytona else "",
+        "docker_host_id": "" if use_daytona else DATASMITH_DOCKER_HOST_ID,
+        "cpu_count": str(cpu_count),
+        "mem_bytes": str(mem_mb * 1024 * 1024),
+    }
+
+
+def _lsv_render_env(base_env: dict[str, str], *, task_id: str, attrs: dict[str, str]) -> dict[str, str]:
+    """Combine the datasmith creds with the LSV_* cache key into the dict baked
+    into setup.sh/test.sh. lsv_init reads LSV_* + creds to look baselines up;
+    lsv_cache_writeback reads them to upsert."""
+    return {
+        **base_env,
+        "LSV_TASK_ID": task_id,
+        "LSV_ENV": attrs["env"],
+        "LSV_CONTAINER_NAME": attrs["container_name"],
+        "LSV_IMAGE_DIGEST": attrs["image_digest"],
+        "LSV_MACHINE_CLASS": attrs["machine_class"],
+        "LSV_DOCKER_HOST_ID": attrs["docker_host_id"],
+        "LSV_CPU_COUNT": attrs["cpu_count"],
+        "LSV_MEM_BYTES": attrs["mem_bytes"],
+    }
+
+
 def _materialize_tasks(
     items: list[dict[str, Any]],
     task_dir: Path,
     *,
     rounds: int,
+    use_daytona: bool,
 ) -> dict[str, dict[str, Any]]:
     """Write one Harbor task directory per PR. Returns a mapping from the
     Harbor task directory name back to the datasmith row metadata we need
     when inserting harbor_runs."""
     adapter = FormulaCodeAdapter(harbor_tasks_root=task_dir, force=True)
     verifier_env = _build_verifier_env() or None
+
+    # LSV baseline cache: on only when enabled AND datasmith creds are present.
+    # cpu_count/mem_mb are the pins the trial gets (see _build_job_config) and
+    # double as the cache-key hardware fields.
+    base_env = _build_base_verifier_env()
+    cache_on = DATASMITH_LSV_CACHE_ENABLED and bool(base_env)
+    cpu_count, mem_mb = _trial_pins(use_daytona)
+    if cache_on:
+        logger.info("LSV baseline cache enabled (env=%s)", "daytona" if use_daytona else "docker")
+    elif DATASMITH_LSV_CACHE_ENABLED:
+        logger.info("LSV baseline cache idle: SUPABASE_URL/SUPABASE_KEY not set")
 
     # Per-task operator declarations. expected_n is the producer for the
     # dilution_ratio invariant; the trial container cannot read the table
@@ -123,13 +259,26 @@ def _materialize_tasks(
                 pr.get("issue_number"),
             )
             continue
+        render_env: dict[str, str] | None = None
+        if cache_on:
+            attrs = _compute_resource_attrs(
+                use_daytona=use_daytona,
+                container_name=pr.get("container_name"),
+                image_digest=_resolve_image_digest(pr.get("container_name")),
+                cpu_count=cpu_count,
+                mem_mb=mem_mb,
+            )
+            render_env = _lsv_render_env(base_env, task_id=rec.task_dir_name, attrs=attrs)
         try:
             adapter.generate_task(
                 rec,
                 run_pytest=True,
                 rounds=rounds,
+                cpus=cpu_count,
+                memory=f"{mem_mb}M",
                 verifier_env=verifier_env,
                 expected_n=expected_n_for(overrides, (rec.owner, rec.repo, rec.issue_number)),
+                render_env=render_env,
             )
         except Exception:
             logger.exception("generate_task failed for %s/%s#%d", rec.owner, rec.repo, rec.issue_number)
@@ -164,10 +313,10 @@ def _build_job_config(
 
     # Harbor defaults to 4 GB per trial container (per the task.toml template)
     # which is too tight for lsv_init on mid/large Python repos — sklearn's
-    # dep-graph walk alone exceeds 4 GB and gets OOM-killed with exit 137.
-    # Bump to 32 GB across the board; the host has 500 GB so there's plenty
-    # of headroom, and smaller repos won't actually use more than they need.
-    MEMORY_MB = 32 * 1024
+    # dep-graph walk alone exceeds 4 GB and gets OOM-killed with exit 137. The
+    # pin comes from _trial_pins so it stays identical to the cache-key
+    # mem_bytes; the default is still 32 GB.
+    _, MEMORY_MB = _trial_pins(use_daytona)
     if use_daytona:
         environment = EnvironmentConfig(
             type=EnvironmentType.DAYTONA,
@@ -427,7 +576,7 @@ async def run_harbor_healthcheck(
     if job_name is None:
         job_name = f"fc-healthcheck-{uuid.uuid4().hex[:8]}"
 
-    task_id_map = _materialize_tasks(items, task_dir, rounds=rounds)
+    task_id_map = _materialize_tasks(items, task_dir, rounds=rounds, use_daytona=use_daytona)
     if not task_id_map:
         logger.warning("No tasks materialized — skipping Harbor dispatch")
         return []
