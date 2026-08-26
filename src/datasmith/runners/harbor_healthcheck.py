@@ -192,6 +192,47 @@ def _compute_resource_attrs(
     }
 
 
+def _decode_bytea(value: Any) -> bytes | None:
+    """Decode a PostgREST bytea payload (PostgreSQL hex form ``\\x...``) to raw
+    bytes. Returns None on anything unexpected -- the caller degrades to a miss."""
+    if not isinstance(value, str) or not value.startswith("\\x"):
+        return None
+    try:
+        return bytes.fromhex(value[2:])
+    except ValueError:
+        return None
+
+
+def _fetch_deps_db(owner: str, repo: str, issue_number: int) -> bytes | None:
+    """Fetch the pre-surveyed LSV deps DB for a task from ``lsv_deps_cache`` on
+    datasmith's own Supabase, or None on miss / any error.
+
+    Host-side over ``get_client()`` (not the in-container urllib path): the survey
+    is resource-independent, so it is fetched once here and baked into the image,
+    which works even when SUPABASE_URL is localhost (the container's baseline
+    fetch still needs the tunnel, but that is a separate layer). Best-effort:
+    every failure returns None and the trial re-runs the survey under force=True.
+    """
+    try:
+        resp = (
+            get_client()
+            .table("lsv_deps_cache")
+            .select("deps_db")
+            .eq("owner", owner)
+            .eq("repo", repo)
+            .eq("issue_number", issue_number)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        logger.debug("lsv_deps_cache lookup failed for %s/%s#%d (%s)", owner, repo, issue_number, exc)
+        return None
+    rows = resp.data or []
+    if not rows or not isinstance(rows[0], dict):
+        return None
+    return _decode_bytea(rows[0].get("deps_db"))
+
+
 def _lsv_render_env(base_env: dict[str, str], *, task_id: str, attrs: dict[str, str]) -> dict[str, str]:
     """Combine the datasmith creds with the LSV_* cache key into the dict baked
     into setup.sh/test.sh. lsv_init reads LSV_* + creds to look baselines up;
@@ -260,6 +301,7 @@ def _materialize_tasks(
             )
             continue
         render_env: dict[str, str] | None = None
+        deps_db: bytes | None = None
         if cache_on:
             attrs = _compute_resource_attrs(
                 use_daytona=use_daytona,
@@ -269,6 +311,12 @@ def _materialize_tasks(
                 mem_mb=mem_mb,
             )
             render_env = _lsv_render_env(base_env, task_id=rec.task_dir_name, attrs=attrs)
+            deps_db = _fetch_deps_db(rec.owner, rec.repo, rec.issue_number)
+            if deps_db:
+                logger.info(
+                    "LSV survey cache hit for %s/%s#%d (%d bytes)",
+                    rec.owner, rec.repo, rec.issue_number, len(deps_db),
+                )
         try:
             adapter.generate_task(
                 rec,
@@ -279,6 +327,7 @@ def _materialize_tasks(
                 verifier_env=verifier_env,
                 expected_n=expected_n_for(overrides, (rec.owner, rec.repo, rec.issue_number)),
                 render_env=render_env,
+                deps_db=deps_db,
             )
         except Exception:
             logger.exception("generate_task failed for %s/%s#%d", rec.owner, rec.repo, rec.issue_number)
