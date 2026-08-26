@@ -245,6 +245,13 @@ def _format_description(title: str, body: str) -> str:
     return "\n\n".join(parts)
 
 
+# How many container tags the stage 8 dry run spells out before eliding. The
+# list exists so an operator can see which public tags a push overwrites, so
+# the cap is a readability budget, not a correctness one -- the elided count
+# is always printed.
+DATASMITH_DRY_RUN_TAG_LIST_CAP: int = int(os.environ.get("DATASMITH_DRY_RUN_TAG_LIST_CAP", "100"))
+
+
 class Pipeline:
     """Orchestrate the full FormulaCode update pipeline."""
 
@@ -1016,15 +1023,33 @@ class Pipeline:
         # ``publish.records.records_from_supabase``, which is where its
         # ``pull_requests`` read lives.
         if self._dry_run:
-            # Query what would be published without running the pipeline
-            rows = fetch_all(
-                "candidate_containers",
-                select="owner, repo, issue_number",
-            )
+            # Select through the function the real run selects with.
+            #
+            # This used to read ``candidate_containers`` whole -- no window, no
+            # harbor evidence, no verification state -- and report every
+            # container ever synthesized: 1875 items where the real run
+            # publishes a handful. Stage 8 writes to DockerHub and stamps
+            # ``published_at`` with no undo, so "dry-run first" is the standing
+            # rule; a dry run that answers a different question than the real
+            # run makes that rule ceremonial.
+            from datasmith.publish import records as _records
+
+            found = _records.records_from_supabase(start_date=start_date, end_date=end_date)
+            tags = [r.container_name for r in found if r.container_name]
+            shown = tags[:DATASMITH_DRY_RUN_TAG_LIST_CAP]
+            tag_line = ", ".join(shown) or "(none)"
+            if len(tags) > len(shown):
+                tag_line += f", ... and {len(tags) - len(shown)} more"
             self._log_dry_run_summary(
                 "publish",
-                [{"owner": r["owner"], "repo": r["repo"]} for r in rows],
-                extra={"Date range": f"{start_date} to {end_date}"},
+                [{"owner": r.owner, "repo": r.repo, "issue_number": r.issue_number} for r in found],
+                extra={
+                    "Date range": f"{start_date} to {end_date}",
+                    "Harbor environments admitted": ",".join(_records.DATASMITH_PUBLISH_ENVIRONMENTS),
+                    "Min harbor speedup": _records.MIN_HARBOR_SPEEDUP,
+                    "Container verification required": "verification_state='verified'",
+                    "Tags that would be OVERWRITTEN on DockerHub": tag_line,
+                },
             )
             return
 

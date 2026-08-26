@@ -456,10 +456,10 @@ class TestScopedSkipPredicates:
 class TestPublishWindow:
     """Stage 8's window lives in ``records_from_supabase``, not in ``_publish``.
 
-    ``_publish`` delegates, and its dry-run branch reads ``candidate_containers``
-    with no window at all — so driving it through :func:`_run_stage` would
-    measure a code path that has no window to get wrong. This class patches the
-    read stage 8 actually windows.
+    ``_publish`` delegates — both its real and its dry-run branch now go
+    through ``records_from_supabase`` — so driving it through
+    :func:`_run_stage` would measure the delegation rather than the window.
+    This class patches the read stage 8 actually windows.
     """
 
     def _published(self, **kwargs: Any) -> set[int]:
