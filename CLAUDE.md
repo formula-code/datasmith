@@ -191,6 +191,12 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   ended 27 of 38 recorded failures — 12 of them at round 2, giving the
   producer one attempt per failure),
   `DATASMITH_PV_AGENT_TIMEOUT_S`, `DATASMITH_PV_BATTERY_TIMEOUT_S`,
+  `DATASMITH_VERIFY_TIMEOUT_S` (wall-clock for ONE verification — build,
+  tests and measurement together; default 5400. It must stay larger than
+  `DATASMITH_VERIFY_TEST_TIMEOUT_S` and `DATASMITH_VERIFY_MEASURE_TIMEOUT_S`,
+  which bound single steps: it was 3600, equal to each of them, so work still
+  inside its own allowance was killed and reported as a hang. Measured
+  tests+measurement on the verified corpus reached 3351 s),
   `DATASMITH_PV_BATTERY_CPUS` (cores one battery container may use; 0
   disables the cap. modin, dask and pymc size their worker pools from
   the visible core count, so an uncapped container claims the whole

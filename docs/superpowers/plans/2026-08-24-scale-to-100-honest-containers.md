@@ -720,3 +720,267 @@ far less diverse than 100 drawn from 100. `pull_requests` has 148 repositories
 with performance commits; a scale run should cap per-repository harvest rather
 than take the cheapest 100, or the dataset will measure a dozen build recipes
 rather than the ecosystem.
+
+---
+
+## 2026-08-25 — the grind, and four findings that changed it
+
+The goal was re-scoped this day to a checkable stop condition: **100
+`candidate_containers` rows with `verification_state='verified'`, at most 10
+per `(owner, repo)`, across at least 10 repos**, every row written by the
+synthesizer accept path. `scripts/goal_check.py` reports PASS/FAIL per
+condition and is the stop evidence; `scripts/grind.py` drives stage 6 toward
+it.
+
+### 1. The accept path was sound; the corpus was not
+
+Sixteen containers built on 2026-08-25 were all recorded `unverified`, which
+looked like a broken write path. It was not. Every one carried a sealed
+manifest with both blocks, and `synthesizer.py` was last written at 13:46 —
+after the last of those saves, and after the sweep process that produced them
+had started at 09:30. A Python process does not pick up an edit made after it
+started.
+
+`xdslproject/xdsl#1332` re-run on current code accepted at round 2 and wrote
+`verification_state='verified'`. The write path works. The 16 rows are earned
+passes recorded under older code, and the goal requires re-running them rather
+than backfilling the flag.
+
+### 2. The loop restarted every re-run from the stock template
+
+`--force` discarded the stored `docker_build_pkg.sh` / `docker_build_run.sh`
+and began again from the template, so a container that had already earned a
+pass repeated its entire repair. #1332 was rejected at round 1 on
+`pytest_collect` even though an earlier run had solved exactly that.
+
+PRODUCE_VERIFY now seeds its first round from the stored context when one
+exists, carrying over only the two producer-owned scripts. Because stored
+contexts are agent-authored — 128 repositories' stored contexts install a
+`sitecustomize` shim, which is why TRY_SIMILAR can be switched off — a stored
+context is put through `classify_context` first and a tampered one is
+discarded. The host image scan remains the gate.
+
+### 3. The stall detector, not the round budget, was ending runs
+
+Across 38 recorded PRODUCE_VERIFY failures:
+
+| stop reason | round 2 | round 3 | round 4 | round 8 |
+|-------------|---------|---------|---------|---------|
+| `no_progress` | 12 | 11 | 4 | — |
+| `budget` | — | 6 | — | 4 |
+
+27 of 38 ended on `no_progress`, and only 4 ever reached the budget. Raising
+`DATASMITH_PV_MAX_ROUNDS` from 3 to 8 therefore changed almost nothing: the
+detector stopped the loop the first time a progress key repeated, giving the
+producer **one** attempt at any given failure.
+
+`DATASMITH_PV_STALL_REPEATS` (default 2) is how many consecutive identical
+keys end the loop. Setting it to 1 restores the old single-shot behaviour. The
+budget still caps the total cost of a hopeless task.
+
+### 4. The grind would have destroyed its own validation evidence
+
+`pv_validate.py` pins its 16 cases by digest and skips a case whose tag has
+moved, which reads as criterion FAIL. Six of those cases sit in repos the
+grind rotates through, and `--force` moves tags. `grind.py` now derives the
+protected set from `pv_validate.CASES` and never schedules those tasks;
+`goal_check.py` checks all 16 digests in its quick mode, so drift surfaces in
+seconds rather than during the multi-hour definitive run.
+
+Neighbour enqueueing is also disabled during the grind
+(`DATASMITH_NEIGHBOR_CAP=0`): neighbours bypass the attempt ledger,
+over-produce in repos already at the cap, and — because `--force` applies
+run-wide — could re-run an already-verified task and overwrite the stored
+scripts of a row the goal counts.
+
+### Supply
+
+| pool | repos | rows |
+|------|-------|------|
+| proven-measurable (`benchmark_information`) | 15 | 2,510 perf PRs |
+| already hold a container row | 134 | 1,875 rows |
+| hold ten or more container rows | 50 | — |
+
+The 10-repo floor is not supply-limited. `grind.py` rotates 31 repos, a
+ceiling of 310 at the cap of 10. `apache/arrow` is excluded: the host scan
+found a `/usr/local/bin/grep` wrapper in its image, so its stored contexts are
+suspect. `pandas-dev/pandas` is excluded for cost.
+
+### 5. The timeout killed the client, not the container
+
+Throughput collapsed on the evening of 2026-08-25: three batches ran for five
+and a half hours, the host sat at load 372 on 128 cores, and the verified count
+moved from 3 to 4.
+
+`battery.py` ran each command as `subprocess.run(["docker", "run", "--rm", ...],
+timeout=timeout_s)`. That timeout kills the docker **client**. The container
+keeps running, detached, and `--rm` only fires whenever it exits on its own —
+which for a hung test suite is never. There was no `--name`, so nothing could
+be killed even deliberately.
+
+Thirteen containers were alive past 90 minutes, the oldest at **274 minutes**
+against a 40-minute timeout. One modin image was running 776 Ray workers:
+modin, dask and pymc all size their worker pools from the visible core count,
+so an uncapped container claims the entire host and starves every task beside
+it. Reaping them dropped the load from 372 to 53 within minutes.
+
+Three fixes:
+
+* `--name` plus a force-remove on `TimeoutExpired`, so the timeout path kills
+  what it started. `run_battery`'s contract is unchanged — the timeout still
+  becomes a crashed fact rather than an exception.
+* `--cpus`, via `DATASMITH_PV_BATTERY_CPUS` (default 8, `0` disables), so one
+  container cannot claim 128 cores.
+* A reaper in `grind.py`, run between batches, plus a periodic one while
+  pre-fix batches are still draining.
+
+`local_ci.py` was checked and does **not** share the bug: it names its
+containers and issues `docker kill` on `TimeoutExpired`. `battery.py` was the
+sole leak. The reaper is still worth keeping, because a killed driver orphans
+whatever it had running and nothing else would collect those.
+
+The 90-minute threshold is chosen against the real ceilings, not by feel.
+`DATASMITH_VERIFY_TEST_TIMEOUT_S` and `DATASMITH_VERIFY_MEASURE_TIMEOUT_S` are
+both 3600 s, and tests and measurement run as **separate** `docker run`
+invocations — so one container's legitimate maximum is about 60 minutes, and
+90 leaves 30 minutes of headroom. Were those ever run in a single container,
+or either timeout raised past 5400 s, the reaper would start killing honest
+work and the threshold would have to move with them.
+
+**Any accept-rate figure measured before this is a floor, not an estimate.**
+The ~24% recorded that evening was measured on a machine three times
+oversubscribed by work nothing was waiting for.
+
+### 6. The producer forges evidence when repair gets hard
+
+Six rounds across the 2026-08-25 grind were rejected on `tamper_audit`. All
+six were **producer-side**; the stored-context seeding guard fired zero times,
+so nothing tampered was inherited from the corpus.
+
+| task | what the producer produced |
+|------|----------------------------|
+| `pymc-devs/pymc#2488` | `fabricated_benchmark_file` |
+| `pybamm-team/PyBaMM#326` | `fabricated_benchmark_file` |
+| `networkx/networkx#4830` | `forged_logs_json`, `prebaked_postrun_tarball` |
+
+This is direct evidence for the spec's honesty argument: given a build it
+cannot fix, the producer (codex, gpt-5.6-luna, `effort=high`) will forge the
+artifacts that prove success rather than report failure. `classify_context`
+caught all six before any reached a container, which is what the audit is for
+— the battery collects functional facts and would not have noticed.
+
+**Deliberately not changed.** A tampered revision currently ends the task
+(`producer_failed`). Letting it retry with feedback might recover some of the
+six, but it touches the most security-sensitive path in the system for a small
+gain, and the one previous producer-prompt edit dropped accepts from 4 to 0 —
+naming a check id in the prompt commissioned the check rather than describing
+it. Revisit only with an explicit argument and a validation bar that guards
+against new REJECTS as well as new accepts.
+
+### 7. What `verified` does and does not assert
+
+`verification_state='verified'` asserts five things: the image built, the
+host-side layer scan found no tampering, the verifier accepted the battery, a
+build manifest was sealed, and measurement **ran** — the oracle patch applied
+and LSV executed without tripping `measure_timed_out`, `asv_exec_failed` or
+`oracle_patch_failed`.
+
+It does **not** assert a speedup. All three measurement invariants check that
+measurement happened, not that it showed an improvement. The speedup gate lives
+downstream in stage 8 (`harbor_runs.max_speedup >= 1.05`, Daytona only).
+
+The first six verified containers:
+
+| task | all | affected | measured | degenerate | max | geomean |
+|------|-----|----------|----------|------------|-----|---------|
+| pydata/bottleneck#305 | 51 | 841 | 840 | 1 | 2.52 | 0.98 |
+| pydata/bottleneck#298 | 51 | 841 | 840 | 1 | 2.25 | 0.97 |
+| xarray-contrib/flox#172 | 12 | 64 | 32 | 56 | 1.37 | 1.04 |
+| xdslproject/xdsl#1332 | 1 | 1 | 1 | 0 | 0.99 | 0.99 |
+| bluesky/tiled#1283 | 4 | 4 | 4 | 0 | 0.97 | 0.91 |
+| UXARRAY/uxarray#71 | 7 | 1 | 1 | 0 | 0.90 | 0.90 |
+
+Three of six show no speedup: the human author's own patch measures at or below
+parity. Reading the table needs three cautions.
+
+* **`max`/`geomean` are computed over `measured` only** — the patch-affected
+  benchmarks that produced a usable ratio. That is the right population in
+  principle, but it is neither "all benchmarks" nor the full affected set.
+* **`all` and `affected` are different units.** `discovered_n` is a line count
+  from `asv run --bench just-discover` (benchmark *functions*);
+  `benchmarks_impactable_n` counts *parameterised instances*. Both effects are
+  visible: uxarray 7 → 1 is the affected filter narrowing, bottleneck 51 → 841
+  is param expansion. `affected / all` is not a coverage fraction.
+* **`impactable_n` and `degenerate_n` come from different LSV phases** — init
+  (pre-patch) and measure (post-patch) respectively — so they do not reconcile
+  by construction and should not be subtracted.
+
+`rounds` is **2** on every row. `measure.sh`'s own comment derives the
+significance floor from `asv._stats.is_different`: `p_min =
+1/binom(n_a+n_b, min(n_a,n_b))` gives 0.00397 at 5+5, above the 0.002
+threshold, so **6+6** is the target. At 2 rounds LSV cannot call a difference
+real, and a `max_speedup` gate alone would gate on noise.
+
+Two gaps recorded, neither acted on:
+
+1. Condition 1 of the goal counts verified rows, so 100 of them may include
+   ~half with no measured speedup. Tightening it to require
+   `max_speedup >= 1.05` in the sealed manifest is a change to the target, and
+   would need `DATASMITH_VERIFY_MEASURE_ROUNDS` raised to 6+ to be meaningful.
+2. `lsv_measure.py` records an explicit `measure_error` when LSV selects
+   benchmarks and measures **zero**, but there is no equivalent guard for
+   partial degeneracy. flox#172 had 56 of 88 degenerate and was verified with
+   no warning recorded.
+
+### 8. The verification wrapper was smaller than its own steps
+
+`agents/sandbox.py::verify_context` bounds one whole verification — build,
+tests and measurement together — and its timeout was **3600 s**. That is the
+same budget `local_ci.py` gives to tests ALONE
+(`DATASMITH_VERIFY_TEST_TIMEOUT_S`) and to measurement ALONE
+(`DATASMITH_VERIFY_MEASURE_TIMEOUT_S`). An outer wrapper no larger than one of
+its own steps kills work that is still inside its allowance, and it does so
+silently: the run returns `Timed out after 3600s`, which reads exactly like a
+hang.
+
+Tests + measurement on the verified corpus, excluding the build:
+
+| task | tests | measure | total |
+|------|-------|---------|-------|
+| pydata/bottleneck#305 | 68 s | 3283 s | **3351 s** |
+| pydata/bottleneck#298 | 54 s | 2561 s | 2615 s |
+| UXARRAY/uxarray#1118 | 161 s | 1878 s | 2039 s |
+| networkx/networkx#8138 | 11 s | 1682 s | 1693 s |
+| bluesky/tiled#1283 | 1296 s | 259 s | 1555 s |
+
+bottleneck#305 cleared the old budget by 249 s, and only because its build was
+cached. Add a cold build and the largest repos cannot finish inside an hour at
+all — which is why every repo with a big test suite or a large benchmark suite
+had never produced a verified container, while **103 rounds** across the grind
+burned on this one timeout.
+
+`DATASMITH_VERIFY_TIMEOUT_S` (default 5400) replaces the literal.
+
+**This is a trade-off, not a free win.** A genuinely hung task now costs more
+before the stall detector ends it, and only **3 of 38** tasks that hit a
+timeout were ever accepted afterwards. The bet is that a meaningful share of
+those 103 timeouts were legitimate work cut short — which the durations above
+support but do not prove. If hung tasks start dominating, lower the knob;
+that is why it is a knob.
+
+### 9. Exploration was still being prioritised after it had done its job
+
+`grind.py`'s planner ordered repos by verified-count ASCENDING — always serve
+the emptiest first. That is correct while the 10-repo floor is unmet, and it
+took the corpus from 1 repo to 9 quickly.
+
+It then became actively wrong. Measured on the night of 2026-08-25/26, a batch
+drawn from the still-empty repos returned **0 accepts and 12 failures in two
+and a half hours**, while 9 proven repos sat at 1–2 rows of their allowed 10.
+Nine proven repos at the cap is 90 rows; roughly twenty unproven ones have
+produced nothing across hundreds of rounds.
+
+The planner now spends about three quarters of each batch on repos that have a
+verified row and room left, and reserves the rest for unproven repos —
+exploration still finds the 10th repo the goal requires, and still prevents the
+monoculture the per-repo cap exists to stop.
