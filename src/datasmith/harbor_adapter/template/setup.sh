@@ -78,16 +78,19 @@ micromamba activate "$ENV_NAME" || true
 set -u
 
 SETUP_PHASE="install_deps"
-# ── Install dependencies ────────────────────────────────────────────────
-echo "[$(ts)] [setup] Installing LSV + snapshot-tool..."
-
-micromamba run -n "$ENV_NAME" uv pip install -q --upgrade asv_runner || true
-micromamba run -n "$ENV_NAME" uv pip install -q coverage || true
-micromamba run -n "$ENV_NAME" uv pip install -q --no-cache \
-    "git+https://github.com/formula-code/lsv.git" || true
-micromamba run -n "$ENV_NAME" uv pip install -q --no-cache \
-    "git+https://github.com/formula-code/snapshot-tester.git" || true
-micromamba run -n "$ENV_NAME" uv pip install -q -U jinja2 || true
+# ── Dependencies ────────────────────────────────────────────────────────
+# LSV + snapshot-tool + asv_runner/coverage/jinja2 are BAKED into the image
+# by the Dockerfile now, so all 8-48 trials reuse one install instead of
+# pip-cloning from GitHub every trial (~10-40s/trial). Fallback: if a base
+# image predates the bake, install them here so the trial still works.
+if micromamba run -n "$ENV_NAME" bash -c 'command -v snapshot-tool >/dev/null 2>&1 && python -c "import asv.contrib.lightspeed"' 2>/dev/null; then
+  echo "[$(ts)] [setup] LSV + snapshot-tool already baked into image; skipping install."
+else
+  echo "[$(ts)] [setup] Installing LSV + snapshot-tool (not baked)..."
+  micromamba run -n "$ENV_NAME" uv pip install -q --upgrade asv_runner coverage jinja2 \
+      "git+https://github.com/formula-code/lsv.git" \
+      "git+https://github.com/formula-code/snapshot-tester.git" || true
+fi
 
 SETUP_PHASE="extra_setup_commands"
 {{ extra_setup_commands }}
