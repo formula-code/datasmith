@@ -19,18 +19,10 @@ COPY config.json /tests/config.json
 RUN chmod +x /entrypoint.sh
 ENV PYTHONPATH=/opt/lsv:${PYTHONPATH:-}
 
-# ── Bake per-trial deps ONCE (were pip-installed from GitHub EVERY trial in ──
-# setup.sh, ~10-40s/trial with --no-cache git clones). Installed into the asv
-# env here, reused by all 8-48 trials. Fail-safe (set +e / || true): if the
-# base image lacks micromamba/ENV_NAME this is a no-op and setup.sh still works.
-RUN bash -c 'set +e; \
-    source /etc/profile.d/asv_utils.sh 2>/dev/null || true; \
-    source /etc/profile.d/asv_build_vars.sh 2>/dev/null || true; \
-    eval "$(micromamba shell hook --shell=bash)" 2>/dev/null || true; \
-    micromamba run -n "$ENV_NAME" uv pip install -q --upgrade asv_runner coverage jinja2 \
-        "git+https://github.com/formula-code/lsv.git" \
-        "git+https://github.com/formula-code/snapshot-tester.git"; \
-    true'
+# NOTE: LSV is already installed in the base image's asv env (Layer A), and
+# build-time networking on this box cannot reach GitHub (DNS-restricted), so we
+# do NOT pip-install deps here. The runtime setup.sh keeps a guarded install as
+# a fallback (it runs with host networking, where GitHub is reachable).
 
 # ── Bake the base-commit LSV baseline ONCE (was re-measured EVERY trial, ─────
 # 100-490s each). Correct BY CONSTRUCTION: HEAD == base_commit here and no
