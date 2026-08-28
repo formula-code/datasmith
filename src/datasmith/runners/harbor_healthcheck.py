@@ -357,6 +357,67 @@ def _row_from_trial(  # noqa: C901
     }
 
 
+def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: int) -> None:
+    """Publish an oracle trial's ``.snapshots/`` behavioral baseline to the prod
+    ``snapshots`` storage bucket, keyed ``{owner}__{repo}__{issue}/oracle.tar.gz`` (tarball
+    rooted at ``.snapshots``, large ``.pkl`` payloads dropped). This is the durable home
+    for the baseline that agent trials download for regression-relative correctness.
+
+    Host-side; uses ``SUPABASE_URL`` + ``SUPABASE_KEY`` and the CF-Access service-token env
+    (``DATASMITH_CF_ACCESS_CLIENT_ID/SECRET``). Best-effort — never raises.
+    """
+    import io
+    import tarfile
+    import urllib.error
+    import urllib.request
+
+    try:
+        snap = _trial_dir_from_uri(trial.trial_uri) / "artifacts" / ".snapshots"
+        if not (snap / "baseline.json").exists():
+            return
+        base = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_KEY", "")
+        if not (base and key):
+            return
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            tar.add(
+                str(snap),
+                arcname=".snapshots",
+                filter=lambda i: None if i.name.endswith((".pkl", ".pkl.gz")) else i,
+            )
+        object_key = f"{owner}__{repo}__{issue_number}/oracle.tar.gz"
+        url = f"{base}/storage/v1/object/snapshots/{object_key}"
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/gzip",
+            "x-upsert": "true",
+            "User-Agent": "Mozilla/5.0",
+        }
+        cid = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_ID")
+        csec = os.environ.get("DATASMITH_CF_ACCESS_CLIENT_SECRET")
+        if cid and csec:
+            headers["CF-Access-Client-Id"] = cid
+            headers["CF-Access-Client-Secret"] = csec
+        data = buf.getvalue()
+        for method in ("POST", "PUT"):
+            try:
+                req = urllib.request.Request(url, data=data, headers=headers, method=method)
+                with urllib.request.urlopen(req, timeout=180):
+                    get_logger(__name__).info("Published oracle snapshots: %s", object_key)
+                    return
+            except urllib.error.HTTPError as e:
+                if method == "POST" and e.code in (400, 409):
+                    continue  # exists -> overwrite
+                get_logger(__name__).warning(
+                    "Snapshot publish failed for %s (%s)", object_key, e.code
+                )
+                return
+    except Exception as exc:  # noqa: BLE001 — publishing must never break the healthcheck
+        get_logger(__name__).warning("Snapshot publish error: %s", exc)
+
+
 def _insert_harbor_runs(rows: list[dict[str, Any]], chunk_size: int = 100) -> int:
     """Insert (not upsert) into harbor_runs. Each row is a fresh run with an
     auto-generated run_id, so upsert semantics don't apply here.
@@ -468,6 +529,12 @@ async def run_harbor_healthcheck(
         row = _row_from_trial(trial, task_id_map, environment=environment)
         if row is not None:
             rows.append(row)
+            # Persist the oracle behavioral baseline durably so agent trials can verify
+            # against it (regression-relative correctness). Best-effort; never blocks.
+            if row.get("agent_name") == "oracle":
+                _publish_oracle_snapshots(
+                    trial, row["owner"], row["repo"], row["issue_number"]
+                )
 
     n_success = sum(1 for r in rows if r["status"] == "success")
     n_fast = sum(
