@@ -13,9 +13,18 @@ TASK_ID="${ISSUE_NUMBER}"
 export OWNER REPO ISSUE_NUMBER TASK_ID
 
 # Harbor's [verifier.env] section only reaches test.sh, not setup.sh, so we
-# bake the agent name directly into setup.sh at render time. lsv_init.py
-# reads this to decide whether to capture the oracle snapshot baseline.
-export HARBOR_AGENT_NAME="oracle"
+# bake the agent name directly into setup.sh at render time. lsv_init.py reads
+# this to decide whether to CAPTURE the oracle snapshot baseline during setup.
+#
+# In PRODUCTION RL this MUST be non-oracle: lsv_init.py's capture is "oracle
+# only -- production runs download pre-built snapshots" (lsv_init.py:500). The
+# correctness gate's real baseline is downloaded by test.sh from db at verify
+# time (keyed on test.sh's own AGENT_KEY, independent of this value), and
+# snapshot-tool verify re-captures the current state fresh -- so a setup-time
+# capture is pure redundant work (e.g. ~30s/trial on shapely). Leaving this
+# "oracle" was a leftover from the offline oracle-baseline recipe. Set it back
+# to "oracle" ONLY when generating that baseline, never for a training run.
+export HARBOR_AGENT_NAME="agent"
 
 setup_start=$(date +%s)
 # Track which phase we're currently in so the exit trap can report WHERE
