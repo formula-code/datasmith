@@ -266,7 +266,7 @@ def summarize_snapshots(log_dir: Path) -> dict:
     """Collect snapshot verify summaries into a single structured block."""
     out: dict = {"summaries": {}, "passed": True}
     for match_path in glob_mod.glob(str(log_dir / "summary_*.json")):
-        name = Path(match_path).stem.removeprefix("summary_")
+        name = Path(match_path).stem[len("summary_"):]
         try:
             data = json.loads(Path(match_path).read_text())
         except (json.JSONDecodeError, OSError):
