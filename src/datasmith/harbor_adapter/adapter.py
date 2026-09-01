@@ -145,7 +145,7 @@ class FormulaCodeAdapter:
         rec: FormulaCodeRecord,
         paths: HarborTaskPaths,
         run_pytest: bool = True,
-        rounds: int = 1,
+        rounds: int = DATASMITH_LSV_ROUNDS,
     ) -> None:
         """Generate test files (test.sh, config.json)."""
         # test.sh
@@ -178,7 +178,7 @@ class FormulaCodeAdapter:
         self,
         rec: FormulaCodeRecord,
         paths: HarborTaskPaths,
-        rounds: int = 1,
+        rounds: int = DATASMITH_LSV_ROUNDS,
     ) -> None:
         """Generate solution files (solve.sh, setup.sh)."""
         # solve.sh
