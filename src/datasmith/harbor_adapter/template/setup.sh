@@ -111,8 +111,13 @@ SETUP_PHASE="lsv_init"
 echo "[$(ts)] [setup] Starting LSV init..."
 lsv_init_start=$(date +%s)
 set +e
+# measure gate: serialize LSV baseline measure (fail-open); release AFTER capturing $?
+_MG_URL="${MEASURE_GATE_URL:-http://172.17.0.1:8266}"
+_MG_SID="mg-$(hostname 2>/dev/null || echo h)-$$-${RANDOM}"
+curl -fsS -m 2000 -X POST "${_MG_URL}/acquire?sid=${_MG_SID}" >/dev/null 2>&1 || true
 python /opt/lsv/lsv_init.py --rounds {{ rounds }}
 lsv_exit=$?
+curl -fsS -m 5 -X POST "${_MG_URL}/release?sid=${_MG_SID}" >/dev/null 2>&1 || true
 set -e
 lsv_init_end=$(date +%s)
 if [ $lsv_exit -ne 0 ]; then

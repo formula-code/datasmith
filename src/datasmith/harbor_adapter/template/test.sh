@@ -60,7 +60,13 @@ echo "[$(ts)] [test] patch: files=${patch_files} +${patch_added}/-${patch_remove
 # Helpers live at /opt/lsv (baked into the image by Dockerfile).
 echo "[$(ts)] [test] Running LSV measure..."
 lsv_measure_start=$(date +%s)
-python /opt/lsv/lsv_measure.py --base-commit {{ base_commit }} --rounds {{ rounds }}
+# measure gate: serialize LSV measure to avoid memory-bandwidth contention (fail-open)
+_MG_URL="${MEASURE_GATE_URL:-http://172.17.0.1:8266}"
+_MG_SID="mg-$(hostname 2>/dev/null || echo h)-$$-${RANDOM}"
+curl -fsS -m 2000 -X POST "${_MG_URL}/acquire?sid=${_MG_SID}" >/dev/null 2>&1 || true
+if python /opt/lsv/lsv_measure.py --base-commit {{ base_commit }} --rounds {{ rounds }}; then _mg_rc=0; else _mg_rc=$?; fi
+curl -fsS -m 5 -X POST "${_MG_URL}/release?sid=${_MG_SID}" >/dev/null 2>&1 || true
+if [ "${_mg_rc:-0}" -ne 0 ]; then exit "${_mg_rc}"; fi
 lsv_measure_end=$(date +%s)
 
 # ── Snapshot vars ───────────────────────────────────────────────────────
