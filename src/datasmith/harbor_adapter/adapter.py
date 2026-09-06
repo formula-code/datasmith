@@ -133,11 +133,14 @@ class FormulaCodeAdapter:
         )
         paths.config_path.write_text(toml_content)
 
-    def _write_environment_files(self, rec: FormulaCodeRecord, paths: HarborTaskPaths) -> None:
-        """Generate environment files (Dockerfile, scripts)."""
+    def _write_environment_files(self, rec: FormulaCodeRecord, paths: HarborTaskPaths, cpus: int = 2) -> None:
+        """Generate environment files (Dockerfile, scripts).
+
+        ``cpus`` is the trial cpu quota; it pins NUMBA_NUM_THREADS in the image.
+        """
         # Dockerfile
         base_img = rec.container_name or "python:3.11-slim"
-        dockerfile_content = render_dockerfile(base_img)
+        dockerfile_content = render_dockerfile(base_img, numba_threads=cpus)
         (paths.environment_dir / "Dockerfile").write_text(dockerfile_content)
 
     def _write_test_files(
@@ -241,7 +244,7 @@ class FormulaCodeAdapter:
         if expected_n is not None:
             verifier_env = {**(verifier_env or {}), "FORMULACODE_EXPECTED_N": str(expected_n)}
         self._write_task_toml(rec, paths, timeout_sec, cpus, memory, storage, verifier_env=verifier_env)
-        self._write_environment_files(rec, paths)
+        self._write_environment_files(rec, paths, cpus=cpus)
         self._write_test_files(rec, paths, run_pytest, rounds)
         self._write_solution_files(rec, paths, rounds)
 

@@ -19,6 +19,15 @@ COPY config.json /tests/config.json
 RUN chmod +x /entrypoint.sh
 ENV PYTHONPATH=/opt/lsv:${PYTHONPATH:-}
 
+# Thread caps. The base image (docker/templates/Dockerfile.base) already pins
+# OMP/MKL/OPENBLAS_NUM_THREADS=1, but numba reads its own NUMBA_NUM_THREADS and
+# otherwise defaults to the HOST core count (128 on the training boxes) inside
+# a {{ numba_threads }}-cpu cgroup quota -- heavy oversubscription that distorts
+# timings on numba-heavy families (flox, uxarray, numpy). Pinned to the trial
+# cpu quota, and set BEFORE the baseline bake below so the baked baseline and
+# every trial measure under the same thread count.
+ENV NUMBA_NUM_THREADS={{ numba_threads }}
+
 # NOTE: LSV is already installed in the base image's asv env (Layer A), and
 # build-time networking on this box cannot reach GitHub (DNS-restricted), so we
 # do NOT pip-install deps here. The runtime setup.sh keeps a guarded install as

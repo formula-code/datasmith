@@ -139,9 +139,14 @@ storage = '{storage}'
 """
 
 
-def render_dockerfile(base_image: str) -> str:
-    """Render Dockerfile with base image."""
-    return _render_template("Dockerfile", base_image=base_image)
+def render_dockerfile(base_image: str, numba_threads: int = 2) -> str:
+    """Render Dockerfile with base image.
+
+    ``numba_threads`` becomes ``ENV NUMBA_NUM_THREADS`` in the task image. Keep
+    it equal to the trial cpu quota (task.toml ``cpus`` / harbor
+    ``override_cpus``): numba otherwise defaults to the host core count.
+    """
+    return _render_template("Dockerfile", base_image=base_image, numba_threads=int(numba_threads))
 
 
 def render_test_sh(
