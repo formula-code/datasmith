@@ -248,4 +248,22 @@ class FormulaCodeAdapter:
         self._write_test_files(rec, paths, run_pytest, rounds)
         self._write_solution_files(rec, paths, rounds)
 
+        # Provenance stamp: which datasmith source rendered this dir and with
+        # what parameters. `python -m datasmith.harbor_adapter.stamp check`
+        # flags dirs that drift from the installed template (hot patches,
+        # stale renders). Imported here so `python -m datasmith.harbor_adapter.stamp`
+        # does not re-import itself through the package __init__.
+        from datasmith.harbor_adapter.stamp import write_stamp
+
+        write_stamp(
+            out_dir,
+            rounds=rounds,
+            cpus=cpus,
+            memory=memory,
+            storage=storage,
+            timeout_sec=timeout_sec,
+            run_pytest=run_pytest,
+            base_image=rec.container_name,
+        )
+
         return out_dir
