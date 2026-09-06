@@ -12,19 +12,23 @@ ISSUE_NUMBER="{{ issue_number }}"
 TASK_ID="${ISSUE_NUMBER}"
 export OWNER REPO ISSUE_NUMBER TASK_ID
 
-# Harbor's [verifier.env] section only reaches test.sh, not setup.sh, so we
-# bake the agent name directly into setup.sh at render time. lsv_init.py reads
-# this to decide whether to CAPTURE the oracle snapshot baseline during setup.
+# Agent / provenance tag. lsv_init.py reads HARBOR_AGENT_NAME and CAPTURES the
+# oracle snapshot baseline during setup ONLY when it is the literal "oracle"
+# (lsv_init.py: `os.environ.get("HARBOR_AGENT_NAME","").lower() == "oracle"`);
+# every other value skips the capture. In production RL the capture is pure
+# redundant work (the gate's baseline is downloaded by test.sh at verify time and
+# snapshot-tool verify re-captures the current state fresh), so training must
+# never run as "oracle".
 #
-# In PRODUCTION RL this MUST be non-oracle: lsv_init.py's capture is "oracle
-# only -- production runs download pre-built snapshots" (lsv_init.py:500). The
-# correctness gate's real baseline is downloaded by test.sh from db at verify
-# time (keyed on test.sh's own AGENT_KEY, independent of this value), and
-# snapshot-tool verify re-captures the current state fresh -- so a setup-time
-# capture is pure redundant work (e.g. ~30s/trial on shapely). Leaving this
-# "oracle" was a leftover from the offline oracle-baseline recipe. Set it back
-# to "oracle" ONLY when generating that baseline, never for a training run.
-export HARBOR_AGENT_NAME="agent"
+# Harbor's [verifier.env] only reaches test.sh, not setup.sh. The channels that
+# DO reach this script are, in priority order:
+#   1. FC_AGENT_TAG      -- explicit override (image ENV or the exec env); use
+#                           FC_AGENT_TAG=oracle to force a baseline capture.
+#   2. HARBOR_AGENT_NAME -- harbor's trial runner injects agent.name() into the
+#                           setup.sh exec env (e.g. "qwen-code" for the RL agent,
+#                           "oracle" for harbor's oracle agent).
+#   3. "agent"           -- generic default when neither is set.
+export HARBOR_AGENT_NAME="${FC_AGENT_TAG:-${HARBOR_AGENT_NAME:-agent}}"
 
 setup_start=$(date +%s)
 # Track which phase we're currently in so the exit trap can report WHERE
@@ -111,10 +115,21 @@ SETUP_PHASE="lsv_init"
 echo "[$(ts)] [setup] Starting LSV init..."
 lsv_init_start=$(date +%s)
 set +e
-# measure gate: serialize LSV baseline measure (fail-open); release AFTER capturing $?
+# Measure gate: serialize the LSV baseline measure through the host-side
+# semaphore (rl/measure_gate.py) so concurrent trials do not saturate memory
+# bandwidth and corrupt timings. Fail-open: an unreachable gate or an expired
+# wait never blocks the trial. Release AFTER capturing $?.
+#   URL: 172.17.0.1 is docker's default bridge gateway (the host as seen from a
+#        bridge-networked container); under host networking it is still the
+#        host. Override with MEASURE_GATE_URL when the gate lives elsewhere.
+#   SID: one lease per (container, phase). The kernel uuid is unique across
+#        containers; the old hostname-$$-$RANDOM form collides because $$ is
+#        the same small PID in every container.
+#   -m 7200 matches the gate's --acquire-wait so a long queue waits instead of
+#        timing out on the client side and running ungated.
 _MG_URL="${MEASURE_GATE_URL:-http://172.17.0.1:8266}"
-_MG_SID="mg-$(hostname 2>/dev/null || echo h)-$$-${RANDOM}"
-curl -fsS -m 2000 -X POST "${_MG_URL}/acquire?sid=${_MG_SID}" >/dev/null 2>&1 || true
+_MG_SID="mg-init-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(hostname 2>/dev/null || echo h)-$$-${RANDOM}")"
+curl -fsS -m "${MEASURE_GATE_ACQUIRE_WAIT:-7200}" -X POST "${_MG_URL}/acquire?sid=${_MG_SID}" >/dev/null 2>&1 || true
 python /opt/lsv/lsv_init.py --rounds {{ rounds }}
 lsv_exit=$?
 curl -fsS -m 5 -X POST "${_MG_URL}/release?sid=${_MG_SID}" >/dev/null 2>&1 || true
