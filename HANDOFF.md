@@ -1,10 +1,6 @@
-# Handoff pointer
+# Handoff — see `formula-code/rl-recipe`
 
-This repo is part of the FormulaCode GRPO RL project handoff (2026-09-08).
-The full scientific handoff — project overview, live-run state, how to run it,
-the external glue (launch scripts, env flags, /overflow artifacts, services),
-and the per-repo map — is the top-level HANDOFF.md in
-formula-code/formulacode-verified-rl (branch formulacode/rl-campaign-log).
+The full project handoff lives in the **rl-recipe** repo:
+**`docs/HANDOFF.md`** → https://github.com/formula-code/rl-recipe/blob/formulacode/handoff-2026-09-08/docs/HANDOFF.md
 
-Controlled branch here: formulacode/handoff-2026-09-08
-Tag: live-2026-09-08 (commit reflecting the live working-tree state on ml-login7).
+This is one of five repos: `skyrl` (trainer) · `harbor` (trial framework) · `datasmith` (measurement) · `rl-recipe` (recipe + live services) · `rl-experiments` (oracle table / tasks / dashboard / logs). The doc above has the repo map, how-to-run, and the out-of-repo glue.
