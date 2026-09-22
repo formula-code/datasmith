@@ -259,7 +259,7 @@ class SandboxRunner:
         # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
         # trial path — copied, never forked, so a change to LSV selection
         # affects stage 6 and stage 7 identically.
-        lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template"
+        lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template" / "tests"
         for fname in ("lsv_init.py", "lsv_measure.py", "parser.py"):
             src = lsv_templates / fname
             if src.exists():
@@ -672,7 +672,7 @@ def verify_context(
         # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
         # trial path — copied, never forked, so a change to LSV selection
         # affects stage 6 and stage 7 identically.
-        lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template"
+        lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template" / "tests"
         for fname in ("lsv_init.py", "lsv_measure.py", "parser.py"):
             src = lsv_templates / fname
             if src.exists():

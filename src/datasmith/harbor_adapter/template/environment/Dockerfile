@@ -10,14 +10,13 @@ COPY entrypoint.sh /entrypoint.sh
 
 # Bake LSV helper scripts into the image so setup.sh can find them before
 # Harbor's verifier mounts /tests/ (verifier runs AFTER setup.sh).
-COPY lsv_init.py lsv_measure.py parser.py upload.py pytest_runner.py jinja_patch_plugin_pandas.py /opt/lsv/
+COPY lsv_init.py /opt/lsv/lsv_init.py
 
 # lsv_init.py reads /tests/config.json during setup.sh — bake it in too.
 # Harbor's verifier later overwrites this with identical content.
 COPY config.json /tests/config.json
 
 RUN chmod +x /entrypoint.sh
-ENV PYTHONPATH=/opt/lsv:${PYTHONPATH:-}
 
 # Thread caps. The base image (docker/templates/Dockerfile.base) already pins
 # OMP/MKL/OPENBLAS_NUM_THREADS=1, but numba reads its own NUMBA_NUM_THREADS and
@@ -40,7 +39,7 @@ ENV NUMBA_NUM_THREADS={{ numba_threads }}
 # (h11 defense). lsv_init.py stages this cache per-trial and runs force=False;
 # any missing/partial/sha-mismatched cache falls back to force=True (today's
 # behavior) -> zero regression. DATASMITH_LSV_ROUNDS must equal the trial rounds.
-ARG DATASMITH_LSV_ROUNDS=5
+ARG DATASMITH_LSV_ROUNDS={{ lsv_rounds }}
 RUN bash -c 'set +e; \
     source /etc/profile.d/asv_utils.sh 2>/dev/null || true; \
     source /etc/profile.d/asv_build_vars.sh 2>/dev/null || true; \

@@ -222,7 +222,7 @@ def _fill_missing_scripts(context_dir: str, base_commit: str = "") -> None:
     # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
     # trial path — copied, never forked, so a change to LSV selection
     # affects stage 6 and stage 7 identically.
-    lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template"
+    lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template" / "tests"
 
     # Every file that Dockerfile.pr references via COPY
     required = [

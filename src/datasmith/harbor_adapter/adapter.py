@@ -7,6 +7,7 @@ from shutil import copy2, rmtree
 
 from datasmith.harbor_adapter.utils import (
     DATASMITH_LSV_ROUNDS,
+    make_task_id,
     render_dockerfile,
     render_instruction_md,
     render_run_setup_sh,
@@ -32,13 +33,22 @@ class FormulaCodeRecord:
     repo_name: str | None = None
 
     @property
-    def task_id(self) -> int:
-        """Single-column join key (= issue_number). Repo qualifier is implicit."""
-        return self.issue_number
+    def task_id(self) -> str:
+        """The harbor task id ``{owner}__{repo}__{issue_number}``.
+
+        Derived, never stored: the record's identity IS the triple, which keys
+        the FormulaCode DB (``tasks`` / ``runs`` rows are matched on
+        ``owner=eq.&repo=eq.&issue_number=eq.``). This string is what harbor
+        sees as the task -- the trial directory name, the snapshot storage
+        prefix, ``TASK_ID`` inside the container -- and ``utils.split_task_id``
+        recovers the triple from it. It is NOT the DB's ``tasks.task_id``
+        column, which is a deprecated alias equal to the bare issue number.
+        """
+        return make_task_id(self.owner, self.repo, self.issue_number)
 
     @property
     def task_dir_name(self) -> str:
-        """Filesystem-safe name used as Harbor's task / trial directory.
+        """Filesystem name of the Harbor task / trial directory (= ``task_id``).
 
         Harbor discovers tasks by scanning ``LocalDatasetConfig.path`` for
         ``task.toml`` files (flat or one-level deep) and uses the parent
@@ -47,7 +57,7 @@ class FormulaCodeRecord:
         The triple-segment string keeps each trial dir globally unique while
         staying within Harbor's flat-discovery contract.
         """
-        return f"{self.owner}__{self.repo}__{self.issue_number}"
+        return self.task_id
 
 
 class HarborTaskPaths:
@@ -68,6 +78,20 @@ class HarborTaskPaths:
         self.solution_dir.mkdir(parents=True, exist_ok=True)
 
 
+# Static helper scripts. They ship in template/tests/ and are copied into the
+# task's tests/ dir: harbor's trial runner uploads the whole tests/ dir to
+# /tests BEFORE running setup.sh (src/harbor/trial/trial.py::_run_setup_script),
+# so setup.sh and test.sh read /tests/*.py at runtime.
+TEST_HELPERS: tuple[str, ...] = (
+    "lsv_init.py",
+    "lsv_measure.py",
+    "parser.py",
+    "upload.py",
+    "pytest_runner.py",
+    "jinja_patch_plugin_pandas.py",
+)
+
+
 class FormulaCodeAdapter:
     def __init__(self, harbor_tasks_root: Path, force: bool = False) -> None:
         self.out_root = Path(harbor_tasks_root)
@@ -81,29 +105,23 @@ class FormulaCodeAdapter:
                     rmtree(sub)
 
     def _copy_template_files(self, paths: HarborTaskPaths) -> None:
-        """Copy static template files to appropriate directories.
+        """Copy static template files to their destinations.
 
-        Harbor's trial runner uploads only ``tests/setup.sh`` alone to
-        ``/tmp/setup.sh`` and runs it BEFORE uploading the rest of
-        ``tests/`` via the verifier (see harbor/trial/trial.py:225 and
-        verifier/verifier.py:86). That means any helper script setup.sh
-        calls must already exist inside the container when setup runs.
+        Sources live under the nested ``template/{environment,tests}/`` layout,
+        mirroring the generated task structure.
 
-        We work around that by copying the LSV helper scripts into
-        ``environment/`` instead, so the Dockerfile ``COPY`` directive
-        bakes them into the image at build time. setup.sh and test.sh then
-        invoke them from ``/opt/lsv/`` inside the container.
+        The docker build context is environment/, and the Dockerfile's baseline
+        bake runs lsv_init.py at BUILD time -- before any upload has happened --
+        so the build context gets its own copy of that one file (the Dockerfile
+        COPYs it to /opt/lsv, used only by the bake; runtime reads /tests).
         """
-        for name in [
-            "entrypoint.sh",
-            "lsv_init.py",
-            "lsv_measure.py",
-            "parser.py",
-            "upload.py",
-            "pytest_runner.py",
-            "jinja_patch_plugin_pandas.py",
-        ]:
-            copy2(self.template_dir / name, paths.environment_dir / name)
+        copy2(
+            self.template_dir / "environment" / "entrypoint.sh",
+            paths.environment_dir / "entrypoint.sh",
+        )
+        for name in TEST_HELPERS:
+            copy2(self.template_dir / "tests" / name, paths.tests_dir / name)
+        copy2(self.template_dir / "tests" / "lsv_init.py", paths.environment_dir / "lsv_init.py")
 
     def _write_instruction_md(self, rec: FormulaCodeRecord, paths: HarborTaskPaths) -> None:
         """Generate instruction.md file."""
@@ -133,15 +151,35 @@ class FormulaCodeAdapter:
         )
         paths.config_path.write_text(toml_content)
 
-    def _write_environment_files(self, rec: FormulaCodeRecord, paths: HarborTaskPaths, cpus: int = 2) -> None:
-        """Generate environment files (Dockerfile, scripts).
+    @staticmethod
+    def _config_json(rec: FormulaCodeRecord) -> str:
+        cfg = rec.__dict__.copy()
+        cfg["task_id"] = rec.task_id  # surface the derived harbor id
+        return json.dumps(cfg, indent=2)
 
-        ``cpus`` is the trial cpu quota; it pins NUMBA_NUM_THREADS in the image.
+    def _write_environment_files(
+        self,
+        rec: FormulaCodeRecord,
+        paths: HarborTaskPaths,
+        cpus: int = 2,
+        rounds: int = DATASMITH_LSV_ROUNDS,
+    ) -> None:
+        """Generate environment files (Dockerfile, build-context config).
+
+        ``cpus`` is the trial cpu quota; it pins NUMBA_NUM_THREADS in the image
+        so numba's thread cap matches the cgroup quota. ``rounds`` is the
+        DATASMITH_LSV_ROUNDS build-arg default so the baked baseline is measured
+        with the same sample count the trial's measure pass uses.
         """
-        # Dockerfile
         base_img = rec.container_name or "python:3.11-slim"
-        dockerfile_content = render_dockerfile(base_img, numba_threads=cpus)
+        dockerfile_content = render_dockerfile(base_img, numba_threads=cpus, lsv_rounds=rounds)
         (paths.environment_dir / "Dockerfile").write_text(dockerfile_content)
+
+        # config.json in the build context: lsv_init.py reads /tests/config.json
+        # to find the source root, and at build time nothing is mounted, so the
+        # Dockerfile COPYs this one to /tests/config.json. Harbor later uploads
+        # the byte-identical tests/config.json over it.
+        (paths.environment_dir / "config.json").write_text(self._config_json(rec))
 
     def _write_test_files(
         self,
@@ -164,18 +202,9 @@ class FormulaCodeAdapter:
         test_sh_path.write_text(test_sh_content)
         test_sh_path.chmod(0o755)
 
-        # tests/config.json — Harbor verifier mounts this at /tests/config.json
-        # at trial time (post-setup). lsv_init.py reads it from /tests/config.json
-        # FIRST during setup.sh, before the verifier mount exists, so we ALSO
-        # bake the same content into environment/config.json — the Dockerfile
-        # COPYs it to /tests/config.json at image build time. The two paths end
-        # up with identical content; Harbor's later upload_dir() either overwrites
-        # with the same bytes or merges harmlessly.
-        cfg = rec.__dict__.copy()
-        cfg["task_id"] = rec.task_id  # surface the property so legacy readers see it
-        cfg_json = json.dumps(cfg, indent=2)
-        (paths.tests_dir / "config.json").write_text(cfg_json)
-        (paths.environment_dir / "config.json").write_text(cfg_json)
+        # tests/config.json -- Harbor uploads it to /tests/config.json at trial
+        # time (same bytes as environment/config.json, see above).
+        (paths.tests_dir / "config.json").write_text(self._config_json(rec))
 
     def _write_solution_files(
         self,
@@ -211,11 +240,16 @@ class FormulaCodeAdapter:
         cpus: int = 2,
         memory: str = "4G",
         storage: str = "10G",
-        rounds: int = DATASMITH_LSV_ROUNDS,
+        rounds: int | None = None,
         verifier_env: dict[str, str] | None = None,
         expected_n: int | None = None,
     ) -> Path:
         """Generate a complete Harbor task directory for the given FormulaCodeRecord.
+
+        ``rounds`` is the LSV sample-round count used by BOTH the image's baked
+        baseline (Dockerfile build arg) and the trial's setup/measure passes;
+        ``None`` means ``DATASMITH_LSV_ROUNDS`` (env, default 5). It is
+        resolved here, once, so the two can never disagree.
 
         ``expected_n`` is the operator-declared count of benchmarks this PR
         should impact, read from ``formulacode_task_overrides``. It is injected
@@ -230,6 +264,8 @@ class FormulaCodeAdapter:
         NULL), and the invariant then skips. Emitting a key that is always
         empty would make the wiring look live when it is not.
         """
+        if rounds is None:
+            rounds = DATASMITH_LSV_ROUNDS
         out_dir = self.out_root / rec.task_dir_name
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -244,7 +280,7 @@ class FormulaCodeAdapter:
         if expected_n is not None:
             verifier_env = {**(verifier_env or {}), "FORMULACODE_EXPECTED_N": str(expected_n)}
         self._write_task_toml(rec, paths, timeout_sec, cpus, memory, storage, verifier_env=verifier_env)
-        self._write_environment_files(rec, paths, cpus=cpus)
+        self._write_environment_files(rec, paths, cpus=cpus, rounds=rounds)
         self._write_test_files(rec, paths, run_pytest, rounds)
         self._write_solution_files(rec, paths, rounds)
 

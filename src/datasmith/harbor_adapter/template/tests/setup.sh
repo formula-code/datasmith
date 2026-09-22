@@ -130,7 +130,7 @@ set +e
 _MG_URL="${MEASURE_GATE_URL:-http://172.17.0.1:8266}"
 _MG_SID="mg-init-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(hostname 2>/dev/null || echo h)-$$-${RANDOM}")"
 curl -fsS -m "${MEASURE_GATE_ACQUIRE_WAIT:-7200}" -X POST "${_MG_URL}/acquire?sid=${_MG_SID}" >/dev/null 2>&1 || true
-python /opt/lsv/lsv_init.py --rounds {{ rounds }}
+python /tests/lsv_init.py --rounds {{ rounds }}
 lsv_exit=$?
 curl -fsS -m 5 -X POST "${_MG_URL}/release?sid=${_MG_SID}" >/dev/null 2>&1 || true
 set -e

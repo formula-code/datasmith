@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-_PARSER = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "parser.py"
+_PARSER = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "parser.py"
 
 
 def _load():
@@ -230,7 +230,7 @@ class TestProducerCoverage:
     def test_test_sh_passes_base_commit_to_parser(self):
         """The other half: the arg must actually be supplied at the call site."""
         test_sh = (
-            Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "test.sh"
+            Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "test.sh"
         ).read_text()
         parser_call = [ln for ln in test_sh.splitlines() if "parser.py" in ln]
         assert parser_call, "test.sh never invokes parser.py"
@@ -242,7 +242,7 @@ class TestProducerCoverage:
         """#15's measured value. lsv_init.py recorded no sha at all, so
         NEITHER side of the comparison existed."""
         src = (
-            Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "lsv_init.py"
+            Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "lsv_init.py"
         ).read_text()
         assert '"baseline_sha"' in src
         assert "rev-parse" in src
