@@ -212,17 +212,21 @@ def aggregate_by_hierarchy(per_benchmark: dict[str, float]) -> dict:
 # ── Test and snapshot results ────────────────────────────────────────────────
 
 
-def load_test_results(log_dir: Path) -> tuple[bool, float, dict]:
+def load_test_results(log_dir: Path) -> tuple[bool | None, float, dict]:
     """Read test_results.json. Returns (tests_passed, success_ratio, raw).
 
-    Missing file returns ``(False, 0.0, {})`` so the caller can distinguish
-    'no pytest data' from 'pytest passed'. This is the inversion of the
-    previous behavior, which defaulted to ``True`` and silently masked
-    every failure mode upstream of pytest.
+    Fail CLOSED and honest: a missing test_results.json means the tests never
+    produced a result, so ``tests_passed`` is ``None`` (unknown) -- never
+    ``True`` (the original behavior, which silently masked every failure mode
+    upstream of pytest) and not ``False`` either (which is indistinguishable
+    from a real failing suite). The reward shaping treats anything but ``True``
+    as broken, so the penalty is unchanged; reward.json just stops lying about
+    which of the two it was.
     """
     path = log_dir / "test_results.json"
     if not path.exists():
-        return False, 0.0, {}
+        print(f"[parser] WARNING: {path} not found; tests_passed=None (never ran)")
+        return None, 0.0, {}
 
     raw = json.loads(path.read_text())
     results = raw.get("results", raw)
@@ -263,17 +267,39 @@ def summarize_pytest(raw: dict) -> dict:
 
 
 def summarize_snapshots(log_dir: Path) -> dict:
-    """Collect snapshot verify summaries into a single structured block."""
-    out: dict = {"summaries": {}, "passed": True}
-    for match_path in glob_mod.glob(str(log_dir / "summary_*.json")):
+    """Collect snapshot verify summaries into a single structured block.
+
+    ``passed`` is the ACTUAL verdict, three-valued:
+      - no summary_*.json at all -> verify did not run: ``passed=None``,
+        ``verify_ran=False``. Never report a pass when nothing ran (this used
+        to default to True, which made an inert gate look green).
+      - any summary reports ``passed is False`` -> ``False`` (regression).
+      - summaries present, none failed -> ``True``.
+
+    The host generator overlays its own host-side snapshot verdict for the live
+    gate; this keeps the container-side reward.json honest for offline use and
+    reporting, and never falsely positive.
+    """
+    out: dict = {"summaries": {}, "passed": None, "verify_ran": False}
+    regressions: list[str] = []
+    for match_path in sorted(glob_mod.glob(str(log_dir / "summary_*.json"))):
         name = Path(match_path).stem[len("summary_"):]
         try:
             data = json.loads(Path(match_path).read_text())
         except (json.JSONDecodeError, OSError):
             continue
         out["summaries"][name] = data
+        out["verify_ran"] = True
         if data.get("passed") is False:
-            out["passed"] = False
+            regressions.append(Path(match_path).name)
+    if not out["verify_ran"]:
+        print("[parser] No snapshot summaries found; snapshots_passed=None (verify did not run).")
+    elif regressions:
+        out["passed"] = False
+        print(f"[parser] Snapshot regressions detected: {regressions}")
+    else:
+        out["passed"] = True
+        print("[parser] Snapshot verification passed.")
     return out
 
 
@@ -329,22 +355,6 @@ def summarize_lsv_init(lsv_results: dict) -> dict:
         "source_files_covered": init.get("source_files_covered"),
         "init_time_s": (init.get("timing") or {}).get("total_s"),
     }
-
-
-def log_snapshot_results(log_dir: Path) -> None:
-    """Log snapshot verification results. Regressions are informational only."""
-    regressions = []
-    for match_path in glob_mod.glob(str(log_dir / "summary_*.json")):
-        try:
-            data = json.loads(Path(match_path).read_text())
-            if data.get("passed") is False:
-                regressions.append(Path(match_path).name)
-        except (json.JSONDecodeError, OSError):
-            continue
-    if regressions:
-        print(f"[parser] Snapshot regressions detected (informational): {regressions}")
-    else:
-        print("[parser] Snapshot verification passed (or not run).")
 
 
 
@@ -601,7 +611,7 @@ def write_reward(
     advantage_levels: dict | None,
     speedups: dict[str, float],
     speedup_levels: dict,
-    tests_passed: bool,
+    tests_passed: bool | None,
     snapshots: dict,
     lsv_error: str | None = None,
     *,
@@ -625,7 +635,10 @@ def write_reward(
     reward_dir.mkdir(parents=True, exist_ok=True)
 
     max_speedup = max(speedups.values()) if speedups else None
-    snapshots_passed = bool((snapshots or {}).get("passed", True))
+    # Three-valued, straight from summarize_snapshots: True / False / None
+    # (None = verify never ran). Never coerced to True.
+    snapshots_passed = (snapshots or {}).get("passed")
+    snapshot_verify_ran = bool((snapshots or {}).get("verify_ran", False))
 
     reward_data = {
         # ── legacy scalar fields (publish filter, old downstream tools) ──
@@ -648,6 +661,7 @@ def write_reward(
         "max_speedup": max_speedup,
         "tests_passed": tests_passed,
         "snapshots_passed": snapshots_passed,
+        "snapshot_verify_ran": snapshot_verify_ran,
         "lsv_error": lsv_error,
         # ── structured dossier ────────────────────────────────────────────
         "patch": patch or {},
@@ -689,7 +703,12 @@ def write_reward(
         speedup_value = g
     else:
         h = 1.0  # TODO: fetch oracle speedup from DB
-        if not tests_passed or not snapshots_passed:
+        # Penalty iff the tests did not demonstrably pass (False OR never ran)
+        # or the snapshot verify demonstrably regressed (False). A snapshot
+        # verify that never ran (None) is NOT a penalty: the host-side gate owns
+        # that decision ("snapshot absence is not fatal"), and this keeps
+        # reward.txt numerically identical to the pre-honesty behavior.
+        if tests_passed is not True or snapshots_passed is False:
             speedup_value = -_PENALTY
         elif g <= 1.0:
             speedup_value = _FLOOR + (1.0 - _FLOOR) * g
@@ -702,6 +721,7 @@ def write_reward(
     print(f"[parser] max_speedup = {max_speedup}")
     print(f"[parser] num_valid_benchmarks = {len(speedups)}")
     print(f"[parser] tests_passed = {tests_passed}")
+    print(f"[parser] snapshots_passed = {snapshots_passed} (verify_ran={snapshot_verify_ran})")
     print(f"[parser] patch_applied = {(patch or {}).get('applied')}")
 
 
@@ -793,7 +813,6 @@ def main() -> None:
     # Load test results + summarize pytest into a dossier block.
     tests_passed, _, test_raw = load_test_results(LOG_DIR)
     pytest_summary = summarize_pytest(test_raw)
-    log_snapshot_results(LOG_DIR)
 
     # Trial-time invariants: is this trial's reward trustworthy?
     trial_ctx = build_trial_context(
