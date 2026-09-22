@@ -36,9 +36,18 @@ _RENDER_SOURCES = ("adapter.py", "utils.py", "records.py")
 
 
 def _iter_digest_files() -> Iterable[tuple[str, Path]]:
-    for path in sorted(_TEMPLATE_DIR.iterdir()):
-        if path.is_file() and not path.name.endswith((".pyc", ".pyo")):
-            yield f"template/{path.name}", path
+    # Recursive on purpose: the template is a nested tree
+    # (template/environment/*, template/tests/*, template/solution/*). A
+    # top-level-only walk would silently digest nothing but instruction.md once
+    # the payload moved into subdirectories, and the drift gate would pass on
+    # every hot patch. Keys are POSIX paths relative to the package dir so the
+    # digest is stable across checkouts and operating systems.
+    for path in sorted(_TEMPLATE_DIR.rglob("*")):
+        if not path.is_file() or path.name.endswith((".pyc", ".pyo")):
+            continue
+        if "__pycache__" in path.parts:
+            continue
+        yield path.relative_to(_HERE).as_posix(), path
     for name in _RENDER_SOURCES:
         yield name, _HERE / name
 
