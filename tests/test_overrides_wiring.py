@@ -167,7 +167,7 @@ class TestExpectedNReachesTheTrial:
     def test_parser_reads_the_env_var_the_adapter_writes(self):
         """Both halves must agree on the NAME. A rename on one side alone
         silently un-wires the invariant."""
-        parser_src = (_ROOT / "src" / "datasmith" / "harbor_adapter" / "template" / "parser.py").read_text()
+        parser_src = (_ROOT / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "parser.py").read_text()
         assert "FORMULACODE_EXPECTED_N" in parser_src
 
         adapter_src = (_ROOT / "src" / "datasmith" / "harbor_adapter" / "adapter.py").read_text()
@@ -177,7 +177,7 @@ class TestExpectedNReachesTheTrial:
         """Prove the whole chain: env var -> context -> invariant fires."""
         spec = importlib.util.spec_from_file_location(
             "fc_parser_wiring",
-            _ROOT / "src" / "datasmith" / "harbor_adapter" / "template" / "parser.py",
+            _ROOT / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "parser.py",
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -199,7 +199,7 @@ class TestExpectedNReachesTheTrial:
     def test_dilution_skips_when_the_env_var_is_absent(self, monkeypatch):
         spec = importlib.util.spec_from_file_location(
             "fc_parser_wiring2",
-            _ROOT / "src" / "datasmith" / "harbor_adapter" / "template" / "parser.py",
+            _ROOT / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "parser.py",
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

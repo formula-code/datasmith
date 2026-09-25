@@ -36,9 +36,9 @@ _RENDER_SOURCES = ("adapter.py", "utils.py", "records.py")
 
 
 def _iter_digest_files() -> Iterable[tuple[str, Path]]:
-    for path in sorted(_TEMPLATE_DIR.iterdir()):
-        if path.is_file() and not path.name.endswith((".pyc", ".pyo")):
-            yield f"template/{path.name}", path
+    for path in sorted(_TEMPLATE_DIR.rglob("*")):
+        if path.is_file() and path.suffix not in (".pyc", ".pyo") and "__pycache__" not in path.parts:
+            yield path.relative_to(_HERE).as_posix(), path
     for name in _RENDER_SOURCES:
         yield name, _HERE / name
 
