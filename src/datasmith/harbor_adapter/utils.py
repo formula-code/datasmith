@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from textwrap import dedent
 
@@ -104,6 +105,17 @@ def render_instruction_md(instructions: str) -> str:
     return render_literal(template_text, instructions=dedent(instructions).strip())
 
 
+_CREDENTIAL_NAME = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|SUPABASE", re.I)
+_ENV_REF = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*(:-)?\}")
+
+
+def check_verifier_env(verifier_env: dict[str, str] | None) -> None:
+    """Credentials reach tasks only as ${VAR} / ${VAR:-} (harbor resolves them per trial), never literal."""
+    for k, v in (verifier_env or {}).items():
+        if _CREDENTIAL_NAME.search(k) and not _ENV_REF.fullmatch(v):
+            raise ValueError(f"verifier env {k} must be a ${{VAR}} or ${{VAR:-}} reference, not a literal value")
+
+
 def render_task_toml(
     difficulty: str = "medium",
     category: str = "optimization",
@@ -116,6 +128,7 @@ def render_task_toml(
 ) -> str:
     """Generate task.toml configuration."""
     tags = tags or ["optimization", "formulacode", "asv", "benchmarking"]
+    check_verifier_env(verifier_env)
 
     verifier_env_section = ""
     if verifier_env:
