@@ -85,7 +85,13 @@ def record_from_config(cfg: dict) -> FormulaCodeRecord:
     missing = [k for k in ("owner", "repo", "issue_number", "base_commit", "container_name") if not cfg.get(k)]
     if missing:
         raise ValueError(f"record missing required fields {missing}")
-    return FormulaCodeRecord(**{k: cfg[k] for k in _RECORD_FIELDS if k in cfg})
+    fields = {k: cfg[k] for k in _RECORD_FIELDS if k in cfg}
+    # verified-rl rows keep datasmith's label in difficulty_datasmith; difficulty may be a curriculum bucket.
+    if cfg.get("difficulty_datasmith"):
+        fields["difficulty"] = cfg["difficulty_datasmith"]
+    elif cfg.get("difficulty_source"):
+        fields.pop("difficulty", None)
+    return FormulaCodeRecord(**fields)
 
 
 def _load_records(path: Path) -> list[FormulaCodeRecord]:
