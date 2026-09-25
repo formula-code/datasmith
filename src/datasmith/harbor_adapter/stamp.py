@@ -36,7 +36,6 @@ _RENDER_SOURCES = ("adapter.py", "utils.py", "records.py")
 
 
 def _iter_digest_files() -> Iterable[tuple[str, Path]]:
-    # Recursive: the template is nested (environment/, tests/, solution/).
     for path in sorted(_TEMPLATE_DIR.rglob("*")):
         if path.is_file() and path.suffix not in (".pyc", ".pyo") and "__pycache__" not in path.parts:
             yield path.relative_to(_HERE).as_posix(), path

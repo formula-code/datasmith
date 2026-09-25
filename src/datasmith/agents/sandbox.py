@@ -256,9 +256,7 @@ class SandboxRunner:
             if src.exists():
                 shutil.copy2(str(src), str(task_dir / fname))
 
-        # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
-        # trial path — copied, never forked, so a change to LSV selection
-        # affects stage 6 and stage 7 identically.
+        # Copied from the harbor trial template so stages 6 and 7 select LSV benchmarks identically.
         lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template" / "tests"
         for fname in ("lsv_init.py", "lsv_measure.py", "parser.py"):
             src = lsv_templates / fname
@@ -669,9 +667,7 @@ def verify_context(
             if src.exists():
                 shutil.copy2(str(src), str(task_dir / fname))
 
-        # lsv_init.py / lsv_measure.py / parser.py are shared with the harbor
-        # trial path — copied, never forked, so a change to LSV selection
-        # affects stage 6 and stage 7 identically.
+        # Copied from the harbor trial template so stages 6 and 7 select LSV benchmarks identically.
         lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template" / "tests"
         for fname in ("lsv_init.py", "lsv_measure.py", "parser.py"):
             src = lsv_templates / fname

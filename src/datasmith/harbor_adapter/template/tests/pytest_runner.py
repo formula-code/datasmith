@@ -212,22 +212,16 @@ def discover_test_files_from_changed(changed_files, repo_root):
 
 def package_tests_fallback(changed_files, repo_root, max_dirs=4):
     """Nearest tests/ | test/ | _tests dir above each changed source file, at most ``max_dirs``."""
-    dirs, seen = [], set()
+    dirs = []
     for path in changed_files:
         if not python_file(path) or is_test_file(path):
             continue
         d = os.path.dirname(os.path.join(repo_root, path.replace("\\", "/")))
         for _ in range(6):
-            found = None
-            for tname in ("tests", "test", "_tests"):
-                cand = os.path.join(d, tname)
-                if os.path.isdir(cand):
-                    found = cand
-                    break
+            found = next((c for c in (os.path.join(d, t) for t in ("tests", "test", "_tests")) if os.path.isdir(c)), None)
             if found:
                 rel = os.path.relpath(found, repo_root).replace("\\", "/")
-                if rel not in seen:
-                    seen.add(rel)
+                if rel not in dirs:
                     dirs.append(rel)
                 break
             parent = os.path.dirname(d)
