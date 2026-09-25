@@ -1,4 +1,4 @@
-"""run_base_and_diff in harbor_adapter/template/tests/pytest_runner.py: `ran` only when the base side produced results."""
+"""run_base_and_diff: `ran` only when the base side produced results."""
 
 import importlib.util
 import subprocess
