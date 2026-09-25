@@ -1,116 +1,35 @@
--- supabase/migrations/00033_oracle_rebuilds.sql
---
--- Oracle performance as rows: multi-pass re-measurement campaigns, their raw
--- per-pass measurements, the canonical per-benchmark aggregate, and a canonical
--- per-task summary attached to the task row that already exists.
---
--- WHY.  The FormulaCode RL reward divides every agent measurement by a per-task
--- oracle baseline.  That baseline has lived in a single committed file
--- (`initial_survey/oracle/gold_oracle_benchmarks.json`, 1.7 MB, 59 tasks) with
--- no history and no provenance.  Two captures four hours apart on the same box
--- disagreed on every task that was actually re-measured: across the 2484
--- benchmark pairs involved, 66% moved further than the whole 1.05 noise
--- deadband, the impacted set was ~26% reproducible (median Jaccard), and 11.7%
--- of doubly-impacted benchmarks flipped sign.  The reward is built on the sign
--- of those numbers, so the baseline has to carry its own uncertainty and its own
--- provenance, and it has to be queryable next to the task it belongs to.
---
--- Numbered 00033.  00030 is the highest on this branch, but 00031
--- (`00031_lsv_baseline_cache.sql`) and 00032 (`00032_lsv_deps_cache.sql`) are
--- both claimed on `lsv-cache` / `origin/lsv-cache`, so taking either here would
--- collide when that branch lands.  00024 remains absent everywhere, as 00025's
--- header records.
---
--- ── TASK IDENTITY ───────────────────────────────────────────────────────────
--- The task row of record on this database is `pull_requests`, PK
--- (owner, repo, issue_number) -- the tuple CLAUDE.md names as "the canonical
--- identifier for one PR / one task".  There is deliberately NO reference to a
--- `tasks` table: none exists on this database.  The `tasks` table the trial
--- containers PATCH lives in Harbor's separate Supabase project, reached through
--- HARBOR_SUPABASE_URL (see scripts/harbor_tasks_migration.sql, whose header
--- says "Target: Harbor's Supabase project ... NOT datasmith's local Supabase",
--- and runners/harbor_healthcheck.py::_build_verifier_env, which maps the
--- HARBOR_SUPABASE_* variables into the container as its SUPABASE_*).
---
--- NOTHING HERE EVER INSERTS A TASK.  The FKs to `pull_requests` are the point:
--- publishing a rebuild for a task that has no row MUST fail loudly rather than
--- quietly building a parallel task universe.  The publishing tool preflights
--- the task list with GETs and refuses to write if any key is missing; these FKs
--- are the backstop for the case where it does not.
---
--- ── PRIVATE, AND ENFORCED (00026_formulacode_task_overrides pattern) ────────
--- These four tables are private.  That is a deliberate choice, not an omission:
--- `harbor_runs` and `benchmark_information` -- the existing measurement tables
--- -- are anon-readable and served on api.formulacode.org, and oracle rebuild
--- measurements are not public data.
---
--- 00015 revoked the default broad `anon` SELECT, so not granting SELECT keeps
--- these unreadable -- but that is only half of it.  Postgres/Supabase default
--- privileges still hand `anon` INSERT/UPDATE/DELETE/TRUNCATE on a newly created
--- table, and with RLS disabled nothing blocks them.  So the grants are revoked
--- explicitly and RLS is enabled with no policy, which denies every anon row.
--- The service-role key used by the publishing tool bypasses RLS entirely.
-
--- ── 1. One row per rebuild campaign ──────────────────────────────────────────
+-- Oracle rebuild campaigns, their raw and aggregated measurements, and a per-task
+-- summary. Private; FKs to pull_requests so publishing for an unknown task fails.
 create table if not exists oracle_rebuilds (
   rebuild_id        uuid        primary key default gen_random_uuid(),
-
-  -- Human-facing handle and natural upsert key: 'rebuild-20260930'.  Matches
-  -- the tool's --out directory name and its storage prefix.
   label             text        not null unique,
   generated_at      timestamptz not null,
-
-  -- ── provenance: what measured this, on what, from which source ──────────
   host              text,
   nproc             int,
   kernel            text,
-  repo_sha          text,       -- formulacode-verified-rl commit
-  datasmith_sha     text,       -- this repo's commit (template + renderer)
-  lsv_commit        text,       -- LSV as reported from INSIDE a task container
-  render_digest     text,       -- harbor_adapter render digest (stamp check)
-
-  -- ── measurement protocol ────────────────────────────────────────────────
+  repo_sha          text,
+  datasmith_sha     text,
+  lsv_commit        text,
+  render_digest     text,
   k_passes          int         not null,
   arms              text[]      not null default array['oracle'],
   concurrency       int,
   gate_slots        int,
   lsv_rounds        int         not null,
   noise_floor       double precision not null default 1.05,
-
-  -- How task images were pinned.  'baked-pinned' = every task.toml carried a
-  -- docker_image whose id was recorded per task, the only state in which a
-  -- rebuild is reproducible; 'mixed' = some tasks re-measured their baseline
-  -- per trial; 'unpinned' = none were pinned.
   image_policy      text        check (image_policy in ('baked-pinned', 'mixed', 'unpinned')),
-
-  -- ── rollup, so "how did this campaign go" is one row ────────────────────
   n_tasks           int,
   n_trusted         int,
   n_marginal        int,
   n_untrusted       int,
-
-  -- Host load across the campaign (per-pass p50/p95, foreign load, co-tenants).
-  -- The contention record is part of the measurement, not a log artifact.
   load_stats        jsonb,
-
-  -- Full manifest verbatim, including per-task image ids.  The columns above
-  -- are the queryable subset, not a summary of something lost.
   manifest          jsonb,
-
-  -- Optional pointer to the raw per-pass tarball in Storage.  NULL is normal:
-  -- the trial directories live on /overflow and are only archived on request.
   raw_archive_uri   text,
-
-  -- At most one campaign is the live denominator.  Enforced below.
   is_canonical      boolean     not null default false,
-
   created_at        timestamptz not null default now()
 );
 
--- At most one canonical rebuild, ever.  Unique on a column that is only ever
--- `true` in the indexed subset means a second canonical row cannot be inserted
--- without first demoting the current one -- so there is never a moment when two
--- campaigns both claim to be the live denominator.
+-- Partial unique index on a true-only subset: at most one canonical rebuild.
 create unique index if not exists uq_oracle_rebuilds_canonical
   on oracle_rebuilds (is_canonical)
   where is_canonical;
@@ -126,46 +45,26 @@ comment on column oracle_rebuilds.image_policy is
 comment on column oracle_rebuilds.is_canonical is
   'The campaign the live reward divides by. At most one (uq_oracle_rebuilds_canonical); formulacode_task_overrides.oracle_rebuild_id points at it.';
 
--- ── 2. One row per task per pass per arm (the raw measurement) ───────────────
--- Deliberately NOT `harbor_runs`: that table is anon-readable and its FK is to
--- candidate_containers (owner, repo, sha), which our rendered RL tasks need not
--- have.  This is the same shape, private, and keyed to the task instead.
 create table if not exists oracle_rebuild_passes (
   pass_id           uuid        primary key default gen_random_uuid(),
   rebuild_id        uuid        not null
                       references oracle_rebuilds (rebuild_id) on delete cascade,
-
   owner             text        not null,
   repo              text        not null,
   issue_number      int         not null,
-
   pass_idx          int         not null,
-
-  -- 'oracle' applies the real solution patch and is the signal.  'placebo'
-  -- applies a behaviour-preserving edit to the same files, so its true speedup
-  -- is 1.0 everywhere; it measures the baked-baseline bias that repeated
-  -- oracle passes structurally cannot see (every pass divides by the same
-  -- baked baseline, so its error is invisible to repetition).
   arm               text        not null check (arm in ('oracle', 'placebo')),
-
   status            text,
   max_speedup       double precision,
   geomean_speedup   double precision,
   n_benchmarks      int,
   wallclock_sec     double precision,
-
-  -- Host load sampled around this pass's measurement window.  A pass is judged
-  -- contaminated against these, and a contaminated pass is excluded from the
-  -- aggregate but kept here as the evidence for that exclusion.
   load_before       jsonb,
   load_after        jsonb,
   contaminated      boolean     not null default false,
-
-  reward_payload    jsonb,      -- the pass's reward.json verbatim
+  reward_payload    jsonb,
   ran_at            timestamptz not null default now(),
-
   unique (rebuild_id, owner, repo, issue_number, pass_idx, arm),
-
   foreign key (owner, repo, issue_number)
     references pull_requests (owner, repo, issue_number)
 );
@@ -185,14 +84,12 @@ comment on column oracle_rebuild_passes.arm is
 comment on column oracle_rebuild_passes.contaminated is
   'Pass excluded from the aggregate (host load, timing outlier, dropped benchmarks). Kept, never deleted: it is the evidence for the exclusion.';
 
--- ── 3. Raw per-benchmark values, one row per benchmark per pass ─────────────
 create table if not exists oracle_rebuild_benchmarks (
   pass_id           uuid        not null
                       references oracle_rebuild_passes (pass_id) on delete cascade,
   benchmark_name    text        not null,
   log_speedup       double precision,
   raw               jsonb,
-
   primary key (pass_id, benchmark_name)
 );
 
@@ -201,7 +98,6 @@ comment on table oracle_rebuild_benchmarks is
 comment on column oracle_rebuild_benchmarks.log_speedup is
   'ln(baseline/current) for this benchmark in this pass. NULL when the benchmark produced no usable result.';
 
--- ── 4. The canonical per-benchmark aggregate, versioned by rebuild ──────────
 create table if not exists task_oracle_benchmarks (
   rebuild_id                   uuid    not null
                                  references oracle_rebuilds (rebuild_id) on delete cascade,
@@ -209,32 +105,17 @@ create table if not exists task_oracle_benchmarks (
   repo                         text    not null,
   issue_number                 int     not null,
   benchmark_name               text    not null,
-
-  -- MEDIAN over accepted passes, not mean.  Contention noise is one-sided --
-  -- interference only makes a benchmark slower -- so the mean of ratios is
-  -- biased, and the median at K=5 tolerates two contaminated passes.
   median_log_speedup           double precision not null,
   log_iqr                      double precision,
   log_mad                      double precision,
   passes_present               int     not null,
-  sign_consistency             double precision,  -- fraction of passes agreeing on the sign
-
-  -- Legacy rule, kept verbatim so the derived JSON export and the current
-  -- reward/dashboard agree: |median_log_speedup| > ln(noise_floor).
+  sign_consistency             double precision,
   impacted_beyond_noise_floor  boolean not null,
-
-  -- New rule: the effect must exceed this benchmark's OWN measured noise, be
-  -- present in most passes, and not flip sign between them.
   reliably_impacted            boolean not null,
-
-  -- Per-benchmark noise floor, max(ln(noise_floor), |bias| + 2 sigma) from the
-  -- placebo arm.  Replaces the single global constant with something measured.
   noise_theta                  double precision,
-  placebo_log_bias             double precision,  -- null when the placebo arm was unusable
+  placebo_log_bias             double precision,
   placebo_log_mad              double precision,
-
   primary key (rebuild_id, owner, repo, issue_number, benchmark_name),
-
   foreign key (owner, repo, issue_number)
     references pull_requests (owner, repo, issue_number)
 );
@@ -254,16 +135,6 @@ comment on column task_oracle_benchmarks.noise_theta is
 comment on column task_oracle_benchmarks.impacted_beyond_noise_floor is
   'Legacy global-floor rule, kept verbatim so the derived JSON export stays byte-compatible with the current reward and dashboard.';
 
--- ── 5. Canonical per-task summary on the EXISTING per-task row ──────────────
--- formulacode_task_overrides is already the private, per-task, operator-facing
--- row keyed by the canonical triple, and it already carries `oracle_h` ("the
--- human-authored speedup this task is scored against").  The canonical oracle
--- summary belongs next to it, not on the anon-readable `pull_requests`.
---
--- ADD COLUMN IF NOT EXISTS is idempotent and takes no table rewrite for a
--- nullable column with no default.  Every pre-existing row gets NULL, which
--- reads correctly as "no rebuild has claimed this task yet" rather than as a
--- speedup of zero.
 alter table formulacode_task_overrides
   add column if not exists oracle_rebuild_id          uuid,
   add column if not exists oracle_lsv_mean_speedup    double precision,
@@ -311,13 +182,7 @@ $$;
 create index if not exists idx_fto_oracle_trust
   on formulacode_task_overrides (oracle_trust);
 
--- ── Lock the four new tables down ───────────────────────────────────────────
--- Deliberately NO policy: RLS with zero policies denies every row to every
--- non-superuser role, and the service-role key used by the publishing tool
--- bypasses RLS entirely, so operator tooling is unaffected.  Per CLAUDE.md a
--- new table is private by default and stays that way.  formulacode_task_overrides
--- is already locked down by 00026 and only gains nullable columns here, so its
--- privileges are untouched.
+-- Default privileges grant anon writes on new tables; RLS with no policy denies all rows.
 revoke all on oracle_rebuilds           from anon;
 revoke all on oracle_rebuilds           from authenticated;
 revoke all on oracle_rebuild_passes     from anon;
