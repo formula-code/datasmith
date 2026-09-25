@@ -34,12 +34,7 @@ SNAPSHOT_TIMEOUT = os.environ.get("FORMULACODE_SNAPSHOT_TIMEOUT", "30")
 
 
 def _resolve_via_importlib(name: str) -> Path | None:
-    """Resolve a package name to a directory under REPO_ROOT via importlib.
-
-    Returns None if the package can't be resolved, has no file location, or
-    resolves to a location outside REPO_ROOT (e.g. site-packages for a
-    non-editable install -- which would be catastrophic for LSV tracking).
-    """
+    """Package dir for ``name`` if it resolves under REPO_ROOT (never site-packages), else None."""
     try:
         spec = importlib.util.find_spec(name)
     except (ImportError, ValueError):
@@ -63,10 +58,7 @@ def detect_source_root() -> Path:
 
     Matching strategy (first existing wins):
 
-    0. An explicit ``import_name`` in config.json, resolved through importlib
-       and accepted only if it lands under REPO_ROOT. An operator override for
-       the rare repo whose import name matches none of the heuristics below;
-       no record sets it today.
+    0. An explicit ``import_name`` in config.json (operator override), if it resolves under REPO_ROOT.
     1. If the patch touches exactly one non-skip top-level dir AND that dir
        exists, use it. Handles the common flat layout (``pandas/``,
        ``numpy/``).

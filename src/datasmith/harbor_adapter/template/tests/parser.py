@@ -213,16 +213,7 @@ def aggregate_by_hierarchy(per_benchmark: dict[str, float]) -> dict:
 
 
 def load_test_results(log_dir: Path) -> tuple[bool | None, float, dict]:
-    """Read test_results.json. Returns (tests_passed, success_ratio, raw).
-
-    Fail CLOSED and honest: a missing test_results.json means the tests never
-    produced a result, so ``tests_passed`` is ``None`` (unknown) -- never
-    ``True`` (the original behavior, which silently masked every failure mode
-    upstream of pytest) and not ``False`` either (which is indistinguishable
-    from a real failing suite). The reward shaping treats anything but ``True``
-    as broken, so the penalty is unchanged; reward.json just stops lying about
-    which of the two it was.
-    """
+    """Read test_results.json. Returns (tests_passed, success_ratio, raw); tests_passed is None if missing."""
     path = log_dir / "test_results.json"
     if not path.exists():
         print(f"[parser] WARNING: {path} not found; tests_passed=None (never ran)")
@@ -267,19 +258,7 @@ def summarize_pytest(raw: dict) -> dict:
 
 
 def summarize_snapshots(log_dir: Path) -> dict:
-    """Collect snapshot verify summaries into a single structured block.
-
-    ``passed`` is the ACTUAL verdict, three-valued:
-      - no summary_*.json at all -> verify did not run: ``passed=None``,
-        ``verify_ran=False``. Never report a pass when nothing ran (this used
-        to default to True, which made an inert gate look green).
-      - any summary reports ``passed is False`` -> ``False`` (regression).
-      - summaries present, none failed -> ``True``.
-
-    The host generator overlays its own host-side snapshot verdict for the live
-    gate; this keeps the container-side reward.json honest for offline use and
-    reporting, and never falsely positive.
-    """
+    """Collect snapshot verify summaries. ``passed``: None if verify never ran, False on any regression."""
     out: dict = {"summaries": {}, "passed": None, "verify_ran": False}
     regressions: list[str] = []
     for match_path in sorted(glob_mod.glob(str(log_dir / "summary_*.json"))):
@@ -635,8 +614,6 @@ def write_reward(
     reward_dir.mkdir(parents=True, exist_ok=True)
 
     max_speedup = max(speedups.values()) if speedups else None
-    # Three-valued, straight from summarize_snapshots: True / False / None
-    # (None = verify never ran). Never coerced to True.
     snapshots_passed = (snapshots or {}).get("passed")
     snapshot_verify_ran = bool((snapshots or {}).get("verify_ran", False))
 
@@ -703,11 +680,7 @@ def write_reward(
         speedup_value = g
     else:
         h = 1.0  # TODO: fetch oracle speedup from DB
-        # Penalty iff the tests did not demonstrably pass (False OR never ran)
-        # or the snapshot verify demonstrably regressed (False). A snapshot
-        # verify that never ran (None) is NOT a penalty: the host-side gate owns
-        # that decision ("snapshot absence is not fatal"), and this keeps
-        # reward.txt numerically identical to the pre-honesty behavior.
+        # A snapshot verify that never ran (None) is not penalized; the host-side gate decides that.
         if tests_passed is not True or snapshots_passed is False:
             speedup_value = -_PENALTY
         elif g <= 1.0:

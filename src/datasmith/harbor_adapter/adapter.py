@@ -34,29 +34,12 @@ class FormulaCodeRecord:
 
     @property
     def task_id(self) -> str:
-        """The harbor task id ``{owner}__{repo}__{issue_number}``.
-
-        Derived, never stored: the record's identity IS the triple, which keys
-        the FormulaCode DB (``tasks`` / ``runs`` rows are matched on
-        ``owner=eq.&repo=eq.&issue_number=eq.``). This string is what harbor
-        sees as the task -- the trial directory name, the snapshot storage
-        prefix, ``TASK_ID`` inside the container -- and ``utils.split_task_id``
-        recovers the triple from it. It is NOT the DB's ``tasks.task_id``
-        column, which is a deprecated alias equal to the bare issue number.
-        """
+        """Harbor task id; the DB is keyed by the (owner, repo, issue_number) triple, not this."""
         return make_task_id(self.owner, self.repo, self.issue_number)
 
     @property
     def task_dir_name(self) -> str:
-        """Filesystem name of the Harbor task / trial directory (= ``task_id``).
-
-        Harbor discovers tasks by scanning ``LocalDatasetConfig.path`` for
-        ``task.toml`` files (flat or one-level deep) and uses the parent
-        directory name as the trial name. We can't nest by ``owner/repo`` or
-        Harbor's task IDs become unique-per-issue but ambiguous-across-repos.
-        The triple-segment string keeps each trial dir globally unique while
-        staying within Harbor's flat-discovery contract.
-        """
+        """Flat, globally unique task dir name (Harbor discovers tasks one level deep)."""
         return self.task_id
 
 
@@ -78,10 +61,7 @@ class HarborTaskPaths:
         self.solution_dir.mkdir(parents=True, exist_ok=True)
 
 
-# Static helper scripts. They ship in template/tests/ and are copied into the
-# task's tests/ dir: harbor's trial runner uploads the whole tests/ dir to
-# /tests BEFORE running setup.sh (src/harbor/trial/trial.py::_run_setup_script),
-# so setup.sh and test.sh read /tests/*.py at runtime.
+# Harbor uploads tests/ to /tests before setup.sh runs, so the helpers are read from there.
 TEST_HELPERS: tuple[str, ...] = (
     "lsv_init.py",
     "lsv_measure.py",
@@ -105,23 +85,12 @@ class FormulaCodeAdapter:
                     rmtree(sub)
 
     def _copy_template_files(self, paths: HarborTaskPaths) -> None:
-        """Copy static template files to their destinations.
-
-        Sources live under the nested ``template/{environment,tests}/`` layout,
-        mirroring the generated task structure.
-
-        The docker build context is environment/, and the Dockerfile's baseline
-        bake runs lsv_init.py at BUILD time -- before any upload has happened --
-        so the build context gets its own copy of that one file (the Dockerfile
-        COPYs it to /opt/lsv, used only by the bake; runtime reads /tests).
-        """
-        copy2(
-            self.template_dir / "environment" / "entrypoint.sh",
-            paths.environment_dir / "entrypoint.sh",
-        )
+        tests = self.template_dir / "tests"
+        copy2(self.template_dir / "environment" / "entrypoint.sh", paths.environment_dir / "entrypoint.sh")
         for name in TEST_HELPERS:
-            copy2(self.template_dir / "tests" / name, paths.tests_dir / name)
-        copy2(self.template_dir / "tests" / "lsv_init.py", paths.environment_dir / "lsv_init.py")
+            copy2(tests / name, paths.tests_dir / name)
+        # The Dockerfile's baseline bake runs lsv_init.py at build time, before /tests exists.
+        copy2(tests / "lsv_init.py", paths.environment_dir / "lsv_init.py")
 
     def _write_instruction_md(self, rec: FormulaCodeRecord, paths: HarborTaskPaths) -> None:
         """Generate instruction.md file."""
@@ -154,7 +123,7 @@ class FormulaCodeAdapter:
     @staticmethod
     def _config_json(rec: FormulaCodeRecord) -> str:
         cfg = rec.__dict__.copy()
-        cfg["task_id"] = rec.task_id  # surface the derived harbor id
+        cfg["task_id"] = rec.task_id
         return json.dumps(cfg, indent=2)
 
     def _write_environment_files(
@@ -164,21 +133,10 @@ class FormulaCodeAdapter:
         cpus: int = 2,
         rounds: int = DATASMITH_LSV_ROUNDS,
     ) -> None:
-        """Generate environment files (Dockerfile, build-context config).
-
-        ``cpus`` is the trial cpu quota; it pins NUMBA_NUM_THREADS in the image
-        so numba's thread cap matches the cgroup quota. ``rounds`` is the
-        DATASMITH_LSV_ROUNDS build-arg default so the baked baseline is measured
-        with the same sample count the trial's measure pass uses.
-        """
+        """Generate environment files (Dockerfile, build-context config.json for the bake)."""
         base_img = rec.container_name or "python:3.11-slim"
         dockerfile_content = render_dockerfile(base_img, numba_threads=cpus, lsv_rounds=rounds)
         (paths.environment_dir / "Dockerfile").write_text(dockerfile_content)
-
-        # config.json in the build context: lsv_init.py reads /tests/config.json
-        # to find the source root, and at build time nothing is mounted, so the
-        # Dockerfile COPYs this one to /tests/config.json. Harbor later uploads
-        # the byte-identical tests/config.json over it.
         (paths.environment_dir / "config.json").write_text(self._config_json(rec))
 
     def _write_test_files(
@@ -202,8 +160,6 @@ class FormulaCodeAdapter:
         test_sh_path.write_text(test_sh_content)
         test_sh_path.chmod(0o755)
 
-        # tests/config.json -- Harbor uploads it to /tests/config.json at trial
-        # time (same bytes as environment/config.json, see above).
         (paths.tests_dir / "config.json").write_text(self._config_json(rec))
 
     def _write_solution_files(
@@ -246,10 +202,7 @@ class FormulaCodeAdapter:
     ) -> Path:
         """Generate a complete Harbor task directory for the given FormulaCodeRecord.
 
-        ``rounds`` is the LSV sample-round count used by BOTH the image's baked
-        baseline (Dockerfile build arg) and the trial's setup/measure passes;
-        ``None`` means ``DATASMITH_LSV_ROUNDS`` (env, default 5). It is
-        resolved here, once, so the two can never disagree.
+        ``rounds`` (default ``DATASMITH_LSV_ROUNDS``) drives both the baked baseline and the trial passes.
 
         ``expected_n`` is the operator-declared count of benchmarks this PR
         should impact, read from ``formulacode_task_overrides``. It is injected
@@ -264,8 +217,7 @@ class FormulaCodeAdapter:
         NULL), and the invariant then skips. Emitting a key that is always
         empty would make the wiring look live when it is not.
         """
-        if rounds is None:
-            rounds = DATASMITH_LSV_ROUNDS
+        rounds = DATASMITH_LSV_ROUNDS if rounds is None else rounds
         out_dir = self.out_root / rec.task_dir_name
         out_dir.mkdir(parents=True, exist_ok=True)
 
