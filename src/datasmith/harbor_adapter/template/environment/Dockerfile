@@ -49,8 +49,8 @@ COPY config.json /tests/config.json
 # numba otherwise uses the host core count; pin it to the trial cpu quota before the bake.
 ENV NUMBA_NUM_THREADS={{ numba_threads }}
 
-# Bake the base-commit LSV baseline once (HEAD == base_commit, unpatched). Non-fatal: without a
-# valid cache each trial re-measures. Rounds must equal the trial's --rounds.
+# Bake the base-commit LSV baseline once (HEAD == base_commit, unpatched), pinned to the trial's cpu count.
+# Non-fatal: trials re-measure unless sha and env fingerprint (cpu, rounds, lsv) match.
 ARG DATASMITH_LSV_ROUNDS={{ lsv_rounds }}
 RUN set +e; \
     set +u; \
@@ -58,7 +58,7 @@ RUN set +e; \
     . /etc/profile.d/asv_build_vars.sh 2>/dev/null || true; \
     export PATH="/root/.local/bin:${HOME}/.local/bin:${PATH}"; \
     eval "$(micromamba shell hook --shell=bash)" 2>/dev/null || true; \
-    LSV_OUTPUT_DIR=/opt/lsv/cache FORMULACODE_BAKE_BASELINE=1 \
+    LSV_OUTPUT_DIR=/opt/lsv/cache FORMULACODE_BAKE_BASELINE=1 FORMULACODE_BAKE_CPUS={{ numba_threads }} \
       micromamba run -n "$ENV_NAME" python /opt/lsv/lsv_init.py --rounds "${DATASMITH_LSV_ROUNDS}"; \
     true
 
