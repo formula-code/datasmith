@@ -308,7 +308,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
         if o in ("failed", "error") and base_oc.get(n) == "passed"
     )
     out = {
-        "ran": bool(stashed and selected_tests),
+        "ran": bool(stashed and selected_tests and base_oc),  # no base results: nothing to diff against
         "stashed": stashed,
         "n_selected_tests": len(selected_tests),
         "n_agent_tests": len(agent_oc),
