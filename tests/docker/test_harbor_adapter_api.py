@@ -18,9 +18,12 @@ def test_public_api_imports_without_harbor():
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-@pytest.mark.parametrize("value", ["${SUPABASE_ANON_KEY}", "${SUPABASE_URL:-}"])
-def test_credential_reference_renders(value):
-    assert value in render_task_toml(verifier_env={"SUPABASE_URL": value})
+@pytest.mark.parametrize(
+    "key,value",
+    [("SUPABASE_URL", "${SUPABASE_ANON_KEY}"), ("SUPABASE_URL", "${SUPABASE_URL:-}"), ("FORMULACODE_EXPECTED_N", "3")],
+)
+def test_reference_or_non_credential_renders(key, value):
+    assert f'{key} = "{value}"' in render_task_toml(verifier_env={key: value})
 
 
 @pytest.mark.parametrize(
@@ -34,7 +37,3 @@ def test_credential_reference_renders(value):
 def test_credential_literal_rejected(key, value):
     with pytest.raises(ValueError):
         render_task_toml(verifier_env={key: value})
-
-
-def test_non_credential_literal_allowed():
-    assert 'FORMULACODE_EXPECTED_N = "3"' in render_task_toml(verifier_env={"FORMULACODE_EXPECTED_N": "3"})
