@@ -24,7 +24,10 @@ _DEFAULT = FormulaCodeRecord.__dataclass_fields__["difficulty"].default
     "extra,expected",
     [
         ({"difficulty": "medium"}, "medium"),
-        ({"difficulty": "balanced", "difficulty_source": "curriculum_spec", "difficulty_datasmith": "medium"}, "medium"),
+        (
+            {"difficulty": "balanced", "difficulty_source": "curriculum_spec", "difficulty_datasmith": "medium"},
+            "medium",
+        ),
         ({"difficulty": "balanced", "difficulty_source": "curriculum_spec"}, _DEFAULT),
     ],
 )
