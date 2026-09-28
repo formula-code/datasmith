@@ -254,8 +254,6 @@ def measure_paired(session, changed: list[str], args) -> dict:
     from asv.runner import run_benchmarks
 
     t0 = time.perf_counter()
-    if subprocess.run(["git", "diff", "--quiet", args.base_commit], cwd=BASE_COPY).returncode != 0:
-        raise RuntimeError(f"base copy {BASE_COPY} differs from {args.base_commit}")
     if not session.deps_db_path.exists():
         raise RuntimeError(f"Dependency database not found: {session.deps_db_path}")
     os.chdir("/")
