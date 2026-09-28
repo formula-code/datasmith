@@ -72,8 +72,9 @@ echo "[$(ts)] [test] patch: files=${patch_files} +${patch_added}/-${patch_remove
 # The image holds the base-commit build; without this the patched sources are timed and tested as the old .so.
 # pytest_runner.py reruns FC_REBUILD_CMD around its base-side run.
 FC_REBUILD_CMD=""
-if { git diff {{ base_commit }} --name-only; git ls-files --others --exclude-standard; } 2>/dev/null \
-   | grep -qE '\.(pyx|pxd|pxi|c|cc|cpp|cxx|h|hh|hpp)$|(^|/)(setup\.py|setup\.cfg|pyproject\.toml|meson\.build|CMakeLists\.txt)$'; then
+# No pipe into grep -q: under pipefail the early exit of grep can fail the test (SIGPIPE on the writer).
+_changed="$({ git diff {{ base_commit }} --name-only; git ls-files --others --exclude-standard; } 2>/dev/null || true)"
+if grep -qE '\.(pyx|pxd|pxi|c|cc|cpp|cxx|h|hh|hpp)$|(^|/)(setup\.py|setup\.cfg|pyproject\.toml|meson\.build|CMakeLists\.txt)$' <<< "${_changed}"; then
   cat > /tmp/fc_rebuild.sh <<'SHEOF'
 set -eo pipefail
 cd /workspace/repo
