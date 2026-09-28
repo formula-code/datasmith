@@ -364,17 +364,31 @@ def _cfs_quota_cpus() -> int | None:
     return max(1, -(-int(quota) // int(period)))
 
 
+def _affinity_cpus() -> int:
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
 def _usable_cpus() -> int:
     """min(affinity CPUs, ceil(CFS quota)), so a taskset-bounded bake and a --cpus trial compare equal."""
-    try:
-        n = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        n = os.cpu_count() or 1
+    n = _affinity_cpus()
     try:
         quota = _cfs_quota_cpus()
     except ValueError:
         quota = None
     return min(n, quota) if quota else n
+
+
+def _cpu_limit() -> str:
+    """How the CPUs are bounded: pinned (affinity below the host count), quota (CFS), both, or none."""
+    try:
+        quota = _cfs_quota_cpus() is not None
+    except ValueError:
+        quota = False
+    kinds = [k for k, on in (("pinned", _affinity_cpus() < (os.cpu_count() or 0)), ("quota", quota)) if on]
+    return "+".join(kinds) or "none"
 
 
 def _lsv_commit() -> str | None:
@@ -400,6 +414,10 @@ def env_fingerprint(rounds: int) -> dict:
     return {
         "cpu_model": cpu_model,
         "usable_cpus": _usable_cpus(),
+        # Libraries size pools from these, and a pinned bake and a quota-limited trial time differently.
+        "os_cpu_count": os.cpu_count(),
+        "affinity_cpus": _affinity_cpus(),
+        "cpu_limit": _cpu_limit(),
         "numba_num_threads": os.environ.get("NUMBA_NUM_THREADS"),
         "lsv_rounds": rounds,
         "lsv_commit": _lsv_commit(),

@@ -11,6 +11,9 @@ _LSV_INIT = _TEMPLATE / "tests" / "lsv_init.py"
 FP = {
     "cpu_model": "AMD EPYC 7B13",
     "usable_cpus": 2,
+    "os_cpu_count": 64,
+    "affinity_cpus": 2,
+    "cpu_limit": "pinned",
     "numba_num_threads": "2",
     "lsv_rounds": 5,
     "lsv_commit": "fc16ba47239f68b93c335be22b1d2c37d259667c",
@@ -64,3 +67,13 @@ def test_dockerfile_bounds_bake_to_trial_cpus():
     df = render_dockerfile("img", numba_threads=3, lsv_rounds=5)
     assert "FORMULACODE_BAKE_CPUS=3" in df
     assert "NUMBA_NUM_THREADS=3" in df
+
+
+def test_pinned_bake_and_quota_trial_differ(m, monkeypatch):
+    monkeypatch.setattr(m.os, "cpu_count", lambda: 64)
+    monkeypatch.setattr(m, "_affinity_cpus", lambda: 2)
+    monkeypatch.setattr(m, "_cfs_quota_cpus", lambda: None)
+    assert m._cpu_limit() == "pinned"
+    monkeypatch.setattr(m, "_affinity_cpus", lambda: 64)
+    monkeypatch.setattr(m, "_cfs_quota_cpus", lambda: 2)
+    assert m._cpu_limit() == "quota"
