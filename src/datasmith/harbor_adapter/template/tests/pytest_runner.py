@@ -248,6 +248,10 @@ def _final_outcomes(results):
     return out
 
 
+class _BaseRebuildFailed(Exception):
+    pass
+
+
 def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
     """Stash the agent's edits, rerun the same tests at base, restore; flag base-pass -> agent-fail."""
     import sys as _sys
@@ -261,18 +265,25 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
     stashed = code == 0 and "No local changes" not in (out or "")
     base_oc = {}
     base_error = None
+    # test.sh sets this when the patch touches compiled sources; base must not import the patched .so.
+    rebuild = os.environ.get("FC_REBUILD_CMD")
     if stashed:
         try:
+            if rebuild:
+                rc, _, err = _run(["bash", "-c", rebuild], cwd=repo_root)
+                if rc != 0:
+                    raise _BaseRebuildFailed(err.strip()[-400:])
             # Fresh subprocess: in-process would reuse the agent's modules from sys.modules.
             self_path = os.path.abspath(__file__)
             tf = _tempfile.mktemp(suffix="_fcbase.json")
+            # Same sys.path[0] as `python /tests/pytest_runner.py`, so `-p` plugins next to the runner import.
             script = (
-                "import json, importlib.util; "
+                "import json, sys, importlib.util; sys.path[0] = %r; "
                 "spec = importlib.util.spec_from_file_location('fc_pytest_runner', %r); "
                 "P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P); "
                 "r = P.run_pytest_and_collect(%r, extra_args=%r, cwd=%r); "
                 "open(%r, 'w').write(json.dumps(r.get('tests', [])))"
-            ) % (self_path, list(selected_tests), extra_args, repo_root, tf)
+            ) % (os.path.dirname(self_path), self_path, list(selected_tests), extra_args, repo_root, tf)
             # Own pycache: a base file with the agent file's size and mtime would load the agent bytecode.
             _old_pyc = os.environ.get("PYTHONPYCACHEPREFIX")
             os.environ["PYTHONPYCACHEPREFIX"] = _tempfile.mkdtemp(prefix="fcbase_pyc_")
@@ -295,8 +306,12 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
                     os.remove(tf)
                 except OSError:
                     pass
+        except _BaseRebuildFailed as e:
+            base_error = "base rebuild failed: %s" % e
         finally:
             _run(["git", "stash", "pop"], cwd=repo_root)
+            if rebuild and _run(["bash", "-c", rebuild], cwd=repo_root)[0] != 0:
+                base_error = (base_error or "") + "; patched rebuild after stash pop failed"
     regressed = sorted(
         n for n, o in agent_oc.items()
         if o in ("failed", "error") and base_oc.get(n) == "passed"

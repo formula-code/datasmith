@@ -49,3 +49,25 @@ def test_no_base_results_is_not_ran(runner, repo: Path, monkeypatch) -> None:
     assert out["stashed"] is True
     assert "no results" in out["base_error"]
     assert "assert False" in (repo / "test_m.py").read_text()
+
+
+def test_base_side_imports_plugins_next_to_the_runner(runner, repo: Path, tmp_path_factory) -> None:
+    tests_dir = tmp_path_factory.mktemp("tests")
+    (tests_dir / "pytest_runner.py").write_text(_RUNNER.read_text())
+    (tests_dir / "fc_plugin.py").write_text("")
+    spec = importlib.util.spec_from_file_location("_fc_copied_runner", tests_dir / "pytest_runner.py")
+    copied = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(copied)
+    out = copied.run_base_and_diff(["test_m.py"], "-p fc_plugin", str(repo), AGENT)
+    assert out["ran"] is True, out.get("base_error")
+
+
+def test_rebuild_runs_at_base_and_again_after_restore(runner, repo: Path, monkeypatch) -> None:
+    log = repo.parent / "rebuilds.log"
+    monkeypatch.setenv("FC_REBUILD_CMD", f"grep -h assert test_m.py >> {log}")
+    out = runner.run_base_and_diff(["test_m.py"], "", str(repo), AGENT)
+    assert out["ran"] is True
+    assert log.read_text().split() == ["assert", "True", "assert", "False"]
+    monkeypatch.setenv("FC_REBUILD_CMD", "false")
+    out = runner.run_base_and_diff(["test_m.py"], "", str(repo), AGENT)
+    assert out["ran"] is False and "base rebuild failed" in out["base_error"]
