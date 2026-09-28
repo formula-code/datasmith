@@ -84,6 +84,17 @@ command -v snapshot-tool >/dev/null 2>&1 \
 SETUP_PHASE="extra_setup_commands"
 {{ extra_setup_commands }}
 
+SETUP_PHASE="base_copy"
+# lsv_measure.py times this unpatched copy (with its build) against the patched repo. Overlayfs cannot rename
+# image directories, so the repo is moved out and copied back to make both trees renamable.
+if [ "${FC_LSV_PAIRED:-1}" != "0" ]; then
+  cd /
+  rm -rf /workspace/.fc_base
+  mv /workspace/repo /workspace/.fc_base
+  cp -a /workspace/.fc_base /workspace/repo
+  cd /workspace/repo
+fi
+
 SETUP_PHASE="lsv_init"
 # ── LSV Phase 1: initialize_diffcheck ────────────────────────────────────
 echo "[$(ts)] [setup] Starting LSV init..."

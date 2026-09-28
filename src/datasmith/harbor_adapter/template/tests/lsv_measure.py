@@ -5,6 +5,9 @@ LightspeedSession from the same results_dir used during init (the
 .lightspeed_deps.db persists on disk), computes changed files via
 git diff against base_commit, and runs measure_impacted.
 
+When setup.sh left a base copy at /workspace/.fc_base, the base and patched trees are
+timed in the same container instead, alternating round by round (see measure_paired).
+
 Usage:
     python /tests/lsv_measure.py --base-commit <sha> [--rounds N]
 """
@@ -16,8 +19,11 @@ import dataclasses
 import json
 import math
 import os
+import statistics
 import subprocess
 import sys
+import time
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
@@ -29,6 +35,9 @@ def _ts() -> str:
 
 REPO_ROOT = Path("/workspace/repo")
 OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
+# setup.sh copies the unpatched repo (with its build) here; when it exists, base and patched are timed in pairs.
+BASE_COPY = Path("/workspace/.fc_base")
+PARKED = Path("/workspace/.fc_patched")
 
 
 def _strip_jsonc(text: str) -> str:
@@ -190,13 +199,110 @@ def _finite(obj):
     return obj
 
 
+@contextmanager
+def base_in_place():
+    """Put the base copy at REPO_ROOT by rename, so editable-install paths stay valid; always put the patched tree back."""
+    os.rename(REPO_ROOT, PARKED)
+    try:
+        os.rename(BASE_COPY, REPO_ROOT)
+        try:
+            yield
+        finally:
+            os.rename(REPO_ROOT, BASE_COPY)
+    finally:
+        os.rename(PARKED, REPO_ROOT)
+
+
+def run_paired(run, k: int) -> list[dict]:
+    """k rounds in A-B-B-A order; run() times the tree at REPO_ROOT and returns {bid: seconds}."""
+    rounds = []
+    for i in range(k):
+        r = {}
+        for side in ("base", "patched") if i % 2 == 0 else ("patched", "base"):
+            with base_in_place() if side == "base" else nullcontext():
+                r[side] = run()
+        rounds.append(r)
+    return rounds
+
+
+def paired_stats(rounds: list[dict], min_pairs: int) -> dict:
+    """Per benchmark: median over rounds of ln(t_base / t_patched), paired by round."""
+    out = {}
+    for bid in sorted({b for r in rounds for times in r.values() for b in times}):
+        base = [r["base"].get(bid) for r in rounds]
+        patched = [r["patched"].get(bid) for r in rounds]
+        logs = [math.log(b / p) for b, p in zip(base, patched) if (b or 0) > 0 and (p or 0) > 0]
+        if len(logs) < min_pairs:
+            continue
+        med = statistics.median(logs)
+        out[bid] = {
+            "base_times": base,
+            "patched_times": patched,
+            "log_ratios": logs,
+            "median_log_ratio": med,
+            "mad_log_ratio": statistics.median(abs(x - med) for x in logs),
+            "speedup": math.exp(med),
+        }
+    return out
+
+
+def measure_paired(session, changed: list[str], args) -> dict:
+    """Time LSV's diff-selected benchmarks on the base copy and the patched repo, alternating in one container."""
+    from asv.contrib.lightspeed.deps_db import LightspeedDB
+    from asv.contrib.lightspeed.fingerprint import changed_files_with_fingerprints
+    from asv.contrib.lightspeed.session import _all_bids, _extract_deltas, _fmt, _timing_params
+    from asv.runner import run_benchmarks
+
+    t0 = time.perf_counter()
+    if not session.deps_db_path.exists():
+        raise RuntimeError(f"Dependency database not found: {session.deps_db_path}")
+    os.chdir("/")
+    benchmarks = session._load_benchmarks()
+    db = LightspeedDB(str(session.deps_db_path))
+    changes = changed_files_with_fingerprints(changed, db.get_stored_fshas())
+    names = {bid.name for bid in db.get_affected_benchmark_ids(changes)}
+    selected = benchmarks.filter_out(set(benchmarks.keys()) - names)
+    env = session._get_env()
+    launch = getattr(session._conf, "launch_method", None) or "auto"
+    extra = _timing_params(1, args.repeat, args.warmup_time)
+    params: dict = {}
+
+    def run() -> dict:
+        deltas = _extract_deltas(run_benchmarks(selected, env, extra_params=extra, launch_method=launch), selected, {})
+        params.update({bid: d.params for bid, d in deltas.items()})
+        return {bid: d.current for bid, d in deltas.items() if d.current is not None}
+
+    rounds = run_paired(run, args.rounds) if names else []
+    stats = paired_stats(rounds, (args.rounds + 1) // 2)
+    bench = {}
+    for bid, s in stats.items():
+        base = statistics.median(t for t in s["base_times"] if t)
+        cur = statistics.median(t for t in s["patched_times"] if t)
+        bench[bid] = {"name": bid, "baseline": base, "current": cur, "delta_pct": (cur - base) / base * 100,
+                      "baseline_str": _fmt(base), "current_str": _fmt(cur), "params": params.get(bid), "paired": s}
+        print(f"    {bid}: {_fmt(base)} -> {_fmt(cur)} (paired speedup {s['speedup']:.3f}, mad ln {s['mad_log_ratio']:.3f})")
+    n_selected = len(selected) if names else 0
+    dropped = [b for b in map(str, _all_bids(selected)) if b not in stats] if names else []
+    return {
+        "benchmarks": bench,
+        "selected_count": n_selected,
+        "total_count": len(benchmarks),
+        "skipped_count": len(benchmarks) - n_selected,
+        "dropped_count": len(dropped),
+        "dropped": dropped[:200],
+        "timing": {"total_s": time.perf_counter() - t0, "phases": None},
+        "error": f"LSV selected {n_selected} benchmarks but measured 0 in paired rounds." if names and not bench else None,
+        "paired": {"rounds": args.rounds, "min_pairs": (args.rounds + 1) // 2, "order": [side for r in rounds for side in r]},
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LSV Phase 2: measure_impacted")
     parser.add_argument(
         "--base-commit", required=True, help="Base commit SHA to diff against"
     )
     parser.add_argument(
-        "--rounds", type=int, default=1, help="Number of timing rounds (default: 1)"
+        "--rounds", type=int, default=1, help="Timing rounds; in paired mode, base/patched pairs (default: 1)"
     )
     # See lsv_init.py: --rounds is monotone and safe, --repeat is neither.
     parser.add_argument(
@@ -256,6 +362,18 @@ def main() -> None:
         },
         machine="dockertest",
     )
+
+    if BASE_COPY.is_dir():
+        print(f"[{_ts()}] [phase] LSV paired measure: {BASE_COPY} vs {REPO_ROOT}, {args.rounds} rounds")
+        try:
+            measure_data = measure_paired(session, changed, args)
+        except Exception as e:  # noqa: BLE001 -- a crashed measure still writes results with the error
+            print(f"[{_ts()}] [lsv_measure] ERROR: paired measure raised: {e}")
+            measure_data = {"benchmarks": {}, "selected_count": 0, "total_count": 0, "skipped_count": 0,
+                            "timing": {"total_s": 0.0}, "error": f"LSV paired measure raised: {e}"}
+        (OUTPUT_DIR / "lsv_measure_results.json").write_text(json.dumps(_finite(measure_data), indent=2))
+        _write_combined_results(_finite(measure_data))
+        return
 
     # Run measure_impacted
     print("=" * 64)
