@@ -19,9 +19,11 @@ import dataclasses
 import json
 import math
 import os
+import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
@@ -213,13 +215,31 @@ def base_in_place():
         os.rename(PARKED, REPO_ROOT)
 
 
+TEMP_ROOTS = (Path("/tmp"),)
+
+
+@contextmanager
+def drop_new_temp_entries():
+    """Remove what the block left in the temp dirs: benchmarks leave tempfile dirs behind (TileDB: ~0.4 GB each)."""
+    dirs = {Path(tempfile.gettempdir()), *TEMP_ROOTS}
+    before = {p for d in dirs for p in d.iterdir()}
+    try:
+        yield
+    finally:
+        for p in {p for d in dirs for p in d.iterdir()} - before:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+
+
 def run_paired(run, k: int) -> list[dict]:
     """k rounds in A-B-B-A order; run() times the tree at REPO_ROOT and returns {bid: seconds}."""
     rounds = []
     for i in range(k):
         r = {}
         for side in ("base", "patched") if i % 2 == 0 else ("patched", "base"):
-            with base_in_place() if side == "base" else nullcontext():
+            with base_in_place() if side == "base" else nullcontext(), drop_new_temp_entries():
                 r[side] = run()
         rounds.append(r)
     return rounds

@@ -56,6 +56,8 @@ echo "[$(ts)] [setup] Get all file directory..."
 ls -R .
 
 SETUP_PHASE="source_asv_env"
+# The pipeline may point TMPDIR at a folder on the host; tempfile falls back to /tmp while it is missing.
+[ -n "${TMPDIR:-}" ] && mkdir -p "$TMPDIR"
 # Verifier deps are baked into the image (environment/Dockerfile); only activate the env here.
 echo "[$(ts)] [setup] Activating ASV environment..."
 set +u

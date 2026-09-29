@@ -15,8 +15,11 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
@@ -451,6 +454,24 @@ def _bound_bake_cpus() -> bool:
         return False
 
 
+TEMP_ROOTS = (Path("/tmp"),)
+
+
+@contextmanager
+def drop_new_temp_entries():
+    """Remove what the block left in the temp dirs: benchmarks leave tempfile dirs behind (TileDB: ~0.4 GB each)."""
+    dirs = {Path(tempfile.gettempdir()), *TEMP_ROOTS}
+    before = {p for d in dirs for p in d.iterdir()}
+    try:
+        yield
+    finally:
+        for p in {p for d in dirs for p in d.iterdir()} - before:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LSV Phase 1: initialize_diffcheck")
     parser.add_argument(
@@ -637,4 +658,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    with drop_new_temp_entries():
+        main()
