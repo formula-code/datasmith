@@ -187,7 +187,7 @@ def test_measure_sh_end_to_end_against_lsv_stubs(tmp_path, image_tag):
     for name in ("measure.sh", "apply_oracle_patch.py", "emit_measure.py"):
         with open(f"{templates}/{name}") as fh:
             (tmp_path / name).write_text(fh.read())
-    with open("src/datasmith/harbor_adapter/template/parser.py") as fh:
+    with open("src/datasmith/harbor_adapter/template/tests/parser.py") as fh:
         (tmp_path / "parser.py").write_text(fh.read())
 
     # Stub lsv_init: no-op. Stub lsv_measure: write a canned result whose

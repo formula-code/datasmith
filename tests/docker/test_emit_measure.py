@@ -6,7 +6,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).parents[2]
 _EMITTER = _ROOT / "src" / "datasmith" / "docker" / "templates" / "emit_measure.py"
-_PARSER = _ROOT / "src" / "datasmith" / "harbor_adapter" / "template" / "parser.py"
+_PARSER = _ROOT / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "parser.py"
 
 
 def _load():

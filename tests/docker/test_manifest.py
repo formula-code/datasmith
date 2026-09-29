@@ -763,7 +763,7 @@ class TestMeasurabilityProducerCoverage:
 
         root = Path(__file__).parents[2]
         emitter = root / "src" / "datasmith" / "docker" / "templates" / "emit_measure.py"
-        parser = root / "src" / "datasmith" / "harbor_adapter" / "template" / "parser.py"
+        parser = root / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "parser.py"
         spec = importlib.util.spec_from_file_location("emit_measure", emitter)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
