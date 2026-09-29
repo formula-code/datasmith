@@ -42,13 +42,16 @@ def load_lsv_results(lsv_dir: Path) -> dict:
 
 
 def compute_per_benchmark_speedups(benchmarks: dict) -> dict[str, float]:
-    """Compute speedup = baseline / current for each benchmark.
+    """Compute speedup = baseline / current for each benchmark, or the paired speedup when lsv_measure has one.
 
     Values >1 mean the agent made it faster.
     Filters out benchmarks with None/zero baseline or current.
     """
     speedups = {}
     for name, data in benchmarks.items():
+        if (data.get("paired") or {}).get("speedup"):
+            speedups[name] = data["paired"]["speedup"]
+            continue
         baseline = data.get("baseline")
         current = data.get("current")
         if baseline is None or current is None:
