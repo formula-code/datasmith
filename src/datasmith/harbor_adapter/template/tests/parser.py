@@ -5,6 +5,9 @@ speedups (baseline/current from LSV), fetches oracle benchmark timings from
 Supabase to compute advantage ((oracle_time - agent_time) / agent_time),
 and writes reward.json + reward.txt.
 
+reward.txt is OUTDATED: RL training ignores it and computes the reward from reward.json
+with skyrl-formulacode's examples/train_integrations/harbor/formulacode/reward.py.
+
 Usage:
     python /tests/parser.py --owner OWNER --repo REPO --issue-number N [--agent-key KEY]
 """
@@ -668,7 +671,7 @@ def write_reward(
 
     (reward_dir / "reward.json").write_text(json.dumps(reward_data, indent=2))
 
-    # reward.txt — shaped reward for RL training.
+    # OUTDATED: training ignores reward.txt; the real reward is formulacode/reward.py in skyrl-formulacode.
     # Formula: g = raw geomean speedup (level4), h = oracle speedup (default 1.0).
     #   Oracle runs:             raw g (not graded)
     #   Broke tests/snapshots:  -PENALTY
