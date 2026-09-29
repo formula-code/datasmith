@@ -375,7 +375,7 @@ def _affinity_cpus() -> int:
 
 
 def _usable_cpus() -> int:
-    """min(affinity CPUs, ceil(CFS quota)), so a taskset-bounded bake and a --cpus trial compare equal."""
+    """min(affinity CPUs, ceil(CFS quota)): the CPUs the benchmarks can use at once."""
     n = _affinity_cpus()
     try:
         quota = _cfs_quota_cpus()
@@ -417,7 +417,7 @@ def env_fingerprint(rounds: int) -> dict:
     return {
         "cpu_model": cpu_model,
         "usable_cpus": _usable_cpus(),
-        # Libraries size pools from these, and a pinned bake and a quota-limited trial time differently.
+        # Libraries size pools from these, so a pinned bake and a quota-limited trial time differently (unpaired only).
         "os_cpu_count": os.cpu_count(),
         "affinity_cpus": _affinity_cpus(),
         "cpu_limit": _cpu_limit(),
@@ -427,7 +427,15 @@ def env_fingerprint(rounds: int) -> dict:
     }
 
 
-def baked_reuse_reason(baked_meta: dict | None, head: str | None, current_fp: dict) -> str | None:
+# Paired timing measures both sides in the trial and reads only the deps DB, which depends on neither CPUs nor rounds.
+PAIRED_KEYS = ("lsv_commit",)
+
+
+def paired_mode() -> bool:
+    return Path("/workspace/.fc_base").is_dir() and os.environ.get("FC_LSV_PAIRED", "1") != "0"
+
+
+def baked_reuse_reason(baked_meta: dict | None, head: str | None, current_fp: dict, paired: bool = False) -> str | None:
     """None if the baked baseline may be reused, else why not. Anything missing re-measures."""
     if not isinstance(baked_meta, dict):
         return "no readable baked lsv_init_results.json"
@@ -437,7 +445,8 @@ def baked_reuse_reason(baked_meta: dict | None, head: str | None, current_fp: di
     baked_fp = baked_meta.get("env_fingerprint")
     if not isinstance(baked_fp, dict):
         return "baked baseline has no env_fingerprint"
-    diffs = [f"{k}: baked {baked_fp.get(k)!r} != trial {v!r}" for k, v in current_fp.items() if baked_fp.get(k) != v]
+    keys = PAIRED_KEYS if paired else tuple(current_fp)
+    diffs = [f"{k}: baked {baked_fp.get(k)!r} != trial {current_fp.get(k)!r}" for k in keys if baked_fp.get(k) != current_fp.get(k)]
     return "fingerprint mismatch (" + "; ".join(diffs) + ")" if diffs else None
 
 
@@ -536,6 +545,7 @@ def main() -> None:
     _baked_meta = Path("/opt/lsv/cache/lsv_init_results.json")
     _results_dir = OUTPUT_DIR / "results"
     _fingerprint = env_fingerprint(args.rounds)
+    _paired = paired_mode()
     _force = True
     _reuse_reason = "bake" if _bake_mode else "no baked deps db"
     if not _bake_mode and _baked_db.exists():
@@ -549,7 +559,7 @@ def main() -> None:
             _baked = json.loads(_baked_meta.read_text())
         except (OSError, ValueError):
             _baked = None
-        _reuse_reason = baked_reuse_reason(_baked, _head, _fingerprint)
+        _reuse_reason = baked_reuse_reason(_baked, _head, _fingerprint, _paired)
         if _reuse_reason is None:
             from shutil import copy2
 
@@ -572,7 +582,7 @@ def main() -> None:
         # baseline are exactly the unmeasurable ones -> no speedup contribution ->
         # reward unchanged. The baked lsv_init_results.json carries baseline_sha for
         # invariant #15.
-        _baked["baseline_reuse"] = {"reused": True, "reason": None, "trial_fingerprint": _fingerprint}
+        _baked["baseline_reuse"] = {"reused": True, "reason": None, "paired": _paired, "trial_fingerprint": _fingerprint}
         (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(_baked, indent=2))
         print(
             f"[{_ts()}] [lsv_init] reused baked baseline (skipped initialize_diffcheck); "
@@ -630,7 +640,7 @@ def main() -> None:
         if _bake_mode:
             init_data["bake_cpus_bounded"] = _bake_bounded
         else:
-            init_data["baseline_reuse"] = {"reused": False, "reason": _reuse_reason}
+            init_data["baseline_reuse"] = {"reused": False, "reason": _reuse_reason, "paired": _paired}
         (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(init_data, indent=2))
 
     # Snapshot capture (oracle only — production runs download pre-built snapshots)

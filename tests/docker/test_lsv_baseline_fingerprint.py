@@ -1,4 +1,4 @@
-"""Baked LSV baseline reuse: only at the same sha and the same timing fingerprint."""
+"""Baked LSV baseline reuse: same sha, and the same timing fingerprint unless timing is paired."""
 
 import importlib.util
 from pathlib import Path
@@ -77,3 +77,16 @@ def test_pinned_bake_and_quota_trial_differ(m, monkeypatch):
     monkeypatch.setattr(m, "_affinity_cpus", lambda: 64)
     monkeypatch.setattr(m, "_cfs_quota_cpus", lambda: 2)
     assert m._cpu_limit() == "quota"
+
+
+def test_paired_reuse_ignores_cpu_and_rounds(m):
+    trial = dict(FP, os_cpu_count=128, affinity_cpus=128, cpu_limit="quota", lsv_rounds=3)
+    assert m.baked_reuse_reason(_baked(), "abc", trial) is not None
+    assert m.baked_reuse_reason(_baked(), "abc", trial, paired=True) is None
+    old_bake = {k: v for k, v in FP.items() if k not in ("os_cpu_count", "affinity_cpus", "cpu_limit")}
+    assert m.baked_reuse_reason(_baked(env_fingerprint=old_bake), "abc", trial, paired=True) is None
+
+
+@pytest.mark.parametrize("baked,head,trial", [(_baked(), "def", dict(FP)), (_baked(), "abc", dict(FP, lsv_commit="other"))])
+def test_paired_reuse_still_needs_sha_and_lsv(m, baked, head, trial):
+    assert m.baked_reuse_reason(baked, head, trial, paired=True)
