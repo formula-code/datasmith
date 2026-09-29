@@ -85,6 +85,9 @@ if ! python -c "import pkg_resources" 2>/dev/null; then
 fi
 # TileDB-Py links the env's libtiledb (as in the image build) instead of downloading and compiling one.
 if [ -e "${CONDA_PREFIX:-/nonexistent}/lib/libtiledb.so" ]; then export TILEDB_PATH="${TILEDB_PATH:-${CONDA_PREFIX}}"; fi
+# Old setup.py files add numpy's headers only in a build step that editable installs skip (TileDB-Py#1005).
+NP_INC="$(python -c 'import numpy; print(numpy.get_include())' 2>/dev/null || true)"
+if [ -n "${NP_INC}" ]; then export CPPFLAGS="-I${NP_INC}${CPPFLAGS:+ ${CPPFLAGS}}"; fi
 # Same install as docker_build_pkg.sh.
 PIP_NO_BUILD_ISOLATION=1 python -m pip install --no-build-isolation --no-deps -v -e .
 SHEOF
