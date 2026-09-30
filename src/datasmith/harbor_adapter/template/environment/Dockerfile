@@ -19,7 +19,7 @@ RUN set -eux; \
 
 # Bake pinned verifier deps into the ASV env. coverage is split by python version: 7.16.1 needs >= 3.10.
 # PATH export: uv's installer only edits rc files, which RUN never sources.
-ARG LSV_REF=fc16ba47239f68b93c335be22b1d2c37d259667c
+ARG LSV_REF=024e0aef286a717d1c2577a18df408ae7f153b6e
 ARG SNAPSHOT_TESTER_REF=f08bb0cd51a03c891e65060e25e69f8700055ba2
 RUN set -eux; \
     set +u; \
