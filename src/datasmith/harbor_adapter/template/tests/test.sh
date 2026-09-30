@@ -88,6 +88,8 @@ if [ -e "${CONDA_PREFIX:-/nonexistent}/lib/libtiledb.so" ]; then export TILEDB_P
 # Old setup.py files add numpy's headers only in a build step that editable installs skip (TileDB-Py#1005).
 NP_INC="$(python -c 'import numpy; print(numpy.get_include())' 2>/dev/null || true)"
 if [ -n "${NP_INC}" ]; then export CPPFLAGS="-I${NP_INC}${CPPFLAGS:+ ${CPPFLAGS}}"; fi
+# GCC 14 made these errors; code that built with older compilers (shapely#1562's ufuncs.c) must still build.
+export CFLAGS="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration${CFLAGS:+ ${CFLAGS}}"
 # Same install as docker_build_pkg.sh.
 PIP_NO_BUILD_ISOLATION=1 python -m pip install --no-build-isolation --no-deps -v -e .
 SHEOF
