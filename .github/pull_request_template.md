@@ -34,5 +34,3 @@ path/
 ## Notes
 
 <!-- Merge order, dependencies on other PRs, what is not done, decisions for the reviewer. -->
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)

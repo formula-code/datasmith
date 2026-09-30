@@ -25,11 +25,7 @@ Delete a section if it adds nothing.
 
 Write math as GitHub math: `$…$` inline and `$$…$$` for display.
 
-The last line is the footer, exactly:
-
-```text
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-```
+Do not add a footer or any AI attribution.
 
 ## Code in the PR
 
@@ -54,6 +50,4 @@ The reward counts a timeout as a failure. A slow task then gets a negative rewar
 ## Verification
 
 `pytest tests/test_reward.py`: 14 passed.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ````
