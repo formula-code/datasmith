@@ -168,7 +168,9 @@ snapshot_end=$(date +%s)
 pytest_start=$(date +%s)
 {%- if run_pytest %}
 echo "[$(ts)] [test] Running pytest..."
-if python /tests/pytest_runner.py --base {{ base_commit }} --extra-args "-p jinja_patch_plugin_pandas"; then _py_rc=0; else _py_rc=$?; fi
+# A hung test (e.g. a stuck plot-export browser) would hold its gate slot until the verifier limit; timeout ends its process group.
+if timeout --kill-after=60 "${FC_PYTEST_TIMEOUT:-1800}" python /tests/pytest_runner.py --base {{ base_commit }} --extra-args "-p jinja_patch_plugin_pandas"; then _py_rc=0; else _py_rc=$?; fi
+[ "${_py_rc}" = 124 ] && echo "[$(ts)] [test] pytest timed out after ${FC_PYTEST_TIMEOUT:-1800}s" >&2
 {% else %}
 mkdir -p "$LOG_DIR"
 echo '{"results": {"exit_code": 0, "summary": {"error": 0, "failed": 0}, "details": "Tests skipped as per configuration."}}' > "$LOG_DIR/test_results.json"
