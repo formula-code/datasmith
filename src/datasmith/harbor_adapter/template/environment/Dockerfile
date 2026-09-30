@@ -19,7 +19,7 @@ RUN set -eux; \
 
 # Install pinned verifier deps into the ASV env at image build. coverage is split by python version: 7.16.1 needs >= 3.10.
 # PATH export: uv's installer only edits rc files, which RUN never sources.
-ARG LSV_REF=024e0aef286a717d1c2577a18df408ae7f153b6e
+ARG LSV_REF=3da027e4c645822711ce082fd94799361c71d432
 ARG SNAPSHOT_TESTER_REF=f08bb0cd51a03c891e65060e25e69f8700055ba2
 RUN set -eux; \
     set +u; \
