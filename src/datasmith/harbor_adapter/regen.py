@@ -200,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         "--rounds",
         type=int,
         default=DATASMITH_LSV_ROUNDS,
-        help=f"LSV rounds (default $DATASMITH_LSV_ROUNDS or {DATASMITH_LSV_ROUNDS}); must equal the image's baked baseline rounds",
+        help=f"LSV rounds (default $DATASMITH_LSV_ROUNDS or {DATASMITH_LSV_ROUNDS}); must equal the image baseline rounds",
     )
     rn.add_argument("--cpus", type=int, default=2, help="trial cpu quota; also pins NUMBA_NUM_THREADS (default 2)")
     rn.add_argument("--memory", default="16G")
