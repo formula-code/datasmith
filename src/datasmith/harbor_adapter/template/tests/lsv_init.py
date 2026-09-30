@@ -462,6 +462,20 @@ def move_untracked_asv_runner(repo: Path, dest: Path) -> bool:
     return True
 
 
+def make_benchmark_package(repo: Path, benchmark_dir: Path) -> bool:
+    """LSV discovers benchmarks only in a package; add an empty __init__.py (django-components has none) and keep it
+    out of git's untracked files, so a trial's patch does not list it."""
+    init = benchmark_dir / "__init__.py"
+    if init.exists() or not benchmark_dir.is_dir():
+        return False
+    init.write_text("")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a") as f:
+        f.write(f"\n/{init.relative_to(repo)}\n")
+    return True
+
+
 def paired_mode() -> bool:
     return Path("/workspace/.fc_base").is_dir() and os.environ.get("FC_LSV_PAIRED", "1") != "0"
 
@@ -571,6 +585,8 @@ def main() -> None:
     )
 
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
+    if _build_mode and make_benchmark_package(REPO_ROOT, Path(session.benchmark_dir)):
+        print(f"[{_ts()}] [lsv_init] added an empty __init__.py to the benchmark folder (git excludes it)")
 
     # Base-commit baseline is measured at image build (FORMULACODE_IMAGE_BASELINE=1) to skip a 100-490s re-time
     # per trial; reuse it only at the same sha AND the same timing conditions, else re-measure (force=True).
