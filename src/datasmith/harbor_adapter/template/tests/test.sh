@@ -91,7 +91,11 @@ if [ -n "${NP_INC}" ]; then export CPPFLAGS="-I${NP_INC}${CPPFLAGS:+ ${CPPFLAGS}
 # GCC 14 made these errors; code that built with older compilers (shapely#1562's ufuncs.c) must still build.
 export CFLAGS="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration${CFLAGS:+ ${CFLAGS}}"
 # Same install as docker_build_pkg.sh.
-PIP_NO_BUILD_ISOLATION=1 python -m pip install --no-build-isolation --no-deps -v -e .
+# The image build falls back to an isolated build when this fails (old numpy needs its own setuptools); do the same.
+if ! PIP_NO_BUILD_ISOLATION=1 python -m pip install --no-build-isolation --no-deps -v -e .; then
+  echo "no-isolation rebuild failed; retrying with an isolated build" >&2
+  python -m pip install --no-deps -v -e .
+fi
 SHEOF
   FC_REBUILD_CMD="bash /tmp/fc_rebuild.sh"
   echo "[$(ts)] [test] Patch touches compiled sources; rebuilding (log: ${LOG_DIR}/rebuild.log)..."
