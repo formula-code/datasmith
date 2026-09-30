@@ -58,7 +58,7 @@ ls -R .
 SETUP_PHASE="source_asv_env"
 # The pipeline may point TMPDIR at a folder on the host; tempfile falls back to /tmp while it is missing.
 [ -n "${TMPDIR:-}" ] && mkdir -p "$TMPDIR"
-# Verifier deps are baked into the image (environment/Dockerfile); only activate the env here.
+# Verifier deps are installed at image build (environment/Dockerfile); only activate the env here.
 echo "[$(ts)] [setup] Activating ASV environment..."
 set +u
 source /etc/profile.d/asv_utils.sh || true
@@ -73,10 +73,10 @@ fi
 eval "$(micromamba shell hook --shell=bash)"
 micromamba activate "$ENV_NAME"
 
-SETUP_PHASE="probe_baked_deps"
+SETUP_PHASE="probe_image_deps"
 # Fail fast on a stale image. LSV installs as asv.contrib.lightspeed (there is no top-level `lsv`).
 micromamba run -n "$ENV_NAME" python -c "import asv_runner, coverage, jinja2" \
-  || { echo "[$(ts)] [setup] FATAL: baked verifier deps missing in '$ENV_NAME' — rebuild the task image." >&2; exit 1; }
+  || { echo "[$(ts)] [setup] FATAL: image verifier deps missing in '$ENV_NAME' — rebuild the task image." >&2; exit 1; }
 micromamba run -n "$ENV_NAME" python -c "import asv.contrib.lightspeed" \
   || { echo "[$(ts)] [setup] FATAL: LSV (asv.contrib.lightspeed) missing in '$ENV_NAME' — rebuild the task image." >&2; exit 1; }
 command -v snapshot-tool >/dev/null 2>&1 \
