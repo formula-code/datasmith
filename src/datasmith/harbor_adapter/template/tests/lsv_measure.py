@@ -39,6 +39,7 @@ REPO_ROOT = Path("/workspace/repo")
 # iris benchmarks generate their data with DATA_GEN_PYTHON and write it to BENCHMARK_DATA (else inside the repo).
 os.environ.setdefault("DATA_GEN_PYTHON", sys.executable)
 os.environ.setdefault("BENCHMARK_DATA", os.path.join(tempfile.gettempdir(), "fc_benchmark_data"))
+os.makedirs(os.environ["BENCHMARK_DATA"], exist_ok=True)
 OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
 # setup.sh copies the unpatched repo (with its build) here; when it exists, base and patched are timed in pairs.
 BASE_COPY = Path("/workspace/.fc_base")

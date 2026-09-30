@@ -33,6 +33,7 @@ REPO_ROOT = Path("/workspace/repo")
 # iris benchmarks generate their data with DATA_GEN_PYTHON and write it to BENCHMARK_DATA (else inside the repo).
 os.environ.setdefault("DATA_GEN_PYTHON", sys.executable)
 os.environ.setdefault("BENCHMARK_DATA", os.path.join(tempfile.gettempdir(), "fc_benchmark_data"))
+os.makedirs(os.environ["BENCHMARK_DATA"], exist_ok=True)
 OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
 SNAPSHOT_DIR = Path(os.environ.get("SNAPSHOT_DIR", "/logs/artifacts/.snapshots"))
 SNAPSHOT_FILTER = os.environ.get("FORMULACODE_SNAPSHOT_FILTER", r".*")
@@ -448,6 +449,19 @@ def skip_suite_timing(lsv_session_module) -> None:
     lsv_session_module._store_baseline = lambda *a, **k: None
 
 
+def move_untracked_asv_runner(repo: Path, dest: Path) -> bool:
+    """An untracked asv_runner/ in the repo (a compatibility copy from the upstream image build) hides the installed
+    asv_runner, which LSV needs (asv_runner.util). Move it out of the repo; a tracked one stays."""
+    shim = repo / "asv_runner"
+    if not (shim / "__init__.py").is_file():
+        return False
+    tracked = subprocess.run(["git", "-C", str(repo), "ls-files", "--error-unmatch", "asv_runner"], capture_output=True).returncode == 0
+    if tracked:
+        return False
+    shutil.move(str(shim), str(dest))
+    return True
+
+
 def paired_mode() -> bool:
     return Path("/workspace/.fc_base").is_dir() and os.environ.get("FC_LSV_PAIRED", "1") != "0"
 
@@ -522,6 +536,8 @@ def main() -> None:
     )
     args = parser.parse_args()
     _build_mode = os.environ.get("FORMULACODE_IMAGE_BASELINE", os.environ.get("FORMULACODE_BAKE_BASELINE")) == "1"
+    if _build_mode and move_untracked_asv_runner(REPO_ROOT, Path("/opt/lsv/asv_runner_shim")):
+        print(f"[{_ts()}] [lsv_init] moved the untracked asv_runner/ out of the repo (it hid the installed asv_runner)")
     _build_bounded = _build_mode and _bound_build_cpus()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
