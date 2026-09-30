@@ -30,6 +30,9 @@ def _ts() -> str:
 
 
 REPO_ROOT = Path("/workspace/repo")
+# iris benchmarks generate their data with DATA_GEN_PYTHON and write it to BENCHMARK_DATA (else inside the repo).
+os.environ.setdefault("DATA_GEN_PYTHON", sys.executable)
+os.environ.setdefault("BENCHMARK_DATA", os.path.join(tempfile.gettempdir(), "fc_benchmark_data"))
 OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
 SNAPSHOT_DIR = Path(os.environ.get("SNAPSHOT_DIR", "/logs/artifacts/.snapshots"))
 SNAPSHOT_FILTER = os.environ.get("FORMULACODE_SNAPSHOT_FILTER", r".*")
@@ -156,9 +159,12 @@ def detect_source_root() -> Path:
 
     # Last resort before handing LSV a path that does not exist: any top-level
     # importable package. Prefer one matching pkg, else the shallowest by name.
+    # Also inside src/lib/python: scikit-image ships src/skimage, so the repo name (scikit_image) finds nothing.
     top_level_pkgs = [
         d
-        for d in REPO_ROOT.iterdir()
+        for holder in (REPO_ROOT, *(REPO_ROOT / h for h in ("src", "lib", "python")))
+        if holder.is_dir()
+        for d in holder.iterdir()
         if d.is_dir() and (d / "__init__.py").is_file() and d.name not in skip
     ]
     if top_level_pkgs:
