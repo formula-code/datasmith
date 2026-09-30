@@ -60,6 +60,27 @@ def _resolve_via_importlib(name: str) -> Path | None:
     return None
 
 
+def source_root_from_install(repo: Path) -> Path | None:
+    """The package folder of the distribution installed in editable mode from `repo` (nanoarrow: python/src/nanoarrow)."""
+    import importlib.metadata as md
+    import importlib.util
+
+    for dist in md.distributions():
+        url = dist.read_text("direct_url.json") or ""
+        if str(repo) not in url:
+            continue
+        for name in (dist.read_text("top_level.txt") or "").split() or [str(dist.metadata["Name"]).replace("-", "_")]:
+            try:
+                spec = importlib.util.find_spec(name)
+            except (ImportError, ValueError):
+                continue
+            for loc in (spec.submodule_search_locations or []) if spec else []:
+                path = Path(loc)
+                if path.is_dir() and repo in path.parents:
+                    return path
+    return None
+
+
 def detect_source_root() -> Path:
     """Derive the source package root from /tests/config.json patch headers.
 
@@ -157,6 +178,10 @@ def detect_source_root() -> Path:
             cand = (REPO_ROOT / layout / pkg) if layout else (REPO_ROOT / pkg)
             if cand.is_dir():
                 return cand
+
+    installed = source_root_from_install(REPO_ROOT)
+    if installed is not None:
+        return installed
 
     # Last resort before handing LSV a path that does not exist: any top-level
     # importable package. Prefer one matching pkg, else the shallowest by name.
