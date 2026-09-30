@@ -177,7 +177,8 @@ echo '{"results": {"exit_code": 0, "summary": {"error": 0, "failed": 0}, "detail
 {%- endif %}
 pytest_end=$(date +%s)
 mg_release
-if [ "${_py_rc:-0}" -ne 0 ]; then exit "${_py_rc}"; fi
+# A killed or timed-out runner leaves no test_results.json; the parser then records tests as not run and the timings are kept.
+if [ "${_py_rc:-0}" -ne 0 ]; then echo "[$(ts)] [test] pytest runner exited ${_py_rc}; continuing without test results" >&2; rm -f "${LOG_DIR}/test_results.json"; fi
 
 # Per-step timings; parser.py merges them with setup_timings.json into reward.json.
 test_end=$(date +%s)
