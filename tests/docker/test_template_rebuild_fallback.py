@@ -13,15 +13,17 @@ def _rebuild_script() -> str:
     return re.sub(r"\{\{[^}]*\}\}", "X", body)
 
 
-def _run(tmp_path: Path, fail_no_isolation: bool) -> subprocess.CompletedProcess:
+def _run(tmp_path: Path, fail_no_isolation: bool, fail_isolated: bool = False) -> subprocess.CompletedProcess:
     log = tmp_path / "calls.txt"
+    (tmp_path / "setup.py").write_text("")
     fake = f"""python() {{
   echo "$*" >> {log}
   case "$*" in *numpy*|*pkg_resources*) return 1;; esac
   case "$*" in *--no-build-isolation*) return {1 if fail_no_isolation else 0};; esac
+  case "$*" in *"pip install"*) return {1 if fail_isolated else 0};; esac
   return 0
 }}
-cd() {{ :; }}
+cd() {{ builtin cd {tmp_path}; }}
 """
     script = fake + _rebuild_script().replace("set -eo pipefail\n", "set -eo pipefail\n", 1)
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30), log
@@ -38,3 +40,10 @@ def test_no_isolation_build_that_works_runs_once(tmp_path):
     out, log = _run(tmp_path, fail_no_isolation=False)
     assert out.returncode == 0, out.stderr
     assert sum("pip install" in line for line in log.read_text().splitlines()) == 1
+
+
+def test_in_place_extension_build_after_both_installs_fail(tmp_path):
+    out, log = _run(tmp_path, fail_no_isolation=True, fail_isolated=True)
+    calls = log.read_text().splitlines()
+    assert out.returncode == 0, out.stderr
+    assert calls[-1] == "setup.py build_ext --inplace"

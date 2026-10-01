@@ -94,7 +94,12 @@ export CFLAGS="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -
 # The image build falls back to an isolated build when this fails (old numpy needs its own setuptools); do the same.
 if ! PIP_NO_BUILD_ISOLATION=1 python -m pip install --no-build-isolation --no-deps -v -e .; then
   echo "no-isolation rebuild failed; retrying with an isolated build" >&2
-  python -m pip install --no-deps -v -e .
+  if ! python -m pip install --no-deps -v -e .; then
+    # Old setup.py projects (numpy 1.16, skimage 0.19) run from the repo; rebuilding their extensions in place is enough.
+    [ -f setup.py ] || exit 1
+    echo "isolated rebuild failed; building extensions in place" >&2
+    python setup.py build_ext --inplace
+  fi
 fi
 SHEOF
   FC_REBUILD_CMD="bash /tmp/fc_rebuild.sh"
