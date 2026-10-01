@@ -47,3 +47,20 @@ def test_in_place_extension_build_after_both_installs_fail(tmp_path):
     calls = log.read_text().splitlines()
     assert out.returncode == 0, out.stderr
     assert calls[-1] == "stdlib setup.py build_ext --inplace"
+
+
+def test_rebuild_runs_in_the_installed_project_folder(tmp_path):
+    log = tmp_path / "calls.txt"
+    fake = f"""python() {{
+  case "$*" in *direct_url*) echo /workspace/repo/python; return 0;; esac
+  echo "python $*" >> {log}
+  case "$*" in *numpy*|*pkg_resources*) return 1;; esac
+  return 0
+}}
+cd() {{ echo "cd $*" >> {log}; builtin cd {tmp_path}; }}
+"""
+    out = subprocess.run(["bash", "-c", fake + _rebuild_script()], capture_output=True, text=True, timeout=30)
+    calls = log.read_text().splitlines()
+    assert out.returncode == 0, out.stderr
+    assert "cd /workspace/repo/python" in calls
+    assert calls.index("cd /workspace/repo/python") < next(i for i, c in enumerate(calls) if "pip install" in c)

@@ -78,6 +78,11 @@ if grep -qE '\.(pyx|pxd|pxi|c|cc|cpp|cxx|h|hh|hpp)$|(^|/)(setup\.py|setup\.cfg|p
   cat > /tmp/fc_rebuild.sh <<'SHEOF'
 set -eo pipefail
 cd /workspace/repo
+# The Python project can sit in a subfolder (nanoarrow: python/); rebuild where the package was installed from.
+if [ ! -f setup.py ] && [ ! -f pyproject.toml ]; then
+  proj="$(python -c 'import importlib.metadata as m, json; print(next((u[7:] for d in m.distributions() for u in [json.loads(d.read_text("direct_url.json") or "{}").get("url", "")] if u.startswith("file:///workspace/repo")), ""))')"
+  if [ -n "${proj}" ]; then cd "${proj}"; fi
+fi
 # setuptools >= 82 has no pkg_resources; old setup.py files import it (the image build shims it the same way).
 if ! python -c "import pkg_resources" 2>/dev/null; then
   shim="$(mktemp -d)"; echo 'from pip._vendor.pkg_resources import *' > "${shim}/pkg_resources.py"
