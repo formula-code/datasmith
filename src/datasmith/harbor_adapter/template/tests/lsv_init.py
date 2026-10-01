@@ -179,6 +179,12 @@ def detect_source_root() -> Path:
             if cand.is_dir():
                 return cand
 
+        # Namespace package named by the repo: geocat-comp ships geocat/comp/ with no geocat/__init__.py.
+        for layout in ("", "src", "lib", "python"):
+            cand = REPO_ROOT / layout / pkg.replace("_", "/", 1)
+            if "_" in pkg and (cand / "__init__.py").is_file():
+                return cand
+
     installed = source_root_from_install(REPO_ROOT)
     if installed is not None:
         return installed
