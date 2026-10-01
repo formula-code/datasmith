@@ -96,9 +96,10 @@ if ! PIP_NO_BUILD_ISOLATION=1 python -m pip install --no-build-isolation --no-de
   echo "no-isolation rebuild failed; retrying with an isolated build" >&2
   if ! python -m pip install --no-deps -v -e .; then
     # Old setup.py projects (numpy 1.16, skimage 0.19) run from the repo; rebuilding their extensions in place is enough.
+    # numpy.distutils fails with setuptools >= 60's own distutils, hence stdlib.
     [ -f setup.py ] || exit 1
     echo "isolated rebuild failed; building extensions in place" >&2
-    python setup.py build_ext --inplace
+    SETUPTOOLS_USE_DISTUTILS=stdlib python setup.py build_ext --inplace
   fi
 fi
 SHEOF
