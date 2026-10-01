@@ -263,7 +263,11 @@ def download_snapshots(
 
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         with tarfile.open(tarball_path, "r:gz") as tar:
-            tar.extractall(path=snapshot_dir.parent, filter="data")
+            # `filter` exists from 3.12 and in security backports; the task envs go back to 3.7.
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(path=snapshot_dir.parent, filter="data")
+            else:
+                tar.extractall(path=snapshot_dir.parent)
 
         print(f"[upload] Downloaded oracle snapshots for {owner}/{repo}#{issue_number}")
         return True

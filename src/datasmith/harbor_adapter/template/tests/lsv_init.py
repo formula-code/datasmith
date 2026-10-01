@@ -15,8 +15,11 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from glob import glob
 from pathlib import Path
@@ -27,6 +30,10 @@ def _ts() -> str:
 
 
 REPO_ROOT = Path("/workspace/repo")
+# iris benchmarks generate their data with DATA_GEN_PYTHON and write it to BENCHMARK_DATA (else inside the repo).
+os.environ.setdefault("DATA_GEN_PYTHON", sys.executable)
+os.environ.setdefault("BENCHMARK_DATA", os.path.join(tempfile.gettempdir(), "fc_benchmark_data"))
+os.makedirs(os.environ["BENCHMARK_DATA"], exist_ok=True)
 OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
 SNAPSHOT_DIR = Path(os.environ.get("SNAPSHOT_DIR", "/logs/artifacts/.snapshots"))
 SNAPSHOT_FILTER = os.environ.get("FORMULACODE_SNAPSHOT_FILTER", r".*")
@@ -50,6 +57,27 @@ def _resolve_via_importlib(name: str) -> Path | None:
             continue
         if candidate.is_dir():
             return candidate
+    return None
+
+
+def source_root_from_install(repo: Path) -> Path | None:
+    """The package folder of the distribution installed in editable mode from `repo` (nanoarrow: python/src/nanoarrow)."""
+    import importlib.metadata as md
+    import importlib.util
+
+    for dist in md.distributions():
+        url = dist.read_text("direct_url.json") or ""
+        if str(repo) not in url:
+            continue
+        for name in (dist.read_text("top_level.txt") or "").split() or [str(dist.metadata["Name"]).replace("-", "_")]:
+            try:
+                spec = importlib.util.find_spec(name)
+            except (ImportError, ValueError):
+                continue
+            for loc in (spec.submodule_search_locations or []) if spec else []:
+                path = Path(loc)
+                if path.is_dir() and repo in path.parents:
+                    return path
     return None
 
 
@@ -151,11 +179,24 @@ def detect_source_root() -> Path:
             if cand.is_dir():
                 return cand
 
+        # Namespace package named by the repo: geocat-comp ships geocat/comp/ with no geocat/__init__.py.
+        for layout in ("", "src", "lib", "python"):
+            cand = REPO_ROOT / layout / pkg.replace("_", "/", 1)
+            if "_" in pkg and (cand / "__init__.py").is_file():
+                return cand
+
+    installed = source_root_from_install(REPO_ROOT)
+    if installed is not None:
+        return installed
+
     # Last resort before handing LSV a path that does not exist: any top-level
     # importable package. Prefer one matching pkg, else the shallowest by name.
+    # Also inside src/lib/python: scikit-image ships src/skimage, so the repo name (scikit_image) finds nothing.
     top_level_pkgs = [
         d
-        for d in REPO_ROOT.iterdir()
+        for holder in (REPO_ROOT, *(REPO_ROOT / h for h in ("src", "lib", "python")))
+        if holder.is_dir()
+        for d in holder.iterdir()
         if d.is_dir() and (d / "__init__.py").is_file() and d.name not in skip
     ]
     if top_level_pkgs:
@@ -364,17 +405,31 @@ def _cfs_quota_cpus() -> int | None:
     return max(1, -(-int(quota) // int(period)))
 
 
-def _usable_cpus() -> int:
-    """min(affinity CPUs, ceil(CFS quota)), so a taskset-bounded bake and a --cpus trial compare equal."""
+def _affinity_cpus() -> int:
     try:
-        n = len(os.sched_getaffinity(0))
+        return len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
-        n = os.cpu_count() or 1
+        return os.cpu_count() or 1
+
+
+def _usable_cpus() -> int:
+    """min(affinity CPUs, ceil(CFS quota)): the CPUs the benchmarks can use at once."""
+    n = _affinity_cpus()
     try:
         quota = _cfs_quota_cpus()
     except ValueError:
         quota = None
     return min(n, quota) if quota else n
+
+
+def _cpu_limit() -> str:
+    """How the CPUs are bounded: pinned (affinity below the host count), quota (CFS), both, or none."""
+    try:
+        quota = _cfs_quota_cpus() is not None
+    except ValueError:
+        quota = False
+    kinds = [k for k, on in (("pinned", _affinity_cpus() < (os.cpu_count() or 0)), ("quota", quota)) if on]
+    return "+".join(kinds) or "none"
 
 
 def _lsv_commit() -> str | None:
@@ -388,7 +443,7 @@ def _lsv_commit() -> str | None:
 
 
 def env_fingerprint(rounds: int) -> dict:
-    """Conditions the baseline timing depends on; the baked baseline is reused only when all match."""
+    """Conditions the baseline timing depends on; the image baseline is reused only when all match."""
     cpu_model = None
     try:
         for line in Path("/proc/cpuinfo").read_text().splitlines():
@@ -400,30 +455,81 @@ def env_fingerprint(rounds: int) -> dict:
     return {
         "cpu_model": cpu_model,
         "usable_cpus": _usable_cpus(),
+        # Libraries size pools from these, so a pinned image build and a quota-limited trial time differently (unpaired only).
+        "os_cpu_count": os.cpu_count(),
+        "affinity_cpus": _affinity_cpus(),
+        "cpu_limit": _cpu_limit(),
         "numba_num_threads": os.environ.get("NUMBA_NUM_THREADS"),
         "lsv_rounds": rounds,
         "lsv_commit": _lsv_commit(),
     }
 
 
-def baked_reuse_reason(baked_meta: dict | None, head: str | None, current_fp: dict) -> str | None:
-    """None if the baked baseline may be reused, else why not. Anything missing re-measures."""
-    if not isinstance(baked_meta, dict):
-        return "no readable baked lsv_init_results.json"
-    baked_sha = baked_meta.get("baseline_sha")
-    if baked_sha is None or baked_sha != head:
-        return f"baseline_sha {baked_sha} != HEAD {head}"
-    baked_fp = baked_meta.get("env_fingerprint")
-    if not isinstance(baked_fp, dict):
-        return "baked baseline has no env_fingerprint"
-    diffs = [f"{k}: baked {baked_fp.get(k)!r} != trial {v!r}" for k, v in current_fp.items() if baked_fp.get(k) != v]
+# Paired timing measures both sides in the trial and reads only the deps DB, which depends on neither CPUs nor rounds.
+PAIRED_KEYS = ("lsv_commit",)
+
+
+def image_timing_skipped(build_mode: bool) -> bool:
+    """Paired trials read only the dependency DB, so the image build skips LSV's full-suite timing unless asked."""
+    return build_mode and os.environ.get("FC_LSV_PAIRED", "1") != "0" and os.environ.get("FORMULACODE_IMAGE_TIMING") != "1"
+
+
+def skip_suite_timing(lsv_session_module) -> None:
+    """Keep initialize_diffcheck's coverage pass (the dependency DB) and drop its timing pass."""
+    lsv_session_module.run_benchmarks = lambda *a, **k: {}
+    lsv_session_module._store_baseline = lambda *a, **k: None
+
+
+def move_untracked_asv_runner(repo: Path, dest: Path) -> bool:
+    """An untracked asv_runner/ in the repo (a compatibility copy from the upstream image build) hides the installed
+    asv_runner, which LSV needs (asv_runner.util). Move it out of the repo; a tracked one stays."""
+    shim = repo / "asv_runner"
+    if not (shim / "__init__.py").is_file():
+        return False
+    tracked = subprocess.run(["git", "-C", str(repo), "ls-files", "--error-unmatch", "asv_runner"], capture_output=True).returncode == 0
+    if tracked:
+        return False
+    shutil.move(str(shim), str(dest))
+    return True
+
+
+def make_benchmark_package(repo: Path, benchmark_dir: Path) -> bool:
+    """LSV discovers benchmarks only in a package; add an empty __init__.py (django-components has none) and keep it
+    out of git's untracked files, so a trial's patch does not list it."""
+    init = benchmark_dir / "__init__.py"
+    if init.exists() or not benchmark_dir.is_dir():
+        return False
+    init.write_text("")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a") as f:
+        f.write(f"\n/{init.relative_to(repo)}\n")
+    return True
+
+
+def paired_mode() -> bool:
+    return Path("/workspace/.fc_base").is_dir() and os.environ.get("FC_LSV_PAIRED", "1") != "0"
+
+
+def image_reuse_reason(image_meta: dict | None, head: str | None, current_fp: dict, paired: bool = False) -> str | None:
+    """None if the image baseline may be reused, else why not. Anything missing re-measures."""
+    if not isinstance(image_meta, dict):
+        return "no readable image lsv_init_results.json"
+    image_sha = image_meta.get("baseline_sha")
+    if image_sha is None or image_sha != head:
+        return f"baseline_sha {image_sha} != HEAD {head}"
+    image_fp = image_meta.get("env_fingerprint")
+    if not isinstance(image_fp, dict):
+        return "image baseline has no env_fingerprint"
+    keys = PAIRED_KEYS if paired else tuple(current_fp)
+    diffs = [f"{k}: image {image_fp.get(k)!r} != trial {current_fp.get(k)!r}" for k in keys if image_fp.get(k) != current_fp.get(k)]
     return "fingerprint mismatch (" + "; ".join(diffs) + ")" if diffs else None
 
 
-def _bound_bake_cpus() -> bool:
-    """Pin the bake to the first FORMULACODE_BAKE_CPUS allowed CPUs (BuildKit has no per-RUN CPU quota)."""
+def _bound_build_cpus() -> bool:
+    """Pin the image build to the first FORMULACODE_IMAGE_CPUS allowed CPUs (BuildKit has no per-RUN CPU quota)."""
     try:
-        want = int(os.environ.get("FORMULACODE_BAKE_CPUS", "0"))
+        want = int(os.environ.get("FORMULACODE_IMAGE_CPUS", os.environ.get("FORMULACODE_BAKE_CPUS", "0")))
         allowed = sorted(os.sched_getaffinity(0))
         if want <= 0 or len(allowed) < want:
             return False
@@ -431,6 +537,24 @@ def _bound_bake_cpus() -> bool:
         return True
     except (AttributeError, OSError, ValueError):
         return False
+
+
+TEMP_ROOTS = (Path("/tmp"),)
+
+
+@contextmanager
+def drop_new_temp_entries():
+    """Remove what the block left in the temp dirs: benchmarks leave tempfile dirs behind (TileDB: ~0.4 GB each)."""
+    dirs = {Path(tempfile.gettempdir()), *TEMP_ROOTS}
+    before = {p for d in dirs for p in d.iterdir()}
+    try:
+        yield
+    finally:
+        for p in {p for d in dirs for p in d.iterdir()} - before:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -456,7 +580,10 @@ def main() -> None:
         help="Warmup seconds before timing (default: asv auto)",
     )
     args = parser.parse_args()
-    _bake_bounded = os.environ.get("FORMULACODE_BAKE_BASELINE") == "1" and _bound_bake_cpus()
+    _build_mode = os.environ.get("FORMULACODE_IMAGE_BASELINE", os.environ.get("FORMULACODE_BAKE_BASELINE")) == "1"
+    if _build_mode and move_untracked_asv_runner(REPO_ROOT, Path("/opt/lsv/asv_runner_shim")):
+        print(f"[{_ts()}] [lsv_init] moved the untracked asv_runner/ out of the repo (it hid the installed asv_runner)")
+    _build_bounded = _build_mode and _bound_build_cpus()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -489,17 +616,19 @@ def main() -> None:
     )
 
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
+    if _build_mode and make_benchmark_package(REPO_ROOT, Path(session.benchmark_dir)):
+        print(f"[{_ts()}] [lsv_init] added an empty __init__.py to the benchmark folder (git excludes it)")
 
-    # Base-commit baseline is baked at image build (FORMULACODE_BAKE_BASELINE=1) to skip a 100-490s re-time
+    # Base-commit baseline is measured at image build (FORMULACODE_IMAGE_BASELINE=1) to skip a 100-490s re-time
     # per trial; reuse it only at the same sha AND the same timing conditions, else re-measure (force=True).
-    _bake_mode = os.environ.get("FORMULACODE_BAKE_BASELINE") == "1"
-    _baked_db = Path("/opt/lsv/cache/results/.lightspeed_deps.db")
-    _baked_meta = Path("/opt/lsv/cache/lsv_init_results.json")
+    _image_db = Path("/opt/lsv/cache/results/.lightspeed_deps.db")
+    _image_meta = Path("/opt/lsv/cache/lsv_init_results.json")
     _results_dir = OUTPUT_DIR / "results"
     _fingerprint = env_fingerprint(args.rounds)
+    _paired = paired_mode()
     _force = True
-    _reuse_reason = "bake" if _bake_mode else "no baked deps db"
-    if not _bake_mode and _baked_db.exists():
+    _reuse_reason = "image build" if _build_mode else "no image deps db"
+    if not _build_mode and _image_db.exists():
         try:
             _head = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), text=True
@@ -507,22 +636,22 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             _head = None
         try:
-            _baked = json.loads(_baked_meta.read_text())
+            _image = json.loads(_image_meta.read_text())
         except (OSError, ValueError):
-            _baked = None
-        _reuse_reason = baked_reuse_reason(_baked, _head, _fingerprint)
+            _image = None
+        _reuse_reason = image_reuse_reason(_image, _head, _fingerprint, _paired)
         if _reuse_reason is None:
             from shutil import copy2
 
             _results_dir.mkdir(parents=True, exist_ok=True)
-            copy2(_baked_db, _results_dir / ".lightspeed_deps.db")
+            copy2(_image_db, _results_dir / ".lightspeed_deps.db")
             _force = False
-            print(f"[{_ts()}] [lsv_init] staged baked baseline @ {_head}; force=False (skip re-measure)")
+            print(f"[{_ts()}] [lsv_init] staged image baseline @ {_head}; force=False (skip re-measure)")
         else:
-            print(f"[{_ts()}] [lsv_init] not reusing baked baseline: {_reuse_reason}; re-measuring (force=True)")
+            print(f"[{_ts()}] [lsv_init] not reusing image baseline: {_reuse_reason}; re-measuring (force=True)")
 
     if not _force:
-        # Baked baseline staged: the DB already holds the baselines + coverage
+        # Image baseline staged: the DB already holds the baselines + coverage
         # (benchmark_dep) that per-trial lsv_measure reads, so we SKIP
         # initialize_diffcheck entirely. We cannot rely on LSV's own short-circuit
         # (`if not force and all(has_baseline)`): tasks with unmeasurable benchmarks
@@ -531,19 +660,25 @@ def main() -> None:
         # Correctness: identical to a fresh init at base_commit (same commit, same
         # in-lineage deps DB) minus the redundant timing pass. Benchmarks without a
         # baseline are exactly the unmeasurable ones -> no speedup contribution ->
-        # reward unchanged. The baked lsv_init_results.json carries baseline_sha for
+        # reward unchanged. The image lsv_init_results.json carries baseline_sha for
         # invariant #15.
-        _baked["baseline_reuse"] = {"reused": True, "reason": None, "trial_fingerprint": _fingerprint}
-        (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(_baked, indent=2))
+        _image["baseline_reuse"] = {"reused": True, "reason": None, "paired": _paired, "trial_fingerprint": _fingerprint}
+        (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(_image, indent=2))
         print(
-            f"[{_ts()}] [lsv_init] reused baked baseline (skipped initialize_diffcheck); "
-            f"baseline_sha={_baked.get('baseline_sha')}"
+            f"[{_ts()}] [lsv_init] reused image baseline (skipped initialize_diffcheck); "
+            f"baseline_sha={_image.get('baseline_sha')}"
         )
     else:
         print("=" * 64)
         print(f"[{_ts()}] [phase] LSV initialize_diffcheck (force={_force})")
         print("=" * 64)
 
+        _timed = not image_timing_skipped(_build_mode)
+        if not _timed:
+            import asv.contrib.lightspeed.session as _lsv_session
+
+            skip_suite_timing(_lsv_session)
+            print(f"[{_ts()}] [lsv_init] image build: coverage pass only (paired trials do not read baseline timings)")
         init_result = session.initialize_diffcheck(
             source_root=source_root,
             force=_force,
@@ -587,11 +722,12 @@ def main() -> None:
             "deps_db_path": str(init_result.deps_db_path),
             "timing": dataclasses.asdict(init_result.timing),
             "env_fingerprint": _fingerprint,
+            "baseline_timed": _timed,
         }
-        if _bake_mode:
-            init_data["bake_cpus_bounded"] = _bake_bounded
+        if _build_mode:
+            init_data["build_cpus_bounded"] = _build_bounded
         else:
-            init_data["baseline_reuse"] = {"reused": False, "reason": _reuse_reason}
+            init_data["baseline_reuse"] = {"reused": False, "reason": _reuse_reason, "paired": _paired}
         (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(init_data, indent=2))
 
     # Snapshot capture (oracle only — production runs download pre-built snapshots)
@@ -619,4 +755,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    with drop_new_temp_entries():
+        main()

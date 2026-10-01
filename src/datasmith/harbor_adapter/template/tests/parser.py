@@ -302,7 +302,7 @@ def load_setup_status(log_dir: Path) -> dict:
     """Read setup_status.json written by setup.sh's EXIT trap.
 
     Missing file means setup.sh never ran the trap (earlier crash, or an
-    old image without the trap baked in). Return a conservative default:
+    old image built without the trap). Return a conservative default:
     exit_code=None so downstream code can treat it as 'unknown' rather
     than 'succeeded'.
     """

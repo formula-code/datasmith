@@ -1,6 +1,6 @@
 """The secret scan must not match its own source.
 
-`docker_build_final.sh` greps three baked scripts for credential literals, and
+`docker_build_final.sh` greps three scripts built into the image for credential literals, and
 it is one of the three. The pattern was written as one literal, so it matched
 itself. `secrets_scan_clean` was therefore 0 on every build ever made, and the
 FATAL `secrets_present` invariant meant the stock template could never pass

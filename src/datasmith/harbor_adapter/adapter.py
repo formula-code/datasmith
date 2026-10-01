@@ -82,7 +82,7 @@ class FormulaCodeAdapter:
     ) -> Path:
         """Render the Harbor task dir for ``rec``.
 
-        ``rounds`` (default ``DATASMITH_LSV_ROUNDS``) drives both the baked baseline and the trial passes.
+        ``rounds`` (default ``DATASMITH_LSV_ROUNDS``) drives both the image baseline and the trial passes.
         ``expected_n`` (from ``formulacode_task_overrides``) becomes ``FORMULACODE_EXPECTED_N`` for the
         dilution_ratio invariant; ``None`` emits no key, so the invariant skips.
         """
@@ -95,7 +95,7 @@ class FormulaCodeAdapter:
         copy2(self.template_dir / "environment" / "entrypoint.sh", env / "entrypoint.sh")
         for name in TEST_HELPERS:
             copy2(self.template_dir / "tests" / name, tests / name)
-        # The Dockerfile's baseline bake runs lsv_init.py at build time, before /tests exists.
+        # The Dockerfile's baseline measurement runs lsv_init.py at image build, before /tests exists.
         copy2(self.template_dir / "tests" / "lsv_init.py", env / "lsv_init.py")
 
         _write(out_dir / "instruction.md", render_instruction_md(rec.instructions))
