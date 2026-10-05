@@ -525,7 +525,7 @@ def missing_benchmark_deps(config: dict, benchmark_dir: Path, repo: Path) -> lis
             return False
 
     req = (config.get("matrix") or {}).get("req") or config.get("matrix") or {}
-    wanted = {k.removeprefix("pip+") for k, v in req.items() if isinstance(k, str) and not k.startswith("@") and k not in ("req", "env", "env_nobuild", "python") and v is not None}
+    wanted = {(k[4:] if k.startswith("pip+") else k) for k, v in req.items() if isinstance(k, str) and not k.startswith("@") and k not in ("req", "env", "env_nobuild", "python") and v is not None}
     local = {p.stem for p in benchmark_dir.rglob("*")} | {p.name for p in repo.iterdir()}
     for path in benchmark_dir.rglob("*.py"):
         try:
@@ -535,7 +535,7 @@ def missing_benchmark_deps(config: dict, benchmark_dir: Path, repo: Path) -> lis
         for node in ast.walk(tree):
             names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module] if isinstance(node, ast.ImportFrom) and node.module and not node.level else []
             for top in {n.split(".")[0] for n in names}:
-                if top not in sys.stdlib_module_names and top not in local and importlib.util.find_spec(top) is None:
+                if top not in local and importlib.util.find_spec(top) is None:
                     wanted.add(IMPORT_TO_DIST.get(top, top))
     return sorted(d for d in wanted if not installed(d))
 
@@ -661,8 +661,13 @@ def main() -> None:
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
     if _build_mode and make_benchmark_package(REPO_ROOT, Path(session.benchmark_dir)):
         print(f"[{_ts()}] [lsv_init] added an empty __init__.py to the benchmark folder (git excludes it)")
-    if _build_mode and (_missing := missing_benchmark_deps(_load_jsonc(config_path) or {}, Path(session.benchmark_dir), REPO_ROOT)):
-        print(f"[{_ts()}] [lsv_init] installed benchmark deps the image lacked: {install_benchmark_deps(_missing)} (wanted {_missing})")
+    if _build_mode:
+        try:
+            _missing = missing_benchmark_deps(_load_jsonc(config_path) or {}, Path(session.benchmark_dir), REPO_ROOT)
+            if _missing:
+                print(f"[{_ts()}] [lsv_init] installed benchmark deps the image lacked: {install_benchmark_deps(_missing)} (wanted {_missing})")
+        except Exception as e:  # noqa: BLE001  (a failed install must not stop the baseline)
+            print(f"[{_ts()}] [lsv_init] benchmark deps step failed: {type(e).__name__}: {e}")
 
     # Base-commit baseline is measured at image build (FORMULACODE_IMAGE_BASELINE=1) to skip a 100-490s re-time
     # per trial; reuse it only at the same sha AND the same timing conditions, else re-measure (force=True).
