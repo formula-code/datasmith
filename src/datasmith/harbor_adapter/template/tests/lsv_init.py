@@ -507,6 +507,49 @@ def make_benchmark_package(repo: Path, benchmark_dir: Path) -> bool:
     return True
 
 
+IMPORT_TO_DIST = {"sklearn": "scikit-learn", "skimage": "scikit-image", "PIL": "pillow", "yaml": "pyyaml",
+                  "bs4": "beautifulsoup4", "cv2": "opencv-python", "dateutil": "python-dateutil"}
+
+
+def missing_benchmark_deps(config: dict, benchmark_dir: Path, repo: Path) -> list[str]:
+    """Distributions the benchmarks need but the env lacks: asv.conf.json matrix.req entries and imports in the benchmark
+    files. The base images install the package's own deps, not the benchmark-only ones."""
+    import ast
+    import importlib.metadata as md
+
+    def installed(dist: str) -> bool:
+        try:
+            md.distribution(dist)
+            return True
+        except md.PackageNotFoundError:
+            return False
+
+    req = (config.get("matrix") or {}).get("req") or config.get("matrix") or {}
+    wanted = {k.removeprefix("pip+") for k, v in req.items() if isinstance(k, str) and not k.startswith("@") and k not in ("req", "env", "env_nobuild", "python") and v is not None}
+    local = {p.stem for p in benchmark_dir.rglob("*")} | {p.name for p in repo.iterdir()}
+    for path in benchmark_dir.rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module] if isinstance(node, ast.ImportFrom) and node.module and not node.level else []
+            for top in {n.split(".")[0] for n in names}:
+                if top not in sys.stdlib_module_names and top not in local and importlib.util.find_spec(top) is None:
+                    wanted.add(IMPORT_TO_DIST.get(top, top))
+    return sorted(d for d in wanted if not installed(d))
+
+
+def install_benchmark_deps(dists: list[str]) -> list[str]:
+    """pip-install each distribution with the env's current versions as constraints; returns the ones installed."""
+    freeze = subprocess.run([sys.executable, "-m", "pip", "freeze", "--exclude-editable"], capture_output=True, text=True).stdout
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("\n".join(line for line in freeze.splitlines() if "==" in line))
+    done = [d for d in dists if subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-c", f.name, d]).returncode == 0]
+    os.unlink(f.name)
+    return done
+
+
 def paired_mode() -> bool:
     return Path("/workspace/.fc_base").is_dir() and os.environ.get("FC_LSV_PAIRED", "1") != "0"
 
@@ -618,6 +661,8 @@ def main() -> None:
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
     if _build_mode and make_benchmark_package(REPO_ROOT, Path(session.benchmark_dir)):
         print(f"[{_ts()}] [lsv_init] added an empty __init__.py to the benchmark folder (git excludes it)")
+    if _build_mode and (_missing := missing_benchmark_deps(_load_jsonc(config_path) or {}, Path(session.benchmark_dir), REPO_ROOT)):
+        print(f"[{_ts()}] [lsv_init] installed benchmark deps the image lacked: {install_benchmark_deps(_missing)} (wanted {_missing})")
 
     # Base-commit baseline is measured at image build (FORMULACODE_IMAGE_BASELINE=1) to skip a 100-490s re-time
     # per trial; reuse it only at the same sha AND the same timing conditions, else re-measure (force=True).
