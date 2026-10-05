@@ -25,6 +25,9 @@ def m(tmp_path, monkeypatch):
         (d / "side").write_text(side)
         monkeypatch.setattr(mod, attr, d)
     monkeypatch.setattr(mod, "PARKED", tmp_path / ".fc_patched")
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(mod, "TEMP_ROOTS", (tmp_path / "tmp",))
+    monkeypatch.setattr(mod.tempfile, "tempdir", str(tmp_path / "tmp"))
     return mod
 
 
@@ -37,6 +40,13 @@ def test_rounds_alternate_abba(m):
     m.run_paired(lambda: seen.append(_side(m)) or {}, 4)
     assert seen == ["base", "patched", "patched", "base"] * 2
     assert _side(m) == "patched" and (m.BASE_COPY / "side").read_text() == "base"
+
+
+def test_rounds_remove_the_temp_dirs_benchmarks_leave(m):
+    keep = Path(m.tempfile.gettempdir()) / "before"
+    keep.mkdir()
+    m.run_paired(lambda: Path(m.tempfile.mkdtemp()).joinpath("array").write_text("x") and {}, 2)
+    assert list(Path(m.tempfile.gettempdir()).iterdir()) == [keep]
 
 
 def test_error_on_base_side_leaves_repo_patched(m):

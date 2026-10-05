@@ -2,7 +2,7 @@
 
 `pyproject.toml:102` lists all three template directories in `extend-exclude`
 with `force-exclude = true`. That is deliberate: the files there are stdlib-only
-scripts baked into container images, and most ruff rules do not apply to them.
+scripts built into container images, and most ruff rules do not apply to them.
 
 The cost was a real defect. `pytest_runner.py` called `sys.exit()` without
 importing `sys`, so every test run in every image ended in a `NameError`. The
