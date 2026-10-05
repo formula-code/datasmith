@@ -651,6 +651,16 @@ def main() -> None:
     print(f"[{_ts()}] [lsv_init] branch={branch_name}")
     print(f"[{_ts()}] [lsv_init] rounds={args.rounds} repeat={args.repeat} warmup_time={args.warmup_time}")
 
+    # Before the session exists: creating it discovers the benchmarks.
+    if _build_mode:
+        try:
+            _cfg = _load_jsonc(config_path) or {}
+            _missing = missing_benchmark_deps(_cfg, config_path.parent / _cfg.get("benchmark_dir", "benchmarks"), REPO_ROOT)
+            if _missing:
+                print(f"[{_ts()}] [lsv_init] installed benchmark deps the image lacked: {install_benchmark_deps(_missing)} (wanted {_missing})", flush=True)
+        except Exception as e:  # noqa: BLE001  (a failed install must not stop the baseline)
+            print(f"[{_ts()}] [lsv_init] benchmark deps step failed: {type(e).__name__}: {e}", flush=True)
+
     from asv.contrib.lightspeed import LightspeedSession
 
     session = LightspeedSession(
@@ -668,13 +678,6 @@ def main() -> None:
     print(f"[{_ts()}] [lsv_init] benchmark_dir={session.benchmark_dir}")
     if _build_mode and make_benchmark_package(REPO_ROOT, Path(session.benchmark_dir)):
         print(f"[{_ts()}] [lsv_init] added an empty __init__.py to the benchmark folder (git excludes it)")
-    if _build_mode:
-        try:
-            _missing = missing_benchmark_deps(_load_jsonc(config_path) or {}, Path(session.benchmark_dir), REPO_ROOT)
-            if _missing:
-                print(f"[{_ts()}] [lsv_init] installed benchmark deps the image lacked: {install_benchmark_deps(_missing)} (wanted {_missing})")
-        except Exception as e:  # noqa: BLE001  (a failed install must not stop the baseline)
-            print(f"[{_ts()}] [lsv_init] benchmark deps step failed: {type(e).__name__}: {e}")
 
     # Base-commit baseline is measured at image build (FORMULACODE_IMAGE_BASELINE=1) to skip a 100-490s re-time
     # per trial; reuse it only at the same sha AND the same timing conditions, else re-measure (force=True).
