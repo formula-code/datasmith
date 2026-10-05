@@ -540,11 +540,18 @@ def missing_benchmark_deps(config: dict, benchmark_dir: Path, repo: Path) -> lis
     return sorted(d for d in wanted if not installed(d))
 
 
+def env_constraints() -> list[str]:
+    """name==version for every installed distribution, editable ones included, so an install cannot replace the
+    project (stdpopsim would pull msprime from PyPI over the editable repo)."""
+    import importlib.metadata as md
+
+    return sorted({f"{d.metadata['Name']}=={d.version}" for d in md.distributions() if d.metadata["Name"]})
+
+
 def install_benchmark_deps(dists: list[str]) -> list[str]:
-    """pip-install each distribution with the env's current versions as constraints; returns the ones installed."""
-    freeze = subprocess.run([sys.executable, "-m", "pip", "freeze", "--exclude-editable"], capture_output=True, text=True).stdout
+    """pip-install each distribution with every installed version pinned; returns the ones installed."""
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
-        f.write("\n".join(line for line in freeze.splitlines() if "==" in line))
+        f.write("\n".join(env_constraints()))
     done = [d for d in dists if subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-c", f.name, d]).returncode == 0]
     os.unlink(f.name)
     return done

@@ -22,3 +22,14 @@ def test_missing_benchmark_deps(tmp_path):
     assert "fc_not_a_module_x" in missing and "fc_declared_dist_y" in missing
     assert not {"os", "json", "common", "pytest", "mypkg", "fc_skipped_z", "@env"} & set(missing)
     assert ("scikit-learn" in missing) == (importlib.util.find_spec("sklearn") is None)
+
+
+def test_constraints_pin_every_installed_distribution():
+    import importlib.metadata as md
+
+    spec = importlib.util.spec_from_file_location("fc_lsv_init_deps2", _LSV_INIT)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    pins = m.env_constraints()
+    assert f"pytest=={md.version('pytest')}" in pins
+    assert len({p.split("==")[0].lower() for p in pins}) >= len({d.metadata["Name"].lower() for d in md.distributions()}) - 1
