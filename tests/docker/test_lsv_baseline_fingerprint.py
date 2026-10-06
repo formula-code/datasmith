@@ -92,3 +92,24 @@ def test_paired_reuse_ignores_cpu_and_rounds(m):
 )
 def test_paired_reuse_still_needs_sha_and_lsv(m, image, head, trial):
     assert m.image_reuse_reason(image, head, trial, paired=True)
+
+
+def test_baseline_commit_reuses_the_image_measured_at_its_parent(m, tmp_path, monkeypatch):
+    import subprocess
+
+    def git(*a):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=tmp_path, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    git("commit", "-q", "--allow-empty", "-m", "upstream")
+    upstream = git("rev-parse", "HEAD")
+    git("commit", "-q", "--allow-empty", "-m", "fc-baseline")
+    head = git("rev-parse", "HEAD")
+    sha_file = tmp_path / "fc_baseline_sha"
+    monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(m, "BASELINE_SHA_FILE", str(sha_file))
+    assert m.image_commit(head) == head
+    sha_file.write_text(head + "\n")
+    assert m.image_commit(head) == upstream
+    assert m.image_reuse_reason(_image(baseline_sha=upstream), m.image_commit(head), dict(FP)) is None

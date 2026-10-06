@@ -30,6 +30,7 @@ def _ts() -> str:
 
 
 REPO_ROOT = Path("/workspace/repo")
+BASELINE_SHA_FILE = "/opt/fc_baseline_sha"
 # iris benchmarks generate their data with DATA_GEN_PYTHON and write it to BENCHMARK_DATA (else inside the repo).
 os.environ.setdefault("DATA_GEN_PYTHON", sys.executable)
 os.environ.setdefault("BENCHMARK_DATA", os.path.join(tempfile.gettempdir(), "fc_benchmark_data"))
@@ -577,6 +578,16 @@ def image_reuse_reason(image_meta: dict | None, head: str | None, current_fp: di
     return "fingerprint mismatch (" + "; ".join(diffs) + ")" if diffs else None
 
 
+def image_commit(head: str | None) -> str | None:
+    """The commit the image build ran at: the parent of setup.sh's baseline commit when HEAD is that commit."""
+    try:
+        if head and Path(BASELINE_SHA_FILE).read_text().strip() == head:
+            return subprocess.check_output(["git", "rev-parse", f"{head}^"], cwd=str(REPO_ROOT), text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return head
+
+
 def _bound_build_cpus() -> bool:
     """Pin the image build to the first FORMULACODE_IMAGE_CPUS allowed CPUs (BuildKit has no per-RUN CPU quota)."""
     try:
@@ -700,7 +711,7 @@ def main() -> None:
             _image = json.loads(_image_meta.read_text())
         except (OSError, ValueError):
             _image = None
-        _reuse_reason = image_reuse_reason(_image, _head, _fingerprint, _paired)
+        _reuse_reason = image_reuse_reason(_image, image_commit(_head), _fingerprint, _paired)
         if _reuse_reason is None:
             from shutil import copy2
 
@@ -723,6 +734,8 @@ def main() -> None:
         # baseline are exactly the unmeasurable ones -> no speedup contribution ->
         # reward unchanged. The image lsv_init_results.json carries baseline_sha for
         # invariant #15.
+        # The image was measured on this same tree before setup.sh committed it.
+        _image["image_baseline_sha"], _image["baseline_sha"] = _image.get("baseline_sha"), _head
         _image["baseline_reuse"] = {"reused": True, "reason": None, "paired": _paired, "trial_fingerprint": _fingerprint}
         (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(_image, indent=2))
         print(
