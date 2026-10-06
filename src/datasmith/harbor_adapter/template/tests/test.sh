@@ -46,6 +46,22 @@ mg_release() {
   curl -fsS --connect-timeout "${MEASURE_GATE_CONNECT_TIMEOUT:-5}" -m 5 -X POST "${_MG_URL}/release?sid=${_MG_SID}" >/dev/null 2>&1 || true
 }
 
+# ── Parser and upload: compute reward, then upload to Supabase (if configured) ──
+FC_TIMING_SKIPPED=""
+fc_report() {
+  echo "[$(ts)] [test] Computing reward -> /logs/verifier/reward.{json,txt} ..."
+  python /tests/parser.py --owner "${OWNER}" --repo "${REPO}" --issue-number "${ISSUE_NUMBER}" --agent-key "${AGENT_KEY}" --base-commit "${FC_BASE}" ${FC_TIMING_SKIPPED:+--timing-skipped "${FC_TIMING_SKIPPED}"}
+  if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_ANON_KEY:-}" ] && [ -z "${FORMULACODE_NO_UPLOAD:-}" ]; then
+    echo "[$(ts)] [test] Uploading to Supabase..."
+    oracle_flag=""
+    if [ "${AGENT_KEY}" = "oracle" ]; then
+      oracle_flag="--oracle"
+    fi
+    python /tests/upload.py --owner "${OWNER}" --repo "${REPO}" --issue-number "${ISSUE_NUMBER}" --agent-key "${AGENT_KEY}" ${oracle_flag} || \
+      echo "WARNING: Supabase upload failed"
+  fi
+}
+
 test_start=$(date +%s)
 
 # ── Capture patch + detect whether the agent actually changed anything ───
@@ -74,6 +90,20 @@ info = {
 pathlib.Path(log_dir, "patch_info.json").write_text(json.dumps(info))
 PYEOF
 echo "[$(ts)] [test] patch: files=${patch_files} +${patch_added}/-${patch_removed}"
+
+# ── Tamper precheck: the host tamper gate rejects this patch whatever its timing ──
+# The oracle is the reference and is never rejected.
+if [ "${AGENT_KEY}" != "oracle" ]; then
+  if python /tests/tamper_precheck.py --log-dir "${LOG_DIR}"; then _tp_rc=0; else _tp_rc=$?; fi
+  if [ "${_tp_rc}" = 3 ]; then
+    FC_TIMING_SKIPPED="tamper"
+    echo "[$(ts)] [test] Patch edits protected harness files; skipping rebuild, LSV measure, snapshots and pytest."
+    echo "{\"test_total_s\": $(( $(date +%s) - test_start ))}" > "${LOG_DIR}/test_timings.json"
+    fc_report
+    echo "[$(ts)] [test] Complete."
+    exit 0
+  fi
+fi
 
 # ── Rebuild compiled extensions the patch touched ────────────────────────
 # The image holds the base-commit build; without this the patched sources are timed and tested as the old .so.
@@ -189,19 +219,5 @@ timings = {
 pathlib.Path(log_dir, "test_timings.json").write_text(json.dumps(timings))
 PYEOF
 
-# ── Parser: compute reward ───────────────────────────────────────────────
-echo "[$(ts)] [test] Computing reward -> /logs/verifier/reward.{json,txt} ..."
-python /tests/parser.py --owner "${OWNER}" --repo "${REPO}" --issue-number "${ISSUE_NUMBER}" --agent-key "${AGENT_KEY}" --base-commit "${FC_BASE}"
-
-# ── Upload to Supabase (if configured) ───────────────────────────────────
-if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_ANON_KEY:-}" ] && [ -z "${FORMULACODE_NO_UPLOAD:-}" ]; then
-  echo "[$(ts)] [test] Uploading to Supabase..."
-  oracle_flag=""
-  if [ "${AGENT_KEY}" = "oracle" ]; then
-    oracle_flag="--oracle"
-  fi
-  python /tests/upload.py --owner "${OWNER}" --repo "${REPO}" --issue-number "${ISSUE_NUMBER}" --agent-key "${AGENT_KEY}" ${oracle_flag} || \
-    echo "WARNING: Supabase upload failed"
-fi
-
+fc_report
 echo "[$(ts)] [test] Complete."

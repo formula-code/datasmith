@@ -295,6 +295,14 @@ def load_patch_info(log_dir: Path) -> dict:
         return {"applied": False, "files": 0, "added_lines": 0, "removed_lines": 0}
 
 
+def load_tamper_precheck(log_dir: Path) -> dict:
+    """Read tamper_precheck.json from tamper_precheck.py; {} if it did not run."""
+    try:
+        return json.loads((log_dir / "tamper_precheck.json").read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def load_setup_status(log_dir: Path) -> dict:
     """Read setup_status.json written by setup.sh's EXIT trap.
 
@@ -605,6 +613,7 @@ def write_reward(
     timings: dict | None = None,
     setup_status: dict | None = None,
     invariants: dict | None = None,
+    timing_skipped: str | None = None,
 ) -> None:
     """Write reward.json + reward.txt with a structured dossier.
 
@@ -643,6 +652,8 @@ def write_reward(
         "snapshots_passed": snapshots_passed,
         "snapshot_verify_ran": snapshot_verify_ran,
         "lsv_error": lsv_error,
+        # Set when test.sh skipped the timing (e.g. "tamper": the host tamper gate rejects the patch).
+        "timing_skipped": timing_skipped,
         # ── structured dossier ────────────────────────────────────────────
         "patch": patch or {},
         "lsv": {
@@ -664,6 +675,7 @@ def write_reward(
         "snapshots": snapshots or {},
         "timings": timings or {},
         "setup": setup_status or {},
+        "tamper_precheck": load_tamper_precheck(LOG_DIR),
     }
 
     (reward_dir / "reward.json").write_text(json.dumps(reward_data, indent=2))
@@ -721,6 +733,11 @@ def main() -> None:
             "it that check skips."
         ),
     )
+    parser.add_argument(
+        "--timing-skipped",
+        default=None,
+        help="Why test.sh skipped the timing (e.g. tamper); recorded in reward.json.",
+    )
     args = parser.parse_args()
 
     # Load all sidecars written by setup.sh / test.sh. Each helper returns
@@ -750,8 +767,10 @@ def main() -> None:
             pytest_summary={},
             timings=timings,
             setup_status=setup_status,
+            timing_skipped=args.timing_skipped,
         )
-        sys.exit(1)
+        # No LSV results is expected when the timing was skipped on purpose.
+        sys.exit(0 if args.timing_skipped else 1)
 
     measure_results = lsv_results.get("measure", {}) or {}
     benchmarks = measure_results.get("benchmarks", {}) or {}
@@ -825,6 +844,7 @@ def main() -> None:
         pytest_summary=pytest_summary,
         timings=timings,
         setup_status=setup_status,
+        timing_skipped=args.timing_skipped,
     )
     if lsv_error:
         print(f"[parser] lsv_error = {lsv_error}")

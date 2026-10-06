@@ -51,6 +51,7 @@ TEST_HELPERS = (
     "pytest_runner.py",
     "jinja_patch_plugin_pandas.py",
     "rebuild.sh",
+    "tamper_precheck.py",
 )
 
 
