@@ -49,7 +49,12 @@ def normalize_difficulty(raw: str | None) -> str:
 
 
 def render_instruction_md(instructions: str) -> str:
-    return (_TEMPLATE_DIR / "instruction.md").read_text().replace("{instructions}", dedent(instructions).strip())
+    text = dedent(instructions).strip()
+    # The stored problem text begins with older tooling notes; the template's own section replaces them.
+    starts = [i for marker in ("**Repository Description**", "**Task Description**") if (i := text.find(marker)) >= 0]
+    if starts:
+        text = text[min(starts) :]
+    return (_TEMPLATE_DIR / "instruction.md").read_text().replace("{instructions}", text)
 
 
 _CREDENTIAL_NAME = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|SUPABASE", re.I)

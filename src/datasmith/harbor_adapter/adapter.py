@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2, rmtree
@@ -49,6 +50,7 @@ TEST_HELPERS = (
     "upload.py",
     "pytest_runner.py",
     "jinja_patch_plugin_pandas.py",
+    "rebuild.sh",
 )
 
 
@@ -112,10 +114,14 @@ class FormulaCodeAdapter:
         )
         _write(out_dir / "task.toml", task_toml)
 
-        config_json = json.dumps({**rec.__dict__, "task_id": rec.task_id}, indent=2)
+        config = {**rec.__dict__, "task_id": rec.task_id}
+        config_json = json.dumps(config, indent=2)
+        # The built image holds no oracle diff; lsv_init.py at image build needs only the top-level folders it touches.
+        patch_roots = sorted({p.split("/")[0] for p in re.findall(r"diff --git a/([^ ]+)", rec.patch) if "/" in p})
+        image_config = {k: v for k, v in config.items() if k not in ("patch", "gt_hash")} | {"patch_roots": patch_roots}
         base_image = rec.container_name or "python:3.11-slim"
         _write(env / "Dockerfile", render_dockerfile(base_image, numba_threads=cpus, lsv_rounds=rounds))
-        _write(env / "config.json", config_json)
+        _write(env / "config.json", json.dumps(image_config, indent=2))
 
         ids = {"task_id": rec.task_id, "owner": rec.owner, "repo": rec.repo, "issue_number": rec.issue_number}
         test_sh = render_template(
