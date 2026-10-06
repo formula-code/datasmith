@@ -34,7 +34,7 @@ REWARD_DIR="/logs/verifier"
 mkdir -p "${LOG_DIR}" "${LOG_DIR}/.snapshots" "${LOG_DIR}/lsv" "${REWARD_DIR}"
 
 # Host measure gate (rl/measure_gate.py), fail-open. Each acquire is logged ("<step> 1|0") so ungated trials can be dropped.
-_MG_URL="${MEASURE_GATE_URL:-http://172.17.0.1:8266}"
+_MG_URL="${MEASURE_GATE_URL:-}"
 mg_acquire() {
   _MG_SID="mg-$1-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(hostname 2>/dev/null || echo h)-$$-${RANDOM}")"
   local resp ok=0
