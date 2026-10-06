@@ -1,6 +1,12 @@
 import importlib
 import pathlib
 
+# Load the env's libstdc++ (through sqlite3's libicu) before pandas can load the older system one; otherwise pytest-cov fails to import.
+try:
+    import sqlite3  # noqa: F401
+except Exception:
+    pass
+
 
 def _patch_jinja_package_loader() -> None:
     try:
