@@ -110,6 +110,22 @@ PYEOF
 SETUP_PHASE="extra_setup_commands"
 {{ extra_setup_commands }}
 
+SETUP_PHASE="baseline_commit"
+# The grader diffs against a commit of this starting tree, so the image's own edits and untracked benchmark suites
+# are not agent work. Run output stays out of it; a nested repository (astropy-benchmarks/) goes in as plain files.
+if [ "$(cat /opt/fc_baseline_sha 2>/dev/null)" != "$(git rev-parse HEAD)" ]; then
+  printf '%s\n' asv_benchmarks.txt solution_patch.diff '*.orig' '*.rej' __pycache__/ '*.py[co]' .asv/ \
+    '/tmp.*' '/*.npz' /test_array.csv '*.nc' '*.nc4' >> .git/info/exclude
+  python -c 'import json, os; c = json.load(open("/workspace/asv.conf.json")); print("\n".join("/" + os.path.relpath(c[k], "/workspace/repo") + "/" for k in ("results_dir", "env_dir", "html_dir") if (c.get(k) or "").startswith("/workspace/repo/")))' >> .git/info/exclude || true
+  git ls-files --others --exclude-standard | { grep '/$' || true; } | while read -r d; do
+    git -C "$d" ls-files -co --exclude-standard | sed "s|^|$d|"
+  done | git update-index --add --stdin
+  git add -A
+  git -c user.name=fc -c user.email=fc@local commit -q --no-verify --allow-empty -m fc-baseline
+  git rev-parse HEAD > /opt/fc_baseline_sha
+  chmod 444 /opt/fc_baseline_sha
+fi
+
 SETUP_PHASE="base_copy"
 # lsv_measure.py times this unpatched copy (with its build) against the patched repo. Overlayfs cannot rename
 # image directories, so the repo is moved out and copied back to make both trees renamable.

@@ -25,6 +25,7 @@ def _run(tmp_path: Path, runner: str) -> subprocess.CompletedProcess:
     (tmp_path / "test_results.json").write_text("{}")
     script = f"""set -euo pipefail
 LOG_DIR={tmp_path}
+FC_BASE=BASE
 ts() {{ date +%s; }}
 mg_release() {{ :; }}
 python() {{ {runner}; }}

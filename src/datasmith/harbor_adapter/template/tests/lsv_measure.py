@@ -161,11 +161,7 @@ def find_asv_config() -> Path:
 
 
 def get_changed_files(base_commit: str) -> list[str]:
-    """Get files changed between base_commit and current working tree.
-
-    Uses `git diff <base_commit> --name-only` which catches both committed
-    and uncommitted changes relative to the base.
-    """
+    """Files that differ from base_commit in the working tree (committed or not), plus new untracked files."""
     result = subprocess.run(
         ["git", "diff", base_commit, "--name-only"],
         capture_output=True,
@@ -175,9 +171,11 @@ def get_changed_files(base_commit: str) -> list[str]:
     if result.returncode != 0:
         print(f"WARNING: git diff failed: {result.stderr}")
         return []
+    untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"], capture_output=True, text=True,
+                               cwd=str(REPO_ROOT)).stdout
 
     files = []
-    for line in result.stdout.strip().splitlines():
+    for line in sorted(set((result.stdout + "\n" + untracked).splitlines())):
         line = line.strip()
         if line:
             path = REPO_ROOT / line
