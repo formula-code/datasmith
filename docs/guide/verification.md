@@ -78,6 +78,16 @@ the build *and* test stages have both passed, so a doomed attempt never pays it.
 | `DATASMITH_VERIFY_MEASURE_ROUNDS` | `2` | LSV timing rounds; matches stage 7 |
 | `DATASMITH_VERIFY_MEASURE_GEOMEAN_MIN` | `1.0` | Threshold for the `speedup_direction` warning |
 
+## Correctness tests in harbor tasks
+
+A harbor task's `tests/test.sh` runs `tests/pytest_runner.py`, which selects tests from the files the patch changes. Tests or snapshots must check correctness, and a trial where neither ran is graded `unverified`.
+
+- Tests that map from the changed files by name run first.
+- When none map and the patch changes Python sources, the runner runs the nearest tests folder above them (`strategy: regression-fallback:package-tests`).
+- When none map and the patch changes compiled sources (C, C++, Cython, Fortran, CUDA, their `.in`, `.src` or `.tp` templates, or build files), the runner runs up to 12 test files from the nearest tests folder above them, best name matches first (`strategy: compiled_fallback`). `test.sh` rebuilds the extensions for the same file types first.
+- The runner then stashes the patch, rebuilds, and runs the same tests at the base commit. A test that passes at base and fails with the patch is a regression.
+- Oracle runs and agent attempts use the same selection.
+
 ## Preflight check
 
 Before running verification, confirm your environment is properly configured:

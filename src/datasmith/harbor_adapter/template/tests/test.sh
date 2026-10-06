@@ -81,7 +81,7 @@ echo "[$(ts)] [test] patch: files=${patch_files} +${patch_added}/-${patch_remove
 FC_REBUILD_CMD=""
 # No pipe into grep -q: under pipefail the early exit of grep can fail the test (SIGPIPE on the writer).
 _changed="$(fc_diff --name-only || true)"
-if grep -qE '\.(pyx|pxd|pxi|c|cc|cpp|cxx|h|hh|hpp)$|(^|/)(setup\.py|setup\.cfg|pyproject\.toml|meson\.build|CMakeLists\.txt)$' <<< "${_changed}"; then
+if grep -qE '\.(pyx|pxd|pxi|c|cc|cpp|cxx|h|hh|hpp|f|f90|cu)(\.in|\.src|\.tp)?$|(^|/)(setup\.py|setup\.cfg|pyproject\.toml|meson\.build|CMakeLists\.txt)$' <<< "${_changed}"; then
   FC_REBUILD_CMD="bash /tests/rebuild.sh"
   echo "[$(ts)] [test] Patch touches compiled sources; rebuilding (log: ${LOG_DIR}/rebuild.log)..."
   if ! ${FC_REBUILD_CMD} > "${LOG_DIR}/rebuild.log" 2>&1; then
