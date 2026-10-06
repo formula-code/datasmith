@@ -927,17 +927,21 @@ if __name__ == "__main__":
     try:
         repo_root = output.get("repo_root") or detect_repo_root()
         selected = output.get("selected_tests") or []
+        extra = _orig_extra
         if not selected:
             fb, strategy = fallback_tests(output.get("changed_files") or [], repo_root)
+            if strategy == "compiled_fallback":
+                # One test file that cannot import (e.g. needs a download) must not stop the others.
+                extra = (extra + " --continue-on-collection-errors").strip()
             if fb:
                 selected = fb
-                agent_res = run_pytest_and_collect(selected, extra_args=_orig_extra, cwd=repo_root)
+                agent_res = run_pytest_and_collect(selected, extra_args=extra, cwd=repo_root)
                 output["results"] = agent_res
                 output["selected_tests"] = selected
                 output["strategy"] = strategy
         if selected:
             output["regression"] = run_base_and_diff(
-                selected, _orig_extra, repo_root, output["results"]
+                selected, extra, repo_root, output["results"]
             )
         else:
             output["regression"] = {"ran": False, "reason": "no tests selected (direct or fallback)"}
