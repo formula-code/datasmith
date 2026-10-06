@@ -1,16 +1,13 @@
 """The rebuild after a patch falls back to an isolated build, as the image build does (old numpy)."""
 
-import re
 import subprocess
 from pathlib import Path
 
-_TEST_SH = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "test.sh"
+_REBUILD_SH = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "rebuild.sh"
 
 
 def _rebuild_script() -> str:
-    text = _TEST_SH.read_text()
-    body = re.search(r"cat > /tmp/fc_rebuild.sh <<'SHEOF'\n(.*?)\nSHEOF", text, re.S).group(1)
-    return re.sub(r"\{\{[^}]*\}\}", "X", body)
+    return _REBUILD_SH.read_text()
 
 
 def _run(tmp_path: Path, fail_no_isolation: bool, fail_isolated: bool = False) -> subprocess.CompletedProcess:

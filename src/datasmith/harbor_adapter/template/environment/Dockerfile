@@ -40,8 +40,8 @@ RUN set -eux; \
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Build-time copies for the baseline measurement only; runtime reads the uploaded /tests. No PYTHONPATH=/opt/lsv:
-# it would shadow the /tests helpers with a frozen copy.
+# Build-time copies for the baseline measurement only; runtime reads the uploaded /tests. This config.json has no patch
+# or gt_hash. No PYTHONPATH=/opt/lsv: it would shadow the /tests helpers with a frozen copy.
 RUN mkdir -p /opt/lsv /tests
 COPY lsv_init.py /opt/lsv/lsv_init.py
 COPY config.json /tests/config.json
@@ -61,6 +61,12 @@ RUN set +e; \
     LSV_OUTPUT_DIR=/opt/lsv/cache FORMULACODE_IMAGE_BASELINE=1 FORMULACODE_IMAGE_CPUS={{ numba_threads }} \
       micromamba run -n "$ENV_NAME" python /opt/lsv/lsv_init.py --rounds "${DATASMITH_LSV_ROUNDS}"; \
     true
+
+# Processes that skip micromamba activation (an agent's `bash -c`) get the task env through /opt/task-env. Set after the
+# baseline so the measurement environment does not change.
+RUN set -e; . /etc/profile.d/asv_build_vars.sh; \
+    ln -sfn "${MAMBA_ROOT_PREFIX:-/opt/conda}/envs/${ENV_NAME}" /opt/task-env; /opt/task-env/bin/python --version
+ENV PATH=/opt/task-env/bin:$PATH
 
 WORKDIR /workspace/repo
 ENTRYPOINT ["/entrypoint.sh"]

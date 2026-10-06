@@ -137,7 +137,8 @@ def detect_source_root() -> Path:
     # only non-skip patch root is one of these, skip step 1 and fall through
     # to the <pkg>/__init__.py search.
     src_layout_holders = {"src", "lib", "python", "packages"}
-    roots = {p.split("/")[0] for p in paths if "/" in p} - skip
+    # The image's build-time config carries patch_roots instead of the patch.
+    roots = set(config.get("patch_roots") or {p.split("/")[0] for p in paths if "/" in p}) - skip
 
     pkg = config.get("repo_name", "").split("/")[-1].replace("-", "_")
 

@@ -88,6 +88,25 @@ SETUP_PHASE="asv_machine"
 python -c 'import socket; from asv.machine import Machine, MachineCollection; MachineCollection.save(socket.gethostname(), {**Machine.get_defaults(), "machine": "dockertest"})' \
   || echo "[$(ts)] [setup] WARN: asv machine registration failed; agents must pass --machine." >&2
 
+SETUP_PHASE="agent_tools"
+# instruction.md names these. /tests is removed before the agent runs, so the rebuild script is copied out.
+install -m 755 /tests/rebuild.sh /usr/local/bin/rebuild-repo
+# The grader's ASV config with absolute paths, so `asv run --config=/workspace/asv.conf.json` works from any folder.
+python - <<'PYEOF' || echo "[$(ts)] [setup] WARN: could not write /workspace/asv.conf.json." >&2
+import json, os, sys
+sys.path.insert(0, "/tests")
+from lsv_init import _load_jsonc, find_asv_config
+conf = find_asv_config()
+cfg = _load_jsonc(conf)
+defaults = {"repo": None, "benchmark_dir": "benchmarks", "env_dir": "env", "results_dir": "results", "html_dir": "html"}
+for key, default in defaults.items():
+    value = cfg.get(key) or default
+    if value and "://" not in value:
+        cfg[key] = os.path.normpath(os.path.join(conf.parent, value))
+with open("/workspace/asv.conf.json", "w") as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
+
 SETUP_PHASE="extra_setup_commands"
 {{ extra_setup_commands }}
 
@@ -109,7 +128,7 @@ lsv_init_start=$(date +%s)
 set +e
 # Serialize the measure through the host gate (rl/measure_gate.py); fail-open. SID uses the kernel uuid
 # because $$ is the same in every container. --connect-timeout keeps a dropped-packet host from stalling -m.
-_MG_URL="${MEASURE_GATE_URL:-http://172.17.0.1:8266}"
+_MG_URL="${MEASURE_GATE_URL:-}"
 _MG_SID="mg-init-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(hostname 2>/dev/null || echo h)-$$-${RANDOM}")"
 # Logged like test.sh's acquires ("<step> 1|0") so the pipeline can drop ungated trials.
 _mg_resp="$(curl -fsS --connect-timeout "${MEASURE_GATE_CONNECT_TIMEOUT:-5}" -m "${MEASURE_GATE_ACQUIRE_WAIT:-7200}" -X POST "${_MG_URL}/acquire?sid=${_MG_SID}" 2>/dev/null)"
