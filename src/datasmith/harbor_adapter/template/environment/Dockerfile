@@ -69,5 +69,10 @@ RUN set -e; . /etc/profile.d/asv_build_vars.sh; \
     ln -sfn "${MAMBA_ROOT_PREFIX:-/opt/conda}/envs/${ENV_NAME}" /opt/task-env; /opt/task-env/bin/python --version
 ENV PATH=/opt/task-env/bin:$PATH
 
+# Tools that instruction.md names for the agent. The verifier runs in its own container (Harbor separate verifier).
+COPY rebuild.sh /usr/local/bin/rebuild-repo
+COPY write_asv_conf.py /opt/lsv/
+RUN chmod 755 /usr/local/bin/rebuild-repo; cd /workspace/repo && python /opt/lsv/write_asv_conf.py || true
+
 WORKDIR /workspace/repo
 ENTRYPOINT ["/entrypoint.sh"]

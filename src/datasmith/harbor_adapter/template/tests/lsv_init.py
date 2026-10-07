@@ -1,6 +1,6 @@
 """LSV Phase 1: Initialize dependency graph and record baseline timing.
 
-Called from setup.sh before the agent runs. Creates a LightspeedSession,
+Called from prepare.sh in the verifier container, before the agent tree is recreated. Creates a LightspeedSession,
 runs initialize_diffcheck to build the dependency database and baseline
 timing, then captures a snapshot of the benchmark environment.
 
@@ -579,7 +579,7 @@ def image_reuse_reason(image_meta: dict | None, head: str | None, current_fp: di
 
 
 def image_commit(head: str | None) -> str | None:
-    """The commit the image build ran at: the parent of setup.sh's baseline commit when HEAD is that commit."""
+    """The commit the image build ran at: the parent of prepare.sh's baseline commit when HEAD is that commit."""
     try:
         if head and Path(BASELINE_SHA_FILE).read_text().strip() == head:
             return subprocess.check_output(["git", "rev-parse", f"{head}^"], cwd=str(REPO_ROOT), text=True).strip()
@@ -734,7 +734,7 @@ def main() -> None:
         # baseline are exactly the unmeasurable ones -> no speedup contribution ->
         # reward unchanged. The image lsv_init_results.json carries baseline_sha for
         # invariant #15.
-        # The image was measured on this same tree before setup.sh committed it.
+        # The image was measured on this same tree before prepare.sh committed it.
         _image["image_baseline_sha"], _image["baseline_sha"] = _image.get("baseline_sha"), _head
         _image["baseline_reuse"] = {"reused": True, "reason": None, "paired": _paired, "trial_fingerprint": _fingerprint}
         (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(_image, indent=2))
