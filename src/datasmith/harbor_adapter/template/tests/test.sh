@@ -185,11 +185,15 @@ echo '{"results": {"exit_code": 0, "summary": {"error": 0, "failed": 0}, "detail
 pytest_end=$(date +%s)
 mg_release
 # A killed or timed-out runner leaves no test_results.json; the parser then records tests as not run and the timings are kept.
-if [ "${_py_rc:-0}" -ne 0 ]; then echo "[$(ts)] [test] pytest runner exited ${_py_rc}; continuing without test results" >&2; rm -f "${LOG_DIR}/test_results.json"; fi
+# Exit 3: the runner could not restore the agent's tree after the base run, so timing would measure the wrong code.
+if [ "${_py_rc:-0}" -eq 3 ]; then
+  FC_TIMING_SKIPPED="tree_not_restored"
+  echo "[$(ts)] [test] pytest runner could not restore the agent tree; skipping LSV measure." >&2
+elif [ "${_py_rc:-0}" -ne 0 ]; then echo "[$(ts)] [test] pytest runner exited ${_py_rc}; continuing without test results" >&2; rm -f "${LOG_DIR}/test_results.json"; fi
 
 # ── Pytest regression: the reward fails the patch whatever its timing, so the timing is skipped ──
 # The oracle is the reference and is always timed.
-if [ "${AGENT_KEY}" != "oracle" ] && python - "${LOG_DIR}/test_results.json" <<'PYEOF'
+if [ -z "${FC_TIMING_SKIPPED}" ] && [ "${AGENT_KEY}" != "oracle" ] && python - "${LOG_DIR}/test_results.json" <<'PYEOF'
 import json, sys
 try:
     reg = json.load(open(sys.argv[1])).get("regression") or {}

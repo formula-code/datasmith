@@ -12,7 +12,7 @@ import pytest
 from datasmith.harbor_adapter.utils import render_template
 
 
-def _run(tmp_path: Path, patch_files: int, regressed: int) -> tuple[subprocess.CompletedProcess, list[str]]:
+def _run(tmp_path: Path, patch_files: int, regressed: int, runner_rc: int = 0) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run test.sh from the empty-patch check to the end, with the gate, the runners and parser.py stubbed."""
     text = render_template(
         "tests/test.sh", base_commit="BASE", run_pytest=True, rounds=None, task_id="t", owner="o", repo="r", issue_number=1
@@ -33,7 +33,7 @@ timeout() {{ shift 2; "$@"; }}
 python() {{
   case "$1" in -) command python3 "$@"; return;; esac
   echo "python $*" >> {log}
-  case "$*" in *pytest_runner*) echo '{results}' > {tmp_path}/test_results.json;; esac
+  case "$*" in *pytest_runner*) echo '{results}' > {tmp_path}/test_results.json; return {runner_rc};; esac
 }}
 {report}
 {body}
@@ -67,6 +67,14 @@ def test_clean_pytest_runs_lsv_after_pytest(tmp_path):
     assert "lsv_measure_s" in json.loads((tmp_path / "test_timings.json").read_text())
 
 
+def test_runner_that_cannot_restore_the_tree_skips_lsv(tmp_path):
+    out, calls = _run(tmp_path, patch_files=2, regressed=0, runner_rc=3)
+    assert out.returncode == 0, out.stderr
+    assert not any("lsv_measure" in c for c in calls)
+    assert any("parser.py" in c and "--timing-skipped tree_not_restored" in c for c in calls)
+    assert (tmp_path / "test_results.json").exists()
+
+
 def test_parser_writes_reward_without_lsv_results_when_timing_was_skipped(tmp_path, monkeypatch):
     path = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "parser.py"
     spec = importlib.util.spec_from_file_location("fc_parser_order_test", path)
@@ -84,3 +92,19 @@ def test_parser_writes_reward_without_lsv_results_when_timing_was_skipped(tmp_pa
     reward = json.loads((tmp_path / "verifier" / "reward.json").read_text())
     assert reward["timing_skipped"] == "no_patch" and reward["patch"]["applied"] is False
     assert reward["tests_passed"] is None and float((tmp_path / "verifier" / "reward.txt").read_text()) < 0
+
+
+def test_tree_not_restored_is_an_lsv_error(tmp_path, monkeypatch):
+    path = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "parser.py"
+    spec = importlib.util.spec_from_file_location("fc_parser_restore_test", path)
+    parser = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(parser)
+    (tmp_path / "patch_info.json").write_text(json.dumps({"applied": True, "files": 1}))
+    monkeypatch.setattr(parser, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(parser, "LSV_DIR", tmp_path / "lsv")
+    monkeypatch.setattr(parser, "REWARD_DIR", tmp_path / "verifier")
+    argv = ["parser.py", "--owner", "o", "--repo", "r", "--issue-number", "1", "--agent-key", "qwen-coder"]
+    monkeypatch.setattr("sys.argv", [*argv, "--timing-skipped", "tree_not_restored"])
+    with pytest.raises(SystemExit):
+        parser.main()
+    assert json.loads((tmp_path / "verifier" / "reward.json").read_text())["lsv_error"] == "tree_not_restored"

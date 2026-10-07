@@ -754,6 +754,8 @@ def main() -> None:
             {"level4": 0.0},
             tests_passed if args.timing_skipped else False,
             snapshot_block,
+            # The agent tree may differ from what the agent left, so the trial fails instead of scoring 0.
+            "tree_not_restored" if args.timing_skipped == "tree_not_restored" else None,
             patch=patch_info,
             lsv_init_summary=lsv_init_summary,
             lsv_measure_raw=None,
