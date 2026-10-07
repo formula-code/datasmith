@@ -69,6 +69,19 @@ def test_removes_the_wheel_and_keeps_the_editable_install(tmp_path, monkeypatch)
     ]
 
 
+def test_a_copy_built_from_the_repo_is_reinstalled_editable_not_deleted(tmp_path, monkeypatch):
+    m = _load()
+    site = tmp_path / "site-packages"
+    by_url = _dist(site, "Bottleneck", ["bottleneck/__init__.py"], '{"url": "file:///workspace/repo", "dir_info": {}}')
+    monkeypatch.setattr(m.md, "distributions", lambda: [by_url])
+    calls = []
+    monkeypatch.setattr(m, "reinstall_editable", lambda src: calls.append(src) or True)
+    removed = m.remove_shadow_copies(["bottleneck"])
+    assert calls == [Path("/workspace/repo")]
+    assert removed == [f"Bottleneck==1.0 ({site.resolve()}) reinstalled editable"]
+    assert (site / "bottleneck" / "__init__.py").is_file()
+
+
 def test_outside_root(tmp_path):
     m = _load()
     found = {"a": str(tmp_path / "repo/a/__init__.py"), "b": "/site-packages/b/__init__.py", "c": None}
