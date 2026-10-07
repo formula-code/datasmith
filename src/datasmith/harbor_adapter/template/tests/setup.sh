@@ -125,6 +125,8 @@ if [ "$(cat /opt/fc_baseline_sha 2>/dev/null)" != "$(git rev-parse HEAD)" ]; the
     git -C "$d" ls-files -co --exclude-standard | sed "s|^|$d|"
   done | git update-index --add --stdin
   git add -A
+  # A commit with many loose objects starts a background gc, which deletes objects while base_copy moves the repo.
+  git config gc.auto 0
   git -c user.name=fc -c user.email=fc@local commit -q --no-verify --allow-empty -m fc-baseline
   git rev-parse HEAD > /opt/fc_baseline_sha
   chmod 444 /opt/fc_baseline_sha
