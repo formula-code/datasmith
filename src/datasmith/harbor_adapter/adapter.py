@@ -51,6 +51,7 @@ TEST_HELPERS = (
     "pytest_runner.py",
     "jinja_patch_plugin_pandas.py",
     "rebuild.sh",
+    "project_imports.py",
 )
 
 
@@ -98,7 +99,8 @@ class FormulaCodeAdapter:
         for name in TEST_HELPERS:
             copy2(self.template_dir / "tests" / name, tests / name)
         # The Dockerfile's baseline measurement runs lsv_init.py at image build, before /tests exists.
-        copy2(self.template_dir / "tests" / "lsv_init.py", env / "lsv_init.py")
+        for name in ("lsv_init.py", "project_imports.py"):
+            copy2(self.template_dir / "tests" / name, env / name)
 
         _write(out_dir / "instruction.md", render_instruction_md(rec.instructions))
         if expected_n is not None:

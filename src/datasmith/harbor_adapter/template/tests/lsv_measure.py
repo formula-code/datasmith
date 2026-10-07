@@ -385,6 +385,21 @@ def main() -> None:
         machine="dockertest",
     )
 
+    from project_imports import config_packages, shadowed
+
+    try:
+        shadow = shadowed(config_packages(changed, skip=session.benchmark_dir), session)
+    except Exception as e:  # noqa: BLE001 -- a failed probe is logged; timing goes on
+        print(f"[{_ts()}] [lsv_measure] WARNING: import probe failed: {e}")
+        shadow = None
+    if shadow:
+        # Timing would measure the other copy, not the repo, so it is skipped.
+        err = "project shadowed: " + ", ".join(f"{k} -> {v}" for k, v in shadow.items())
+        print(f"[{_ts()}] [lsv_measure] ERROR: {err}; timing skipped")
+        _write_combined_results({"benchmarks": {}, "selected_count": 0, "total_count": 0, "skipped_count": 0,
+                                 "timing": {"total_s": 0.0}, "error": err}, shadow)
+        return
+
     if BASE_COPY.is_dir():
         print(f"[{_ts()}] [phase] LSV paired measure: {BASE_COPY} vs {REPO_ROOT}, {args.rounds} rounds")
         try:
@@ -394,7 +409,7 @@ def main() -> None:
             measure_data = {"benchmarks": {}, "selected_count": 0, "total_count": 0, "skipped_count": 0,
                             "timing": {"total_s": 0.0}, "error": f"LSV paired measure raised: {e}"}
         (OUTPUT_DIR / "lsv_measure_results.json").write_text(json.dumps(_finite(measure_data), indent=2))
-        _write_combined_results(_finite(measure_data))
+        _write_combined_results(_finite(measure_data), shadow)
         return
 
     # Run measure_impacted
@@ -434,7 +449,7 @@ def main() -> None:
             "timing": {"total_s": 0.0},
             "error": err,
         }
-        _write_combined_results(empty_measure)
+        _write_combined_results(empty_measure, shadow)
         return
 
     print(f"  selected: {measure_result.selected_count}/{measure_result.total_count}")
@@ -518,13 +533,15 @@ def main() -> None:
     (OUTPUT_DIR / "lsv_measure_results.json").write_text(
         json.dumps(measure_data, indent=2)
     )
-    _write_combined_results(measure_data)
+    _write_combined_results(measure_data, shadow)
 
     print(f"[{_ts()}] [lsv_measure] Complete. Results at {OUTPUT_DIR}")
 
 
-def _write_combined_results(measure_data: dict) -> None:
-    """Merge init and measure results into a single lsv_results.json."""
+def _write_combined_results(measure_data: dict, shadow: dict | None = None) -> None:
+    """Merge init and measure results into a single lsv_results.json. shadow: packages imported from outside the repo ({} = checked, none)."""
+    if shadow is not None:
+        measure_data["project_shadowed"] = shadow
     init_path = OUTPUT_DIR / "lsv_init_results.json"
     init_data = {}
     if init_path.exists():

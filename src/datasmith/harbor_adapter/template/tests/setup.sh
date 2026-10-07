@@ -83,6 +83,10 @@ command -v snapshot-tool >/dev/null 2>&1 \
   || micromamba run -n "$ENV_NAME" bash -c 'command -v snapshot-tool >/dev/null 2>&1' \
   || { echo "[$(ts)] [setup] FATAL: snapshot-tool missing in '$ENV_NAME' — the correctness gate would be inert; rebuild the task image." >&2; exit 1; }
 
+SETUP_PHASE="project_imports"
+# A second installed copy of the project (a wheel pulled in as a dependency) hides the repo from benchmark processes.
+python /tests/project_imports.py --remove || echo "[$(ts)] [setup] WARN: project import check failed." >&2
+
 SETUP_PHASE="asv_machine"
 # `asv run` without --machine looks up the hostname in ~/.asv-machine.json and stops if it is missing; results go to dockertest.
 python -c 'import socket; from asv.machine import Machine, MachineCollection; MachineCollection.save(socket.gethostname(), {**Machine.get_defaults(), "machine": "dockertest"})' \
