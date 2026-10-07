@@ -37,6 +37,15 @@ def test_import_names_of_changed_files(tmp_path):
     assert got == ["numpy", "skimage"]
 
 
+def test_test_and_benchmark_packages_are_not_the_project(tmp_path):
+    m = _load()
+    for f in ("flox/__init__.py", "tests/__init__.py", "benchmarks/__init__.py"):
+        (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f).write_text("")
+    files = ["flox/xarray.py", "tests/test_xarray.py", "benchmarks/reduce.py"]
+    assert m.import_packages([tmp_path / f for f in files], tmp_path) == ["flox"]
+
+
 def test_removes_the_wheel_and_keeps_the_editable_install(tmp_path, monkeypatch):
     m = _load()
     site = tmp_path / "site-packages"
