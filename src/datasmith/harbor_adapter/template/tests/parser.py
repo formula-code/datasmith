@@ -456,11 +456,18 @@ def _ti_baseline_from_cache(ctx: dict) -> bool | None:
     return cached is False
 
 
+def _ti_project_shadowed(ctx: dict) -> bool | None:
+    """FATAL -- the benchmark processes imported the project from outside the repo, so timing was skipped."""
+    shadow = ctx.get("project_shadowed")
+    return None if shadow is None else not shadow
+
+
 # (id, severity, check). Severity: "fatal" marks the reward untrustworthy;
 # "warn" is recorded and surfaced.
 TRIAL_INVARIANTS = (
     ("baseline_sha_mismatch", "fatal", _ti_baseline_sha),
     ("degenerate_baseline", "fatal", _ti_degenerate_baseline),
+    ("project_shadowed", "fatal", _ti_project_shadowed),
     ("oracle_speedup_direction", "warn", _ti_speedup_direction),
     ("dilution_ratio", "warn", _ti_dilution),
     ("snapshot_asv_factor", "warn", _ti_snapshot_factor),
@@ -538,6 +545,7 @@ def build_trial_context(
         "expected_n": expected_n,
         "snapshot_factor": _snapshot_asv_factor(snapshot_block, speedups or {}),
         "baseline_from_cache": baseline_from_cache,
+        "project_shadowed": measure.get("project_shadowed"),
     }
 
 
@@ -643,6 +651,7 @@ def write_reward(
         "snapshots_passed": snapshots_passed,
         "snapshot_verify_ran": snapshot_verify_ran,
         "lsv_error": lsv_error,
+        "project_shadowed": (lsv_measure_raw or {}).get("project_shadowed"),
         # ── structured dossier ────────────────────────────────────────────
         "patch": patch or {},
         "lsv": {
