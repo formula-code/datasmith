@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 from glob import glob
 from pathlib import Path
@@ -561,6 +562,11 @@ def run_pytest_and_collect(test_paths, extra_args=None, cwd=None):
 
     plugin = _ResultsPlugin()
     _attach_warning_hook(plugin, pytest)
+
+    # As `python -m pytest` from the repo: the repo's package must win over another copy of it in site-packages.
+    repo_dir = os.path.abspath(base)
+    if not sys.path or os.path.abspath(sys.path[0] or ".") != repo_dir:
+        sys.path.insert(0, repo_dir)
 
     args = unique_paths + list(extra_args)
     exit_code = pytest.main(args=args, plugins=[plugin])
