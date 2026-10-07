@@ -12,18 +12,21 @@ import pytest
 from datasmith.harbor_adapter.utils import render_template
 
 
-def _run(tmp_path: Path, patch_files: int, regressed: int, runner_rc: int = 0) -> tuple[subprocess.CompletedProcess, list[str]]:
+def _run(
+    tmp_path: Path, patch_files: int, regressed: int, runner_rc: int = 0, env: str = ""
+) -> tuple[subprocess.CompletedProcess, list[str]]:
     """Run test.sh from the empty-patch check to the end, with the gate, the runners and parser.py stubbed."""
     text = render_template(
         "tests/test.sh", base_commit="BASE", run_pytest=True, rounds=None, task_id="t", owner="o", repo="r", issue_number=1
     )
     report = text[text.index('FC_TIMING_SKIPPED=""') : text.index("test_start=$(date +%s)")]
-    body = text[text.index("# ── Empty patch") :]
+    body = text[text.index("# ── Empty patch") :].replace("/workspace/.fc_base", str(tmp_path / "base"))
     results = json.dumps({"results": {"exit_code": 0}, "regression": {"ran": True, "n_regressed": regressed}})
     log = tmp_path / "calls.txt"
     script = f"""set -euo pipefail
 LOG_DIR={tmp_path} OWNER=o REPO=r ISSUE_NUMBER=1 FC_BASE=BASE AGENT_KEY=qwen-coder BENCHMARK_DIR=
 patch_files={patch_files}
+{env}
 test_start=$(date +%s)
 ts() {{ date +%s; }}
 fc_diff() {{ :; }}
@@ -73,6 +76,30 @@ def test_runner_that_cannot_restore_the_tree_skips_lsv(tmp_path):
     assert not any("lsv_measure" in c for c in calls)
     assert any("parser.py" in c and "--timing-skipped tree_not_restored" in c for c in calls)
     assert (tmp_path / "test_results.json").exists()
+
+
+def _digest(tmp_path: Path) -> str:
+    tests = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests"
+    setup, test = ((tests / f).read_text() for f in ("setup.sh", "test.sh"))
+    fn = setup[setup.index("fc_base_digest() {") : setup.index("[ -d /workspace/.fc_base ]")]
+    assert fn in test  # setup.sh and test.sh hash the base copy the same way
+    fn = fn.replace("/workspace/.fc_base", str(tmp_path / "base"))
+    return subprocess.run(["bash", "-c", fn + "fc_base_digest"], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_changed_base_copy_skips_lsv(tmp_path):
+    (tmp_path / "base" / "pkg").mkdir(parents=True)
+    (tmp_path / "base" / "pkg" / "core.py").write_text("x = 1\n")
+    digest = _digest(tmp_path)
+    out, calls = _run(tmp_path, patch_files=2, regressed=0, env=f"FC_BASE_DIGEST={digest}")
+    assert out.returncode == 0, out.stderr
+    assert any("lsv_measure" in c for c in calls)
+    (tmp_path / "base" / "pkg" / "core.py").write_text("import time; time.sleep(1)\nx = 1\n")
+    (tmp_path / "calls.txt").unlink()
+    out, calls = _run(tmp_path, patch_files=2, regressed=0, env=f"FC_BASE_DIGEST={digest}")
+    assert out.returncode == 0, out.stderr
+    assert not any("lsv_measure" in c for c in calls)
+    assert any("parser.py" in c and "--timing-skipped base_changed" in c for c in calls)
 
 
 def test_parser_writes_reward_without_lsv_results_when_timing_was_skipped(tmp_path, monkeypatch):

@@ -159,4 +159,11 @@ if [ $lsv_exit -ne 0 ]; then
   exit $lsv_exit
 fi
 echo "[$(ts)] [setup] LSV init complete."
+
+SETUP_PHASE="base_digest"
+# sha256 over every file and link in the base copy; harbor reads the setup value before the agent runs.
+fc_base_digest() {
+  (cd /workspace/.fc_base && { find . \( -type f -o -type l \) -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -- 2>/dev/null; find . -type l -printf '%p %l\n' | LC_ALL=C sort; }) | sha256sum | cut -d' ' -f1
+}
+[ -d /workspace/.fc_base ] && fc_base_digest > /opt/fc_base_digest
 SETUP_PHASE="complete"

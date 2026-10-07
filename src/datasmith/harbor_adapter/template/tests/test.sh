@@ -67,7 +67,11 @@ test_start=$(date +%s)
 # ── Capture patch + detect whether the agent actually changed anything ───
 echo "[$(ts)] [test] Capturing patch..."
 # setup.sh commits the starting tree and writes its sha; without that file (an older setup.sh) the upstream base is used.
-FC_BASE="$(cat /opt/fc_baseline_sha 2>/dev/null || echo {{ base_commit }})"
+# FC_BASELINE_SHA is the value harbor read before the agent ran; the file can be rewritten by the agent.
+FC_BASE="${FC_BASELINE_SHA:-$(cat /opt/fc_baseline_sha 2>/dev/null || echo {{ base_commit }})}"
+[ -n "${FC_BASELINE_SHA:-}" ] && [ "$(cat /opt/fc_baseline_sha 2>/dev/null)" != "${FC_BASELINE_SHA}" ] && echo "[$(ts)] [test] /opt/fc_baseline_sha differs from the value read at setup; using the setup value" >&2
+# git replace objects could hide edits from the diff.
+export GIT_NO_REPLACE_OBJECTS=1
 # Intent-to-add entries show new files in the diff. They go in a copy of the index, because git stash rejects them.
 FC_INDEX="$(mktemp)"
 cp .git/index "${FC_INDEX}" 2>/dev/null || rm -f "${FC_INDEX}"
@@ -204,6 +208,15 @@ PYEOF
 then
   FC_TIMING_SKIPPED="pytest_regression"
   echo "[$(ts)] [test] pytest found regressed tests; skipping LSV measure."
+fi
+
+# sha256 over every file and link in the base copy; harbor reads the setup value before the agent runs.
+fc_base_digest() {
+  (cd /workspace/.fc_base && { find . \( -type f -o -type l \) -print0 | LC_ALL=C sort -z | xargs -0r sha256sum -- 2>/dev/null; find . -type l -printf '%p %l\n' | LC_ALL=C sort; }) | sha256sum | cut -d' ' -f1
+}
+if [ -z "${FC_TIMING_SKIPPED}" ] && [ -n "${FC_BASE_DIGEST:-}" ] && { [ ! -d /workspace/.fc_base ] || [ "$(fc_base_digest)" != "${FC_BASE_DIGEST}" ]; }; then
+  FC_TIMING_SKIPPED="base_changed"
+  echo "[$(ts)] [test] the base copy changed after setup; skipping LSV measure." >&2
 fi
 
 # ── LSV Phase 2: measure_impacted ────────────────────────────────────────
