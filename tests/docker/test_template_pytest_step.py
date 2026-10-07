@@ -16,7 +16,7 @@ _TEST_SH = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / 
 def _pytest_block() -> str:
     text = _TEST_SH.read_text()
     start = text.index('echo "[$(ts)] [test] Running pytest..."')
-    end = text.index("# Per-step timings")
+    end = text.index("# ── Pytest regression")
     block = re.sub(r"\{%-? else %\}.*?\{%-? endif %\}", "", text[start:end], flags=re.DOTALL)
     return re.sub(r"\{\{[^}]*\}\}", "BASE", block)
 

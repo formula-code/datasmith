@@ -605,6 +605,7 @@ def write_reward(
     timings: dict | None = None,
     setup_status: dict | None = None,
     invariants: dict | None = None,
+    timing_skipped: str | None = None,
 ) -> None:
     """Write reward.json + reward.txt with a structured dossier.
 
@@ -643,6 +644,8 @@ def write_reward(
         "snapshots_passed": snapshots_passed,
         "snapshot_verify_ran": snapshot_verify_ran,
         "lsv_error": lsv_error,
+        # Set when test.sh skipped the timing: "no_patch" (empty patch) or "pytest_regression".
+        "timing_skipped": timing_skipped,
         # ── structured dossier ────────────────────────────────────────────
         "patch": patch or {},
         "lsv": {
@@ -721,6 +724,11 @@ def main() -> None:
             "it that check skips."
         ),
     )
+    parser.add_argument(
+        "--timing-skipped",
+        default=None,
+        help="Why test.sh skipped the timing (no_patch, pytest_regression); recorded in reward.json.",
+    )
     args = parser.parse_args()
 
     # Load all sidecars written by setup.sh / test.sh. Each helper returns
@@ -730,6 +738,8 @@ def main() -> None:
     timings = load_timings(LOG_DIR)
     snapshot_block = summarize_snapshots(LOG_DIR)
     setup_status = load_setup_status(LOG_DIR)
+    tests_passed, _, test_raw = load_test_results(LOG_DIR)
+    pytest_summary = summarize_pytest(test_raw)
 
     # Load LSV results
     lsv_results = load_lsv_results(LSV_DIR)
@@ -742,16 +752,18 @@ def main() -> None:
             None,
             {},
             {"level4": 0.0},
-            False,
+            tests_passed if args.timing_skipped else False,
             snapshot_block,
             patch=patch_info,
             lsv_init_summary=lsv_init_summary,
             lsv_measure_raw=None,
-            pytest_summary={},
+            pytest_summary=pytest_summary,
             timings=timings,
             setup_status=setup_status,
+            timing_skipped=args.timing_skipped,
         )
-        sys.exit(1)
+        # No LSV results is expected when the timing was skipped on purpose.
+        sys.exit(0 if args.timing_skipped else 1)
 
     measure_results = lsv_results.get("measure", {}) or {}
     benchmarks = measure_results.get("benchmarks", {}) or {}
@@ -785,10 +797,6 @@ def main() -> None:
                 print("[parser] Could not fetch oracle data; advantage will be null")
         else:
             print("[parser] SUPABASE_URL not set; skipping advantage computation")
-
-    # Load test results + summarize pytest into a dossier block.
-    tests_passed, _, test_raw = load_test_results(LOG_DIR)
-    pytest_summary = summarize_pytest(test_raw)
 
     # Trial-time invariants: is this trial's reward trustworthy?
     trial_ctx = build_trial_context(
@@ -825,6 +833,7 @@ def main() -> None:
         pytest_summary=pytest_summary,
         timings=timings,
         setup_status=setup_status,
+        timing_skipped=args.timing_skipped,
     )
     if lsv_error:
         print(f"[parser] lsv_error = {lsv_error}")
