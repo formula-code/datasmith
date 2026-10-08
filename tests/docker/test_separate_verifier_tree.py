@@ -169,3 +169,12 @@ def test_quoted_path_sitecustomize_is_refused(tmp_path):
     verifier, _ = _collect_and_recreate(tmp_path, edit)
     assert (verifier / "agent_tree.txt").read_text().strip() == "tree_diff_refused"
     assert not (verifier / "é").exists()
+
+
+def test_diff_with_package_metadata_is_refused(tmp_path):
+    def edit(agent: Path) -> None:
+        (agent / "evil-0.dist-info").mkdir()
+        (agent / "evil-0.dist-info" / "entry_points.txt").write_text("[pytest11]\nevil = evil\n")
+
+    verifier, _ = _collect_and_recreate(tmp_path, edit)
+    assert (verifier / "agent_tree.txt").read_text().strip() == "tree_diff_refused"

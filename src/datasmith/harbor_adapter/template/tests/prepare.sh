@@ -144,10 +144,10 @@ echo "[$(ts)] [prepare] LSV init complete."
 SETUP_PHASE="agent_tree"
 # The agent's tree is the base commit plus tree.diff; ignored files (the build) stay as the image has them.
 # A missing or broken tree.diff leaves the starting tree, so the trial has no patch (no_patch).
-# Symlinks, *.pth and site/usercustomize.py run code outside the patched sources, so such a diff is refused.
+# Symlinks, *.pth, site/usercustomize.py and package metadata (entry points) run code outside the patched sources.
 _refused="$( { git apply --summary /fc_submission/tree.diff 2>/dev/null | grep -E ' 120000( |$)' || true; \
   git apply --numstat -z /fc_submission/tree.diff 2>/dev/null | tr '\0' '\n' | sed -E 's/^[0-9-]+\t[0-9-]+\t//' \
-    | grep -E '(^|/)(site|user)customize\.py$|\.pth$' || true; } )"
+    | grep -E '(^|/)(site|user)customize\.py$|\.pth$|\.(dist|egg)-info/' || true; } )"
 if [ -n "${_refused}" ]; then
   echo "[$(ts)] [prepare] tree.diff refused: ${_refused}" >&2
   echo tree_diff_refused > /logs/artifacts/agent_tree.txt

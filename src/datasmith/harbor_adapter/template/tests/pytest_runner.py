@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from glob import glob
 from pathlib import Path
@@ -375,33 +376,35 @@ def _sections(text):
     return [(name, "".join(lines)) for name, lines in blocks]
 
 
-def restore_pytest_sections(base_text, agent_text, pattern):
-    """``agent_text`` with its pytest sections replaced by those of ``base_text``; None when they already match."""
-    rx = re.compile(pattern + "$")
-    pick = lambda text, keep: [b for n, b in _sections(text) if bool(n and rx.match(n)) == keep]  # noqa: E731
-    base_pytest, agent_pytest = "".join(pick(base_text, True)), "".join(pick(agent_text, True))
-    if base_pytest.strip() == agent_pytest.strip():
-        return None
-    rest = "".join(pick(agent_text, False))
-    return rest.rstrip("\n") + ("\n\n" + base_pytest if base_pytest else "\n")
+_PYTEST_CONFIG_FILES = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
+
+
+def write_base_pytest_config(base_ref, repo_root):
+    """A copy of the base commit's pytest config file, picked in pytest's order, for ``-c``; an empty one if none."""
+    out = tempfile.mkdtemp(prefix="fc_pytest_cfg_")
+    for name in _PYTEST_CONFIG_FILES:
+        code, text, _ = _run(["git", "show", "%s:%s" % (base_ref, name)], cwd=repo_root)
+        if code != 0:
+            continue
+        if name in _PYTEST_SECTIONS and not any(n and re.match(_PYTEST_SECTIONS[name] + "$", n) for n, _ in _sections(text)):
+            continue
+        path = os.path.join(out, name)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+    path = os.path.join(out, "pytest.ini")
+    with open(path, "w") as fh:
+        fh.write("[pytest]\n")
+    return path
 
 
 def restore_test_edits(base_ref, repo_root):
     """Put the test files back to ``base_ref`` so the agent cannot weaken the tests that judge it."""
-    edits = {"modified": [], "added": [], "deleted": [], "config_changed": [], "config_restored": []}
+    edits = {"modified": [], "added": [], "deleted": [], "config_changed": []}
     for path, status in sorted(_changed_vs(base_ref, repo_root).items()):
-        name = os.path.basename(path)
-        if name in _PYTEST_SECTIONS:
+        # pytest reads the base config through -c (write_base_pytest_config), so config edits are only recorded.
+        if os.path.basename(path) in _PYTEST_CONFIG_FILES:
             edits["config_changed"].append(path)
-            full = os.path.join(repo_root, path)
-            code, base_text, _ = _run(["git", "show", "%s:%s" % (base_ref, path)], cwd=repo_root)
-            if status != "D" and os.path.isfile(full):
-                with open(full) as fh:
-                    fixed = restore_pytest_sections(base_text if code == 0 else "", fh.read(), _PYTEST_SECTIONS[name])
-                if fixed is not None:
-                    with open(full, "w") as fh:
-                        fh.write(fixed)
-                    edits["config_restored"].append(path)
         elif is_test_path(path):
             edits[{"A": "added", "D": "deleted"}.get(status, "modified")].append(path)
     _checkout(base_ref, edits["modified"] + edits["deleted"], repo_root)
@@ -434,6 +437,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
     reverted = bool(changed)
     restore_ok = True
     base_oc = {}
+    base_plugins = None
     base_error = None
     # test.sh sets this when the patch touches compiled sources; base must not import the patched .so.
     rebuild = os.environ.get("FC_REBUILD_CMD")
@@ -456,7 +460,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
                 "spec = importlib.util.spec_from_file_location('fc_pytest_runner', %r); "
                 "P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P); "
                 "r = P.run_pytest_and_collect(%r, extra_args=%r, cwd=%r); "
-                "open(%r, 'w').write(json.dumps(r.get('tests', [])))"
+                "open(%r, 'w').write(json.dumps({'tests': r.get('tests', []), 'plugins': r.get('plugins', [])}))"
             ) % (os.path.dirname(self_path), self_path, list(selected_tests), extra_args, repo_root, tf)
             # Own pycache: a base file with the agent file's size and mtime would load the agent bytecode.
             _old_pyc = os.environ.get("PYTHONPYCACHEPREFIX")
@@ -470,7 +474,9 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
                     os.environ["PYTHONPYCACHEPREFIX"] = _old_pyc
             try:
                 with open(tf) as _fh:
-                    base_oc = _final_outcomes({"tests": json.load(_fh)})
+                    base_res = json.load(_fh)
+                base_oc = _final_outcomes(base_res)
+                base_plugins = base_res.get("plugins", [])
             except Exception:  # noqa: BLE001 — treat an unreadable base run as "no base data"
                 base_oc = {}
                 base_error = "base run produced no results (rc=%s): %s" % (
@@ -508,11 +514,16 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
     shutil.rmtree(backup, ignore_errors=True)
     # Passing at base and not passing with the agent: failed, error, skipped, xfailed, or not collected.
     regressed = sorted(n for n, o in base_oc.items() if o == "passed" and agent_oc.get(n) not in ("passed", "xpassed"))
+    # A pytest plugin that only the agent run loads (an entry point from the agent's package) can rewrite reports.
+    agent_only_plugins = sorted(set((agent_results or {}).get("plugins", [])) - set(base_plugins or []))
+    if base_plugins is not None:
+        regressed += ["plugin:%s" % n for n in agent_only_plugins]
     out = {
         "ran": bool(reverted and selected_tests and base_oc),
         "reverted": reverted,
         "restore_ok": restore_ok,
         "base_ref": base_ref,
+        "agent_only_plugins": agent_only_plugins,
         "n_selected_tests": len(selected_tests),
         "n_agent_tests": len(agent_oc),
         "n_base_pass": sum(1 for o in base_oc.values() if o == "passed"),
@@ -622,6 +633,10 @@ class _ResultsPlugin(object):
     def pytest_sessionfinish(self, session, exitstatus):
         self.results["exit_code"] = int(exitstatus)
         self.results["duration"] = time.time() - self.results["start_time"]
+        config = session.config
+        self.results["config_file"] = str(getattr(config, "inipath", None) or getattr(config, "inifile", None) or "")
+        # Anonymous plugins are named by id(); the rest (entry points, -p modules, conftests) must match the base run.
+        self.results["plugins"] = sorted(n for n, _ in config.pluginmanager.list_name_plugin() if n and not n.isdigit())
 
     def pytest_collectreport(self, report):
         if report.failed:
@@ -712,6 +727,9 @@ def run_pytest_and_collect(test_paths, extra_args=None, cwd=None):
         sys.path.insert(0, repo_dir)
 
     args = unique_paths + list(extra_args)
+    # Both runs use the base commit's pytest configuration; the agent's config files are never read.
+    if os.environ.get("FC_PYTEST_CONFIG"):
+        args = ["-c", os.environ["FC_PYTEST_CONFIG"], "--rootdir", repo_dir] + args
     exit_code = pytest.main(args=args, plugins=[plugin])
     plugin.results["exit_code"] = int(exit_code)
     plugin.results["selected_paths"] = unique_paths
@@ -1076,6 +1094,10 @@ if __name__ == "__main__":
         test_edits = {"error": "%s: %s" % (type(e).__name__, e)}
     (logs_root / "test_edits.json").write_text(json.dumps(test_edits, sort_keys=True))
     args.restored_tests = test_edits.get("modified", []) + test_edits.get("deleted", [])
+    try:
+        os.environ["FC_PYTEST_CONFIG"] = write_base_pytest_config(args.base_ref, args.repo_root or detect_repo_root())
+    except Exception as e:  # noqa: BLE001
+        test_edits["config_error"] = "%s: %s" % (type(e).__name__, e)
     output = main(args)
 
     # Selected tests but nothing collected: retry without extra args, then with importlib mode

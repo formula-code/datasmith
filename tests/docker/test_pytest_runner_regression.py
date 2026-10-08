@@ -233,21 +233,42 @@ def test_weakened_testing_helper_is_restored(src_repo, tmp_path: Path) -> None:
     assert results["regression"]["regressed"] == ["pkg/test_m.py::test_f"]
 
 
-def test_pytest_sections_are_restored_and_build_settings_kept(runner) -> None:
-    base = '[project]\nname = "p"\n\n[tool.pytest.ini_options]\naddopts = "-ra"\n'
-    agent = '[project]\nname = "p"\nversion = "2"\n\n[tool.pytest.ini_options]\naddopts = "-p pkg._plugin"\n'
-    fixed = runner.restore_pytest_sections(base, agent, runner._PYTEST_SECTIONS["pyproject.toml"])
-    assert 'version = "2"' in fixed and 'addopts = "-ra"' in fixed and "pkg._plugin" not in fixed
-    assert runner.restore_pytest_sections(base, base, runner._PYTEST_SECTIONS["pyproject.toml"]) is None
-    added = runner.restore_pytest_sections(
-        "[metadata]\nname = p\n", "[metadata]\nname = p\n\n[tool:pytest]\naddopts = -p x\n", "tool:pytest"
-    )
-    assert "tool:pytest" not in added and "name = p" in added
+def _base_config_in_setup_cfg(root: Path) -> str:
+    (root / "setup.cfg").write_text("[tool:pytest]\naddopts = -ra\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "config")
+    return _git(root, "rev-parse", "HEAD").strip()
 
 
-def test_pyproject_addopts_plugin_is_restored_before_the_run(src_repo, tmp_path: Path) -> None:
+def test_agent_pyproject_dotted_key_config_is_not_read(src_repo, tmp_path: Path) -> None:
+    root, _ = src_repo
+    base = _base_config_in_setup_cfg(root)
+    (root / "pyproject.toml").write_text('[tool]\npytest.ini_options.addopts = "--deselect pkg/test_m.py::test_f"\n')
+    (root / "pkg" / "m.py").write_text("def f():\n    return 2\n")
+    results, _ = _run_runner(root, base, tmp_path / "logs")
+    cfg = results["results"]["config_file"]
+    assert cfg.endswith("setup.cfg") and "fc_pytest_cfg_" in cfg
+    assert results["regression"]["regressed"] == ["pkg/test_m.py::test_f"]
+
+
+def test_added_dot_pytest_ini_is_not_read(src_repo, tmp_path: Path) -> None:
+    root, _ = src_repo
+    base = _base_config_in_setup_cfg(root)
+    (root / ".pytest.ini").write_text("[pytest]\naddopts = --deselect pkg/test_m.py::test_f\n")
+    (root / "pkg" / "m.py").write_text("def f():\n    return 2\n")
+    results, _ = _run_runner(root, base, tmp_path / "logs")
+    assert "fc_pytest_cfg_" in results["results"]["config_file"]
+    assert results["regression"]["regressed"] == ["pkg/test_m.py::test_f"]
+
+
+def test_plugin_loaded_only_in_the_agent_run_is_a_regression(src_repo, tmp_path: Path) -> None:
     root, base = src_repo
-    (root / "pyproject.toml").write_text('[tool.pytest.ini_options]\naddopts = "-p no_such_agent_plugin"\n')
-    _, edits = _run_runner(root, base, tmp_path / "logs")
-    assert edits["config_restored"] == ["pyproject.toml"]
-    assert "no_such_agent_plugin" not in (root / "pyproject.toml").read_text()
+    dist = root / "fcevil-0.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: fcevil\nVersion: 0\n")
+    (dist / "entry_points.txt").write_text("[pytest11]\nfcevil = fcevil_mod\n")
+    (root / "fcevil_mod.py").write_text("")
+    (root / "pkg" / "m.py").write_text("def f():\n    return 1  # agent\n")
+    results, _ = _run_runner(root, base, tmp_path / "logs")
+    assert results["regression"]["agent_only_plugins"] == ["fcevil"]
+    assert "plugin:fcevil" in results["regression"]["regressed"]
