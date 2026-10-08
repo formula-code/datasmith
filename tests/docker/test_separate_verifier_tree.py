@@ -158,3 +158,14 @@ def test_diff_with_pth_file_or_symlink_is_refused(tmp_path):
     assert (verifier / "agent_tree.txt").read_text().strip() == "tree_diff_refused"
     assert not (verifier / "evil.pth").exists() and not (verifier / "link").is_symlink()
     assert (verifier / "pkg.py").read_text() == "x = 1  # image edit\n"
+
+
+def test_quoted_path_sitecustomize_is_refused(tmp_path):
+    def edit(agent: Path) -> None:
+        (agent / "pkg.py").write_text("x = 2\n")
+        (agent / "é").mkdir()
+        (agent / "é" / "sitecustomize.py").write_text("import os\n")
+
+    verifier, _ = _collect_and_recreate(tmp_path, edit)
+    assert (verifier / "agent_tree.txt").read_text().strip() == "tree_diff_refused"
+    assert not (verifier / "é").exists()

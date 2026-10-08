@@ -349,18 +349,59 @@ def _fingerprint(paths, repo_root):
     return fp
 
 
+# Assertion helpers in package code (numpy/testing, pandas/_testing, xarray/testing) judge the tests too.
+_TEST_HELPER_DIRS = ("testing", "_testing")
+
+
 def is_test_path(path):
-    """Test code: test_*.py, *_test.py, conftest.py, pytest.ini, or any file under a tests/test/_tests directory."""
+    """Test code: test_*.py, *_test.py, conftest.py, pytest.ini, or a file under a tests or testing directory."""
     parts = path.split("/")
-    return is_test_file(path) or parts[-1] in ("conftest.py", "pytest.ini") or any(p in _TEST_DIRS for p in parts[:-1])
+    dirs = _TEST_DIRS + _TEST_HELPER_DIRS
+    return is_test_file(path) or parts[-1] in ("conftest.py", "pytest.ini") or any(p in dirs for p in parts[:-1])
+
+
+_PYTEST_SECTIONS = {"pyproject.toml": r"tool\.pytest(\..+)?", "setup.cfg": r"tool:pytest", "tox.ini": r"pytest"}
+_SECTION_HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
+
+
+def _sections(text):
+    """[(section name or None, text)] split at each [section] header line."""
+    blocks = [[None, []]]
+    for line in text.splitlines(True):
+        m = _SECTION_HEADER.match(line)
+        if m:
+            blocks.append([m.group(1), []])
+        blocks[-1][1].append(line)
+    return [(name, "".join(lines)) for name, lines in blocks]
+
+
+def restore_pytest_sections(base_text, agent_text, pattern):
+    """``agent_text`` with its pytest sections replaced by those of ``base_text``; None when they already match."""
+    rx = re.compile(pattern + "$")
+    pick = lambda text, keep: [b for n, b in _sections(text) if bool(n and rx.match(n)) == keep]  # noqa: E731
+    base_pytest, agent_pytest = "".join(pick(base_text, True)), "".join(pick(agent_text, True))
+    if base_pytest.strip() == agent_pytest.strip():
+        return None
+    rest = "".join(pick(agent_text, False))
+    return rest.rstrip("\n") + ("\n\n" + base_pytest if base_pytest else "\n")
 
 
 def restore_test_edits(base_ref, repo_root):
     """Put the test files back to ``base_ref`` so the agent cannot weaken the tests that judge it."""
-    edits = {"modified": [], "added": [], "deleted": [], "config_changed": []}
+    edits = {"modified": [], "added": [], "deleted": [], "config_changed": [], "config_restored": []}
     for path, status in sorted(_changed_vs(base_ref, repo_root).items()):
-        if os.path.basename(path) in ("pyproject.toml", "setup.cfg", "tox.ini"):
+        name = os.path.basename(path)
+        if name in _PYTEST_SECTIONS:
             edits["config_changed"].append(path)
+            full = os.path.join(repo_root, path)
+            code, base_text, _ = _run(["git", "show", "%s:%s" % (base_ref, path)], cwd=repo_root)
+            if status != "D" and os.path.isfile(full):
+                with open(full) as fh:
+                    fixed = restore_pytest_sections(base_text if code == 0 else "", fh.read(), _PYTEST_SECTIONS[name])
+                if fixed is not None:
+                    with open(full, "w") as fh:
+                        fh.write(fixed)
+                    edits["config_restored"].append(path)
         elif is_test_path(path):
             edits[{"A": "added", "D": "deleted"}.get(status, "modified")].append(path)
     _checkout(base_ref, edits["modified"] + edits["deleted"], repo_root)

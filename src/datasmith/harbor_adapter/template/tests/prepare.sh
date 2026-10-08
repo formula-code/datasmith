@@ -146,7 +146,8 @@ SETUP_PHASE="agent_tree"
 # A missing or broken tree.diff leaves the starting tree, so the trial has no patch (no_patch).
 # Symlinks, *.pth and site/usercustomize.py run code outside the patched sources, so such a diff is refused.
 _refused="$( { git apply --summary /fc_submission/tree.diff 2>/dev/null | grep -E ' 120000( |$)' || true; \
-  git apply --numstat /fc_submission/tree.diff 2>/dev/null | cut -f3 | grep -E '(^|/)(site|user)customize\.py$|\.pth$' || true; } )"
+  git apply --numstat -z /fc_submission/tree.diff 2>/dev/null | tr '\0' '\n' | sed -E 's/^[0-9-]+\t[0-9-]+\t//' \
+    | grep -E '(^|/)(site|user)customize\.py$|\.pth$' || true; } )"
 if [ -n "${_refused}" ]; then
   echo "[$(ts)] [prepare] tree.diff refused: ${_refused}" >&2
   echo tree_diff_refused > /logs/artifacts/agent_tree.txt

@@ -213,3 +213,41 @@ def test_base_pass_test_not_collected_is_a_regression(src_repo, tmp_path: Path) 
     (root / "pkg" / "m.py").write_text("raise ImportError('broken')\n")
     results, _ = _run_runner(root, base, tmp_path / "logs")
     assert results["regression"]["regressed"] == ["pkg/test_m.py::test_f"]
+
+
+def test_weakened_testing_helper_is_restored(src_repo, tmp_path: Path) -> None:
+    root, _ = src_repo
+    (root / "pkg" / "testing").mkdir()
+    (root / "pkg" / "testing" / "__init__.py").write_text("")
+    (root / "pkg" / "testing" / "helpers.py").write_text("def check(x):\n    assert x == 1\n")
+    (root / "pkg" / "test_m.py").write_text(
+        "from m import f\nfrom testing.helpers import check\n\ndef test_f():\n    check(f())\n"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "helpers")
+    base = _git(root, "rev-parse", "HEAD").strip()
+    (root / "pkg" / "m.py").write_text("def f():\n    return 2\n")
+    (root / "pkg" / "testing" / "helpers.py").write_text("def check(x):\n    pass\n")
+    results, edits = _run_runner(root, base, tmp_path / "logs")
+    assert edits["modified"] == ["pkg/testing/helpers.py"]
+    assert results["regression"]["regressed"] == ["pkg/test_m.py::test_f"]
+
+
+def test_pytest_sections_are_restored_and_build_settings_kept(runner) -> None:
+    base = '[project]\nname = "p"\n\n[tool.pytest.ini_options]\naddopts = "-ra"\n'
+    agent = '[project]\nname = "p"\nversion = "2"\n\n[tool.pytest.ini_options]\naddopts = "-p pkg._plugin"\n'
+    fixed = runner.restore_pytest_sections(base, agent, runner._PYTEST_SECTIONS["pyproject.toml"])
+    assert 'version = "2"' in fixed and 'addopts = "-ra"' in fixed and "pkg._plugin" not in fixed
+    assert runner.restore_pytest_sections(base, base, runner._PYTEST_SECTIONS["pyproject.toml"]) is None
+    added = runner.restore_pytest_sections(
+        "[metadata]\nname = p\n", "[metadata]\nname = p\n\n[tool:pytest]\naddopts = -p x\n", "tool:pytest"
+    )
+    assert "tool:pytest" not in added and "name = p" in added
+
+
+def test_pyproject_addopts_plugin_is_restored_before_the_run(src_repo, tmp_path: Path) -> None:
+    root, base = src_repo
+    (root / "pyproject.toml").write_text('[tool.pytest.ini_options]\naddopts = "-p no_such_agent_plugin"\n')
+    _, edits = _run_runner(root, base, tmp_path / "logs")
+    assert edits["config_restored"] == ["pyproject.toml"]
+    assert "no_such_agent_plugin" not in (root / "pyproject.toml").read_text()
