@@ -287,12 +287,17 @@ def summarize_snapshots(log_dir: Path) -> dict:
 
 def load_patch_info(log_dir: Path) -> dict:
     path = log_dir / "patch_info.json"
-    if not path.exists():
-        return {"applied": False, "files": 0, "added_lines": 0, "removed_lines": 0}
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {"applied": False, "files": 0, "added_lines": 0, "removed_lines": 0}
+    info = {"applied": False, "files": 0, "added_lines": 0, "removed_lines": 0}
+    if path.exists():
+        try:
+            info = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    # prepare.sh writes tree_diff_refused or tree_diff_failed; the host fails such a trial instead of an empty patch.
+    tree = log_dir / "agent_tree.txt"
+    if tree.exists():
+        info["submission_rejected"] = tree.read_text().strip()
+    return info
 
 
 def load_setup_status(log_dir: Path) -> dict:

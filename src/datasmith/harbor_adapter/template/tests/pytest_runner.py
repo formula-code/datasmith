@@ -3,12 +3,14 @@
 from __future__ import print_function
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from glob import glob
 from pathlib import Path
@@ -197,6 +199,8 @@ def discover_test_files_from_changed(changed_files, repo_root):
             continue
 
         if is_test_file(rel):
+            if not os.path.isfile(abs_path):
+                continue
             mapping.setdefault(rel, [])
             mapping[rel].append(rel)
             selected.add(rel)
@@ -303,23 +307,154 @@ class _BaseRebuildFailed(Exception):
     pass
 
 
-def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
-    """Stash the agent's edits, rerun the same tests at base, restore; flag base-pass -> agent-fail."""
+def _changed_vs(base_ref, repo_root):
+    """{path: git status letter} for the working tree against ``base_ref``; untracked files are 'A'."""
+    code, out, err = _run(["git", "diff", "--name-status", "--no-renames", "-z", base_ref], cwd=repo_root)
+    if code != 0:
+        raise RuntimeError("git diff %s failed: %s" % (base_ref, err.strip()[-200:]))
+    fields = out.split("\0")
+    changed = {fields[i + 1]: fields[i][:1] for i in range(0, len(fields) - 1, 2) if fields[i]}
+    code, out, _ = _run(["git", "ls-files", "-z", "--others", "--exclude-standard"], cwd=repo_root)
+    changed.update((p, "A") for p in out.split("\0") if p and code == 0)
+    return changed
+
+
+def _checkout(base_ref, paths, repo_root):
+    if paths:
+        code, _, err = _run(["git", "--literal-pathspecs", "checkout", base_ref, "--"] + list(paths), cwd=repo_root)
+        if code != 0:
+            raise RuntimeError("git checkout %s failed: %s" % (base_ref, err.strip()[-200:]))
+
+
+def _remove(path):
+    if os.path.lexists(path):
+        os.remove(path)
+        try:
+            os.removedirs(os.path.dirname(path))
+        except OSError:
+            pass
+
+
+def _fingerprint(paths, repo_root):
+    """{path: sha256 of the file bytes or symlink target, None if missing}."""
+    fp = {}
+    for path in paths:
+        full = os.path.join(repo_root, path)
+        if os.path.islink(full):
+            fp[path] = hashlib.sha256(os.readlink(full).encode()).hexdigest()
+        elif os.path.isfile(full):
+            with open(full, "rb") as fh:
+                fp[path] = hashlib.sha256(fh.read()).hexdigest()
+        else:
+            fp[path] = None
+    return fp
+
+
+# Assertion helpers in package code (numpy/testing, pandas/_testing, xarray/testing) judge the tests too.
+_TEST_HELPER_DIRS = ("testing", "_testing")
+
+
+def is_test_path(path):
+    """Test code: test_*.py, *_test.py, conftest.py, pytest.ini, or a file under a tests or testing directory."""
+    parts = path.split("/")
+    dirs = _TEST_DIRS + _TEST_HELPER_DIRS
+    return is_test_file(path) or parts[-1] in ("conftest.py", "pytest.ini") or any(p in dirs for p in parts[:-1])
+
+
+_PYTEST_SECTIONS = {"pyproject.toml": r"tool\.pytest(\..+)?", "setup.cfg": r"tool:pytest", "tox.ini": r"pytest"}
+_SECTION_HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
+
+
+def _sections(text):
+    """[(section name or None, text)] split at each [section] header line."""
+    blocks = [[None, []]]
+    for line in text.splitlines(True):
+        m = _SECTION_HEADER.match(line)
+        if m:
+            blocks.append([m.group(1), []])
+        blocks[-1][1].append(line)
+    return [(name, "".join(lines)) for name, lines in blocks]
+
+
+_PYTEST_CONFIG_FILES = ("pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg")
+
+
+def write_base_pytest_config(base_ref, repo_root):
+    """A copy of the base commit's pytest config file, picked in pytest's order, for ``-c``; an empty one if none."""
+    out = tempfile.mkdtemp(prefix="fc_pytest_cfg_")
+    for name in _PYTEST_CONFIG_FILES:
+        code, text, _ = _run(["git", "show", "%s:%s" % (base_ref, name)], cwd=repo_root)
+        if code != 0:
+            continue
+        if name in _PYTEST_SECTIONS and not any(n and re.match(_PYTEST_SECTIONS[name] + "$", n) for n, _ in _sections(text)):
+            continue
+        path = os.path.join(out, name)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+    path = os.path.join(out, "pytest.ini")
+    with open(path, "w") as fh:
+        fh.write("[pytest]\n")
+    return path
+
+
+def fail_without_base_config(output, test_edits):
+    """Without the base config pytest may have read the agent's config files, so the check fails."""
+    if "config_error" in test_edits:
+        reg = dict(output.get("regression") or {}, ran=True)
+        reg["regressed"] = list(reg.get("regressed") or []) + ["config:unavailable"]
+        output["regression"] = reg
+
+
+def restore_test_edits(base_ref, repo_root):
+    """Put the test files back to ``base_ref`` so the agent cannot weaken the tests that judge it."""
+    edits = {"modified": [], "added": [], "deleted": [], "config_changed": []}
+    for path, status in sorted(_changed_vs(base_ref, repo_root).items()):
+        # pytest reads the base config through -c (write_base_pytest_config), so config edits are only recorded.
+        if os.path.basename(path) in _PYTEST_CONFIG_FILES:
+            edits["config_changed"].append(path)
+        elif is_test_path(path):
+            edits[{"A": "added", "D": "deleted"}.get(status, "modified")].append(path)
+    _checkout(base_ref, edits["modified"] + edits["deleted"], repo_root)
+    edits["added_sha256"] = _fingerprint(edits["added"], repo_root)
+    for path in edits["added"]:
+        _remove(os.path.join(repo_root, path))
+    return edits
+
+
+def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base_ref="HEAD"):
+    """Put every changed file back to ``base_ref``, rerun the same tests, restore the agent tree; flag base-pass -> agent-fail."""
+    import shutil
     import sys as _sys
     import tempfile as _tempfile
 
     agent_oc = _final_outcomes(agent_results)
-    # Tracked changes only: untracked generated files (e.g. setuptools-scm _version.py) must stay importable.
-    code, out, _ = _run(
-        ["git", "stash", "push", "-m", "fc-regression"], cwd=repo_root
-    )
-    stashed = code == 0 and "No local changes" not in (out or "")
+    changed = sorted(_changed_vs(base_ref, repo_root))
+    # Committed and untracked agent changes are reverted too, unlike git stash.
+    backup = _tempfile.mkdtemp(prefix="fcagent_")
+    index = os.path.join(repo_root, _run(["git", "rev-parse", "--git-path", "index"], cwd=repo_root)[1].strip())
+    if os.path.isfile(index):
+        shutil.copy2(index, os.path.join(backup, ".index"))
+    for path in changed:
+        src = os.path.join(repo_root, path)
+        if os.path.lexists(src):
+            dst = os.path.join(backup, "tree", path)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst, follow_symlinks=False)
+    before = _fingerprint(changed, repo_root)
+    reverted = bool(changed)
+    restore_ok = True
     base_oc = {}
+    base_plugins = None
     base_error = None
     # test.sh sets this when the patch touches compiled sources; base must not import the patched .so.
     rebuild = os.environ.get("FC_REBUILD_CMD")
-    if stashed:
+    if reverted:
         try:
+            at_base = [p for p in changed if _run(["git", "cat-file", "-e", "%s:%s" % (base_ref, p)], cwd=repo_root)[0] == 0]
+            for path in set(changed) - set(at_base):
+                _remove(os.path.join(repo_root, path))
+            _checkout(base_ref, at_base, repo_root)
             if rebuild:
                 rc, _, err = _run(["bash", "-c", rebuild], cwd=repo_root)
                 if rc != 0:
@@ -333,7 +468,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
                 "spec = importlib.util.spec_from_file_location('fc_pytest_runner', %r); "
                 "P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P); "
                 "r = P.run_pytest_and_collect(%r, extra_args=%r, cwd=%r); "
-                "open(%r, 'w').write(json.dumps(r.get('tests', [])))"
+                "open(%r, 'w').write(json.dumps({'tests': r.get('tests', []), 'plugins': r.get('plugins', [])}))"
             ) % (os.path.dirname(self_path), self_path, list(selected_tests), extra_args, repo_root, tf)
             # Own pycache: a base file with the agent file's size and mtime would load the agent bytecode.
             _old_pyc = os.environ.get("PYTHONPYCACHEPREFIX")
@@ -347,7 +482,9 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
                     os.environ["PYTHONPYCACHEPREFIX"] = _old_pyc
             try:
                 with open(tf) as _fh:
-                    base_oc = _final_outcomes({"tests": json.load(_fh)})
+                    base_res = json.load(_fh)
+                base_oc = _final_outcomes(base_res)
+                base_plugins = base_res.get("plugins", [])
             except Exception:  # noqa: BLE001 — treat an unreadable base run as "no base data"
                 base_oc = {}
                 base_error = "base run produced no results (rc=%s): %s" % (
@@ -359,17 +496,42 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
                     pass
         except _BaseRebuildFailed as e:
             base_error = "base rebuild failed: %s" % e
+        except Exception as e:  # noqa: BLE001
+            base_error = "base run failed: %s: %s" % (type(e).__name__, e)
         finally:
-            _run(["git", "stash", "pop"], cwd=repo_root)
+            try:
+                for path in changed:
+                    saved = os.path.join(backup, "tree", path)
+                    dst = os.path.join(repo_root, path)
+                    _remove(dst)
+                    if os.path.lexists(saved):
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        shutil.copy2(saved, dst, follow_symlinks=False)
+                if os.path.isfile(os.path.join(backup, ".index")):
+                    shutil.copy2(os.path.join(backup, ".index"), index)
+                # Timing runs after this on the same tree, so check it is the agent's tree again.
+                if _fingerprint(changed, repo_root) != before:
+                    restore_ok = False
+                    base_error = (base_error or "") + "; agent tree differs after restore"
+            except Exception as e:  # noqa: BLE001
+                restore_ok = False
+                base_error = (base_error or "") + "; restore failed: %s: %s" % (type(e).__name__, e)
             if rebuild and _run(["bash", "-c", rebuild], cwd=repo_root)[0] != 0:
-                base_error = (base_error or "") + "; patched rebuild after stash pop failed"
-    regressed = sorted(
-        n for n, o in agent_oc.items()
-        if o in ("failed", "error") and base_oc.get(n) == "passed"
-    )
+                restore_ok = False
+                base_error = (base_error or "") + "; patched rebuild after restore failed"
+    shutil.rmtree(backup, ignore_errors=True)
+    # Passing at base and not passing with the agent: failed, error, skipped, xfailed, or not collected.
+    regressed = sorted(n for n, o in base_oc.items() if o == "passed" and agent_oc.get(n) not in ("passed", "xpassed"))
+    # A pytest plugin that only the agent run loads (an entry point from the agent's package) can rewrite reports.
+    agent_only_plugins = sorted(set((agent_results or {}).get("plugins", [])) - set(base_plugins or []))
+    if base_plugins is not None:
+        regressed += ["plugin:%s" % n for n in agent_only_plugins]
     out = {
-        "ran": bool(stashed and selected_tests and base_oc),
-        "stashed": stashed,
+        "ran": bool(reverted and selected_tests and base_oc),
+        "reverted": reverted,
+        "restore_ok": restore_ok,
+        "base_ref": base_ref,
+        "agent_only_plugins": agent_only_plugins,
         "n_selected_tests": len(selected_tests),
         "n_agent_tests": len(agent_oc),
         "n_base_pass": sum(1 for o in base_oc.values() if o == "passed"),
@@ -479,6 +641,10 @@ class _ResultsPlugin(object):
     def pytest_sessionfinish(self, session, exitstatus):
         self.results["exit_code"] = int(exitstatus)
         self.results["duration"] = time.time() - self.results["start_time"]
+        config = session.config
+        self.results["config_file"] = str(getattr(config, "inipath", None) or getattr(config, "inifile", None) or "")
+        # Anonymous plugins are named by id(); the rest (entry points, -p modules, conftests) must match the base run.
+        self.results["plugins"] = sorted(n for n, _ in config.pluginmanager.list_name_plugin() if n and not n.isdigit())
 
     def pytest_collectreport(self, report):
         if report.failed:
@@ -569,6 +735,9 @@ def run_pytest_and_collect(test_paths, extra_args=None, cwd=None):
         sys.path.insert(0, repo_dir)
 
     args = unique_paths + list(extra_args)
+    # Both runs use the base commit's pytest configuration; the agent's config files are never read.
+    if os.environ.get("FC_PYTEST_CONFIG"):
+        args = ["-c", os.environ["FC_PYTEST_CONFIG"], "--rootdir", repo_dir] + args
     exit_code = pytest.main(args=args, plugins=[plugin])
     plugin.results["exit_code"] = int(exit_code)
     plugin.results["selected_paths"] = unique_paths
@@ -818,6 +987,9 @@ def main(args) -> dict:
         repo_root=repo_root,
     )
 
+    # Test files restored from base still belong to the agent's change, so their tests run.
+    changed = sorted(set(changed) | set(getattr(args, "restored_tests", [])))
+
     if args.only != "all":
         filtered = []
         for p in changed:
@@ -916,6 +1088,24 @@ if __name__ == "__main__":
     args = parse_args()
     # The retries below mutate extra_args; the regression gate uses the originals.
     _orig_extra = args.extra_args
+    # Must match parser.py's LOG_DIR lookup; /logs/test_results.json is a best-effort legacy copy.
+    logs_root = Path(
+        os.environ.get("T_BENCH_TASK_LOGS_PATH")
+        or os.environ.get("T_BENCH_CONTAINER_LOGS_PATH")
+        or "/logs/artifacts"
+    )
+    logs_root.mkdir(parents=True, exist_ok=True)
+    # test.sh has already saved patch.diff, so the reward still sees the agent's test edits.
+    try:
+        test_edits = restore_test_edits(args.base_ref, args.repo_root or detect_repo_root())
+    except Exception as e:  # noqa: BLE001
+        test_edits = {"error": "%s: %s" % (type(e).__name__, e)}
+    (logs_root / "test_edits.json").write_text(json.dumps(test_edits, sort_keys=True))
+    args.restored_tests = test_edits.get("modified", []) + test_edits.get("deleted", [])
+    try:
+        os.environ["FC_PYTEST_CONFIG"] = write_base_pytest_config(args.base_ref, args.repo_root or detect_repo_root())
+    except Exception as e:  # noqa: BLE001
+        test_edits["config_error"] = "%s: %s" % (type(e).__name__, e)
     output = main(args)
 
     # Selected tests but nothing collected: retry without extra args, then with importlib mode
@@ -947,7 +1137,7 @@ if __name__ == "__main__":
                 output["strategy"] = strategy
         if selected:
             output["regression"] = run_base_and_diff(
-                selected, extra, repo_root, output["results"]
+                selected, extra, repo_root, output["results"], base_ref=args.base_ref
             )
         else:
             output["regression"] = {"ran": False, "reason": "no tests selected (direct or fallback)"}
@@ -955,15 +1145,10 @@ if __name__ == "__main__":
         output["regression"] = {"ran": False, "error": "%s: %s" % (type(e).__name__, e)}
 
     output["fc_runner"] = "regression-v1+template"
+    output["test_edits"] = test_edits
 
-    # Must match parser.py's LOG_DIR lookup; /logs/test_results.json is a best-effort legacy copy.
-    logs_root = Path(
-        os.environ.get("T_BENCH_TASK_LOGS_PATH")
-        or os.environ.get("T_BENCH_CONTAINER_LOGS_PATH")
-        or "/logs/artifacts"
-    )
+    fail_without_base_config(output, test_edits)
     _payload = json.dumps(output, sort_keys=True)
-    logs_root.mkdir(parents=True, exist_ok=True)
     (logs_root / "test_results.json").write_text(_payload)
     _legacy = Path("/logs/test_results.json")
     if _legacy != logs_root / "test_results.json":
@@ -972,3 +1157,5 @@ if __name__ == "__main__":
             _legacy.write_text(_payload)
         except Exception:  # noqa: BLE001 -- best-effort; the parser path above is the critical one
             pass
+    if output["regression"].get("restore_ok") is False:
+        sys.exit(3)
