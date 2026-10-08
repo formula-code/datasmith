@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-SETUP = Path(__file__).resolve().parents[2] / "src/datasmith/harbor_adapter/template/tests/setup.sh"
+SETUP = Path(__file__).resolve().parents[2] / "src/datasmith/harbor_adapter/template/tests/prepare.sh"
 
 
 def block(root: Path) -> str:
