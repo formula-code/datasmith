@@ -465,10 +465,8 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
                 restore_ok = False
                 base_error = (base_error or "") + "; patched rebuild after restore failed"
     shutil.rmtree(backup, ignore_errors=True)
-    regressed = sorted(
-        n for n, o in agent_oc.items()
-        if o in ("failed", "error") and base_oc.get(n) == "passed"
-    )
+    # Passing at base and not passing with the agent: failed, error, skipped, xfailed, or not collected.
+    regressed = sorted(n for n, o in base_oc.items() if o == "passed" and agent_oc.get(n) not in ("passed", "xpassed"))
     out = {
         "ran": bool(reverted and selected_tests and base_oc),
         "reverted": reverted,

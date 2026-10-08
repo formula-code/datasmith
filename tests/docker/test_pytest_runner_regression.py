@@ -199,3 +199,17 @@ def test_failed_restore_sets_restore_ok_false_and_exits_nonzero(src_repo, tmp_pa
     regression = json.loads((logs / "test_results.json").read_text())["regression"]
     assert proc.returncode == 3
     assert regression["restore_ok"] is False and "patched rebuild after restore failed" in regression["base_error"]
+
+
+def test_base_pass_test_skipped_by_agent_code_is_a_regression(src_repo, tmp_path: Path) -> None:
+    root, base = src_repo
+    (root / "pkg" / "m.py").write_text("import pytest\n\ndef f():\n    pytest.skip('no')\n")
+    results, _ = _run_runner(root, base, tmp_path / "logs")
+    assert results["regression"]["regressed"] == ["pkg/test_m.py::test_f"]
+
+
+def test_base_pass_test_not_collected_is_a_regression(src_repo, tmp_path: Path) -> None:
+    root, base = src_repo
+    (root / "pkg" / "m.py").write_text("raise ImportError('broken')\n")
+    results, _ = _run_runner(root, base, tmp_path / "logs")
+    assert results["regression"]["regressed"] == ["pkg/test_m.py::test_f"]

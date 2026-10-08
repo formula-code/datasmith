@@ -107,3 +107,54 @@ def test_broken_tree_diff_leaves_starting_tree(tmp_path):
     bash(prepare_block("agent_tree", "complete", sha, base).replace("/fc_submission", str(sub)), image)
     assert {k: v for k, v in files(image).items() if k not in ("sha", "agent_tree.txt")} == before
     assert (image / "agent_tree.txt").read_text().strip() == "tree_diff_failed"
+
+
+def _collect_and_recreate(tmp_path: Path, edit) -> tuple[Path, Path]:
+    image, base = image_repo(tmp_path)
+    agent, verifier = tmp_path / "agent", tmp_path / "verifier"
+    subprocess.run(["cp", "-a", str(image), str(agent)], check=True)
+    subprocess.run(["cp", "-a", str(image), str(verifier)], check=True)
+    edit(agent)
+    sub = tmp_path / "submission"
+    bash(collect_script(base, sub), agent)
+    sha = verifier / "sha"
+    bash(prepare_block("baseline_commit", "base_copy", sha, base), verifier)
+    bash(prepare_block("agent_tree", "complete", sha, base).replace("/fc_submission", str(sub)), verifier)
+    return verifier, sha
+
+
+def test_gitattributes_cannot_hide_a_benchmark_edit_from_the_verifier_diff(tmp_path):
+    def edit(agent: Path) -> None:
+        (agent / ".gitattributes").write_text("benchmarks/** -diff\n")
+        (agent / "benchmarks/bench.py").write_text("def time_x(): return 0\n")
+
+    verifier, sha = _collect_and_recreate(tmp_path, edit)
+    test_sh = render_template(
+        "tests/test.sh",
+        base_commit="x",
+        run_pytest=False,
+        rounds=None,
+        task_id="t",
+        owner="o",
+        repo="r",
+        issue_number=1,
+    )
+    fc_diff = next(line for line in test_sh.splitlines() if line.startswith("fc_diff()"))
+    setup = "\n".join(
+        line for line in test_sh.splitlines() if line.startswith(("FC_INDEX=", "cp .git/index", "GIT_INDEX_FILE="))
+    )
+    script = f"FC_BASE={sha.read_text().strip()}\n{setup}\n{fc_diff}\nfc_diff"
+    out = subprocess.run(["bash", "-c", script], cwd=verifier, check=True, capture_output=True, text=True).stdout
+    assert "+def time_x(): return 0" in out
+
+
+def test_diff_with_pth_file_or_symlink_is_refused(tmp_path):
+    def edit(agent: Path) -> None:
+        (agent / "pkg.py").write_text("x = 2\n")
+        (agent / "evil.pth").write_text("import os\n")
+        (agent / "link").symlink_to("/etc/passwd")
+
+    verifier, _ = _collect_and_recreate(tmp_path, edit)
+    assert (verifier / "agent_tree.txt").read_text().strip() == "tree_diff_refused"
+    assert not (verifier / "evil.pth").exists() and not (verifier / "link").is_symlink()
+    assert (verifier / "pkg.py").read_text() == "x = 1  # image edit\n"

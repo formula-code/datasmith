@@ -65,7 +65,8 @@ FC_BASE="$(cat /opt/fc_baseline_sha 2>/dev/null || echo {{ base_commit }})"
 FC_INDEX="$(mktemp)"
 cp .git/index "${FC_INDEX}" 2>/dev/null || rm -f "${FC_INDEX}"
 GIT_INDEX_FILE="${FC_INDEX}" git add -A -N 2>/dev/null || true
-fc_diff() { GIT_INDEX_FILE="${FC_INDEX}" git diff "${FC_BASE}" "$@" 2>/dev/null; }
+# --text and no drivers: a .gitattributes file in the agent's diff must not hide edited lines from the tamper check.
+fc_diff() { GIT_INDEX_FILE="${FC_INDEX}" GIT_NO_REPLACE_OBJECTS=1 git diff --text --no-ext-diff --no-textconv "${FC_BASE}" "$@" 2>/dev/null; }
 fc_diff > "${LOG_DIR}/patch.diff" || true
 patch_files=$(fc_diff --name-only | wc -l | tr -d ' ')
 patch_numstat=$(fc_diff --numstat || true)
