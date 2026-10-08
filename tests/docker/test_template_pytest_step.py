@@ -27,7 +27,7 @@ def _run(tmp_path: Path, runner: str) -> subprocess.CompletedProcess:
     script = f"""set -euo pipefail
 LOG_DIR={tmp_path}
 FC_BASE=BASE
-FC_SKIP_PYTEST=
+_fc_skip_pytest=
 _tests_lease=1
 ts() {{ date +%s; }}
 mg_release() {{ :; }}
