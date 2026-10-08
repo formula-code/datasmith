@@ -61,6 +61,20 @@ def test_error_on_base_side_leaves_repo_patched(m):
     assert not m.PARKED.exists()
 
 
+def test_rebuild_builds_base_then_patched_at_the_repo_path(m, tmp_path):
+    m.rebuild_both_sides("cat side >> " + str(tmp_path / "order") + "; echo built >> build", tmp_path / "rebuild.log")
+    assert (tmp_path / "order").read_text() == "basepatched"
+    assert (m.REPO_ROOT / "build").read_text() == "built\n" and (m.BASE_COPY / "build").read_text() == "built\n"
+    assert _side(m) == "patched"
+
+
+def test_failed_base_rebuild_leaves_repo_patched(m, tmp_path):
+    with pytest.raises(m.subprocess.CalledProcessError):
+        m.rebuild_both_sides('[ "$(cat side)" = patched ]', tmp_path / "rebuild.log")
+    assert _side(m) == "patched" and (m.BASE_COPY / "side").read_text() == "base"
+    assert not m.PARKED.exists()
+
+
 def test_paired_stats_median_log_ratio():
     m = _load("lsv_measure")
     rounds = [
