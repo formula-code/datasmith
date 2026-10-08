@@ -11,15 +11,17 @@ ISSUE_NUMBER="{{ issue_number }}"
 TASK_ID="{{ task_id }}"
 export OWNER REPO ISSUE_NUMBER TASK_ID
 
-# lsv_init.py captures the oracle snapshot baseline only when this is "oracle", so training must not be.
-# Harbor's [verifier.env] does not reach setup.sh; FC_AGENT_TAG overrides harbor's HARBOR_AGENT_NAME.
-export HARBOR_AGENT_NAME="${FC_AGENT_TAG:-${HARBOR_AGENT_NAME:-agent}}"
+# Runs first in test.sh, in the verifier container, which starts from the task image (Harbor separate verifier).
+# lsv_init.py captures the oracle snapshot baseline only when this is "oracle"; test.sh sets it from the run config.
+export HARBOR_AGENT_NAME="${AGENT_KEY:-agent}"
 
 setup_start=$(date +%s)
 # The exit trap reports which phase failed.
 SETUP_PHASE="init"
 lsv_init_start=""
 lsv_init_end=""
+# Harbor copies the agent's /logs/artifacts into this container; nothing the agent wrote there may be read.
+rm -rf /logs/artifacts
 mkdir -p /logs/artifacts
 
 # parser.py and lsv_measure.py read setup_status.json, so write it (and timings) on every exit.
@@ -51,22 +53,18 @@ JSONEOF
 }
 trap _write_setup_status EXIT
 
-SETUP_PHASE="list_files"
-echo "[$(ts)] [setup] Get all file directory..."
-ls -R .
-
 SETUP_PHASE="source_asv_env"
 # The pipeline may point TMPDIR at a folder on the host; tempfile falls back to /tmp while it is missing.
 [ -n "${TMPDIR:-}" ] && mkdir -p "$TMPDIR"
 # Verifier deps are installed at image build (environment/Dockerfile); only activate the env here.
-echo "[$(ts)] [setup] Activating ASV environment..."
+echo "[$(ts)] [prepare] Activating ASV environment..."
 set +u
 source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
 set -u
 
 if [ -z "${ENV_NAME:-}" ]; then
-  echo "[$(ts)] [setup] FATAL: ENV_NAME is empty after sourcing ASV profile scripts." >&2
+  echo "[$(ts)] [prepare] FATAL: ENV_NAME is empty after sourcing ASV profile scripts." >&2
   exit 1
 fi
 
@@ -76,55 +74,32 @@ micromamba activate "$ENV_NAME"
 SETUP_PHASE="probe_image_deps"
 # Fail fast on a stale image. LSV installs as asv.contrib.lightspeed (there is no top-level `lsv`).
 micromamba run -n "$ENV_NAME" python -c "import asv_runner, coverage, jinja2" \
-  || { echo "[$(ts)] [setup] FATAL: image verifier deps missing in '$ENV_NAME' — rebuild the task image." >&2; exit 1; }
+  || { echo "[$(ts)] [prepare] FATAL: image verifier deps missing in '$ENV_NAME' — rebuild the task image." >&2; exit 1; }
 micromamba run -n "$ENV_NAME" python -c "import asv.contrib.lightspeed" \
-  || { echo "[$(ts)] [setup] FATAL: LSV (asv.contrib.lightspeed) missing in '$ENV_NAME' — rebuild the task image." >&2; exit 1; }
+  || { echo "[$(ts)] [prepare] FATAL: LSV (asv.contrib.lightspeed) missing in '$ENV_NAME' — rebuild the task image." >&2; exit 1; }
 command -v snapshot-tool >/dev/null 2>&1 \
   || micromamba run -n "$ENV_NAME" bash -c 'command -v snapshot-tool >/dev/null 2>&1' \
-  || { echo "[$(ts)] [setup] FATAL: snapshot-tool missing in '$ENV_NAME' — the correctness gate would be inert; rebuild the task image." >&2; exit 1; }
+  || { echo "[$(ts)] [prepare] FATAL: snapshot-tool missing in '$ENV_NAME' — the correctness gate would be inert; rebuild the task image." >&2; exit 1; }
 
 SETUP_PHASE="project_imports"
 # A second installed copy of the project (a wheel pulled in as a dependency) hides the repo from benchmark processes.
-python /tests/project_imports.py --remove || echo "[$(ts)] [setup] WARN: project import check failed." >&2
+python /tests/project_imports.py --remove || echo "[$(ts)] [prepare] WARN: project import check failed." >&2
 
 SETUP_PHASE="asv_machine"
 # `asv run` without --machine looks up the hostname in ~/.asv-machine.json and stops if it is missing; results go to dockertest.
 python -c 'import socket; from asv.machine import Machine, MachineCollection; MachineCollection.save(socket.gethostname(), {**Machine.get_defaults(), "machine": "dockertest"})' \
-  || echo "[$(ts)] [setup] WARN: asv machine registration failed; agents must pass --machine." >&2
+  || echo "[$(ts)] [prepare] WARN: asv machine registration failed; agents must pass --machine." >&2
 
-SETUP_PHASE="agent_tools"
-# instruction.md names these. /tests is removed before the agent runs, so the rebuild script is copied out.
-install -m 755 /tests/rebuild.sh /usr/local/bin/rebuild-repo
-# The grader's ASV config with absolute paths, so `asv run --config=/workspace/asv.conf.json` works from any folder.
-python - <<'PYEOF' || echo "[$(ts)] [setup] WARN: could not write /workspace/asv.conf.json." >&2
-import json, os, sys
-sys.path.insert(0, "/tests")
-from lsv_init import _load_jsonc, find_asv_config
-conf = find_asv_config()
-cfg = _load_jsonc(conf)
-defaults = {"repo": None, "benchmark_dir": "benchmarks", "env_dir": "env", "results_dir": "results", "html_dir": "html"}
-for key, default in defaults.items():
-    value = cfg.get(key) or default
-    if value and "://" not in value:
-        cfg[key] = os.path.normpath(os.path.join(conf.parent, value))
-with open("/workspace/asv.conf.json", "w") as f:
-    json.dump(cfg, f, indent=2)
-PYEOF
-
-SETUP_PHASE="extra_setup_commands"
-{{ extra_setup_commands }}
+SETUP_PHASE="asv_config"
+python /tests/write_asv_conf.py || echo "[$(ts)] [prepare] WARN: could not write /workspace/asv.conf.json." >&2
 
 SETUP_PHASE="baseline_commit"
 # The grader diffs against a commit of this starting tree, so the image's own edits and untracked benchmark suites
-# are not agent work. Run output stays out of it; a nested repository (astropy-benchmarks/) goes in as plain files.
+# are not agent work.
 if [ "$(cat /opt/fc_baseline_sha 2>/dev/null)" != "$(git rev-parse HEAD)" ]; then
-  printf '%s\n' asv_benchmarks.txt solution_patch.diff '*.orig' '*.rej' __pycache__/ '*.py[co]' .asv/ \
-    '/tmp.*' '/*.npz' /test_array.csv '*.nc' '*.nc4' .hypothesis/ .pytest_cache/ >> .git/info/exclude
-  python -c 'import json, os; c = json.load(open("/workspace/asv.conf.json")); print("\n".join("/" + os.path.relpath(c[k], "/workspace/repo") + "/" for k in ("results_dir", "env_dir", "html_dir") if (c.get(k) or "").startswith("/workspace/repo/")))' >> .git/info/exclude || true
-  git ls-files --others --exclude-standard | { grep '/$' || true; } | while read -r d; do
-    git -C "$d" ls-files -co --exclude-standard | sed "s|^|$d|"
-  done | git update-index --add --stdin
-  git add -A
+{% filter indent(2) %}
+{% include "shared/stage_tree.sh" %}
+{% endfilter %}
   # A commit with many loose objects starts a background gc, which deletes objects while base_copy moves the repo.
   git config gc.auto 0
   git -c user.name=fc -c user.email=fc@local commit -q --no-verify --allow-empty -m fc-baseline
@@ -145,7 +120,7 @@ fi
 
 SETUP_PHASE="lsv_init"
 # ── LSV Phase 1: initialize_diffcheck ────────────────────────────────────
-echo "[$(ts)] [setup] Starting LSV init..."
+echo "[$(ts)] [prepare] Starting LSV init..."
 lsv_init_start=$(date +%s)
 set +e
 # Serialize the measure through the host gate (rl/measure_gate.py); fail-open. SID uses the kernel uuid
@@ -161,8 +136,22 @@ curl -fsS --connect-timeout "${MEASURE_GATE_CONNECT_TIMEOUT:-5}" -m 5 -X POST "$
 set -e
 lsv_init_end=$(date +%s)
 if [ $lsv_exit -ne 0 ]; then
-  echo "[$(ts)] [setup] FATAL: lsv_init.py failed with exit code $lsv_exit (137=OOM killed). Aborting task."
+  echo "[$(ts)] [prepare] FATAL: lsv_init.py failed with exit code $lsv_exit (137=OOM killed). Aborting task."
   exit $lsv_exit
 fi
-echo "[$(ts)] [setup] LSV init complete."
+echo "[$(ts)] [prepare] LSV init complete."
+
+SETUP_PHASE="agent_tree"
+# The agent's tree is the base commit plus tree.diff; ignored files (the build) stay as the image has them.
+# A missing or broken tree.diff leaves the starting tree, so the trial has no patch (no_patch).
+if [ -s /fc_submission/tree.diff ]; then
+  git read-tree -u --reset {{ base_commit }}
+  if ! git apply --binary --whitespace=nowarn /fc_submission/tree.diff; then
+    echo "[$(ts)] [prepare] tree.diff does not apply; using the starting tree." >&2
+    echo tree_diff_failed > /logs/artifacts/agent_tree.txt
+    git read-tree -u --reset "$(cat /opt/fc_baseline_sha)"
+  fi
+  # The index matches fc-baseline again, as when the agent edited on top of it in one container.
+  git read-tree "$(cat /opt/fc_baseline_sha)"
+fi
 SETUP_PHASE="complete"
