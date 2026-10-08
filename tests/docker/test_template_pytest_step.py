@@ -15,9 +15,10 @@ _TEST_SH = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / 
 
 def _pytest_block() -> str:
     text = _TEST_SH.read_text()
-    start = text.index('echo "[$(ts)] [test] Running pytest..."')
+    start = text.index("pytest_start=$(date +%s)")
     end = text.index("# Per-step timings")
     block = re.sub(r"\{%-? else %\}.*?\{%-? endif %\}", "", text[start:end], flags=re.DOTALL)
+    block = re.sub(r"\{%-? if run_pytest %\}", "", block)
     return re.sub(r"\{\{[^}]*\}\}", "BASE", block)
 
 
@@ -26,6 +27,8 @@ def _run(tmp_path: Path, runner: str) -> subprocess.CompletedProcess:
     script = f"""set -euo pipefail
 LOG_DIR={tmp_path}
 FC_BASE=BASE
+FC_SKIP_PYTEST=
+_tests_lease=1
 ts() {{ date +%s; }}
 mg_release() {{ :; }}
 python() {{ {runner}; }}
