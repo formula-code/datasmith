@@ -96,7 +96,8 @@ class FormulaCodeAdapter:
         for d in (env, tests, solution):
             d.mkdir(parents=True, exist_ok=True)
 
-        copy2(self.template_dir / "environment" / "entrypoint.sh", env / "entrypoint.sh")
+        for name in ("entrypoint.sh", "scrub_git.sh"):
+            copy2(self.template_dir / "environment" / name, env / name)
         for name in TEST_HELPERS:
             copy2(self.template_dir / "tests" / name, tests / name)
         # The image build runs these (baseline measurement, agent tools); /tests does not exist in the agent container.

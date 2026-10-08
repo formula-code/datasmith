@@ -74,5 +74,9 @@ COPY rebuild.sh /usr/local/bin/rebuild-repo
 COPY write_asv_conf.py /opt/lsv/
 RUN chmod 755 /usr/local/bin/rebuild-repo; cd /workspace/repo && python /opt/lsv/write_asv_conf.py || true
 
+# Last, so no later step brings history back. Base image layers still hold it, but the container cannot see them.
+COPY scrub_git.sh /opt/scrub_git.sh
+RUN bash /opt/scrub_git.sh /workspace/repo && rm /opt/scrub_git.sh
+
 WORKDIR /workspace/repo
 ENTRYPOINT ["/entrypoint.sh"]
