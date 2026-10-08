@@ -62,3 +62,10 @@ def test_no_undefined_names_in_templates(rel: str) -> None:
         f"These files are excluded from ruff, so nothing else will catch this.\n"
         f"{proc.stdout}\n{proc.stderr}"
     )
+
+
+@pytest.mark.parametrize("path", sorted((_ROOT / "src/datasmith/harbor_adapter/template").rglob("*.py")), ids=lambda p: p.name)
+def test_harbor_template_parses_as_python_3_8(path: Path) -> None:
+    import ast
+
+    ast.parse(path.read_text(), feature_version=(3, 8))
