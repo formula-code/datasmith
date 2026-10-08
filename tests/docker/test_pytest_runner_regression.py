@@ -272,3 +272,12 @@ def test_plugin_loaded_only_in_the_agent_run_is_a_regression(src_repo, tmp_path:
     results, _ = _run_runner(root, base, tmp_path / "logs")
     assert results["regression"]["agent_only_plugins"] == ["fcevil"]
     assert "plugin:fcevil" in results["regression"]["regressed"]
+
+
+def test_missing_base_config_fails_the_check(runner) -> None:
+    out = {"regression": {"ran": False, "reason": "no tests selected"}}
+    runner.fail_without_base_config(out, {"config_error": "OSError: x"})
+    assert out["regression"]["ran"] is True and out["regression"]["regressed"] == ["config:unavailable"]
+    ok = {"regression": {"ran": True, "regressed": []}}
+    runner.fail_without_base_config(ok, {})
+    assert ok["regression"]["regressed"] == []

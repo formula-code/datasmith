@@ -398,6 +398,14 @@ def write_base_pytest_config(base_ref, repo_root):
     return path
 
 
+def fail_without_base_config(output, test_edits):
+    """Without the base config pytest may have read the agent's config files, so the check fails."""
+    if "config_error" in test_edits:
+        reg = dict(output.get("regression") or {}, ran=True)
+        reg["regressed"] = list(reg.get("regressed") or []) + ["config:unavailable"]
+        output["regression"] = reg
+
+
 def restore_test_edits(base_ref, repo_root):
     """Put the test files back to ``base_ref`` so the agent cannot weaken the tests that judge it."""
     edits = {"modified": [], "added": [], "deleted": [], "config_changed": []}
@@ -1139,6 +1147,7 @@ if __name__ == "__main__":
     output["fc_runner"] = "regression-v1+template"
     output["test_edits"] = test_edits
 
+    fail_without_base_config(output, test_edits)
     _payload = json.dumps(output, sort_keys=True)
     (logs_root / "test_results.json").write_text(_payload)
     _legacy = Path("/logs/test_results.json")
