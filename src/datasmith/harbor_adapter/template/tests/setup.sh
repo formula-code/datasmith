@@ -134,12 +134,16 @@ fi
 
 SETUP_PHASE="base_copy"
 # lsv_measure.py times this unpatched copy (with its build) against the patched repo. Overlayfs cannot rename
-# image directories, so the repo is moved out and copied back to make both trees renamable.
+# image directories, so both trees are copies. No mv of the image tree: on a merged directory with ~10^5 git objects,
+# mv stopped on entries already gone (numpy#12445, pandas#40007); rm -rf skips them.
 if [ "${FC_LSV_PAIRED:-1}" != "0" ]; then
   cd /
-  rm -rf /workspace/.fc_base
-  mv /workspace/repo /workspace/.fc_base
-  cp -a /workspace/.fc_base /workspace/repo
+  rm -rf /workspace/.fc_base /workspace/.fc_new
+  cp -a /workspace/repo /workspace/.fc_base
+  cp -a /workspace/repo /workspace/.fc_new
+  rm -rf /workspace/repo
+  mv /workspace/.fc_new /workspace/repo
+  [ "$(git -C /workspace/repo rev-parse HEAD)" = "$(git -C /workspace/.fc_base rev-parse HEAD)" ]
   cd /workspace/repo
 fi
 
