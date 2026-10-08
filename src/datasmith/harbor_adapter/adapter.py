@@ -95,7 +95,8 @@ class FormulaCodeAdapter:
         for d in (env, tests, solution):
             d.mkdir(parents=True, exist_ok=True)
 
-        copy2(self.template_dir / "environment" / "entrypoint.sh", env / "entrypoint.sh")
+        for name in ("entrypoint.sh", "scrub_git.sh"):
+            copy2(self.template_dir / "environment" / name, env / name)
         for name in TEST_HELPERS:
             copy2(self.template_dir / "tests" / name, tests / name)
         # The Dockerfile's baseline measurement runs lsv_init.py at image build, before /tests exists.
