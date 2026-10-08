@@ -82,12 +82,14 @@ class FormulaCodeAdapter:
         rounds: int | None = None,
         verifier_env: dict[str, str] | None = None,
         expected_n: int | None = None,
+        restore_paths: list[str] | None = None,
     ) -> Path:
         """Render the Harbor task dir for ``rec``.
 
         ``rounds`` (default ``DATASMITH_LSV_ROUNDS``) drives both the image baseline and the trial passes.
         ``expected_n`` (from ``formulacode_task_overrides``) becomes ``FORMULACODE_EXPECTED_N`` for the
         dilution_ratio invariant; ``None`` emits no key, so the invariant skips.
+        ``restore_paths`` are repo files the image puts back to the base commit (base_restore.json).
         """
         rounds = DATASMITH_LSV_ROUNDS if rounds is None else rounds
         out_dir = self.out_root / rec.task_dir_name
@@ -102,6 +104,9 @@ class FormulaCodeAdapter:
         # The Dockerfile's baseline measurement runs lsv_init.py at image build, before /tests exists.
         for name in ("lsv_init.py", "project_imports.py"):
             copy2(self.template_dir / "tests" / name, env / name)
+        if restore_paths:
+            copy2(self.template_dir / "environment" / "restore_base.sh", env / "restore_base.sh")
+            copy2(self.template_dir / "tests" / "rebuild.sh", env / "rebuild.sh")
 
         _write(out_dir / "instruction.md", render_instruction_md(rec.instructions))
         if expected_n is not None:
@@ -123,7 +128,10 @@ class FormulaCodeAdapter:
         patch_roots = sorted({p.split("/")[0] for p in re.findall(r"diff --git a/([^ ]+)", rec.patch) if "/" in p})
         image_config = {k: v for k, v in config.items() if k not in ("patch", "gt_hash")} | {"patch_roots": patch_roots}
         base_image = rec.container_name or "python:3.11-slim"
-        _write(env / "Dockerfile", render_dockerfile(base_image, numba_threads=cpus, lsv_rounds=rounds))
+        _write(
+            env / "Dockerfile",
+            render_dockerfile(base_image, numba_threads=cpus, lsv_rounds=rounds, restore_paths=restore_paths or ()),
+        )
         _write(env / "config.json", json.dumps(image_config, indent=2))
 
         ids = {"task_id": rec.task_id, "owner": rec.owner, "repo": rec.repo, "issue_number": rec.issue_number}

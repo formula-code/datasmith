@@ -39,6 +39,14 @@ RUN set -eux; \
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+{%- if restore_paths %}
+
+# The base image's stored build script edited these files where the oracle patch changes them; start from the base commit.
+COPY restore_base.sh rebuild.sh /opt/restore/
+RUN set -e; set +u; . /etc/profile.d/asv_build_vars.sh; set -u; \
+    eval "$(micromamba shell hook --shell=bash)"; micromamba activate "$ENV_NAME"; \
+    bash /opt/restore/restore_base.sh {{ restore_paths }} && rm -rf /opt/restore
+{%- endif %}
 
 # Build-time copies for the baseline measurement only; runtime reads the uploaded /tests. This config.json has no patch
 # or gt_hash. No PYTHONPATH=/opt/lsv: it would shadow the /tests helpers with a frozen copy.
