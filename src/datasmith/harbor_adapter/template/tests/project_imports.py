@@ -1,6 +1,6 @@
 """Find where benchmark processes import the project from, and remove other installed copies of it.
 
-Usage (setup.sh, image build): python project_imports.py --remove
+Usage (prepare.sh, image build): python project_imports.py --remove
 """
 
 import argparse

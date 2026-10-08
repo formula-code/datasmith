@@ -1,14 +1,17 @@
+import re
 import subprocess
 import time
 from pathlib import Path
 
-SETUP = Path(__file__).resolve().parents[2] / "src/datasmith/harbor_adapter/template/tests/setup.sh"
+SETUP = Path(__file__).resolve().parents[2] / "src/datasmith/harbor_adapter/template/tests/prepare.sh"
 
 
 def baseline_block(sha_file: Path) -> str:
     text = SETUP.read_text()
     start, end = text.index('SETUP_PHASE="baseline_commit"'), text.index('SETUP_PHASE="base_copy"')
-    return text[start:end].replace("/opt/fc_baseline_sha", str(sha_file))
+    stage = (SETUP.parents[1] / "shared" / "stage_tree.sh").read_text()
+    block = re.sub(r'\{% filter indent\(2\) %\}\n\{% include "shared/stage_tree.sh" %\}\n\{% endfilter %\}\n', lambda _: stage, text[start:end])
+    return block.replace("/opt/fc_baseline_sha", str(sha_file))
 
 
 def test_baseline_commit_starts_no_background_gc(tmp_path):

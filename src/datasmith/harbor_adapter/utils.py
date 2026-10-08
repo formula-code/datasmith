@@ -76,12 +76,18 @@ def render_task_toml(
     memory: str = "4G",
     storage: str = "10G",
     verifier_env: dict[str, str] | None = None,
+    collect_command: str = "",
 ) -> str:
+    """The verifier runs in a fresh container from the image; collect_command writes the agent's tree.diff."""
     check_verifier_env(verifier_env)
+    if "'''" in collect_command:
+        raise ValueError("collect_command cannot hold a TOML literal string delimiter")
     env_lines = "".join(f'{k} = "{v}"\n' for k, v in (verifier_env or {}).items())
     verifier_env_section = f"\n[verifier.env]\n{env_lines}" if env_lines else ""
 
-    return f"""[metadata]
+    return f"""artifacts = ["/fc_submission"]
+
+[metadata]
 author_name = "unknown"
 author_email = "unknown"
 difficulty = "{normalize_difficulty(difficulty)}"
@@ -90,7 +96,13 @@ tags = ["optimization", "formulacode", "asv", "benchmarking"]
 
 [verifier]
 timeout_sec = {timeout_sec}
+environment_mode = "separate"
 {verifier_env_section}
+[[verifier.collect]]
+timeout_sec = 600
+command = '''
+{collect_command}'''
+
 [agent]
 timeout_sec = {timeout_sec}
 
