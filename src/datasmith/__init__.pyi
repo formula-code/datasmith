@@ -57,21 +57,6 @@ from datasmith.docker import (
 from datasmith.docker import (
     ImageManager as ImageManager,
 )
-from datasmith.docker import (
-    MultiObjVerifier as MultiObjVerifier,
-)
-from datasmith.docker import (
-    ProfileVerifier as ProfileVerifier,
-)
-from datasmith.docker import (
-    PytestVerifier as PytestVerifier,
-)
-from datasmith.docker import (
-    SmokeVerifier as SmokeVerifier,
-)
-from datasmith.docker import (
-    VerifyResult as VerifyResult,
-)
 from datasmith.filters import (
     check_file_compliance as check_file_compliance,
 )
@@ -163,6 +148,12 @@ from datasmith.utils import (
 )
 from datasmith.utils import (
     TokenPool as TokenPool,
+)
+from datasmith.utils import (
+    abatch_upsert as abatch_upsert,
+)
+from datasmith.utils import (
+    afetch_all as afetch_all,
 )
 from datasmith.utils import (
     batch_upsert as batch_upsert,

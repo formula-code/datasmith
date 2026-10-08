@@ -1,0 +1,63 @@
+"""The rebuild after a patch falls back to an isolated build, as the image build does (old numpy)."""
+
+import subprocess
+from pathlib import Path
+
+_REBUILD_SH = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / "template" / "tests" / "rebuild.sh"
+
+
+def _rebuild_script() -> str:
+    return _REBUILD_SH.read_text()
+
+
+def _run(tmp_path: Path, fail_no_isolation: bool, fail_isolated: bool = False) -> subprocess.CompletedProcess:
+    log = tmp_path / "calls.txt"
+    (tmp_path / "setup.py").write_text("")
+    fake = f"""python() {{
+  echo "${{SETUPTOOLS_USE_DISTUTILS:-}} $*" >> {log}
+  case "$*" in *numpy*|*pkg_resources*) return 1;; esac
+  case "$*" in *--no-build-isolation*) return {1 if fail_no_isolation else 0};; esac
+  case "$*" in *"pip install"*) return {1 if fail_isolated else 0};; esac
+  return 0
+}}
+cd() {{ builtin cd {tmp_path}; }}
+"""
+    script = fake + _rebuild_script().replace("set -eo pipefail\n", "set -eo pipefail\n", 1)
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30), log
+
+
+def test_isolated_build_after_a_failed_no_isolation_build(tmp_path):
+    out, log = _run(tmp_path, fail_no_isolation=True)
+    installs = [line for line in log.read_text().splitlines() if "pip install" in line]
+    assert out.returncode == 0, out.stderr
+    assert len(installs) == 2 and "--no-build-isolation" in installs[0] and "--no-build-isolation" not in installs[1]
+
+
+def test_no_isolation_build_that_works_runs_once(tmp_path):
+    out, log = _run(tmp_path, fail_no_isolation=False)
+    assert out.returncode == 0, out.stderr
+    assert sum("pip install" in line for line in log.read_text().splitlines()) == 1
+
+
+def test_in_place_extension_build_after_both_installs_fail(tmp_path):
+    out, log = _run(tmp_path, fail_no_isolation=True, fail_isolated=True)
+    calls = log.read_text().splitlines()
+    assert out.returncode == 0, out.stderr
+    assert calls[-1] == "stdlib setup.py build_ext --inplace"
+
+
+def test_rebuild_runs_in_the_installed_project_folder(tmp_path):
+    log = tmp_path / "calls.txt"
+    fake = f"""python() {{
+  case "$*" in *direct_url*) echo /workspace/repo/python; return 0;; esac
+  echo "python $*" >> {log}
+  case "$*" in *numpy*|*pkg_resources*) return 1;; esac
+  return 0
+}}
+cd() {{ echo "cd $*" >> {log}; builtin cd {tmp_path}; }}
+"""
+    out = subprocess.run(["bash", "-c", fake + _rebuild_script()], capture_output=True, text=True, timeout=30)
+    calls = log.read_text().splitlines()
+    assert out.returncode == 0, out.stderr
+    assert "cd /workspace/repo/python" in calls
+    assert calls.index("cd /workspace/repo/python") < next(i for i, c in enumerate(calls) if "pip install" in c)

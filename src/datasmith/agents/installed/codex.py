@@ -47,6 +47,13 @@ _AUTO_COMPACT_TOKEN_LIMIT = int(os.environ.get("CODEX_AUTO_COMPACT_TOKEN_LIMIT",
 # the hard requirements verbatim so they survive into the post-compaction
 # state, and to require preservation of the current docker_build_*.sh contents
 # and the most recent failure.json so the agent doesn't lose its place.
+# Model and reasoning effort are knobs, so they follow the DATASMITH_ rule in
+# CLAUDE.md: read from the environment at module scope, with a literal default.
+# Both were hardcoded ("gpt-5.4-mini" at "xhigh") until 2026-08-23, so no run
+# could be reproduced against a different model without editing this file.
+DATASMITH_CODEX_MODEL: str = os.environ.get("DATASMITH_CODEX_MODEL", "gpt-5.6-luna")
+DATASMITH_CODEX_REASONING_EFFORT: str = os.environ.get("DATASMITH_CODEX_REASONING_EFFORT", "medium")
+
 _COMPACT_PROMPT = """\
 You are compacting the history of a long synthesis session for the FormulaCode
 Docker build verifier. Produce a concise summary that REPLACES older turns,
@@ -139,9 +146,9 @@ class CodexAgent(InstalledAgent):
             "codex",
             "exec",
             "--model",
-            "gpt-5.4-mini",
+            DATASMITH_CODEX_MODEL,
             "-c",
-            "model_reasoning_effort=xhigh",
+            f"model_reasoning_effort={DATASMITH_CODEX_REASONING_EFFORT}",
             "-c",
             f"background_terminal_max_timeout={_BG_TERMINAL_MAX_TIMEOUT_MS}",
             "-c",

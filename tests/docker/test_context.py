@@ -19,6 +19,7 @@ class TestToTarBytes:
             build_pkg_sh="#!/bin/bash\necho pkg",
             build_run_sh="#!/bin/bash\necho run",
             build_final_sh="#!/bin/bash\necho final",
+            measure_sh="#!/bin/bash\necho measure",
             profile_sh="#!/bin/bash\necho profile",
             run_tests_sh="#!/bin/bash\necho tests",
             entrypoint_sh="#!/bin/bash\necho entry",
@@ -37,6 +38,7 @@ class TestToTarBytes:
             "docker_build_pkg.sh",
             "docker_build_run.sh",
             "docker_build_final.sh",
+            "measure.sh",
             "profile.sh",
             "run-tests.sh",
             "entrypoint.sh",
@@ -228,3 +230,15 @@ class TestPydanticSerialization:
         ctx = DockerContext(dockerfile="FROM python:3.11")
         ctx.dockerfile = "FROM python:3.12"
         assert ctx.dockerfile == "FROM python:3.12"
+
+
+class TestMeasureScriptPlumbing:
+    def test_measure_sh_is_a_context_file(self) -> None:
+        assert "measure.sh" in DockerContext._FILE_MAP
+        assert DockerContext._FILE_MAP["measure.sh"] == "measure_sh"
+
+    def test_measure_sh_round_trips_through_a_directory(self, tmp_path) -> None:
+        ctx = DockerContext(measure_sh="#!/usr/bin/env bash\necho measure\n")
+        ctx.to_directory(str(tmp_path))
+        assert (tmp_path / "measure.sh").exists()
+        assert DockerContext.from_directory(str(tmp_path)).measure_sh == ctx.measure_sh

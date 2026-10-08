@@ -52,6 +52,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # --- utils ---
     "Settings": ("datasmith.utils", "Settings"),
     "TokenPool": ("datasmith.utils", "TokenPool"),
+    "abatch_upsert": ("datasmith.utils", "abatch_upsert"),
+    "afetch_all": ("datasmith.utils", "afetch_all"),
     "batch_upsert": ("datasmith.utils", "batch_upsert"),
     "fetch_all": ("datasmith.utils", "fetch_all"),
     "get_async_client": ("datasmith.utils", "get_async_client"),
@@ -66,11 +68,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "DockerContext": ("datasmith.docker", "DockerContext"),
     "DockerHubPublisher": ("datasmith.docker", "DockerHubPublisher"),
     "ImageManager": ("datasmith.docker", "ImageManager"),
-    "MultiObjVerifier": ("datasmith.docker", "MultiObjVerifier"),
-    "ProfileVerifier": ("datasmith.docker", "ProfileVerifier"),
-    "PytestVerifier": ("datasmith.docker", "PytestVerifier"),
-    "SmokeVerifier": ("datasmith.docker", "SmokeVerifier"),
-    "VerifyResult": ("datasmith.docker", "VerifyResult"),
     # --- agents ---
     "AgentConfig": ("datasmith.agents", "AgentConfig"),
     "ClassificationDecision": ("datasmith.agents", "ClassificationDecision"),
@@ -197,21 +194,6 @@ if TYPE_CHECKING:
     from datasmith.docker import (
         ImageManager as ImageManager,
     )
-    from datasmith.docker import (
-        MultiObjVerifier as MultiObjVerifier,
-    )
-    from datasmith.docker import (
-        ProfileVerifier as ProfileVerifier,
-    )
-    from datasmith.docker import (
-        PytestVerifier as PytestVerifier,
-    )
-    from datasmith.docker import (
-        SmokeVerifier as SmokeVerifier,
-    )
-    from datasmith.docker import (
-        VerifyResult as VerifyResult,
-    )
     from datasmith.filters import (
         check_file_compliance as check_file_compliance,
     )
@@ -303,6 +285,12 @@ if TYPE_CHECKING:
     )
     from datasmith.utils import (
         TokenPool as TokenPool,
+    )
+    from datasmith.utils import (
+        abatch_upsert as abatch_upsert,
+    )
+    from datasmith.utils import (
+        afetch_all as afetch_all,
     )
     from datasmith.utils import (
         batch_upsert as batch_upsert,

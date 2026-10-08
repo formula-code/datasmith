@@ -5,6 +5,9 @@ cd /workspace/repo || exit 1
 
 source /etc/profile.d/asv_utils.sh || true
 source /etc/profile.d/asv_build_vars.sh || true
+# Defense in depth: never let a bare `fc_note ...` call abort this script
+# under `set -euo pipefail` if the profile.d helper failed to source.
+command -v fc_note >/dev/null 2>&1 || fc_note() { :; }
 
 ROOT_PATH=${ROOT_PATH:-$PWD}         # Usually /workspace/repo
 REPO_ROOT="$ROOT_PATH"
@@ -21,10 +24,29 @@ CONF_NAME=$(find . -type f -name "asv.*.json" | head -n 1)
 # cd to dirname $CONF_NAME
 CWD=$(pwd)
 cd "$(dirname "$CONF_NAME")"
-asv machine --yes --config "$(basename "$CONF_NAME")" \
+# `asv` lives in the micromamba env (/opt/conda/envs/$ENV_NAME/bin), not in
+# the base conda on PATH (/opt/conda/bin). Calling it bare exits 127 and fails
+# the whole run stage.
+#
+# This was broken for every repository. All 1856 stored build_run_sh scripts,
+# across all 134 repos, add an activation here -- meaning the first thing every
+# synthesis agent ever did was repair this line. Lines below already use
+# `micromamba run -n`, so only this call was affected.
+#
+# Real CPU and RAM replace the hardcoded 1 / 4GB. asv writes them into
+# machine.json, which is the only machine record the measurement keeps, and a
+# stub there describes nothing.
+_NPROC="$(nproc 2>/dev/null || echo 1)"
+_RAM_KB="$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+if [ "${_RAM_KB:-0}" -gt 0 ]; then
+  _RAM="$(( _RAM_KB / 1024 / 1024 ))GB"
+else
+  _RAM="unknown"
+fi
+micromamba run -n "$ENV_NAME" asv machine --yes --config "$(basename "$CONF_NAME")" \
   --machine "docker" \
-  --num_cpu "1" \
-  --ram "4GB"
+  --num_cpu "$_NPROC" \
+  --ram "$_RAM"
 cd "$CWD"
 
 
@@ -119,6 +141,29 @@ export ASV_PY_VERSIONS="$ASV_PY_VERSIONS"
 export HEAD_SHA=$HEAD_SHA
 EOF
 
+# Record whether the injected benchmark survived repo lockdown.  These are
+# the facts that catch "git clean wiped the benchmark" before a trial does.
+# NOTE: BENCHMARK_DEST is not set anywhere in the current template pipeline
+# (docker_build_pkg.sh is agent-synthesized per-repo, outside Task 3's
+# scope); if/when that layer starts exporting it via asv_build_vars.sh,
+# this breadcrumb picks it up automatically.
+#
+# IMPORTANT: only emit benchmark_dest_present_post_clean when $BENCHMARK_DEST
+# is actually set. manifest.py's benchmark_dest_missing invariant is FATAL
+# and distinguishes "key absent" (None -> skipped) from "key present and
+# False" (fails). Unconditionally emitting 0 here -- which is what happens
+# on every build today, since nothing sets BENCHMARK_DEST yet -- would turn
+# a should-be-skipped invariant into a permanent fatal failure on every
+# single build once the evaluator is wired into local_ci.py::verify().
+_BENCH_DEST="${BENCHMARK_DEST:-}"
+if [ -n "$_BENCH_DEST" ]; then
+    if [ -f "/workspace/repo/$_BENCH_DEST" ]; then
+        fc_note benchmark_dest_present_post_clean=1
+        fc_note benchmark_dest="$_BENCH_DEST"
+    else
+        fc_note benchmark_dest_present_post_clean=0
+    fi
+fi
 
 # Remove the setup script so the agent doesn't see it
 rm -- "$0"

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +29,30 @@ from datasmith.utils import get_logger
 
 logger = get_logger("agents.sandbox")
 
+# Wall-clock for ONE verification: build + tests + measurement, together.
+#
+# This used to be 3600 s -- the same budget `local_ci.py` gives to tests ALONE
+# and to measurement ALONE (`DATASMITH_VERIFY_TEST_TIMEOUT_S`,
+# `DATASMITH_VERIFY_MEASURE_TIMEOUT_S`, both 3600). An outer wrapper no larger
+# than one of its own steps kills work that is still inside its allowance, and
+# it does so silently: the run comes back as `Timed out after 3600s`, which is
+# indistinguishable from a hang.
+#
+# Measured on the verified corpus 2026-08-26, tests + measurement alone:
+# bottleneck#305 3351 s (93% of the old budget, and it only fit because its
+# build was cached), bottleneck#298 2615 s, uxarray#1118 2039 s, networkx#8138
+# 1693 s, tiled#1283 1555 s. Add a build and the largest repos cannot finish
+# inside an hour at all -- which is why every repo with a big test suite or a
+# large benchmark suite had never produced a verified container, while 103
+# rounds burned on `Timed out after 3600s`.
+#
+# 5400 covers the observed maximum with room for a cold build. It is a
+# trade-off, not a free win: a genuinely hung task now costs more before the
+# stall detector ends it, and only 3 of 38 tasks that hit a timeout ever went
+# on to be accepted. Lower it if hung tasks start dominating again.
+DATASMITH_VERIFY_TIMEOUT_S: int = int(os.environ.get("DATASMITH_VERIFY_TIMEOUT_S", "5400"))
+
+
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 # Files the agent must NOT modify.  Hashes are recorded at workspace setup
@@ -37,10 +62,15 @@ _IMMUTABLE_FILES = (
     "Dockerfile.pr",
     "docker_build_base.sh",
     "docker_build_final.sh",
+    "emit_manifest.py",
+    "measure.sh",
+    "apply_oracle_patch.py",
+    "emit_measure.py",
     "profile.sh",
     "run-tests.sh",
     "entrypoint.sh",
     "task.txt",
+    "solution.patch",
 )
 
 
@@ -98,12 +128,18 @@ class SandboxResult:
     agent_name: str = ""
     files_changed: list[str] = field(default_factory=list)
     resource_metrics: dict = field(default_factory=dict)
+    build_manifest: dict | None = None
     env_payload_override: str | None = None
     aborted: bool = False
     """True when the agent exited without ever producing failure.json or
     verification_success.json — i.e. it never ran (or never finished running)
     local_ci.py. Distinct from a real verifier failure, and should not
     consume the synthesizer's per-PR attempt budget."""
+
+    # The tag the build actually produced. Callers must never reconstruct it:
+    # verify_context serves TRY_SIMILAR and does not necessarily tag what
+    # another caller would guess.
+    image_tag: str = ""
 
 
 class SandboxRunner:
@@ -125,6 +161,7 @@ class SandboxRunner:
         prior_attempts: str = "",
         dry_run: bool = False,
         base_sha: str = "",
+        solution_patch: str = "",
     ) -> SandboxResult:
         """Prepare workspace, launch agent, extract results.
 
@@ -148,6 +185,7 @@ class SandboxRunner:
                 pr_context=pr_context,
                 prior_attempts=prior_attempts,
                 base_sha=base_sha,
+                solution_patch=solution_patch,
             )
 
             # 2. Init git repo (Codex requirement)
@@ -188,6 +226,7 @@ class SandboxRunner:
         pr_context: str,
         prior_attempts: str = "",
         base_sha: str = "",
+        solution_patch: str = "",
     ) -> None:
         """Create the workspace directory structure."""
         task_dir = workspace / "task"
@@ -206,10 +245,21 @@ class SandboxRunner:
             "docker_build_pkg.sh",
             "docker_build_run.sh",
             "docker_build_final.sh",
+            "emit_manifest.py",
+            "measure.sh",
+            "apply_oracle_patch.py",
+            "emit_measure.py",
             "profile.sh",
             "entrypoint.sh",
         ):
             src = docker_templates / fname
+            if src.exists():
+                shutil.copy2(str(src), str(task_dir / fname))
+
+        # Copied from the harbor trial template so stages 6 and 7 select LSV benchmarks identically.
+        lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template" / "tests"
+        for fname in ("lsv_init.py", "lsv_measure.py", "parser.py"):
+            src = lsv_templates / fname
             if src.exists():
                 shutil.copy2(str(src), str(task_dir / fname))
 
@@ -221,6 +271,14 @@ class SandboxRunner:
         # the base commit, not the merge commit.
         task_txt = _generate_task_txt(owner, repo, checkout_sha, env_payload, python_version, repo_image)
         (task_dir / "task.txt").write_text(task_txt)
+
+        # The oracle patch, mounted read-only into the measure container by
+        # local_ci.py.  Always written — even empty — because `docker run -v`
+        # creates a DIRECTORY at a mount source that does not exist, which
+        # apply_oracle_patch.py then cannot read.  It is deliberately NOT a
+        # Dockerfile.pr COPY target: a published image carrying the oracle
+        # solution would be readable by the agent under evaluation.
+        (task_dir / "solution.patch").write_text(solution_patch or "")
 
         # Render AGENTS.md from Jinja2 template
         agents_md = _render_agents_md(
@@ -394,6 +452,7 @@ class SandboxRunner:
 
         # Extract resource_metrics from whichever JSON file was written
         resource_metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
+        build_manifest = _extract_build_manifest(success_file, failure_file, failure_json)
 
         # An "aborted" attempt is one where the agent exited without producing
         # either result file. Distinct from a real verifier failure: the
@@ -409,6 +468,7 @@ class SandboxRunner:
             agent_name=agent_name,
             files_changed=codex_result.files_changed,
             resource_metrics=resource_metrics,
+            build_manifest=build_manifest,
             env_payload_override=env_payload_override if success else None,
             aborted=aborted,
         )
@@ -438,6 +498,36 @@ def _extract_resource_metrics(
         if isinstance(metrics, dict):
             return metrics
     return {}
+
+
+def _extract_image_tag(success_file: Path) -> str:
+    """Read the tag local_ci.py actually built, or "" if it never got that far.
+
+    ``local_ci.py`` records it as ``local_image`` in
+    ``verification_success.json``. Read rather than reconstructed: the tag
+    is local_ci.py's to name, and a caller that rebuilt the string would
+    drift the moment that naming changes.
+    """
+    if not success_file.exists():
+        return ""
+    try:
+        data = json.loads(success_file.read_text())
+    except Exception:
+        logger.debug("Failed to read local_image from success file")
+        return ""
+    tag = data.get("local_image")
+    return tag if isinstance(tag, str) else ""
+
+
+def _extract_build_manifest(success_file: Path, failure_file: Path, failure_json: dict | None) -> dict | None:
+    """Pull ``build_manifest`` out of the verification JSON files.
+
+    It travels inside ``resource_metrics`` because local_ci.py writes it
+    there, reusing the existing plumbing rather than adding a channel.
+    """
+    metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
+    manifest = (metrics or {}).get("build_manifest")
+    return manifest if isinstance(manifest, dict) else None
 
 
 def _generate_task_txt(
@@ -488,6 +578,39 @@ def _render_agents_md(
     )
 
 
+def _kill_labelled_containers(run_label: str) -> int:
+    """Force-remove every container carrying ``fc.run=<run_label>``.
+
+    Best-effort by design: this runs on a path that is already failing, and a
+    docker hiccup here must not replace a timeout result with an exception.
+    Returns how many it removed, for the log line.
+    """
+    try:
+        listed = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"label=fc.run={run_label}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        ).stdout.split()
+    except Exception:
+        logger.warning("could not list containers for %s", run_label)
+        return 0
+    removed = 0
+    for cid in listed:
+        try:
+            if (
+                subprocess.run(["docker", "rm", "-f", cid], capture_output=True, check=False, timeout=120).returncode
+                == 0
+            ):
+                removed += 1
+        except Exception:
+            logger.warning("could not remove container %s for %s", cid, run_label)
+    if removed:
+        logger.warning("verification timed out; force-removed %d container(s) for %s", removed, run_label)
+    return removed
+
+
 def verify_context(
     owner: str,
     repo: str,
@@ -496,13 +619,22 @@ def verify_context(
     env_payload: str,
     python_version: str,
     context: DockerContext,
-    timeout_s: int = 3600,
+    timeout_s: int = DATASMITH_VERIFY_TIMEOUT_S,
     base_sha: str = "",
+    solution_patch: str = "",
+    run_tests_gate: bool = True,
 ) -> SandboxResult:
     """Build and verify a :class:`DockerContext` without launching an agent.
 
     Used by ``Synthesizer.TRY_SIMILAR`` to test whether a previously
     successful build context works for a new commit in the same repository.
+
+    ``run_tests_gate=False`` builds the image and seals the manifest but does
+    NOT fail on pytest's exit code. PRODUCE_VERIFY needs that: in its path
+    pytest runs only in the verifier's battery and severity.py grades the
+    verdict. Leaving the gate on there would reject a container before the
+    verifier could weigh it, which is the contradiction the design settled.
+    Defaults to True so TRY_SIMILAR and TRY_DEFAULT are unchanged.
     """
     start = time.time()
     docker_templates = Path(__file__).parents[1] / "docker" / "templates"
@@ -524,10 +656,21 @@ def verify_context(
             "docker_build_pkg.sh",
             "docker_build_run.sh",
             "docker_build_final.sh",
+            "emit_manifest.py",
+            "measure.sh",
+            "apply_oracle_patch.py",
+            "emit_measure.py",
             "profile.sh",
             "entrypoint.sh",
         ):
             src = docker_templates / fname
+            if src.exists():
+                shutil.copy2(str(src), str(task_dir / fname))
+
+        # Copied from the harbor trial template so stages 6 and 7 select LSV benchmarks identically.
+        lsv_templates = Path(__file__).parents[1] / "harbor_adapter" / "template" / "tests"
+        for fname in ("lsv_init.py", "lsv_measure.py", "parser.py"):
+            src = lsv_templates / fname
             if src.exists():
                 shutil.copy2(str(src), str(task_dir / fname))
 
@@ -540,6 +683,14 @@ def verify_context(
         task_txt = _generate_task_txt(owner, repo, checkout_sha, env_payload, python_version, repo_image)
         (task_dir / "task.txt").write_text(task_txt)
 
+        # The oracle patch, mounted read-only into the measure container by
+        # local_ci.py.  Always written — even empty — because `docker run -v`
+        # creates a DIRECTORY at a mount source that does not exist, which
+        # apply_oracle_patch.py then cannot read.  It is deliberately NOT a
+        # Dockerfile.pr COPY target: a published image carrying the oracle
+        # solution would be readable by the agent under evaluation.
+        (task_dir / "solution.patch").write_text(solution_patch or "")
+
         # Override with the candidate context's editable scripts
         if context.build_pkg_sh:
             (task_dir / "docker_build_pkg.sh").write_text(context.build_pkg_sh)
@@ -551,15 +702,27 @@ def verify_context(
         shutil.copy2(str(src_verify), str(workspace / "local_ci.py"))
 
         # Run local_ci.py directly (no agent)
+        skip_gate = [] if run_tests_gate else ["--skip-test-gate"]
+        local_ci_argv = [sys.executable, str(workspace / "local_ci.py"), "--task", str(task_dir), *skip_gate]
+        # Tag every container this verification starts, so a timeout can kill
+        # them. Killing local_ci.py does NOT stop its containers -- they run in
+        # the daemon, and local_ci deliberately omits `--rm` so it can collect
+        # metrics after exit. Its own cleanup never runs when it is killed from
+        # here, which is how containers survived 90+ minutes against a 3600 s
+        # timeout on 2026-08-25/26 and put the host at load 372 on 128 cores.
+        run_label = f"verify-{uuid.uuid4().hex[:12]}"
+        env = {**os.environ, "FC_RUN_LABEL": run_label}
         try:
             proc = subprocess.run(
-                [sys.executable, str(workspace / "local_ci.py"), "--task", str(task_dir)],
+                local_ci_argv,
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
+                env=env,
             )
             output = proc.stdout
         except subprocess.TimeoutExpired:
+            _kill_labelled_containers(run_label)
             return SandboxResult(
                 success=False,
                 failure_json={
@@ -585,6 +748,8 @@ def verify_context(
                 logger.debug("Failed to parse failure.json in verify_context")
 
         resource_metrics = _extract_resource_metrics(success_file, failure_file, failure_json)
+        build_manifest = _extract_build_manifest(success_file, failure_file, failure_json)
+        tag = _extract_image_tag(success_file)
 
         return SandboxResult(
             success=success,
@@ -593,6 +758,8 @@ def verify_context(
             duration_s=time.time() - start,
             agent_output=output,
             resource_metrics=resource_metrics,
+            build_manifest=build_manifest,
+            image_tag=tag,
         )
 
 

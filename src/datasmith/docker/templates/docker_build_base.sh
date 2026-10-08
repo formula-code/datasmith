@@ -90,6 +90,21 @@ mkdir -p "$UV_CACHE_DIR"
 # Legacy pip cache (keeping for compatibility)
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/opt/pipcache}"
 mkdir -p "$PIP_CACHE_DIR"
+
+# ── FormulaCode build breadcrumbs ────────────────────────────────────
+# Append one fact to the manifest breadcrumb log.  Usage:
+#   fc_note discovered_n=3
+#   fc_note pins_requested="scipy<=1.10 numpy>=1.20"
+# Append-only and always succeeds: a failed breadcrumb must never fail a
+# build.  emit_manifest.py maps any absent key to null.
+fc_note() {
+    local _pair="$1" _k _v
+    _k="${_pair%%=*}"
+    _v="${_pair#*=}"
+    mkdir -p /opt/formulacode 2>/dev/null || true
+    python3 -c 'import json,sys; print(json.dumps({"k": sys.argv[1], "v": sys.argv[2]}))' \
+        "$_k" "$_v" >> /opt/formulacode/notes.jsonl 2>/dev/null || true
+}
 EOF
 }
 

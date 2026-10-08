@@ -238,3 +238,12 @@ jobs/
 FLOWCHART.md
 WORKFLOW.md
 google*.html
+
+# runtime output and local scratch
+logs/
+rl-prep/
+rl-prep.zip
+*.swp
+
+# tokens.env is ignored above; its timestamped backups carry the same secrets
+tokens.env.bak*

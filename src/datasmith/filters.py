@@ -1,11 +1,17 @@
 """Cheap attribute-compliance filters for PR pre-screening.
 
-Applied during scraping (stage 2) to avoid storing irrelevant PRs.
+Split across two stages, because only one of the three components needs a
+diff.  Stage 2 stores **every** merged PR and evaluates the two components
+GraphQL can answer -- the title keyword filter and file compliance --
+recording the verdict in ``is_performance_commit_symbolic``.  Nothing is
+dropped there.  ``check_patch_size`` runs from stage 3, where it gates the
+diff fetch and the LLM call rather than storage.
+
 Implements the attribute compliance checks from the design docs:
 
 - ``message_filter``: positive perf keywords AND NOT negative keywords
 - ``has_core_file``: at least one changed file is not test/doc/benchmark/CI
-- ``check_patch_size``: patch token count within bounds
+- ``check_patch_size``: patch token count within bounds (stage 3)
 - Size limits: max total changes, max files changed
 """
 
@@ -137,7 +143,28 @@ def estimate_tokens(text: str) -> int:
 
 
 def check_patch_size(patch: str) -> bool:
-    """Return True if patch token count is within acceptable bounds."""
+    """Return True if patch token count is within acceptable bounds.
+
+    Decides from length alone whenever length is conclusive, because
+    tokenising is not cheap and this runs on every candidate PR.  A token is
+    at least one character, so:
+
+    * fewer than ``MIN_PATCH_TOKENS`` characters cannot reach the floor;
+    * at most ``MAX_PATCH_TOKENS`` characters cannot exceed the ceiling.
+
+    Only a patch between those two bounds is genuinely ambiguous and worth
+    encoding.  This matters more than it looks: ``tiktoken`` is CPU-bound BPE,
+    and PostHog diffs reach 150 KB.  Stage 3 called this straight from its
+    coroutine, so a single large patch stalled the whole event loop -- every
+    other item, the pacer, and the logging that was supposed to report the
+    stall.  The caller now also runs it off the loop; this keeps most calls
+    from needing a thread at all.
+    """
+    length = len(patch)
+    if length < MIN_PATCH_TOKENS:
+        return False
+    if length <= MAX_PATCH_TOKENS:
+        return True
     n = estimate_tokens(patch)
     return MIN_PATCH_TOKENS <= n <= MAX_PATCH_TOKENS
 

@@ -19,6 +19,7 @@ class DockerContext(BaseModel):
     build_pkg_sh: str = ""
     build_run_sh: str = ""
     build_final_sh: str = ""
+    measure_sh: str = ""
     profile_sh: str = ""
     run_tests_sh: str = ""
     entrypoint_sh: str = ""
@@ -30,6 +31,7 @@ class DockerContext(BaseModel):
         "docker_build_pkg.sh": "build_pkg_sh",
         "docker_build_run.sh": "build_run_sh",
         "docker_build_final.sh": "build_final_sh",
+        "measure.sh": "measure_sh",
         "profile.sh": "profile_sh",
         "run-tests.sh": "run_tests_sh",
         "entrypoint.sh": "entrypoint_sh",
@@ -42,6 +44,7 @@ class DockerContext(BaseModel):
         "building_data": "build_pkg_sh",
         "run_building_data": "build_run_sh",
         "final_building_data": "build_final_sh",
+        "measure_data": "measure_sh",
         "profile_data": "profile_sh",
         "run_tests_data": "run_tests_sh",
         "entrypoint_data": "entrypoint_sh",

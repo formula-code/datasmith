@@ -302,52 +302,74 @@ class TestDockerContextSnippets:
 
 
 # ---------------------------------------------------------------------------
-# Guide — "Docker Images" / "Verification" — Verifiers
+# Guide — "Docker Images" / "Verification" — Build manifest
 # ---------------------------------------------------------------------------
 
 
-class TestVerifierSnippets:
-    """Snippets from the Docker Images and Verification guide pages."""
+class TestManifestSnippets:
+    """Snippets from the Docker Images and Verification guide pages.
 
-    def test_verifier_imports(self) -> None:
-        """Website: ``from datasmith.docker import MultiObjVerifier, SmokeVerifier, ProfileVerifier``"""
-        from datasmith.docker import MultiObjVerifier, ProfileVerifier, SmokeVerifier
+    These replaced the old MultiObjVerifier/SmokeVerifier/ProfileVerifier
+    snippets. That API was dead -- its only .verify() call site was inside
+    verifiers.py itself -- and the published snippet would have failed
+    against every image in the registry.
+    """
 
-        assert MultiObjVerifier is not None
-        assert SmokeVerifier is not None
-        assert ProfileVerifier is not None
+    def test_manifest_api_imports(self) -> None:
+        """Website: ``from datasmith.docker import read_build_manifest, evaluate_invariants``"""
+        from datasmith.docker import evaluate_invariants, read_build_manifest
 
-    def test_smoke_verifier_takes_package(self) -> None:
-        """Website: ``SmokeVerifier("pandas")``"""
-        from datasmith.docker import SmokeVerifier
+        assert read_build_manifest is not None
+        assert evaluate_invariants is not None
 
-        sig = inspect.signature(SmokeVerifier.__init__)
-        assert "package" in sig.parameters
+    def test_read_build_manifest_takes_an_image(self) -> None:
+        """Website: ``read_build_manifest("formulacode/pandas-dev-pandas:16222")``"""
+        import inspect
 
-    def test_profile_verifier_takes_timeout(self) -> None:
-        """Website: ``ProfileVerifier(timeout=300)``"""
-        from datasmith.docker import ProfileVerifier
+        from datasmith.docker import read_build_manifest
 
-        sig = inspect.signature(ProfileVerifier.__init__)
-        assert "timeout" in sig.parameters
+        sig = inspect.signature(read_build_manifest)
+        assert "image" in sig.parameters
 
-    def test_multi_obj_verifier_takes_verifiers_list(self) -> None:
-        """Website: ``MultiObjVerifier(verifiers=[SmokeVerifier(...), ProfileVerifier(...)])``"""
-        from datasmith.docker import MultiObjVerifier
+    def test_evaluate_invariants_handles_a_missing_manifest(self) -> None:
+        """Website: ``evaluate_invariants(None)`` -> ``ok=None``, everything skipped.
 
-        sig = inspect.signature(MultiObjVerifier.__init__)
-        assert "verifiers" in sig.parameters
+        This is part of the published contract, not an edge case: every image
+        built before manifests existed has no manifest, so a snippet that
+        assumed one would fail for most readers.
+        """
+        from datasmith.docker import evaluate_invariants
 
-    def test_verify_result_fields(self) -> None:
-        """Website: ``result.ok, result.rc, result.stdout, result.stderr, result.duration_s``"""
-        from datasmith.docker import VerifyResult
+        report = evaluate_invariants(None)
+        assert report.ok is None
+        assert report.fatal == []
+        assert report.skipped
 
-        r = VerifyResult(ok=True, rc=0, stdout="out", stderr="err", duration_s=1.5)
-        assert r.ok is True
-        assert r.rc == 0
-        assert r.stdout == "out"
-        assert r.stderr == "err"
-        assert r.duration_s == 1.5
+    def test_report_fields(self) -> None:
+        """Website: ``report.ok``, ``report.fatal``, ``report.warnings``, ``report.skipped``"""
+        from datasmith.docker import evaluate_invariants
+
+        report = evaluate_invariants({
+            "schema_version": 1,
+            "build": {"discovered_n": 3, "secrets_scan_clean": True},
+            "verify": {"test_timed_out": False},
+        })
+        assert report.ok is True
+        assert isinstance(report.fatal, list)
+        assert isinstance(report.warnings, list)
+        assert isinstance(report.skipped, list)
+
+    def test_a_violated_fatal_invariant_sets_ok_false(self) -> None:
+        """Website: ``report.ok`` is False when a FATAL invariant is violated."""
+        from datasmith.docker import evaluate_invariants
+
+        report = evaluate_invariants({
+            "schema_version": 1,
+            "build": {"discovered_n": 0},
+            "verify": {},
+        })
+        assert report.ok is False
+        assert "discovered_n_zero" in report.fatal
 
 
 # ---------------------------------------------------------------------------

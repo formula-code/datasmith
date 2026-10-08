@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from datasmith.filters import (
     MAX_FILES_CHANGED,
+    MAX_PATCH_TOKENS,
     MAX_TOTAL_CHANGES,
+    MIN_PATCH_TOKENS,
     check_file_compliance,
     check_patch_size,
     estimate_tokens,
@@ -245,3 +249,49 @@ class TestSymbolicCompliance:
         patch = "--- a/f.py\n+++ b/f.py\n-old\n+new"
         files = [{"filename": "src/core.py", "additions": 1, "deletions": 1}]
         assert symbolic_compliance("Update docs", patch=patch, file_changes=files) is False
+
+
+class TestModuleDocstringMatchesTheStageSplit:
+    """The docstring is the first thing a reader trusts, so it has to be true.
+
+    Stage 2 no longer drops anything: it stores every merged PR and records
+    the symbolic verdict alongside.  ``check_patch_size`` runs from stage 3,
+    where it gates the diff fetch and the LLM call rather than storage.
+    """
+
+    def test_docstring_does_not_claim_stage_2_drops_prs(self) -> None:
+        import datasmith.filters as filters_mod
+
+        doc = filters_mod.__doc__ or ""
+        assert "avoid storing irrelevant PRs" not in doc
+        assert "stage 3" in doc.lower()
+        assert "stores **every** merged PR" in doc or "stores every merged PR" in doc
+
+
+class TestCheckPatchSizeAvoidsTokenising:
+    """Length decides wherever length is conclusive.
+
+    ``tiktoken`` is CPU-bound BPE over the whole diff, and PostHog patches
+    reach 150 KB. Stage 3 called this straight from its coroutine, so one large
+    patch pinned the event loop for minutes: every other item stopped, the
+    pacer stopped, and the stall logger meant to report it could not run
+    either. The stage went silent and read as a deadlock.
+    """
+
+    def test_short_patch_needs_no_encoder(self) -> None:
+        with patch("datasmith.filters.estimate_tokens", side_effect=AssertionError("tokenised")):
+            assert check_patch_size("x" * (MIN_PATCH_TOKENS - 1)) is False
+
+    def test_patch_shorter_than_the_ceiling_needs_no_encoder(self) -> None:
+        """A token is at least one character, so this cannot exceed the ceiling."""
+        with patch("datasmith.filters.estimate_tokens", side_effect=AssertionError("tokenised")):
+            assert check_patch_size("x" * MAX_PATCH_TOKENS) is True
+
+    def test_only_the_ambiguous_middle_is_encoded(self) -> None:
+        with patch("datasmith.filters.estimate_tokens", return_value=MAX_PATCH_TOKENS + 1) as est:
+            assert check_patch_size("x" * (MAX_PATCH_TOKENS * 4)) is False
+            est.assert_called_once()
+
+    def test_a_long_but_token_cheap_patch_still_passes(self) -> None:
+        with patch("datasmith.filters.estimate_tokens", return_value=100):
+            assert check_patch_size("x " * MAX_PATCH_TOKENS) is True

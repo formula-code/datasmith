@@ -268,6 +268,12 @@ at the start of every run and a mismatch causes immediate failure.
 - `task/profile.sh` — ASV benchmark runner
 - `task/run-tests.sh` — Test runner harness
 - `task/entrypoint.sh` — Container entrypoint
+- `task/measure.sh` — Speedup measurement harness
+- `task/apply_oracle_patch.py` — Oracle-patch filter/applier
+- `task/emit_measure.py` — Measurement fact emitter
+- `task/solution.patch` — The reference solution, used only to verify the
+  container can measure a speedup. Do not read it to fix your build, and do
+  not edit it; it is hash-checked like every other file above.
 
 ## Pipeline Stages
 
@@ -297,9 +303,11 @@ Builds the multi-stage Docker image. Inside the build, the `env`, `pkg`, and
 Runs `/run-tests.sh --all` inside the freshly built `run` image. This
 exercises three things end-to-end:
 
-1. ASV benchmark discovery — collects the upstream's ASV benchmark suite.
-2. ASV baseline timing — quick sanity timing of the discovered benchmarks.
-3. Pytest run against the upstream test suite at the base commit.
+1. ASV benchmark *discovery* — collects the upstream's ASV benchmark suite.
+   Discovery only: `asv run --bench just-discover` scans for benchmark
+   classes without executing any of them. Timing happens in the `measure`
+   stage below, not here.
+2. Pytest run against the upstream test suite at the base commit.
 
 **`failure.json.stage` will be**: `tests`.
 
@@ -316,13 +324,45 @@ exercises three things end-to-end:
   This is a **real failure outcome**, not a bug to fix — leave it failing
   and exit. (`failure.json.error_message` will say so explicitly.)
 
+### 3. measure
+
+Runs `/measure.sh` inside the same image, once the `tests` stage has passed.
+This is what proves the container can **measure a speedup** rather than
+merely build:
+
+1. Records the base commit sha, before anything touches the tree.
+2. Measures a baseline for the impacted benchmarks with LSV, at the base
+   commit.
+3. Applies the reference solution from `task/solution.patch` — with
+   benchmark-directory and `asv.*.json` sections filtered out, so the
+   measured benchmarks are the ones that exist at both commits.
+4. Re-measures, and reports how many benchmarks yielded a finite, non-zero
+   timing on both sides.
+
+**`failure.json.stage` will be**: `measure`.
+
+**Common failures**:
+- *No benchmarks measured*: ASV discovered benchmarks but none of them
+  actually ran. Usually stale compiled artifacts, an import error inside the
+  benchmark module, or a missing runtime dependency the benchmarks need but
+  the test suite does not. Fix in `docker_build_run.sh`.
+- *Oracle patch did not apply*: the stored reference patch does not apply to
+  this checkout. This is a **real failure outcome**, not something to fix in
+  the build scripts — leave it failing and exit.
+- *Timed out*: measurement exceeded its limit. A genuinely slow benchmark
+  suite is not a build bug; report it rather than trimming benchmarks.
+
+Do **not** read `task/solution.patch` to work out how to fix a build
+failure. It exists only so verification can measure, and editing it is an
+integrity violation.
+
 ## failure.json reference
 
 When `local_ci.py` fails, `task/failure.json` contains:
 
 ```json
 {
-  "stage": "env|pkg|run|tests|build",
+  "stage": "env|pkg|run|tests|measure|build",
   "return_code": 1,
   "error_message": "Human-readable summary of the failure",
   "stdout": "Full standard output from the failed operation (truncated)",

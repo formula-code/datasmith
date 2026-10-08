@@ -1,18 +1,13 @@
-model_list:
-  - model_name: gemma-4-31b
-    litellm_params:
-      model: openai/google/gemma-4-31B-it
-      api_base: http://127.0.0.1:8123/v1
-      api_key: dummy
-
-  - model_name: model-b
-    litellm_params:
-      model: openai/placeholder-model-b
-      api_base: http://127.0.0.1:8124/v1
-      api_key: dummy
+# The model list is managed dynamically by infra/refresh_models.py, which
+# discovers live `vllm serve` processes and reconciles them into LiteLLM's
+# DB-backed registry via the admin API (no restart). `make model-tunnel` runs
+# the reconciler as a background loop; `make model-refresh` runs it once.
+# Pin a model here only if it must survive regardless of what's running.
+model_list: []
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
+  store_model_in_db: true
 
 litellm_settings:
   drop_params: true

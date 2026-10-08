@@ -1,0 +1,22 @@
+{
+  "cutoff_relaxed": false,
+  "cutoff_used": "2026-01-22T11:15:14Z",
+  "dropped_requirements": [],
+  "env_payload": [
+    "cython==3.2.4",
+    "numpy==2.4.1",
+    "packaging==26.0",
+    "pkgconfig==1.5.5"
+  ],
+  "interpreter_source": "requires-python",
+  "owner_repo": "h5py/h5py",
+  "package_name": "h5py",
+  "package_version": "3.15.1",
+  "primary_root": ".",
+  "probe_status": "installable",
+  "python_version": "3.12",
+  "repo_name": "h5py/h5py",
+  "requires_python": ">=3.10",
+  "resolver_version": "2026.08.23",
+  "sha": "bc0c08a6fd1fa84ad41dec2b0379cde2e3c2f315"
+}

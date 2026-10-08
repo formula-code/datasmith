@@ -184,25 +184,74 @@ make test     # pytest
 
 ## Makefile reference
 
-Run `make help` to list all targets. The complete reference:
+`make help` lists every target, grouped by the sections below. The complete
+reference, with how often you actually run each one:
 
-| Target | Description |
-|--------|-------------|
-| `make install` | Create virtual environment with uv, install pre-commit hooks |
-| `make check` | Run ruff lint, mypy type check, and deptry dependency check |
-| `make test` | Run pytest with coverage |
-| `make build` | Build wheel file |
-| `make clean-build` | Remove build artifacts |
-| `make docker-clean` | Prune dangling Docker images and containers |
-| `make supabase-up` | Start local Supabase instance |
-| `make supabase-down` | Stop local Supabase instance |
-| `make supabase-status` | Show Supabase service status and URLs |
-| `make grafana-migrate` | Apply the `grafana_ro` read-only database role |
-| `make grafana-up` | Start Grafana dashboard (`http://localhost:3001`) |
-| `make grafana-down` | Stop Grafana dashboard |
-| `make grafana-logs` | Tail Grafana container logs |
-| `make grafana-tunnel` | Expose Grafana publicly via Cloudflare Tunnel |
-| `make db-tunnel` | Expose Supabase PostgREST API via Cloudflare Tunnel |
+### Development
+
+| Target | Cadence | Description |
+|--------|---------|-------------|
+| `make install` | once per clone | Create the virtual environment with uv, install pre-commit hooks |
+| `make check` | every commit | Lock-file check, ruff lint, mypy type check, deptry dependency check |
+| `make test` | every commit | Run pytest with coverage (skips `-m slow`) |
+
+CI invokes `make check` by name (`.github/workflows/main.yml`), so the target
+cannot be renamed without updating the workflow.
+
+### Packaging
+
+| Target | Cadence | Description |
+|--------|---------|-------------|
+| `make build` | ad-hoc | Build a wheel locally |
+| `make clean-build` | ad-hoc | Remove build artifacts |
+
+Releases do not go through these targets — `.github/workflows/publish.yml`
+runs `uv run python -m build` directly.
+
+### Housekeeping
+
+| Target | Cadence | Description |
+|--------|---------|-------------|
+| `make docker-clean` | as disk fills | Prune dangling Docker images and containers |
+
+### Database (local Supabase)
+
+| Target | Cadence | Description |
+|--------|---------|-------------|
+| `make supabase-up` | per session | Start the local Supabase instance |
+| `make supabase-down` | per session | Stop the local Supabase instance |
+| `make supabase-status` | ad-hoc | Show Supabase service status and URLs |
+| `make db-tunnel` | long-running | Expose PostgREST via Cloudflare Tunnel |
+
+One `datasmith-db` tunnel serves both public hostnames: `db.formulacode.org`
+(Cloudflare Access + service-role key) and `api.formulacode.org` (public anon
+reads, no Access gate). See [Remote access](../guide/remote-access.md).
+
+### Monitoring (Grafana)
+
+| Target | Cadence | Description |
+|--------|---------|-------------|
+| `make grafana-migrate` | once per Supabase volume | Apply the `grafana_ro` read-only database role |
+| `make grafana-up` | per session | Start the Grafana dashboard (`http://localhost:3001`) |
+| `make grafana-down` | per session | Stop the Grafana dashboard |
+| `make grafana-logs` | ad-hoc | Tail Grafana container logs |
+| `make grafana-tunnel` | long-running | Expose Grafana publicly via Cloudflare Tunnel |
+
+`grafana-migrate` is not a historical one-shot: the role lives in the Postgres
+volume, so a wiped or recreated Supabase volume needs it applied again.
+
+### Model proxy (LiteLLM + vLLM)
+
+| Target | Cadence | Description |
+|--------|---------|-------------|
+| `make model-proxy-install` | once per machine | Build the persistent `.venv-litellm/` venv and run `prisma generate` |
+| `make model-tunnel` | long-running | Start LiteLLM, the model reconciler, and the Cloudflare Tunnel (`model.formulacode.org`) |
+| `make model-refresh` | ad-hoc | Reconcile the LiteLLM registry against live vLLM servers once (`ARGS="--dry-run"` to preview) |
+
+`model-proxy-install` doubles as the recovery step for a stale venv
+(`rm -rf .venv-litellm && make model-proxy-install`). `make model-tunnel`
+depends on the same venv stamp, so it builds it on demand. See the
+[Model proxy guide](../guide/model-proxy.md).
 
 ## Next steps
 

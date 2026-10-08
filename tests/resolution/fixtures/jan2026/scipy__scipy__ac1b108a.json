@@ -1,0 +1,29 @@
+{
+  "cutoff_relaxed": false,
+  "cutoff_used": "2026-01-03T19:18:42Z",
+  "dropped_requirements": [],
+  "env_payload": [
+    "beniget==0.4.2.post1",
+    "cython==3.2.3",
+    "gast==0.6.0",
+    "meson==1.10.0",
+    "meson-python==0.18.0",
+    "numpy==2.3.5",
+    "packaging==25.0",
+    "ply==3.11",
+    "pybind11==3.0.1",
+    "pyproject-metadata==0.10.0",
+    "pythran==0.18.1"
+  ],
+  "interpreter_source": "requires-python",
+  "owner_repo": "scipy/scipy",
+  "package_name": "scipy",
+  "package_version": "1.18.0.dev0",
+  "primary_root": ".",
+  "probe_status": "installable",
+  "python_version": "3.12",
+  "repo_name": "scipy/scipy",
+  "requires_python": ">=3.12",
+  "resolver_version": "2026.08.23",
+  "sha": "ac1b108ab6e9cdc4a9b7565b38fdb07fefaedc15"
+}

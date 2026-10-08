@@ -88,6 +88,16 @@ flowchart TD
 4. The agent iterates internally: reads AGENTS.md, runs verify, reads failure.json, edits build scripts, repeats
 5. On exit, checks for `verification_success.json` and reads back the modified `DockerContext`
 
+**PRODUCE_VERIFY** — The reflexive producer/verifier loop, behind `DATASMITH_PV_ENABLED`. Replaces LLM_GENERATE when enabled; the states before it are untouched, so a repo the stock template already builds never reaches it.
+
+The loop **seeds its first round from the stored context** when `candidate_containers` already holds one for this `(owner, repo, sha)`. Only `docker_build_pkg.sh` and `docker_build_run.sh` carry over — the two files the producer owns — so template fixes to the other scripts stay live. Without this, a `--force` re-run restarted from the stock template and repeated a repair the previous run had already completed: `xdslproject/xdsl#1332` was rejected at round 1 on `pytest_collect` despite an earlier run having solved exactly that.
+
+Seeding changes only where the loop *starts*. The image is rebuilt, the host-side image scan re-run, and the verifier re-grades from scratch, so a seeded round earns its verdict on the same evidence as an unseeded one. Because stored contexts are agent-authored — 128 repositories' stored contexts install a `sitecustomize` shim into site-packages, which is why TRY_SIMILAR can be switched off via `DATASMITH_SKIP_SIMILAR_CONTEXTS` — a stored context is put through `classify_context` before it is used, and a tampered one is discarded in favour of the template. The host image scan remains the gate; the audit exists so a known-bad row costs zero rounds instead of eight.
+
+A **rejected TRY_DEFAULT build falls through to PRODUCE_VERIFY** rather than ending the task. The image built and scanned clean; the verifier simply did not accept it — overwhelmingly on `pytest_pass_ratio` — and that is precisely what the producer exists to repair. On 2026-08-25 `dask/dask#6137`, `dask/dask#6186` and `UXARRAY/uxarray#1118` each produced a clean-scanning container within one hour and were written off as `unverified` rows nothing would revisit.
+
+The context is saved before the fall-through, so the build is never lost if the producer then fails, and the loop is seeded with that context — a build known to work is a far better round-1 starting point than the template. The fall-through applies **only when PRODUCE_VERIFY can actually run** (`DATASMITH_PV_ENABLED` set, an agent available). With the flag off the sole remaining path is LLM_GENERATE, a full sandbox agent, and spending one on every rejected container is not a change this branch should make; the legacy contract that a successful default build ends the task is preserved there.
+
 **FAIL** — All strategies exhausted. Logs a warning and returns `None`.
 
 ### Trace
@@ -184,7 +194,7 @@ class CodexResult:
 | `owner`, `repo`, `issue_number` | Pipeline item | Identifies the PR |
 | `sha` | Pipeline item | Merge commit SHA |
 | `pr_context` | Rendered problem statement | Full PR context for the AGENTS.md template |
-| `verifier` | Caller (typically `MultiObjVerifier`) | Validates the built Docker image (used by TRY_SIMILAR) |
+| ~~`verifier`~~ | *(removed)* | The verifier API was dead and is gone. TRY_SIMILAR validates via `verify_context`, which runs `local_ci.py` — build, tests, measure, then the build manifest's FATAL invariants. |
 | `base_context` | Pipeline item or templates | Base Docker context with all 9 files |
 | `env_payload` | `packages` table (via `ds.resolution`) | JSON array of pinned dependency strings. Populated by the `resolve_packages` pipeline stage, which runs `analyze_commit()` and persists results to the `packages` Supabase table keyed by `(owner, repo, sha)`. See `datasmith.resolution.md`. |
 | `python_version` | `packages` table (via `ds.resolution`) | Target Python version (e.g., "3.10"). Selected by temporal filtering against the commit date to avoid anachronisms (e.g., not using Python 3.12 for a 2019 commit). |
@@ -215,7 +225,7 @@ await runner.run(pr_items)
 
 Each item is dispatched via `asyncio.to_thread()` so multiple PRs are synthesized concurrently without blocking the event loop. Failed items raise `RuntimeError` and are logged to `runner_failures` — the runner never aborts.
 
-Items now include additional fields passed through to the sandbox: `env_payload`, `python_version`, and optionally `base_context`. These are sourced from the `packages` table (populated by the `resolve_packages` pipeline stage) rather than from columns on `pull_requests`. The synthesize stage joins `pull_requests` with `packages` on `(owner, repo, merge_commit_sha = sha)` to obtain resolution data. PRs without a corresponding `packages` row (or where `can_install = FALSE`) are skipped.
+Items now include additional fields passed through to the sandbox: `env_payload`, `python_version`, and optionally `base_context`. These are sourced from the `packages` table (populated by the `resolve_packages` pipeline stage) rather than from columns on `pull_requests`. The synthesize stage joins `pull_requests` with `packages` on `(owner, repo, merge_commit_sha = sha)` to obtain resolution data. A PR without a corresponding `packages` row is skipped; **a PR whose seed the probe disliked is not.** `can_install` no longer gates — stage 4 gates nothing — and `probe_status` orders the queue instead, best-first. See [the pipeline guide](../../guide/pipeline.md#stage-4-resolve-packages).
 
 ## What was removed (2026-03-21)
 

@@ -65,6 +65,7 @@ The provisioned dashboard ("DataSmith Pipeline Overview") includes:
 | **Resource Metrics** | Build metrics table, image size vs build time, avg resources over time |
 | **Pipeline Funnel** | End-to-end conversion: Repos → PRs → Perf PRs → Resolved → Built → Published |
 | **Data Explorer** | Filtered table of performance PRs with referenced issues |
+| **Dataset Composition** | Fix size distribution (lines changed), fix size by difficulty (median lines/files), optimization type by difficulty |
 
 ## Ad-hoc SQL Queries
 

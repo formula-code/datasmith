@@ -137,7 +137,7 @@ pr.publish() # Puts the task on huggingface (and the local database)
 One of the main features of `datasmith` is the ability to automatically synthesize docker containers for a pull request. Here is how it works...
 
 ```python
-pr_buildscript = ds.agents.synthesize_image(pr, verifier=ds.docker.MultiObjVerifier)
+pr_buildscript = ds.agents.synthesize_image(pr)  # verification is internal (local_ci.py + build manifest)
 # Checking if base image exists...                   [PASS]
 # Checking if pandas-dev/pandas image exists...      [FAIL]
 # Making pandas-dev/pandas container...
@@ -163,7 +163,7 @@ If ALL attempts fail, `synthesize_image` logs every attempt (stderr, stdout, mod
 
 This can be run asynchronously as well for multiple tasks (WARNING: Might be expensive!)!
 ```python
-pr_build_scripts = ds.runners.synthesize_images(prs=[...], verifier=ds.docker.MultiObjVerifier, n_concurrent=64)
+pr_build_scripts = ds.runners.synthesize_images(prs=[...], n_concurrent=64)
 # Returns list[str | None]. None entries are PRs where synthesis failed.
 ```
 
@@ -199,7 +199,7 @@ Datasmith contains seven high-level modules. FormulaCode-specific logic lives di
 	* `ds.docker.verify.smoke`: A simple smoke test for the build (`import {package_name}`).
 	* `ds.docker.verify.profile`: Collects asv benchmarks and runs the asv profiler with `--quick`.
 	* `ds.docker.verify.pytest`: Collects the pytest suite with `testrunner` without errors. Runs pytest with a 45-second timeout.
-	* `ds.docker.verify.MultiObjVerifier`: Chains `smoke -> profile -> pytest` verifiers.
+	* ~~`ds.docker.verify.MultiObjVerifier`: Chains `smoke -> profile -> pytest` verifiers.~~ **REMOVED** — never reachable from any pipeline path. Superseded by `local_ci.py` + the build manifest (`read_build_manifest` / `evaluate_invariants`).
 * `ds.agents`: Agents for dynamic filtering and automatic build script generation. Simple agents use `dspy`; complex agents use an installed agent (like `codex`). Each module should define its default prompt as a constant.
 	* `ds.agents.dspy.classifier`: Abstract base class for DSPy classifiers.
 	* `ds.agents.codex`: Wrapper for invoking codex in fully autonomous mode (`codex exec --full-auto "..."`). Manages the working directory, prompt construction, and output capture via `--json` streaming.

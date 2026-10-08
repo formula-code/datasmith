@@ -76,7 +76,7 @@ class TestSynthesizerSimilarContext:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[similar_ctx]),
-            patch.object(synth, "_sandbox_generate", return_value=(None, {}, False)),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {}, None, False)),
         ):
             result = synth.run("owner", "repo", 42, "pr context")
 
@@ -98,7 +98,7 @@ class TestSynthesizerAllFail:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[]),
-            patch.object(synth, "_sandbox_generate", return_value=(None, {}, False)),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {}, None, False)),
         ):
             result = synth.run("owner", "repo", 42, "pr context")
 
@@ -118,7 +118,7 @@ class TestSynthesizerStateTransitions:
         with (
             patch.object(synth, "_check_cache", return_value=None),
             patch.object(synth, "_find_similar", return_value=[]),
-            patch.object(synth, "_sandbox_generate", return_value=(None, {}, False)),
+            patch.object(synth, "_sandbox_generate", return_value=(None, {}, None, False)),
         ):
             synth.run("owner", "repo", 42, "pr context")
 
@@ -388,6 +388,28 @@ class TestResourceMetricsPersistence:
         mock_save.assert_called_once()
         assert mock_save.call_args.kwargs["resource_metrics"] == metrics
 
+    @patch("datasmith.agents.synthesizer.verify_context")
+    def test_try_similar_passes_build_manifest_to_save_context(self, mock_verify: MagicMock) -> None:
+        """When TRY_SIMILAR succeeds, build_manifest flows to _save_context too."""
+        similar_ctx = DockerContext(build_pkg_sh="pkg", build_run_sh="run")
+        manifest = {"schema_version": 1, "build": {"discovered_n": 3}, "verify": {}}
+        mock_verify.return_value = SandboxResult(
+            success=True,
+            docker_context=similar_ctx,
+            build_manifest=manifest,
+        )
+
+        synth = Synthesizer()
+        with (
+            patch.object(synth, "_check_cache", return_value=None),
+            patch.object(synth, "_find_similar", return_value=[similar_ctx]),
+            patch.object(synth, "_save_context") as mock_save,
+        ):
+            synth.run("owner", "repo", 42, "pr context")
+
+        mock_save.assert_called_once()
+        assert mock_save.call_args.kwargs["build_manifest"] == manifest
+
     @patch("datasmith.agents.synthesizer.get_client")
     def test_log_attempt_includes_resource_metrics(self, mock_get_client: MagicMock) -> None:
         """_log_attempt persists resource_metrics to error_logs."""
@@ -477,6 +499,64 @@ class TestSaveContextEnvAndPayload:
 
         row = mock_client.table.return_value.upsert.call_args[0][0]
         assert "env_payload" not in row
+
+
+class TestSaveContextBuildManifest:
+    """_save_context should persist build_manifest and derive manifest_warnings."""
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_save_context_persists_build_manifest_and_warnings(self, mock_get_client: MagicMock) -> None:
+        """A manifest tripping a warn-severity invariant populates manifest_warnings."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        ctx = DockerContext(build_pkg_sh="pkg", build_run_sh="run")
+        # discovery_fallback_used is warn-severity; build[key]=True means the
+        # build DID fall back, which is the violation (see manifest.py's
+        # _c_fallback: check returns True only when the key is False).
+        manifest = {
+            "schema_version": 1,
+            "build": {"discovery_fallback_used": True},
+            "verify": {},
+        }
+
+        synth = Synthesizer()
+        synth._save_context("owner", "repo", "abc123", 42, ctx, build_manifest=manifest)
+
+        row = mock_client.table.return_value.upsert.call_args[0][0]
+        assert row["build_manifest"] == manifest
+        assert row["manifest_warnings"] == ["discovery_fallback_used"]
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_save_context_clean_manifest_no_warnings_key(self, mock_get_client: MagicMock) -> None:
+        """A manifest with no invariant violations stores build_manifest but no manifest_warnings key."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        ctx = DockerContext(build_pkg_sh="pkg", build_run_sh="run")
+        manifest = {"schema_version": 1, "build": {}, "verify": {}}
+
+        synth = Synthesizer()
+        synth._save_context("owner", "repo", "abc123", 42, ctx, build_manifest=manifest)
+
+        row = mock_client.table.return_value.upsert.call_args[0][0]
+        assert row["build_manifest"] == manifest
+        assert "manifest_warnings" not in row
+
+    @patch("datasmith.agents.synthesizer.get_client")
+    def test_save_context_no_build_manifest(self, mock_get_client: MagicMock) -> None:
+        """When build_manifest is None, neither column is included in the upsert row."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        ctx = DockerContext(build_pkg_sh="pkg", build_run_sh="run")
+
+        synth = Synthesizer()
+        synth._save_context("owner", "repo", "abc123", 42, ctx)
+
+        row = mock_client.table.return_value.upsert.call_args[0][0]
+        assert "build_manifest" not in row
+        assert "manifest_warnings" not in row
 
 
 class TestFormatPriorAttempts:

@@ -1,0 +1,17 @@
+{
+  "cutoff_relaxed": false,
+  "cutoff_used": null,
+  "dropped_requirements": [],
+  "env_payload": [],
+  "interpreter_source": "requires-python",
+  "owner_repo": "quantumlib/Cirq",
+  "package_name": "cirq",
+  "package_version": null,
+  "primary_root": ".",
+  "probe_status": "empty",
+  "python_version": "3.12",
+  "repo_name": "quantumlib/Cirq",
+  "requires_python": ">=3.11.0",
+  "resolver_version": "2026.08.23",
+  "sha": "38318ba96962dca9c8a5410632feda821a28d279"
+}
