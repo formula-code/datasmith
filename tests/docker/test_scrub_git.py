@@ -11,9 +11,17 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 
 
 def git(repo: Path, *args: str) -> str:
-    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
-           "HOME": str(repo), "PATH": "/usr/bin:/bin"}
-    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env).stdout.strip()
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "HOME": str(repo),
+        "PATH": "/usr/bin:/bin",
+    }
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env
+    ).stdout.strip()
 
 
 def commit(repo: Path, name: str) -> str:
