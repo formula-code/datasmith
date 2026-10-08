@@ -136,6 +136,9 @@
   "skimage/__init__.py",
   "skimage/data/__init__.py"
  ],
+ "scikit-image__scikit-image__6981": [
+  "skimage/future/__init__.py"
+ ],
  "scverse__scanpy__3654": [
   "src/scanpy/preprocessing/_simple.py"
  ],
