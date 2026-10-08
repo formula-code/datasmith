@@ -106,18 +106,15 @@ lock_repo_to_current_commit() {
   # DO NOT run: git gc --prune=now --aggressive
   # DO NOT run: git prune --expire=now
 
-  # 8) Verification: ensure no ref points to a descendant of HEAD
-  if while IFS= read -r ref; do
-       [[ "$ref" == "refs/heads/$BR" ]] && continue
-       if git merge-base --is-ancestor "$HEAD_SHA" "$(git rev-parse "$ref")"; then
-         echo "$ref"
-         exit 0
-       fi
-     done < <(git for-each-ref --format='%(refname)') ; then
-     : # no output means OK
-   else
-     echo "Error: some refs still point ahead of HEAD. Aborting."
-     return 1
+  # 8) Verification: no ref may point at a descendant of HEAD
+  local ahead
+  ahead=$(git for-each-ref --format='%(refname)' | while IFS= read -r ref; do
+    [[ "$ref" == "refs/heads/$BR" ]] && continue
+    git merge-base --is-ancestor "$HEAD_SHA" "$(git rev-parse "$ref^{commit}")" 2>/dev/null && echo "$ref"
+  done || true)
+  if [[ -n "$ahead" ]]; then
+    echo "Error: refs ahead of HEAD: $ahead" >&2
+    return 1
   fi
 
 }
