@@ -5,7 +5,7 @@ LightspeedSession from the same results_dir used during init (the
 .lightspeed_deps.db persists on disk), computes changed files via
 git diff against base_commit, and runs measure_impacted.
 
-When setup.sh left a base copy at /workspace/.fc_base, the base and patched trees are
+When prepare.sh left a base copy at /workspace/.fc_base, the base and patched trees are
 timed in the same container instead, alternating round by round (see measure_paired).
 
 Usage:
@@ -41,7 +41,7 @@ os.environ.setdefault("DATA_GEN_PYTHON", sys.executable)
 os.environ.setdefault("BENCHMARK_DATA", os.path.join(tempfile.gettempdir(), "fc_benchmark_data"))
 os.makedirs(os.environ["BENCHMARK_DATA"], exist_ok=True)
 OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
-# setup.sh copies the unpatched repo (with its build) here; when it exists, base and patched are timed in pairs.
+# prepare.sh copies the unpatched repo (with its build) here; when it exists, base and patched are timed in pairs.
 BASE_COPY = Path("/workspace/.fc_base")
 PARKED = Path("/workspace/.fc_patched")
 
@@ -439,12 +439,12 @@ def main() -> None:
     except Exception as e:
         msg = str(e)
         # Distinguish "lsv_init never created the dep DB" from "measure ran
-        # but crashed mid-flight". The first means setup.sh failed earlier;
+        # but crashed mid-flight". The first means prepare.sh failed earlier;
         # the second is an LSV runtime bug or a patch that broke the build.
         if "Dependency database not found" in msg or "deps.db" in msg:
             err = (
                 "LSV measure aborted: dependency database missing. "
-                "lsv_init.py did not complete successfully in setup.sh — "
+                "lsv_init.py did not complete successfully in prepare.sh — "
                 "see setup_status.json for the failing phase."
             )
         else:

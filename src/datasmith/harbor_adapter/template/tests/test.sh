@@ -22,7 +22,8 @@ ISSUE_NUMBER="{{ issue_number }}"
 TASK_ID="{{ task_id }}"
 export OWNER REPO ISSUE_NUMBER TASK_ID
 
-AGENT_MODEL_NAME_INPUT="${1:-agent}"
+# FC_AGENT_KEY comes from the run config ([verifier.env]); upstream Harbor passes no argument to test.sh.
+AGENT_MODEL_NAME_INPUT="${FC_AGENT_KEY:-${1:-agent}}"
 AGENT_KEY="$(printf '%s' "${AGENT_MODEL_NAME_INPUT}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
 if [ -z "${AGENT_KEY}" ]; then
   AGENT_KEY="agent"
@@ -30,6 +31,14 @@ fi
 
 LOG_DIR="/logs/artifacts"
 REWARD_DIR="/logs/verifier"
+
+# Only /logs/verifier is mounted on the host in separate mode, so the outputs are copied there on every exit.
+trap 'rm -rf "${REWARD_DIR}/artifacts"; cp -a "${LOG_DIR}" "${REWARD_DIR}/artifacts" 2>/dev/null || true' EXIT
+
+# Commits the starting tree, makes the base copy, runs lsv_init.py and recreates the agent tree from tree.diff.
+AGENT_KEY="${AGENT_KEY}" bash /tests/prepare.sh
+# prepare.sh moves the repository to make the base copy, so this shell enters the new folder.
+cd /workspace/repo
 
 mkdir -p "${LOG_DIR}" "${LOG_DIR}/.snapshots" "${LOG_DIR}/lsv" "${REWARD_DIR}"
 
@@ -50,7 +59,7 @@ test_start=$(date +%s)
 
 # ── Capture patch + detect whether the agent actually changed anything ───
 echo "[$(ts)] [test] Capturing patch..."
-# setup.sh commits the starting tree and writes its sha; without that file (an older setup.sh) the upstream base is used.
+# prepare.sh commits the starting tree and writes its sha.
 FC_BASE="$(cat /opt/fc_baseline_sha 2>/dev/null || echo {{ base_commit }})"
 # Intent-to-add entries show new files in the diff. They go in a copy of the index, because git stash rejects them.
 FC_INDEX="$(mktemp)"

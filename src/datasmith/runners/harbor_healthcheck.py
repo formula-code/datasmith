@@ -288,14 +288,14 @@ def _row_from_trial(  # noqa: C901
                 if setup_phase == "lsv_init":
                     status = "lsv_init_failed"
                     error_message = (
-                        f"lsv_init.py crashed in setup.sh (exit={setup_exit}). "
+                        f"lsv_init.py crashed in prepare.sh (exit={setup_exit}). "
                         "Benchmark discovery never completed, so no dep DB was "
-                        "written. Check setup.txt in the trial dir for the "
+                        "written. Check verifier/test-stdout.txt in the trial dir for the "
                         "underlying ASV/LSV traceback."
                     )
                 else:
                     status = "setup_failed"
-                    error_message = f"setup.sh failed in phase '{setup_phase}' (exit={setup_exit})."
+                    error_message = f"prepare.sh failed in phase '{setup_phase}' (exit={setup_exit})."
             elif patch_applied is False:
                 status = "patch_failed"
                 error_message = "solve.sh produced no diff vs base_commit"
@@ -372,7 +372,10 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
     import urllib.request
 
     try:
-        snap = _trial_dir_from_uri(trial.trial_uri) / "artifacts" / ".snapshots"
+        trial_dir = _trial_dir_from_uri(trial.trial_uri)
+        # A separate verifier copies its outputs to verifier/artifacts; older trials have them in artifacts/.
+        out = trial_dir / "verifier" / "artifacts"
+        snap = (out if out.is_dir() else trial_dir / "artifacts") / ".snapshots"
         if not (snap / "baseline.json").exists():
             return
         base = os.environ.get("SUPABASE_URL", "")
@@ -414,7 +417,7 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
                     "Snapshot publish failed for %s (%s)", object_key, e.code
                 )
                 return
-    except Exception as exc:  # noqa: BLE001 — publishing must never break the healthcheck
+    except Exception as exc:
         get_logger(__name__).warning("Snapshot publish error: %s", exc)
 
 

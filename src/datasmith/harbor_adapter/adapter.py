@@ -42,7 +42,7 @@ class FormulaCodeRecord:
         return self.task_id
 
 
-# Harbor uploads tests/ to /tests before setup.sh runs, so the helpers are read from there.
+# Harbor uploads tests/ to /tests in the verifier container, so the helpers are read from there.
 TEST_HELPERS = (
     "lsv_init.py",
     "lsv_measure.py",
@@ -52,6 +52,7 @@ TEST_HELPERS = (
     "jinja_patch_plugin_pandas.py",
     "rebuild.sh",
     "project_imports.py",
+    "write_asv_conf.py",
 )
 
 
@@ -98,8 +99,8 @@ class FormulaCodeAdapter:
         copy2(self.template_dir / "environment" / "entrypoint.sh", env / "entrypoint.sh")
         for name in TEST_HELPERS:
             copy2(self.template_dir / "tests" / name, tests / name)
-        # The Dockerfile's baseline measurement runs lsv_init.py at image build, before /tests exists.
-        for name in ("lsv_init.py", "project_imports.py"):
+        # The image build runs these (baseline measurement, agent tools); /tests does not exist in the agent container.
+        for name in ("lsv_init.py", "project_imports.py", "rebuild.sh", "write_asv_conf.py"):
             copy2(self.template_dir / "tests" / name, env / name)
 
         _write(out_dir / "instruction.md", render_instruction_md(rec.instructions))
@@ -113,6 +114,7 @@ class FormulaCodeAdapter:
             memory=memory,
             storage=storage,
             verifier_env=verifier_env,
+            collect_command=render_template("shared/collect.sh", base_commit=rec.base_commit),
         )
         _write(out_dir / "task.toml", task_toml)
 
@@ -132,8 +134,8 @@ class FormulaCodeAdapter:
         _write(tests / "test.sh", test_sh, executable=True)
         _write(tests / "config.json", config_json)
         _write(solution / "solve.sh", render_template("solution/solve.sh", solution_patch=rec.patch), executable=True)
-        setup_sh = render_template("tests/setup.sh", rounds=rounds, extra_setup_commands="", **ids)
-        _write(tests / "setup.sh", setup_sh, executable=True)
+        prepare_sh = render_template("tests/prepare.sh", base_commit=rec.base_commit, rounds=rounds, **ids)
+        _write(tests / "prepare.sh", prepare_sh, executable=True)
 
         # Imported here so `python -m datasmith.harbor_adapter.stamp` does not re-import itself via the package.
         from datasmith.harbor_adapter.stamp import write_stamp
