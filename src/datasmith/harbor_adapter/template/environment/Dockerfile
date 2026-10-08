@@ -69,5 +69,9 @@ RUN set -e; . /etc/profile.d/asv_build_vars.sh; \
     ln -sfn "${MAMBA_ROOT_PREFIX:-/opt/conda}/envs/${ENV_NAME}" /opt/task-env; /opt/task-env/bin/python --version
 ENV PATH=/opt/task-env/bin:$PATH
 
+# Last, so no later step brings history back. Base image layers still hold it, but the container cannot see them.
+COPY scrub_git.sh /opt/scrub_git.sh
+RUN bash /opt/scrub_git.sh /workspace/repo && rm /opt/scrub_git.sh
+
 WORKDIR /workspace/repo
 ENTRYPOINT ["/entrypoint.sh"]
