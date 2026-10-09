@@ -295,6 +295,16 @@ def only_names(only: set, names: set) -> set:
     return out & names
 
 
+def only_cases(only: set, names: set) -> dict:
+    """Parameter indices to time per benchmark name, from "<name>-<index>" ids; a listed plain name keeps all its cases."""
+    cases: dict = {}
+    for bid in only:
+        head, _, idx = bid.rpartition("-")
+        if bid not in names and idx.isdigit() and head in names:
+            cases.setdefault(head, set()).add(int(idx))
+    return {name: idx for name, idx in cases.items() if name not in only}
+
+
 def confirm_set(results: dict, conf: dict) -> list:
     """Benchmarks to time again: first-pass |median ln speedup| above their theta, plus the oracle's improved ones."""
     bench = results.get("benchmarks") or {}
@@ -335,6 +345,12 @@ def measure_paired(session, changed: list[str], args, only: set | None = None) -
     if only is not None:
         names = only_names(only, names)
     selected = benchmarks.filter_out(set(benchmarks.keys()) - names)
+    if only is not None:
+        # asv's runner skips parameter cases left out of benchmark_selection; one selection serves both sides.
+        for name, idx in only_cases(only, names).items():
+            current = selected.benchmark_selection.get(name)
+            if current is not None:
+                selected.benchmark_selection[name] = [i for i in current if i in idx]
     env = session._get_env()
     launch = getattr(session._conf, "launch_method", None) or "auto"
     extra = _timing_params(1, args.repeat, args.warmup_time)
@@ -343,12 +359,12 @@ def measure_paired(session, changed: list[str], args, only: set | None = None) -
     def run() -> dict:
         deltas = _extract_deltas(run_benchmarks(selected, env, extra_params=extra, launch_method=launch), selected, {})
         params.update({bid: d.params for bid, d in deltas.items()})
-        return {bid: d.current for bid, d in deltas.items() if d.current is not None}
+        return {bid: d.current for bid, d in deltas.items() if d.current is not None and math.isfinite(d.current)}
 
     rounds = run_paired(run, args.rounds) if names else []
     stats = paired_stats(rounds, (args.rounds + 1) // 2)
     if only is not None:
-        # asv times every parameter combination of a benchmark; keep the listed ones.
+        # Only the listed ids are reported.
         stats = {bid: s for bid, s in stats.items() if bid in only}
     bench = {}
     for bid, s in stats.items():
