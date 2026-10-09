@@ -350,13 +350,14 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
                     base_oc = _final_outcomes({"tests": json.load(_fh)})
             except Exception:  # noqa: BLE001 — treat an unreadable base run as "no base data"
                 base_oc = {}
-                base_error = "base run produced no results (rc=%s): %s" % (
-                    base_code, (base_err or "").strip()[-400:])
             finally:
                 try:
                     os.remove(tf)
                 except OSError:
                     pass
+            if not base_oc:
+                base_error = "base run produced no results (rc=%s): %s" % (
+                    base_code, (base_err or "").strip()[-400:])
         except _BaseRebuildFailed as e:
             base_error = "base rebuild failed: %s" % e
         finally:
@@ -914,7 +915,7 @@ def main(args) -> dict:
 
 if __name__ == "__main__":
     args = parse_args()
-    # The retries below mutate extra_args; the regression gate uses the originals.
+    # The retries below mutate extra_args; fallback tests use the originals.
     _orig_extra = args.extra_args
     output = main(args)
 
@@ -933,7 +934,8 @@ if __name__ == "__main__":
     try:
         repo_root = output.get("repo_root") or detect_repo_root()
         selected = output.get("selected_tests") or []
-        extra = _orig_extra
+        # Base side uses the args that produced the agent results (a retry may have changed them).
+        extra = args.extra_args if selected else _orig_extra
         if not selected:
             fb, strategy = fallback_tests(output.get("changed_files") or [], repo_root)
             if strategy == "compiled_fallback":
