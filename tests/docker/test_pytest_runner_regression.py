@@ -64,6 +64,20 @@ def test_tmp_path_works_when_the_temp_root_belongs_to_another_user(runner, repo:
     assert not (root / "pytest-of-root").exists() and not any(root.glob("pytest-of-*"))
 
 
+def test_committed_change_is_compared_against_the_base_commit(runner, repo: Path) -> None:
+    # bottleneck#309: an agent committed its change, so the stash was empty and no base run happened.
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    base = git("rev-parse", "HEAD")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "agent")
+    head = git("rev-parse", "HEAD")
+    out = runner.run_base_and_diff(["test_m.py"], "", str(repo), AGENT, base_ref=base)
+    assert out["ran"] is True and out["regressed"] == ["test_m.py::test_a"]
+    assert git("rev-parse", "HEAD") == head and git("status", "--porcelain") == ""
+    assert "assert False" in (repo / "test_m.py").read_text()
+
+
 def test_no_base_results_is_not_ran(runner, repo: Path, monkeypatch) -> None:
     real = runner._run
     monkeypatch.setattr(runner, "_run", lambda cmd, cwd=None: (1, "", "boom") if cmd[0] == sys.executable else real(cmd, cwd))
