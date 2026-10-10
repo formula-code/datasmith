@@ -303,13 +303,17 @@ class _BaseRebuildFailed(Exception):
     pass
 
 
-def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
+def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base_ref=None):
     """Stash the agent's edits, rerun the same tests at base, restore; flag base-pass -> agent-fail."""
     import sys as _sys
     import tempfile as _tempfile
 
     agent_oc = _final_outcomes(agent_results)
     # Tracked changes only: untracked generated files (e.g. setuptools-scm _version.py) must stay importable.
+    # An agent that committed its change leaves nothing to stash; move HEAD back so the commits count as changes.
+    head = _run(["git", "rev-parse", "HEAD"], cwd=repo_root)[1].strip()
+    base = _run(["git", "rev-parse", base_ref], cwd=repo_root)[1].strip() if base_ref else ""
+    moved = bool(base and head and base != head and _run(["git", "reset", "-q", "--soft", base], cwd=repo_root)[0] == 0)
     code, out, _ = _run(
         ["git", "stash", "push", "-m", "fc-regression"], cwd=repo_root
     )
@@ -365,9 +369,11 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
         except _BaseRebuildFailed as e:
             base_error = "base rebuild failed: %s" % e
         finally:
-            _run(["git", "stash", "pop"], cwd=repo_root)
+            _run(["git", "stash", "pop", "--index"], cwd=repo_root)
             if rebuild and _run(["bash", "-c", rebuild], cwd=repo_root)[0] != 0:
                 base_error = (base_error or "") + "; patched rebuild after stash pop failed"
+    if moved:
+        _run(["git", "reset", "-q", "--soft", head], cwd=repo_root)
     regressed = sorted(
         n for n, o in agent_oc.items()
         if o in ("failed", "error") and base_oc.get(n) == "passed"
@@ -957,7 +963,7 @@ if __name__ == "__main__":
                 output["strategy"] = strategy
         if selected:
             output["regression"] = run_base_and_diff(
-                selected, extra, repo_root, output["results"]
+                selected, extra, repo_root, output["results"], base_ref=output.get("base_ref") or args.base_ref
             )
         else:
             output["regression"] = {"ran": False, "reason": "no tests selected (direct or fallback)"}
