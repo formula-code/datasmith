@@ -314,6 +314,10 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
         ["git", "stash", "push", "-m", "fc-regression"], cwd=repo_root
     )
     stashed = code == 0 and "No local changes" not in (out or "")
+    # The stash keeps the agent's new test files; at base they import code that does not exist and break collection.
+    _, untracked, _ = _run(["git", "ls-files", "--others", "--exclude-standard", "--", "*.py"], cwd=repo_root)
+    new_tests = [f for f in (untracked or "").split() if re.match(r"(test_.*|.*_test)\.py$", os.path.basename(f))]
+    base_args = " ".join([extra_args or ""] + ["--ignore=" + shlex.quote(f) for f in new_tests]).strip()
     base_oc = {}
     base_error = None
     # test.sh sets this when the patch touches compiled sources; base must not import the patched .so.
@@ -334,7 +338,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
                 "P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P); "
                 "r = P.run_pytest_and_collect(%r, extra_args=%r, cwd=%r); "
                 "open(%r, 'w').write(json.dumps(r.get('tests', [])))"
-            ) % (os.path.dirname(self_path), self_path, list(selected_tests), extra_args, repo_root, tf)
+            ) % (os.path.dirname(self_path), self_path, list(selected_tests), base_args, repo_root, tf)
             # Own pycache: a base file with the agent file's size and mtime would load the agent bytecode.
             _old_pyc = os.environ.get("PYTHONPYCACHEPREFIX")
             os.environ["PYTHONPYCACHEPREFIX"] = _tempfile.mkdtemp(prefix="fcbase_pyc_")

@@ -43,6 +43,16 @@ def test_base_results_mean_ran_and_regressions_count(runner, repo: Path) -> None
     assert "assert False" in (repo / "test_m.py").read_text()
 
 
+def test_new_test_file_from_the_agent_is_left_out_of_the_base_run(runner, repo: Path) -> None:
+    # uxarray#1072: an added test file imports code missing at base, so base collection failed and gave no results.
+    (repo / "test_new.py").write_text("from m_missing import f\n\ndef test_new():\n    assert f()\n")
+    agent = {"tests": AGENT["tests"] + [{"nodeid": "test_new.py::test_new", "when": "call", "outcome": "passed"}]}
+    out = runner.run_base_and_diff(["."], "", str(repo), agent)
+    assert out["ran"] is True, out.get("base_error")
+    assert out["regressed"] == ["test_m.py::test_a"]
+    assert (repo / "test_new.py").exists()
+
+
 def test_no_base_results_is_not_ran(runner, repo: Path, monkeypatch) -> None:
     real = runner._run
     monkeypatch.setattr(runner, "_run", lambda cmd, cwd=None: (1, "", "boom") if cmd[0] == sys.executable else real(cmd, cwd))
