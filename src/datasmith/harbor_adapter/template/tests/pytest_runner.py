@@ -574,6 +574,10 @@ def run_pytest_and_collect(test_paths, extra_args=None, cwd=None):
         sys.path.insert(0, repo_dir)
 
     args = unique_paths + list(extra_args)
+    # TMPDIR is a host-mounted folder whose pytest-of-<user> can belong to another uid, which errors every test at setup.
+    if not any(a == "--basetemp" or a.startswith("--basetemp=") for a in args):
+        import tempfile as _tempfile
+        args.append("--basetemp=" + _tempfile.mkdtemp(prefix="fc-pytest-", dir="/tmp" if os.path.isdir("/tmp") else None))
     exit_code = pytest.main(args=args, plugins=[plugin])
     plugin.results["exit_code"] = int(exit_code)
     plugin.results["selected_paths"] = unique_paths
