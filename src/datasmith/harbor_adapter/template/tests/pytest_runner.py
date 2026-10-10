@@ -316,7 +316,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results):
     stashed = code == 0 and "No local changes" not in (out or "")
     # The stash keeps the agent's new test files; at base they import code that does not exist and break collection.
     _, untracked, _ = _run(["git", "ls-files", "--others", "--exclude-standard", "--", "*.py"], cwd=repo_root)
-    new_tests = [f for f in (untracked or "").split() if re.match(r"(test_.*|.*_test)\.py$", os.path.basename(f))]
+    new_tests = [f for f in (untracked or "").splitlines() if re.match(r"(test_.*|.*_test)\.py$", os.path.basename(f))]
     base_args = " ".join([extra_args or ""] + ["--ignore=" + shlex.quote(f) for f in new_tests]).strip()
     base_oc = {}
     base_error = None
