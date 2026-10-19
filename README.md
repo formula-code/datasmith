@@ -18,7 +18,9 @@
   </a>
 </p>
 
-[FormulaCode](https://formula-code.github.io/) is a *continually updating*  benchmark for evaluating  the holistic ability of LLM agents to optimize codebases. FormulaCode consists of two parts: a [pipeline](https://github.com/formula-code/datasmith) to construct performance optimization tasks, and an [execution harness](https://github.com/formula-code/terminal-bench) that connects a language model to our terminal sandbox. _This repository contains the task generation pipeline._
+[FormulaCode](https://formula-code.github.io/) is a *continually updating*  benchmark for evaluating  the holistic ability of LLM agents to optimize codebases. FormulaCode consists of two parts: a [pipeline](https://github.com/formula-code/datasmith) to construct performance optimization tasks, and an [execution harness](https://github.com/formula-code/harbor) (Harbor) that connects a language model to our terminal sandbox. _This repository contains the task generation pipeline._
+
+The end-to-end pipeline, from task selection to RL training, is described in [docs/OVERVIEW.md](docs/OVERVIEW.md).
 
 `fc-data` is a python package for automatically curating and managing [FormulaCode](https://formula-code.github.io/) tasks. After installation, fc-data is designed to run as a monthly CRON job that updates the FormulaCode dataset with new commits and repositories.
 
@@ -231,30 +233,26 @@ hf = HuggingFacePublisher()
 hf.publish(records, version="formulacode@2026-03")
 ```
 
-We define tasks using `terminal-bench`'s formulacode adapter for evaluation:
-```python
-from terminal_bench.adapters.formulacode import FormulaCodeAdapter
-from terminal_bench.harness.harness import Harness
-
-adapter = FormulaCodeAdapter(task_dir="fctasks/", force=True)
-adapter.generate_task(pr.to_record())
-
-run = Harness(
-    output_path="fcevals/",
-    dataset_path="dataset_path",
-    task_ids=[pr.to_record().task_id],
-    agent_configs=[
-        {"agent_name": "nop", "model_name": "nop"},
-        {"agent_name": "oracle", "model_name": "oracle"},
-    ],
-)
-
-print(run.results[0].is_resolved)  # Did the oracle get a speedup > 1.00 over baseline?
+Tasks are Harbor task folders rendered by `datasmith.harbor_adapter`. Render them from a records file with
+`fc-render-tasks`, then run them with [Harbor](https://github.com/formula-code/harbor) (Harbor's `adapters/formulacode`
+imports this package):
+```bash
+fc-render-tasks render --records records.jsonl --out tasks/ --cpus 2 --memory 16G --storage 20G
+harbor run -p tasks/<owner>__<repo>__<N> -a oracle   # the oracle agent applies the human patch
 ```
+
+Or from Python:
+```python
+from datasmith.harbor_adapter.adapter import FormulaCodeAdapter, FormulaCodeRecord
+
+FormulaCodeAdapter(harbor_tasks_root="tasks/").generate_task(FormulaCodeRecord(**record))
+```
+
+How a rendered task becomes an approved, measured task is in [docs/OVERVIEW.md](docs/OVERVIEW.md).
 
 ## Database schema
 
-There are xix tables in Supabase (Postgres):
+The main tables in Supabase (Postgres):
 
 | Table | Primary key | Purpose |
 |-------|-------------|---------|
@@ -416,4 +414,4 @@ $ python scratch/scripts/prepare_formulacode_dataset.py \
 
 ### Evaluation
 
-Evaluation is done in FormulaCode's fork of the [terminal-bench](https://github.com/formula-code/fc-eval) evaluation framework.
+Tasks run on [Harbor](https://github.com/formula-code/harbor). The steps from a rendered task to measurement, review, agent trials and RL training are in [docs/OVERVIEW.md](docs/OVERVIEW.md).

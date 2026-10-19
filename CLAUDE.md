@@ -48,7 +48,7 @@ fc-data --stage 7 --harbor-limit 10                                    # Smoke t
 
 ### Source modules (`src/datasmith/`)
 
-The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents/` → `runners/` → `update/`. Each module's `__init__.py` re-exports its public surface; import from the package (`from datasmith.github import PR`), not the submodule.
+The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents/` → `runners/` → `update/`. Each module's `__init__.py` re-exports its public names; import from the package (`from datasmith.github import PR`), not the submodule.
 
 | Module | Purpose |
 |--------|---------|
@@ -58,8 +58,9 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 | `agents/` | LLM agents: DSPy perf classification (`classifiers.py`) and problem extraction (`extractors.py`); CLI-agent synthesis of build scripts (`synthesizer.py`, `sandbox.py`, `installed/`), plus rate limiting and tamper auditing |
 | `resolution/` | Dependency resolution: parses pyproject.toml/setup.py/setup.cfg, resolves pinned deps via `uv pip compile`, validates installability. Pipeline stage 4 |
 | `runners/` | One module per pipeline stage, all subclassing `BaseRunner` (`base.py`), which supplies bounded concurrency plus `runner_progress`/`runner_failures` bookkeeping. A runner logs per-item failures and keeps going — it never aborts the stage |
-| `update/` | Pipeline orchestrator (`pipeline.py` — owns the `STAGES` list and stage dispatch) and the `fc-data` CLI (`cli.py`). `offline.py` imports PR data from parquet instead of the GitHub API |
-| `harbor_adapter/` | Vendored subset of Harbor's `formulacode` adapter: materializes a Harbor task directory from Supabase rows and parses trial results. `template/parser.py` owns the geomean level1–level4 rollup |
+| `update/` | Pipeline orchestrator (`pipeline.py` — the `STAGES` list and stage dispatch) and the `fc-data` CLI (`cli.py`). `offline.py` imports PR data from parquet instead of the GitHub API |
+| `harbor_adapter/` | Renders Harbor task directories from Supabase rows (`fc-render-tasks`) and parses trial results. Harbor's `adapters/formulacode` imports this package, not the reverse. `template/` is copied into every rendered task; `template/tests/parser.py` computes the geomean level1–level4 rollup |
+| `verify/` | The `fc-verify` command: select, build, publish, precheck, measure, classify and review tasks in a survey folder. See `docs/OVERVIEW.md` |
 | `publish/` | DockerHub + HuggingFace publishing (stage 8) and the parquet record round-trip |
 | `scrape/` | AST extraction of ASV benchmark functions from a checked-out repo (stage 9). Note: PR scraping lives in `github/`, not here |
 | `filters.py` | Cheap symbolic pre-screening. Stage 2 stores **every** merged PR and evaluates only the two components GraphQL can answer — the title keyword filter and file compliance — recording the verdict in `is_performance_commit_symbolic`. `check_patch_size` still lives here, but now runs from stage 3, where it gates the diff fetch and the LLM call rather than storage |
@@ -70,7 +71,7 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 1. **scrape_repos** — Fetch repository metadata from GitHub
 2. **scrape_commits** — Scrape merged PRs via `GitHubClient.fetch_merged_prs`, which windows `merged_at` server-side through GitHub's search API and bisects the range when the 1000-result cap would truncate the answer. GraphQL-only apart from a ~1% REST fallback for PRs whose `files(first: 100)` list is truncated; no diffs are fetched here. A truncated leaf (`Truncated`) or a missing repository (`RepositoryNotFoundError`) fails that repository rather than reading as a healthy zero
 3. **classify_prs** — Fetch each candidate PR's diff, apply the `check_patch_size` gate, and only then call the LLM. Three outcomes stay distinct: an oversized patch is recorded with both `is_performance_commit` and `is_performance_commit_symbolic` false and no model call; a diff GitHub definitively will not serve records `is_performance_commit` false and leaves the symbolic column alone, because the size gate never ran; a failed request raises and lands in `runner_failures`. A fetched patch is persisted so a resumed run does not buy the same diff twice
-4. **resolve_packages** — Emit one dependency **seed** per commit, and the story of how it was reached. Six units compose it: `discover` picks the packaging root, `declare` reads only what the project states it needs, `interpreter` walks a declared ladder (`requires-python` → trove classifiers → `asv.conf.json` `pythons` → newest release at commit date) and records the rung in `interpreter_source`, `pin` runs one `uv pip compile` with the commit date as `--exclude-newer`, `probe` dry-runs the result, and the row is written. What it deliberately does not read: `requirements*.txt` globs, `environment.yml`, and import statements — so a project that declares nothing gets an empty seed and says so, rather than a list of invented PyPI names. Benchmark tooling (`asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer`) is stripped from both the declared set and the compiled one: the base image owns it, and a second owner only starts a version fight. **The stage gates nothing.** `can_install` is retained, nullable, and no longer read or written; `probe_status` (`installable` → `unresolved` → `failed` → `empty`) orders the stage 5 queue best-first and excludes nobody. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container.
+4. **resolve_packages** — Emit one dependency **seed** per commit, and the story of how it was reached. Six units compose it: `discover` picks the packaging root, `declare` reads only what the project states it needs, `interpreter` walks a declared ladder (`requires-python` → trove classifiers → `asv.conf.json` `pythons` → newest release at commit date) and records the rung in `interpreter_source`, `pin` runs one `uv pip compile` with the commit date as `--exclude-newer`, `probe` dry-runs the result, and the row is written. What it deliberately does not read: `requirements*.txt` globs, `environment.yml`, and import statements — so a project that declares nothing gets an empty seed and says so, rather than a list of invented PyPI names. Benchmark tooling (`asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer`) is stripped from both the declared set and the compiled one: the base image installs it, and a second install only starts a version conflict. **The stage gates nothing.** `can_install` is retained, nullable, and no longer read or written; `probe_status` (`installable` → `unresolved` → `failed` → `empty`) orders the stage 5 queue best-first and excludes nobody. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container.
 5. **render_problems** — Scrape linked issues and render deconstructed problem contexts
 6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
 7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
@@ -79,14 +80,14 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 
 Stage 6 has two synthesis paths. `TRY_DEFAULT` uses the stock template and
 needs no agent. `PRODUCE_VERIFY` (behind `DATASMITH_PV_ENABLED`) runs a
-reflexive loop between a producer agent that owns `docker_build_pkg.sh` and
+reflexive loop between a producer agent that edits `docker_build_pkg.sh` and
 `docker_build_run.sh` and a verifier agent that runs the container and grades
 it. Severity is decided in `agents/reflexive/severity.py`, never in the
 verifier's prompt.
 
 `--stage` is `action="append"` — repeat it to run a subset (`--stage 5 --stage 6`); stages then run in ascending order regardless of flag order. `--start-date`/`--end-date` are required even for a single stage. Other cross-stage knobs: `--dry-run` (log what each stage would do), `--force` (re-run already-processed tasks; stages 3–7), `--tasks-per-repo` (stages 5–7 only), `--agent {claude,codex,gemini,qwen,none}` for stage 6 synthesis, and `--tasks owner/repo#PR,...` to pin stage 7 to specific tasks, bypassing date/repo filters.
 
-**The date window means `merged_at`, half-open `[start, end)`** — in stages 2 through 8 alike. A PR merged exactly at midnight on the end date belongs to the next window, so consecutive runs partition the corpus instead of overlapping, and a PR merged inside the window but opened months before it is now in scope. The contract lives in one place, `window_filters()` in `utils/db.py`; stages 3–8 call it rather than hand-writing filter kwargs, and stage 2 applies the same half-open bounds to GitHub's search API instead of to the database. Duplication is what let the original defect survive — with no single home for the contract there was nothing to test — so a fail-closed AST test asserts every windowing site either routes through the helper or is an audited exemption. Stage 9 windows nothing on purpose (the website wants the full corpus), and `synthesize_images._fetch_neighbor_items` keeps its own ±`DATASMITH_NEIGHBOR_WINDOW_DAYS` band around a PR's `created_at`, which is a similarity heuristic and deliberately reaches outside the run window.
+**The date window means `merged_at`, half-open `[start, end)`** — in stages 2 through 8 alike. A PR merged exactly at midnight on the end date belongs to the next window, so consecutive runs partition the corpus instead of overlapping, and a PR merged inside the window but opened months before it is now in scope. The rule lives in one place, `window_filters()` in `utils/db.py`; stages 3–8 call it rather than hand-writing filter kwargs, and stage 2 applies the same half-open bounds to GitHub's search API instead of to the database. An AST test asserts every windowing site either routes through the helper or is an audited exemption. Stage 9 windows nothing on purpose (the website wants the full corpus), and `synthesize_images._fetch_neighbor_items` keeps its own ±`DATASMITH_NEIGHBOR_WINDOW_DAYS` band around a PR's `created_at`, which is a similarity heuristic and deliberately reaches outside the run window.
 
 ### Build manifest
 
@@ -96,7 +97,7 @@ The manifest has two blocks with different lifetimes: `build` is sealed inside t
 
 The `verify` block also carries **measurement** facts: after `run_tests` passes, `local_ci.py` runs the image a second time against `/measure.sh`, which measures the impacted benchmarks with LSV at `base_commit`, applies the oracle patch (mounted read-only from `task/solution.patch`, never baked into the image), re-measures, and prints a `FORMULACODE_MEASURE_START/END` block. Three FATAL invariants gate it — `measure_timed_out`, `asv_exec_failed`, `oracle_patch_failed`. **Measurement facts must never be sealed via `fc_note`**: `fc_note` lives in the cached base image, so a breadcrumb change silently no-ops and produces an all-null `build` block indistinguishable from a healthy one.
 
-Because the manifest is what gates publishing, the sealer is deliberately hardened against synthesis agents tampering with it — several commits on this branch exist purely to close bypasses (reassigning `rc` after the sealer, `|| true` swallowing an exit code). Treat changes near the sealer as security-relevant and add a regression test.
+Because the manifest gates publishing, the sealer is hardened against synthesis agents that tamper with it (for example, reassigning `rc` after the sealer, or `|| true` hiding an exit code). Treat changes near the sealer as security-relevant and add a regression test.
 
 ### Dataset verification (`dataset/`)
 
@@ -107,7 +108,7 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 
 ### Where not to look
 
-`archive/`, `docs/archive/`, `docs/design/archived/`, `scratch/`, `jobs/`, `backups/`, and `dist/` are dead or historical — Ruff's `extend-exclude` skips several of them. `archive/scrape/CLAUDE.md` documents a report-builder layout that no longer exists. When searching for current behavior, scope to `src/`, `tests/`, `docs/design/`, `docs/guide/`, and `dataset/`.
+`archive/`, `docs/archive/`, `scratch/`, `jobs/`, `backups/`, and `dist/` are dead or historical — Ruff's `extend-exclude` skips several of them. `archive/scrape/CLAUDE.md` documents a report-builder layout that no longer exists. When searching for current behavior, scope to `src/`, `tests/`, `docs/design/`, `docs/guide/`, and `dataset/`.
 
 ## Code quality standards
 
@@ -117,9 +118,9 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 - **Build**: hatchling backend, uv for dependency management. `make check` runs `uv lock --locked`, so a `pyproject.toml` dependency edit must be accompanied by a refreshed `uv.lock`
 - **CI**: GitHub Actions runs `make check` + tests on Python 3.11 and 3.12
 
-### Specs and plans
+### Design docs
 
-Substantial features are designed before they are built: a design doc in `docs/superpowers/specs/<date>-<slug>-design.md`, an implementation plan in `docs/superpowers/plans/<date>-<slug>.md`, and a branch named `spec/<slug>`. Before changing a subsystem, check whether a spec covers it — the spec is the authority on intent, and the design docs under `docs/design/components/` are per-module references.
+Each module has a design doc under `docs/design/components/`. Read it before changing that module, and update it when behavior changes. `docs/OVERVIEW.md` describes the whole pipeline across repos.
 
 ### Documentation
 
@@ -170,7 +171,7 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_SCRAPE_COMMITS_CONCURRENCY`,
   `DATASMITH_RESOLVE_PACKAGES_WORKERS`,
   `DATASMITH_CLASSIFY_LLM_WORKERS`, `DATASMITH_RENDER_PROBLEMS_WORKERS`
-  (stages 3 and 5 each own a bounded pool rather than inheriting the
+  (stages 3 and 5 each use a bounded pool rather than inheriting the
   interpreter default sized `min(32, cpu_count + 4)`),
   `DATASMITH_GH_SEARCH_CONCURRENCY` (bounds the bisection fan-out, so a
   PostHog-scale month cannot burst ~80 concurrent GraphQL POSTs from a
@@ -180,7 +181,7 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   whose runs may gate stage 8; default `daytona`, since local Docker
   trials share the build host and their timings move with load — set it
   to `docker,daytona` only deliberately, and record that you did;
-  it does **not** relax `MIN_HARBOR_SPEEDUP`); and the database read guards —
+  it does **not** relax `MIN_HARBOR_SPEEDUP`); and the database read limits —
   `DATASMITH_KEY_FILTER_CHUNK`, `DATASMITH_LARGE_TABLES`,
   `DATASMITH_LARGE_COLUMNS` (the last two are comma-separated name sets,
   not numbers).
@@ -206,9 +207,11 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   (`agents/reflexive/image_integrity.py`) --
   `DATASMITH_PV_IMAGE_SCAN_TIMEOUT_S`,
   `DATASMITH_PV_IMAGE_SCAN_MAX_FILE_BYTES` and
-  `DATASMITH_PV_IMAGE_SCAN_MAX_HITS`. `DATASMITH_PV_ENABLED` is off by default and
-  must stay off until the 16-container validation set passes — see
-  `docs/superpowers/specs/2026-08-23-producer-verifier-design.md` section 9.
+  `DATASMITH_PV_IMAGE_SCAN_MAX_HITS`. `DATASMITH_PV_ENABLED` is off by default. Turn it
+  on only when, on the 16-container labelled validation set, both negative
+  controls (`attack-demo:1`, pysindy#139) are rejected, no hard-grounds
+  rejection is accepted, every disagreement with a label has a written cause,
+  and one repository completes reject, producer edit, rebuild, accept end to end.
 - **Two budgets, two dials.** Cores scale stage 4
   (`DATASMITH_RESOLVE_PACKAGES_WORKERS`); the single GitHub token scales
   stages 2 and 3 and does not care how large the machine is. Keep them on
