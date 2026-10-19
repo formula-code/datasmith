@@ -76,12 +76,14 @@ def _precheck(survey: Survey, a: argparse.Namespace) -> None:
     kinds = set(filter(None, a.measure_uncovered.split(",")))
     for t in _tasks(a.tasks):
         st = survey.state(t)
-        if not st.get("tag"):
-            print(json.dumps({"task": t, "error": "no image tag in state"}))
+        toml = survey.task_dir(t) / "task.toml"
+        tag = st.get("tag") or (pin.read_pin(toml.read_text()) if toml.exists() else None)
+        if not tag:
+            print(json.dumps({"task": t, "error": "no image tag in state or task.toml"}))
             continue
-        end, result = precheck.precheck(survey, t, st["tag"], kinds, rerun=a.rerun)
+        end, result = precheck.precheck(survey, t, tag, kinds, rerun=a.rerun)
         if end:
-            survey.save_state(t, {**st, "phase": end})
+            survey.save_state(t, {**st, "phase": end, "tag": tag})
         print(json.dumps({"task": t, "end": end, **{k: result.get(k) for k in ("by_deps", "patch_failed", "error")}}))
 
 
@@ -93,6 +95,7 @@ def _measure(survey: Survey, a: argparse.Namespace) -> None:
         confirm_rounds=a.confirm_rounds,
         max_heavy=a.max_heavy,
         harbor=a.harbor,
+        time_limit_s=a.time_limit,
     )
     for task, phase in measure.measure_many(survey, _tasks(a.tasks), s, a.workers, a.manifest).items():
         print(f"{task}: {phase}")
@@ -353,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--confirm-rounds", type=int, default=0)
     m.add_argument("--max-heavy", type=int, default=1)
     m.add_argument("--harbor", default="harbor")
+    m.add_argument("--time-limit", type=int, default=0, help="seconds per measure job; a job past it ends as too_slow")
     c = sub.choices["capture"]
     c.add_argument("--manifest", type=Path)
     c.add_argument("--gate", default="http://127.0.0.1:8267")

@@ -7,10 +7,12 @@ in the state (`measure_jobs`) and runs again under a new job name, so harbor nev
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import re
+import signal
 import statistics
 import subprocess
 import time
@@ -56,6 +58,8 @@ class Settings:
     snapshot_workers: int = 1
     verifier_timeout_multiplier: float = 1.0
     max_heavy: int = 1
+    # Seconds a measure job may run (0 = no limit); a job past it is stopped and the task ends as too_slow.
+    time_limit_s: int = 0
     heavy_benchmarks: int = 200
     harbor: str = "harbor"
     # Per task: {"mounts": {host: container}, "env": {...}} for tasks whose benchmarks read files at run time.
@@ -319,20 +323,33 @@ def tasks_root_for(survey: Survey, task: str, job: str, confirm: dict | None) ->
     return dst
 
 
+class TooSlow(Exception):
+    """The job ran past Settings.time_limit_s and was stopped."""
+
+
 def run_harbor(
-    survey: Survey, job: str, config: Path, s: Settings, run: Callable[..., Any] = subprocess.run
+    survey: Survey, job: str, config: Path, s: Settings, run: Callable[..., Any] | None = None
 ) -> list[Path]:
+    """Run the job; with s.time_limit_s, stop its process group after that long and raise TooSlow."""
     env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
     env.update(HARBOR_DOCKER_HOST_NET="1", COMPOSE_BAKE="false", DOCKER_BUILDKIT="0")
     (survey.root / "logs").mkdir(parents=True, exist_ok=True)
+    cmd = [s.harbor, "run", "--config", str(config)]
     with (survey.root / "logs" / f"{job}.log").open("a") as log:
-        run(
-            [s.harbor, "run", "--config", str(config)],
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        if run is not None:
+            run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        else:
+            proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                proc.wait(timeout=s.time_limit_s or None)
+            except subprocess.TimeoutExpired:
+                for sig, wait in ((signal.SIGINT, 120), (signal.SIGKILL, 30)):
+                    with contextlib.suppress(OSError):
+                        os.killpg(proc.pid, sig)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=wait)
+                        break
+                raise TooSlow(job) from None
     return sorted(p.parent for p in (survey.root / "jobs" / job).glob("*/result.json"))
 
 
@@ -355,7 +372,7 @@ def measure_task(
     s: Settings,
     manifest: Path | None = None,
     grade: Callable[[Path, dict], dict] | None = None,
-    run: Callable[..., Any] = subprocess.run,
+    run: Callable[..., Any] | None = None,
 ) -> str:
     """Measure one task and return its new phase: measured, no_benchmarks or error.
 
@@ -375,7 +392,20 @@ def measure_task(
         config.parent.mkdir(parents=True, exist_ok=True)
         cfg = job_config(survey, task, job, s, tasks_root_for(survey, task, job, confirm))
         config.write_text(yaml.safe_dump(cfg, sort_keys=False))
-    trials = run_harbor(survey, job, config, s, run)
+    try:
+        trials = run_harbor(survey, job, config, s, run)
+    except TooSlow:
+        released = release_leases(survey.root / "jobs" / job, s.gate_url)
+        survey.save_state(
+            task,
+            {
+                **st,
+                "phase": "too_slow",
+                "measure_jobs": n + 1,
+                "last_error": f"{job}: stopped after {s.time_limit_s} s; released {len(released)} gate lease(s)",
+            },
+        )
+        return "too_slow"
     timeouts = gate_timeouts(s)
     runs = [trial_run(t, timeouts) for t in trials]
     for r, t in zip(runs, trials, strict=True):

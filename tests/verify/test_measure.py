@@ -140,3 +140,15 @@ def test_old_gate_logs_without_ids_are_skipped(tmp_path):
     (tmp_path / "t" / "artifacts").mkdir(parents=True)
     (tmp_path / "t" / "artifacts" / "measure_gate.txt").write_text("init 1\nmeasure 1\n")
     assert measure.job_leases(tmp_path) == []
+
+
+def test_a_job_past_the_time_limit_ends_too_slow(tmp_path, monkeypatch):
+    survey = setup_task(tmp_path)
+    harbor = tmp_path / "harbor"
+    harbor.write_text("#!/bin/sh\nsleep 60\n")
+    harbor.chmod(0o755)
+    monkeypatch.setattr(measure, "release_leases", lambda job, url: ["mg-1"])
+    s = measure.Settings(harbor=str(harbor), time_limit_s=1)
+    assert measure.measure_task(survey, "o__r__1", s) == "too_slow"
+    st = survey.state("o__r__1")
+    assert st["phase"] == "too_slow" and "released 1" in st["last_error"] and st["measure_jobs"] == 1

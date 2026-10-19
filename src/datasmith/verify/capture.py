@@ -11,7 +11,6 @@ import collections
 import json
 import re
 import shutil
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -84,7 +83,7 @@ def update_record(survey: Survey, task: str, **fields: Any) -> None:
 
 
 def capture(
-    survey: Survey, task: str, s: Settings, manifest: Path | None = None, run: Callable[..., Any] = subprocess.run
+    survey: Survey, task: str, s: Settings, manifest: Path | None = None, run: Callable[..., Any] | None = None
 ) -> str:
     """Capture the reference and check a no-change run against it; returns the task's capture result."""
     if manifest is not None and (row := images.rows_by_task(manifest).get(task)):

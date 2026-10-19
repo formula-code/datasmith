@@ -14,7 +14,7 @@ from datasmith.verify.survey import DECISIONS, UNMEASURED, Survey, display_id, t
 NOTE_UP_ZERO = "auto: no oracle benchmark above noise (oracle up 0)"
 NOTE_UNMEASURED = {
     "uncovered": "uncovered: no benchmark runs the code the patch changes",
-    "base_edited": "base edited: the patch changes the benchmark files",
+    "base_edited": "base edited: the image already has edits that touch the oracle patch",
     "patch_failed": "patch failed: the patch did not apply in the image",
     "no_benchmarks": "no benchmarks: benchmark suite empty or failed to load at the base commit",
     "image_failed": "image build failed",
