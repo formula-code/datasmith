@@ -28,9 +28,6 @@ make grafana-up / grafana-down / grafana-logs        # Grafana on :3001
 make db-tunnel                                       # Expose PostgREST as db + api .formulacode.org
 make model-tunnel                                    # LiteLLM + reconciler + model.formulacode.org
 
-# Dataset verification (iterative Docker build debugging)
-python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha>
-
 # Pipeline update (monthly, the primary entrypoint for fc-data)
 fc-data --start-date YYYY-MM-DD --end-date YYYY-MM-DD          # Run all 9 stages
 fc-data --start-date 2026-01-01 --end-date 2026-01-31 --stage 4  # Run a single stage
@@ -57,10 +54,10 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 | `docker/` | Image lifecycle: build-context synthesis and persistence (`context.py` — largest file), image naming/build (`images.py`), DockerHub push (`publish.py`), build-manifest invariants (`manifest.py`). `templates/` holds the multi-stage Dockerfiles and `docker_build_*.sh` scripts baked into every task image |
 | `agents/` | LLM agents: DSPy perf classification (`classifiers.py`) and problem extraction (`extractors.py`); CLI-agent synthesis of build scripts (`synthesizer.py`, `sandbox.py`, `installed/`), plus rate limiting and tamper auditing |
 | `resolution/` | Dependency resolution: parses pyproject.toml/setup.py/setup.cfg, resolves pinned deps via `uv pip compile`, validates installability. Pipeline stage 4 |
-| `runners/` | One module per pipeline stage, all subclassing `BaseRunner` (`base.py`), which supplies bounded concurrency plus `runner_progress`/`runner_failures` bookkeeping. A runner logs per-item failures and keeps going — it never aborts the stage |
+| `runners/` | One module per pipeline stage, all subclassing `BaseRunner` (`base.py`), which supplies bounded concurrency plus `runner_progress`/`runner_failures` bookkeeping. A runner logs per-item failures and keeps going — it never aborts the stage. `build_task_images.py` is `fc-build-tasks`, which builds one image per rendered task |
 | `update/` | Pipeline orchestrator (`pipeline.py` — the `STAGES` list and stage dispatch) and the `fc-data` CLI (`cli.py`). `offline.py` imports PR data from parquet instead of the GitHub API |
 | `harbor_adapter/` | Renders Harbor task directories from Supabase rows (`fc-render-tasks`) and parses trial results. Harbor's `adapters/formulacode` imports this package, not the reverse. `template/` is copied into every rendered task; `template/tests/parser.py` computes the geomean level1–level4 rollup |
-| `verify/` | The `fc-verify` command: select, build, publish, precheck, measure, classify and review tasks in a survey folder. See `docs/OVERVIEW.md` |
+| `measurement/` | Task timing (`fc-measure precheck` and `fc-measure measure`): the measure job (`run.py`, host lock folder `FC_MEASURE_LOCK_DIR`), precheck from the image build check, the per-benchmark noise rule (`noise.py`). See `docs/OVERVIEW.md` |
 | `publish/` | DockerHub + HuggingFace publishing (stage 8) and the parquet record round-trip |
 | `scrape/` | AST extraction of ASV benchmark functions from a checked-out repo (stage 9). Note: PR scraping lives in `github/`, not here |
 | `filters.py` | Cheap symbolic pre-screening. Stage 2 stores **every** merged PR and evaluates only the two components GraphQL can answer — the title keyword filter and file compliance — recording the verdict in `is_performance_commit_symbolic`. `check_patch_size` still lives here, but now runs from stage 3, where it gates the diff fetch and the LLM call rather than storage |
@@ -72,7 +69,7 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 2. **scrape_commits** — Scrape merged PRs via `GitHubClient.fetch_merged_prs`, which windows `merged_at` server-side through GitHub's search API and bisects the range when the 1000-result cap would truncate the answer. GraphQL-only apart from a ~1% REST fallback for PRs whose `files(first: 100)` list is truncated; no diffs are fetched here. A truncated leaf (`Truncated`) or a missing repository (`RepositoryNotFoundError`) fails that repository rather than reading as a healthy zero
 3. **classify_prs** — Fetch each candidate PR's diff, apply the `check_patch_size` gate, and only then call the LLM. Three outcomes stay distinct: an oversized patch is recorded with both `is_performance_commit` and `is_performance_commit_symbolic` false and no model call; a diff GitHub definitively will not serve records `is_performance_commit` false and leaves the symbolic column alone, because the size gate never ran; a failed request raises and lands in `runner_failures`. A fetched patch is persisted so a resumed run does not buy the same diff twice
 4. **resolve_packages** — Emit one dependency **seed** per commit, and the story of how it was reached. Six units compose it: `discover` picks the packaging root, `declare` reads only what the project states it needs, `interpreter` walks a declared ladder (`requires-python` → trove classifiers → `asv.conf.json` `pythons` → newest release at commit date) and records the rung in `interpreter_source`, `pin` runs one `uv pip compile` with the commit date as `--exclude-newer`, `probe` dry-runs the result, and the row is written. What it deliberately does not read: `requirements*.txt` globs, `environment.yml`, and import statements — so a project that declares nothing gets an empty seed and says so, rather than a list of invented PyPI names. Benchmark tooling (`asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer`) is stripped from both the declared set and the compiled one: the base image installs it, and a second install only starts a version conflict. **The stage gates nothing.** `can_install` is retained, nullable, and no longer read or written; `probe_status` (`installable` → `unresolved` → `failed` → `empty`) orders the stage 5 queue best-first and excludes nobody. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container.
-5. **render_problems** — Scrape linked issues and render deconstructed problem contexts
+5. **render_problems** — `RenderShortProblemsRunner`: render a short problem text without linked issues; a text that gives away the fix is not stored
 6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
 7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
 8. **publish** — Build, verify, and publish Docker images to DockerHub. Two gates, and a PR must clear both: it needs at least one successful `harbor_runs` row whose `max_speedup >= 1.05` in an admitted environment (`DATASMITH_PUBLISH_ENVIRONMENTS`, default **daytona** only), *and* its `candidate_containers` row must be `verification_state = 'verified'`. The harbor row says the container is fast; `verification_state` says it is honest, and neither substitutes for the other — `harbor_runs` outlives the container generation that produced it, so a pre-honesty-gate row can carry a fast trial. That second gate is deliberately **not** a knob.
@@ -99,16 +96,9 @@ The `verify` block also carries **measurement** facts: after `run_tests` passes,
 
 Because the manifest gates publishing, the sealer is hardened against synthesis agents that tamper with it (for example, reassigning `rc` after the sealer, or `|| true` hiding an exit code). Treat changes near the sealer as security-relevant and add a regression test.
 
-### Dataset verification (`dataset/`)
-
-Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a multi-stage Dockerfile, shell build scripts, and validation scripts. The verification loop is:
-1. Run `verify.py` → check `failure.json` for errors → edit `docker_build_pkg.sh` and/or `docker_build_run.sh` → rerun until `verification_success.json` appears.
-
-**Only modify `docker_build_pkg.sh` and `docker_build_run.sh`** during verification fixes. See `dataset/CLAUDE.md` and `dataset/AGENTS.md` for detailed guidance.
-
 ### Where not to look
 
-`archive/`, `docs/archive/`, `scratch/`, `jobs/`, `backups/`, and `dist/` are dead or historical — Ruff's `extend-exclude` skips several of them. `archive/scrape/CLAUDE.md` documents a report-builder layout that no longer exists. When searching for current behavior, scope to `src/`, `tests/`, `docs/design/`, `docs/guide/`, and `dataset/`.
+`archive/`, `docs/archive/`, `scratch/`, `jobs/`, `backups/`, and `dist/` are dead or historical — Ruff's `extend-exclude` skips several of them. `archive/scrape/CLAUDE.md` documents a report-builder layout that no longer exists. When searching for current behavior, scope to `src/`, `tests/` and `docs/guide/`.
 
 ## Code quality standards
 
@@ -120,7 +110,7 @@ Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a mul
 
 ### Design docs
 
-Each module has a design doc under `docs/design/components/`. Read it before changing that module, and update it when behavior changes. `docs/OVERVIEW.md` describes the whole pipeline across repos.
+`docs/OVERVIEW.md` describes the whole pipeline across repos. `docs/guide/` has one page per subsystem; update it when behavior changes.
 
 ### Documentation
 

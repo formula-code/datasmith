@@ -389,29 +389,6 @@ $ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 \
 | `--force` | Re-run synthesis even for tasks that already have a container or cached context (stage 5 only) |
 
 
-## Dataset verification
-
-Each task lives in `dataset/formulacode_verified/<owner_repo>/<sha>/` with a multi-stage Dockerfile and shell build scripts. The verification loop:
-
-```bash
-$ python dataset/verify.py --task dataset/formulacode_verified/<owner_repo>/<sha>
-# Check failure.json for errors -> edit docker_build_pkg.sh / docker_build_run.sh -> rerun
-# Done when verification_success.json appears
-```
-
-Only modify `docker_build_pkg.sh` and `docker_build_run.sh` during verification fixes.
-
-```bash
-$ python scratch/scripts/prepare_formulacode_dataset.py \
-       --input  scratch/artifacts/pipeflush/perfonly_commits_master.parquet \
-       --output scratch/artifacts/pipeflush/perfonly_enriched.parquet \
-       --dockerhub-repository formulacode/all \
-       --upload-to-hf formulacode/formulacode-all \
-       --hf-verified-filter /path/to/valid_tasks.json
-```
-
-> Requires `HF_TOKEN` in `tokens.env`. The upload creates `default`, `verified`, and per-month (`YYYY-MM`) configs on Hugging Face.
-
-### Evaluation
+## Evaluation
 
 Tasks run on [Harbor](https://github.com/formula-code/harbor). The steps from a rendered task to measurement, review, agent trials and RL training are in [docs/OVERVIEW.md](docs/OVERVIEW.md).

@@ -34,7 +34,6 @@ theme:
 exclude_docs: |
   archive/
   design/Datasmith - Overview.md
-  design/components/datasmith.*.md
 
 validation:
   links:
