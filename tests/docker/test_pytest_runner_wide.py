@@ -70,7 +70,7 @@ def test_a_run_stopped_at_its_limit_keeps_the_finished_tests(runner, repo: Path)
     (repo / "tests" / "test_slow.py").write_text(
         "import time\n\ndef test_fast():\n    pass\n\ndef test_slow():\n    time.sleep(60)\n"
     )
-    outcomes, rootdir, timed_out = runner._agent_run_limited(["tests/test_slow.py"], "", str(repo), 5)
+    outcomes, rootdir, timed_out, _ = runner._agent_run_limited(["tests/test_slow.py"], "", str(repo), 5)
     assert timed_out is True and rootdir == str(repo)
     assert outcomes == {"tests/test_slow.py::test_fast": "passed"}
 

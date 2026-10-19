@@ -404,7 +404,8 @@ WIDE_MAX_FILES = 40
 
 
 def _agent_run_limited(test_paths, extra_args, repo_root, timeout):
-    """pytest in a fresh process with a time limit: ({nodeid: outcome} of the tests that finished, rootdir, timed_out)."""
+    """pytest in a fresh process with a time limit: ({nodeid: outcome} of the tests that finished, rootdir, timed_out,
+    the end of its output)."""
     import tempfile as _tempfile
 
     self_path = os.path.abspath(__file__)
@@ -415,12 +416,15 @@ def _agent_run_limited(test_paths, extra_args, repo_root, timeout):
         "P = importlib.util.module_from_spec(spec); spec.loader.exec_module(P); "
         "P.run_pytest_and_collect(%r, extra_args=%r, cwd=%r, stream=%r)"
     ) % (os.path.dirname(self_path), self_path, list(test_paths), extra_args or "", repo_root, stream)
-    timed_out = False
-    try:
-        subprocess.run([sys.executable, "-c", script], cwd=repo_root, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=max(1, int(timeout)))
-    except subprocess.TimeoutExpired:
-        timed_out = True
+    timed_out, err = False, ""
+    with _tempfile.TemporaryFile() as fh:
+        try:
+            subprocess.run([sys.executable, "-c", script], cwd=repo_root, stdout=fh, stderr=subprocess.STDOUT,
+                           timeout=max(1, int(timeout)))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        fh.seek(0)
+        err = fh.read().decode("utf-8", "replace")[-1500:]
     tests, rootdir = [], repo_root
     try:
         with open(stream) as fh:
@@ -436,7 +440,7 @@ def _agent_run_limited(test_paths, extra_args, repo_root, timeout):
         os.remove(stream)
     except OSError:
         pass
-    return _final_outcomes({"tests": tests}), rootdir, timed_out
+    return _final_outcomes({"tests": tests}), rootdir, timed_out, err
 
 
 def run_wide_check(changed_files, ran_ids, extra_args, repo_root, budget, base_ref=None):
@@ -450,8 +454,10 @@ def run_wide_check(changed_files, ran_ids, extra_args, repo_root, budget, base_r
         out["reason"] = "no tests folder" if not dirs else "no time left"
         return out
     t0 = time.time()
-    first, rootdir, timed_out = _agent_run_limited(dirs, extra_args, repo_root, budget)
+    first, rootdir, timed_out, tail = _agent_run_limited(dirs, extra_args, repo_root, budget)
     out.update(timed_out=timed_out, n_agent_tests=len(first))
+    if not first:
+        out["output_tail"] = tail
 
     def path_of(nodeid):
         return os.path.relpath(os.path.join(rootdir, nodeid.split("::")[0]), repo_root).replace("\\", "/")
@@ -460,7 +466,7 @@ def run_wide_check(changed_files, ran_ids, extra_args, repo_root, budget, base_r
     files = sorted({path_of(n) for n in failing})[:WIDE_MAX_FILES]
     failing = [n for n in failing if path_of(n) in files]
     if failing:
-        again, _, _ = _agent_run_limited(files, extra_args, repo_root, (budget - (time.time() - t0)) / 2)
+        again, _, _, _ = _agent_run_limited(files, extra_args, repo_root, (budget - (time.time() - t0)) / 2)
         failing = [n for n in failing if again.get(n) in ("failed", "error")]
         files = sorted({path_of(n) for n in failing})
     out["n_agent_failing"] = len(failing)
