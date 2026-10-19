@@ -1,6 +1,6 @@
 # PR style
 
-The PR template (`.github/pull_request_template.md`) gives the sections. This page gives the rules.
+The PR template (`.github/pull_request_template.md`) gives the sections. This page gives the rules for PR text. `docs/CODE_DESIGN.md` gives the rules for the code.
 
 ## Language
 
