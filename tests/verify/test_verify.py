@@ -133,3 +133,13 @@ def test_readiness_rows_without_network(survey):
     r = rows[0]
     assert (r["in_registry"], r["oracle_runs"], r["nop_runs"], r["prompt_giveaway"]) == (True, 3, 3, 3)
     assert release.summary(rows)["no_license"] == 1
+
+
+def test_cli_imports_with_the_standard_library_only():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    code = f"import sys; sys.path.insert(0, {str(src)!r}); import datasmith.verify.cli"
+    assert subprocess.run([sys.executable, "-S", "-c", code], capture_output=True).returncode == 0

@@ -22,8 +22,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from datasmith.verify import images
 from datasmith.verify.noise import load_rule, repo_spreads, rule_for, thetas
 from datasmith.verify.survey import Survey, repo_of
@@ -372,12 +370,11 @@ def measure_task(
     confirm = confirm_spec(survey, task, rule, s.confirm_rounds) if rule else None
     config = survey.root / "configs" / f"{job}.yaml"
     if not config.exists():
+        import yaml
+
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(
-            yaml.safe_dump(
-                job_config(survey, task, job, s, tasks_root_for(survey, task, job, confirm)), sort_keys=False
-            )
-        )
+        cfg = job_config(survey, task, job, s, tasks_root_for(survey, task, job, confirm))
+        config.write_text(yaml.safe_dump(cfg, sort_keys=False))
     trials = run_harbor(survey, job, config, s, run)
     timeouts = gate_timeouts(s)
     runs = [trial_run(t, timeouts) for t in trials]

@@ -16,8 +16,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from datasmith.verify import images
 from datasmith.verify.measure import Settings, job_config, outputs_dir, patch_failures, read_json, run_harbor, utc
 from datasmith.verify.survey import Survey
@@ -66,6 +64,8 @@ def capture_trial(survey: Survey, task: str, s: Settings, nop: bool, run: Callab
     config = survey.root / "configs" / f"{job}.yaml"
     if not config.exists():
         config.parent.mkdir(parents=True, exist_ok=True)
+        import yaml
+
         config.write_text(yaml.safe_dump(capture_config(survey, task, job, s, nop), sort_keys=False))
     trials = run_harbor(survey, job, config, s, run)
     want = "summary_*.json" if nop else ".snapshots/baseline.json"
