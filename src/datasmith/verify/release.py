@@ -13,7 +13,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from datasmith.verify.measure import read_json, trial_run
+from datasmith.measurement.run import _read_json as read_json
+from datasmith.measurement.run import trial_run
 from datasmith.verify.pin import read_pin
 from datasmith.verify.prompt_check import check_task
 from datasmith.verify.survey import Survey, task_id
@@ -93,7 +94,7 @@ def task_row(
     for r in runs:
         cpu = r.get("cpu_model")
         if cpu is None and r.get("trial_dir") and (Path(r["trial_dir"]) / "result.json").exists():
-            cpu = trial_run(Path(r["trial_dir"]), [])["cpu_model"]
+            cpu = trial_run(Path(r["trial_dir"]))["cpu_model"]
         cpus.add(cpu or "unknown")
     return {
         "task": task,

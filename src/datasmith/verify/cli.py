@@ -11,8 +11,6 @@ fc-verify build    TASKS_ROOT OUT [--ids FILE ...] [--workers N] [--retry-failed
 fc-verify publish  TASKS_ROOT MANIFEST OUT [--region R] [--repo NAME] [--until-idle]
 fc-verify push     MANIFEST OUT_JSONL [--region R] [--repo NAME]  push verified rows as they are (no scrub)
 fc-verify pins     TASKS_ROOT MANIFEST                    pin status of every task folder
-fc-verify measure  SURVEY TASK ... [--manifest M] [--workers N] [--oracle-runs 3] [--nop-runs 3] [--gate URL]
-fc-verify release-leases JOB_DIR [--gate URL]      free the gate slots of a stopped job
 fc-verify readiness SURVEY OUT_CSV [--registry-tags FILE] [--fetch-github] [--giveaway JSONL]
 fc-verify records  IDS_MD OUT_DIR                  render records for chosen owner/repo#N ids (database)
 fc-verify select   OUT_DIR --hub TSV [--n 130] [--seed S] [--skip IDS_MD ...] [--exclude-repo owner/repo ...]
@@ -32,7 +30,7 @@ import sys
 from pathlib import Path
 
 from datasmith.measurement.noise import classify_all, load_rule
-from datasmith.verify import images, measure, pin, precheck, registry, release, report, review, status
+from datasmith.verify import images, pin, precheck, registry, release, report, review, status
 from datasmith.verify.survey import DECISIONS, Survey, task_id
 
 
@@ -84,19 +82,6 @@ def _precheck(survey: Survey, a: argparse.Namespace) -> None:
         print(json.dumps({"task": t, "end": end, **{k: result.get(k) for k in ("by_deps", "patch_failed", "error")}}))
 
 
-def _measure(survey: Survey, a: argparse.Namespace) -> None:
-    s = measure.Settings(
-        n_oracle=a.oracle_runs,
-        n_nop=a.nop_runs,
-        gate_url=a.gate,
-        confirm_rounds=a.confirm_rounds,
-        max_heavy=a.max_heavy,
-        harbor=a.harbor,
-    )
-    for task, phase in measure.measure_many(survey, _tasks(a.tasks), s, a.workers, a.manifest).items():
-        print(f"{task}: {phase}")
-
-
 def _readiness(survey: Survey, a: argparse.Namespace) -> None:
     tags = set(a.registry_tags.read_text().split()) if a.registry_tags else None
     giveaway = {}
@@ -118,7 +103,6 @@ COMMANDS = {
     "auto": _auto,
     "add": _add,
     "precheck": _precheck,
-    "measure": _measure,
     "readiness": _readiness,
 }
 
@@ -167,11 +151,6 @@ def _pins(a: argparse.Namespace) -> int:
             bad += state in ("drift", "env-mismatch", "unverified-pinned")
             print(f"{task_dir.name}: {state}" + (f" -> {tag}" if tag else ""))
     return 1 if bad else 0
-
-
-def _release(a: argparse.Namespace) -> int:
-    print("\n".join(measure.release_leases(a.job_dir, a.gate)))
-    return 0
 
 
 def _records(a: argparse.Namespace) -> int:
@@ -285,7 +264,6 @@ NO_SURVEY = {
     "publish": _publish,
     "pins": _pins,
     "failure": _failure,
-    "release-leases": _release,
 }
 
 
@@ -302,12 +280,11 @@ def main(argv: list[str] | None = None) -> int:
         "auto",
         "add",
         "precheck",
-        "measure",
         "readiness",
     ):
         p = sub.add_parser(name)
         p.add_argument("survey", type=Path)
-        if name in ("classify", "report", "add", "precheck", "measure"):
+        if name in ("classify", "report", "add", "precheck"):
             p.add_argument("tasks", nargs="*")
     sub.choices["review"].add_argument("task")
     sub.choices["review"].add_argument("decision", choices=DECISIONS)
@@ -335,23 +312,11 @@ def main(argv: list[str] | None = None) -> int:
     pb.add_argument("--region", default="us-east-1")
     pb.add_argument("--repo", default="formulacode")
     pb.add_argument("--until-idle", action="store_true", help="keep publishing while a build runs")
-    m = sub.choices["measure"]
-    m.add_argument("--manifest", type=Path, help="image manifest; images are loaded before measuring")
-    m.add_argument("--workers", type=int, default=1)
-    m.add_argument("--oracle-runs", type=int, default=3)
-    m.add_argument("--nop-runs", type=int, default=3)
-    m.add_argument("--gate", default="http://127.0.0.1:8267")
-    m.add_argument("--confirm-rounds", type=int, default=0)
-    m.add_argument("--max-heavy", type=int, default=1)
-    m.add_argument("--harbor", default="harbor")
     rd = sub.choices["readiness"]
     rd.add_argument("out_csv", type=Path)
     rd.add_argument("--registry-tags", type=Path, help="file with one registry tag per line")
     rd.add_argument("--fetch-github", action="store_true", help="look up repo licenses and PR authors")
     rd.add_argument("--giveaway", type=Path, help="JSON lines with task and score from a prompt audit")
-    rl = sub.add_parser("release-leases")
-    rl.add_argument("job_dir", type=Path)
-    rl.add_argument("--gate", default="http://127.0.0.1:8267")
     rc = sub.add_parser("records")
     rc.add_argument("ids", type=Path)
     rc.add_argument("out", type=Path)

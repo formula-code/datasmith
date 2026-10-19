@@ -24,6 +24,11 @@ def render_template(template_name: str, **context: object) -> str:
     return _TEMPLATE_ENV.get_template(template_name).render(**context)
 
 
+def patch_files(solve_sh: Path) -> list[str]:
+    """Files the oracle patch in a rendered solve.sh changes."""
+    return sorted(set(re.findall(r"^\+\+\+ b/(\S+)", solve_sh.read_text(), re.M))) if solve_sh.exists() else []
+
+
 def make_task_id(owner: str, repo: str, issue_number: int | str) -> str:
     """Harbor task id (dir name, snapshot prefix, $TASK_ID); DB queries use the triple."""
     return f"{owner}__{repo}__{int(issue_number)}"
