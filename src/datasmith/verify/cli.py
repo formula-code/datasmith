@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 
 from datasmith.verify import capture, images, measure, pin, precheck, registry, release, report, review, status
-from datasmith.verify.noise import classify_all, load_rule
+from datasmith.measurement.noise import classify_all, load_rule
 from datasmith.verify.survey import DECISIONS, Survey, task_id
 
 

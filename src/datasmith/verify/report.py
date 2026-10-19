@@ -9,7 +9,7 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-from datasmith.verify.noise import moved, repo_spreads, rule_for, sigmas
+from datasmith.measurement.noise import moved, repo_spreads, rule_for, sigmas
 from datasmith.verify.survey import Survey, display_id, repo_of
 
 _SOLUTION = re.compile(r"<< '__SOLUTION__'\n(.*?)\n__SOLUTION__", re.DOTALL)

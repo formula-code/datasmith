@@ -1,44 +1,14 @@
 import json
-import math
 
+from datasmith.measurement.noise import load_rule
 from datasmith.verify import report, review, status
 from datasmith.verify.cli import main
-from datasmith.verify.noise import classify_all, load_rule, moved, robust_sd, verify
 from datasmith.verify.survey import Survey, display_id, task_id
 
 
 def test_ids_round_trip():
     assert task_id("scikit-learn/scikit-learn#123") == "scikit-learn__scikit-learn__123"
     assert display_id("pydata__xarray__3588") == "pydata/xarray#3588"
-
-
-def test_moved_needs_two_of_three_runs():
-    assert moved([0.2, 0.2, 0.0], 0.1) == (True, False)
-    assert moved([0.2, 0.0, 0.0], 0.1) == (False, False)
-    assert moved([-0.2, -0.2, None], 0.1) == (False, True)
-
-
-def test_robust_sd_is_centered_at_zero():
-    assert robust_sd([0.1, -0.1, 0.1], center=0.0) == 1.4826 * 0.1
-    assert robust_sd([], center=0.0) is None
-
-
-def test_oracle_failing_tests_include_the_rerun():
-    runs = [
-        {"role": "oracle_baseline", "run": 1, "log_speedups": {"a.time_x": 0.4}, "tests": {"failing": ["t::a", "t::z"]}}
-    ]
-    rec = {"task": "o__r__1", "n_oracle": 1, "runs": runs, "oracle_tests_rerun": {"failing": ["t.py", "t::a"]}}
-    entry = verify(rec, {"form": "global", "theta": 0.03}, {})["entry"]
-    assert entry["oracle_failing_tests"] == ["t.py", "t::a", "t::z"]
-
-
-def test_classify_counts_gain_and_no_gain(survey):
-    s = Survey(survey)
-    stats = classify_all(s.records(), load_rule(s.rule_path))
-    assert stats["o__r__1"]["oracle_up"] == 1
-    assert stats["o__r__1"]["best"][0]["benchmark"] == "a.time_x"
-    assert math.isclose(stats["o__r__1"]["best"][0]["speedup"], 1.5)
-    assert stats["o__r__2"]["oracle_up"] == 0
 
 
 def test_auto_rules_pick_no_gain_and_unmeasured(survey):

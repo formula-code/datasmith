@@ -13,8 +13,6 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-from datasmith.verify.survey import repo_of
-
 NEEDS = {"global": ("theta",), "per_benchmark": ("k", "n0", "theta_min", "theta_max")}
 # An oracle run that fails more than this share of the tests that pass without the patch cannot be the reference.
 ORACLE_MAX_BROKEN = 0.5
@@ -32,6 +30,7 @@ def load_rule(path: Path) -> dict[str, Any]:
 
 
 def rule_for(rule: dict, repo: str | None) -> dict:
+    """The rule with the overrides of one repo (the `repo` part of an `owner__repo__N` task id)."""
     return {**rule, **rule.get("repos", {}).get(repo, {})}
 
 
@@ -57,14 +56,15 @@ def repo_spreads(records: list[dict]) -> dict[str, float]:
     values: dict[str, list[float]] = {}
     for record in records:
         for xs in nop_logs(record).values():
-            values.setdefault(repo_of(record["task"]), []).extend(xs)
+            values.setdefault(record["task"].split("__")[1], []).extend(xs)
     return {repo: s for repo, xs in values.items() if (s := robust_sd(xs, center=0.0)) is not None}
 
 
 def sigmas(rule: dict, record: dict, spreads: dict[str, float]) -> dict[str, tuple[float | None, float]]:
     """(s_b, sigma_b) per benchmark of the record."""
-    r = rule_for(rule, repo_of(record["task"]))
-    nops, s_repo = nop_logs(record), spreads.get(repo_of(record["task"]))
+    repo = record["task"].split("__")[1]
+    r = rule_for(rule, repo)
+    nops, s_repo = nop_logs(record), spreads.get(repo)
     out = {}
     for b in {b for run in record["runs"] for b in run["log_speedups"]}:
         s_b = robust_sd(nops.get(b, []), center=0.0)
@@ -76,7 +76,7 @@ def sigmas(rule: dict, record: dict, spreads: dict[str, float]) -> dict[str, tup
 
 
 def thetas(rule: dict, record: dict, spreads: dict[str, float]) -> dict[str, float]:
-    r = rule_for(rule, repo_of(record["task"]))
+    r = rule_for(rule, record["task"].split("__")[1])
     if r["form"] == "global":
         return {b: r["theta"] for run in record["runs"] for b in run["log_speedups"]}
     return {
@@ -109,7 +109,7 @@ def classify(record: dict, rule: dict, spreads: dict[str, float]) -> dict[str, A
 
     The bar is k·sigma_b (no clip), the same bar the review page shows; `verify` below uses the clipped theta_b.
     """
-    k = float(rule_for(rule, repo_of(record["task"])).get("k", 2))
+    k = float(rule_for(rule, record["task"].split("__")[1]).get("k", 2))
     orc = sorted((r for r in record["runs"] if r["role"] != "nop"), key=lambda r: r["run"])
     nop = sorted((r for r in record["runs"] if r["role"] == "nop"), key=lambda r: r["run"])
     up, down, alarms, nop_values, medians = [], [], 0, 0, []
@@ -143,7 +143,7 @@ def verify(record: dict, rule: dict, spreads: dict[str, float]) -> dict[str, Any
     """All oracle runs present and usable, on a reused baseline; at least one benchmark up beyond theta_b in 2 runs and none
     moving both ways below that count; no-change bias on the improved benchmarks within theta_b."""
     theta = thetas(rule, record, spreads)
-    r_task = rule_for(rule, repo_of(record["task"]))
+    r_task = rule_for(rule, record["task"].split("__")[1])
     oracle = [r for r in record["runs"] if r["role"] != "nop"]
     problems = {
         r["run"]: p for r in oracle if (p := oracle_problem(r, r_task.get("oracle_max_broken", ORACLE_MAX_BROKEN)))

@@ -23,10 +23,10 @@ from pathlib import Path
 from typing import Any
 
 from datasmith.verify import images
-from datasmith.verify.noise import load_rule, repo_spreads, rule_for, thetas
+from datasmith.measurement.noise import load_rule, repo_spreads, rule_for, thetas
 from datasmith.verify.survey import Survey, repo_of
 
-NOP_AGENT = "datasmith.verify.agents:NopTouch"
+NOP_AGENT = "datasmith.measurement.agents:NopTouch"
 # Container temp dir inside the mounted artifacts dir, so benchmark leftovers land on the jobs disk.
 TRIAL_TMPDIR = "/logs/artifacts/.tmp"
 INFRA_EXCEPTIONS = {

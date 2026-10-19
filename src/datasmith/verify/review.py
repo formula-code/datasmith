@@ -8,7 +8,7 @@ from __future__ import annotations
 import datetime
 from typing import Any
 
-from datasmith.verify.noise import classify_all, load_rule
+from datasmith.measurement.noise import classify_all, load_rule
 from datasmith.verify.survey import DECISIONS, UNMEASURED, Survey, display_id, task_id
 
 NOTE_UP_ZERO = "auto: no oracle benchmark above noise (oracle up 0)"
