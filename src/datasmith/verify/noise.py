@@ -170,7 +170,11 @@ def verify(record: dict, rule: dict, spreads: dict[str, float]) -> dict[str, Any
         "unbiased": unbiased,
     }
     entry = {b: {"oracle_log_speedup": m, "oracle_speedup": math.exp(m), "theta": theta[b]} for b, m in median.items()}
-    failing = sorted({t for r in oracle for t in (r.get("tests") or {}).get("failing", [])})
+    # oracle_tests_rerun: oracle test failures found by a later test-only rerun of the oracle patch.
+    failing = sorted(
+        {t for r in oracle for t in (r.get("tests") or {}).get("failing", [])}
+        | set((record.get("oracle_tests_rerun") or {}).get("failing") or [])
+    )
     return {
         "task": record["task"],
         "verified": all(checks.values()),
