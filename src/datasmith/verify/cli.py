@@ -10,6 +10,8 @@ fc-verify precheck SURVEY TASK ... [--measure-uncovered always_affected,compiled
 fc-verify build    TASKS_ROOT OUT [--ids FILE ...] [--workers N] [--retry-failed]
 fc-verify publish  TASKS_ROOT MANIFEST OUT [--region R] [--repo NAME] [--until-idle]
 fc-verify pins     TASKS_ROOT MANIFEST                    pin status of every task folder
+fc-verify measure  SURVEY TASK ... [--manifest M] [--workers N] [--oracle-runs 3] [--nop-runs 3] [--gate URL]
+fc-verify release-leases JOB_DIR [--gate URL]      free the gate slots of a stopped job
 fc-verify failure  LOG ...                       error class of failed image builds
 """
 
@@ -21,7 +23,7 @@ import re
 import sys
 from pathlib import Path
 
-from datasmith.verify import images, pin, precheck, registry, report, review, status
+from datasmith.verify import images, measure, pin, precheck, registry, report, review, status
 from datasmith.verify.noise import classify_all, load_rule
 from datasmith.verify.survey import DECISIONS, Survey, task_id
 
@@ -72,6 +74,19 @@ def _precheck(survey: Survey, a: argparse.Namespace) -> None:
         if end:
             survey.save_state(t, {**st, "phase": end})
         print(json.dumps({"task": t, "end": end, **{k: result.get(k) for k in ("by_deps", "patch_failed", "error")}}))
+
+
+def _measure(survey: Survey, a: argparse.Namespace) -> None:
+    s = measure.Settings(
+        n_oracle=a.oracle_runs,
+        n_nop=a.nop_runs,
+        gate_url=a.gate,
+        confirm_rounds=a.confirm_rounds,
+        max_heavy=a.max_heavy,
+        harbor=a.harbor,
+    )
+    for task, phase in measure.measure_many(survey, _tasks(a.tasks), s, a.workers, a.manifest).items():
+        print(f"{task}: {phase}")
 
 
 COMMANDS = {
@@ -126,13 +141,18 @@ def _pins(a: argparse.Namespace) -> int:
     return 1 if bad else 0
 
 
+def _release(a: argparse.Namespace) -> int:
+    print("\n".join(measure.release_leases(a.job_dir, a.gate)))
+    return 0
+
+
 def _failure(a: argparse.Namespace) -> int:
     for log in a.logs:
         print(json.dumps({"log": str(log), **report.failure_reason(log)}))
     return 0
 
 
-NO_SURVEY = {"build": _build, "publish": _publish, "pins": _pins, "failure": _failure}
+NO_SURVEY = {"build": _build, "publish": _publish, "pins": _pins, "failure": _failure, "release-leases": _release}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,10 +160,10 @@ def main(argv: list[str] | None = None) -> int:
         prog="fc-verify", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("status", "classify", "report", "review", "auto", "add", "precheck"):
+    for name in ("status", "classify", "report", "review", "auto", "add", "precheck", "measure"):
         p = sub.add_parser(name)
         p.add_argument("survey", type=Path)
-        if name in ("classify", "report", "add", "precheck"):
+        if name in ("classify", "report", "add", "precheck", "measure"):
             p.add_argument("tasks", nargs="*")
     sub.choices["review"].add_argument("task")
     sub.choices["review"].add_argument("decision", choices=DECISIONS)
@@ -171,6 +191,18 @@ def main(argv: list[str] | None = None) -> int:
     pb.add_argument("--region", default="us-east-1")
     pb.add_argument("--repo", default="formulacode")
     pb.add_argument("--until-idle", action="store_true", help="keep publishing while a build runs")
+    m = sub.choices["measure"]
+    m.add_argument("--manifest", type=Path, help="image manifest; images are loaded before measuring")
+    m.add_argument("--workers", type=int, default=1)
+    m.add_argument("--oracle-runs", type=int, default=3)
+    m.add_argument("--nop-runs", type=int, default=3)
+    m.add_argument("--gate", default="http://127.0.0.1:8267")
+    m.add_argument("--confirm-rounds", type=int, default=0)
+    m.add_argument("--max-heavy", type=int, default=1)
+    m.add_argument("--harbor", default="harbor")
+    rl = sub.add_parser("release-leases")
+    rl.add_argument("job_dir", type=Path)
+    rl.add_argument("--gate", default="http://127.0.0.1:8267")
     pp = sub.add_parser("pins")
     pp.add_argument("tasks_root", type=Path)
     pp.add_argument("manifest", type=Path)
