@@ -1,9 +1,7 @@
-"""The producer half: consume a rejection report, edit the two owned scripts.
+"""The producer half: read a rejection report and edit the two build scripts.
 
-The producer receives the typed report and its full evidence, and NEVER the
-verifier's reasoning or transcript. Keeping it out of the deliberation is what
-protects both contexts. Keeping it short of evidence would only make it guess,
-so the payload is unbounded even though the envelope is typed.
+The producer gets the typed report with its full evidence, but never the
+verifier's reasoning or transcript, so the two contexts stay separate.
 """
 
 from __future__ import annotations
@@ -49,7 +47,7 @@ JSON object, no prose, no code fence:
 def parse_plan(raw: str) -> ProducerPlan | None:
     """Pull a ProducerPlan out of an agent reply. Never raises.
 
-    A plan naming a file the producer does not own fails validation in
+    A plan naming a file the producer may not edit fails validation in
     PlannedEdit and lands here as None.
     """
     if not raw:

@@ -19,47 +19,29 @@ from datasmith.utils import TokenPool, get_logger
 
 logger = get_logger("github.client")
 
-# ---------------------------------------------------------------------------
-# Tunable knobs.  Every one is env-overridable so an operator on a different
-# machine, or against a repository with a different merge volume, edits
-# ``tokens.env`` rather than this file.
-# ---------------------------------------------------------------------------
+# Tunable settings; each can be overridden by an environment variable.
 
-# GitHub's search API silently truncates at 1000 results: ``hasNextPage``
-# goes false with no error while ``issueCount`` keeps reporting the true
-# total.  ``fetch_merged_prs`` therefore bisects the merge window instead of
-# trusting pagination to terminate honestly.
+# GitHub search stops at 1000 results without an error, so ``fetch_merged_prs``
+# bisects the merge window instead of trusting pagination.
 DATASMITH_GH_SEARCH_CAP: int = int(os.environ.get("DATASMITH_GH_SEARCH_CAP", "1000"))
 DATASMITH_GH_SEARCH_PAGE_SIZE: int = int(os.environ.get("DATASMITH_GH_SEARCH_PAGE_SIZE", "100"))
-# 1000 results at 100 per page is 10 pages; the extra headroom only exists so
-# a malformed ``pageInfo`` cannot spin forever.
+# 1000 results at 100 per page is 10 pages; the extra pages stop a malformed ``pageInfo`` from looping forever.
 DATASMITH_GH_SEARCH_MAX_PAGES: int = int(os.environ.get("DATASMITH_GH_SEARCH_MAX_PAGES", "20"))
-# Recursion floor for the bisection.  ``merged:`` resolves to one second, so a
-# shard this small cannot be split again and the fetcher must fail loudly
-# rather than recurse forever.
+# Smallest shard the bisection splits; ``merged:`` resolves to one second, so a smaller shard raises.
 DATASMITH_GH_MIN_SHARD_SECONDS: int = int(os.environ.get("DATASMITH_GH_MIN_SHARD_SECONDS", "1"))
-# Ceiling on concurrent search POSTs from one client.  The bisection recurses
-# with ``gather`` on both halves, so a repository needing N leaves would
-# otherwise issue up to N simultaneous requests -- and stage 2 runs several
-# repositories at once on top of that.  A PostHog-scale month is ~16 leaves,
-# which against a one-token pool is a burst straight into GitHub's *secondary*
-# rate limit.  The cap is held around the POST itself and never around the
-# recursion: a parent that held a slot while awaiting its children would
-# deadlock any tree deeper than the cap.
+# Maximum concurrent search POSTs per client, to stay under GitHub's secondary rate limit.
+# Held around the POST only; holding it across the recursion would deadlock deep trees.
 DATASMITH_GH_SEARCH_CONCURRENCY: int = int(os.environ.get("DATASMITH_GH_SEARCH_CONCURRENCY", "4"))
 
 DATASMITH_GH_RETRIES: int = int(os.environ.get("DATASMITH_GH_RETRIES", "3"))
 # Multiplier on the exponential backoff (base * 2**attempt).  Zero disables
 # waiting entirely, which is what the offline tests use.
 DATASMITH_GH_BACKOFF_BASE_S: float = float(os.environ.get("DATASMITH_GH_BACKOFF_BASE_S", "1.0"))
-# Ceiling on an honoured ``Retry-After`` / ``X-RateLimit-Reset`` wait.  The
-# REST core window is an hour, so the default lets a one-token pool wait out a
-# full reset -- waiting is a correctness requirement, not an optimisation.
+# Maximum wait for ``Retry-After`` / ``X-RateLimit-Reset``; one hour lets a one-token pool wait out a full reset.
 DATASMITH_GH_MAX_RETRY_WAIT_S: float = float(os.environ.get("DATASMITH_GH_MAX_RETRY_WAIT_S", "3600"))
 
-# ``GET /pulls/{n}/files`` is paginated and defaults to 30 per page.  The file
-# compliance guard rejects at 500 files, so a single unpaginated page can
-# never make it fire; 30 pages of 100 covers GitHub's own 3000-file ceiling.
+# The file compliance check rejects at 500 files, so the 30 per page default is too small.
+# 30 pages of 100 covers GitHub's 3000-file limit.
 DATASMITH_GH_FILES_PER_PAGE: int = int(os.environ.get("DATASMITH_GH_FILES_PER_PAGE", "100"))
 DATASMITH_GH_FILES_MAX_PAGES: int = int(os.environ.get("DATASMITH_GH_FILES_MAX_PAGES", "30"))
 DATASMITH_GH_FILES_FALLBACK_CONCURRENCY: int = int(os.environ.get("DATASMITH_GH_FILES_FALLBACK_CONCURRENCY", "4"))
@@ -112,9 +94,8 @@ class DiffStatus(str, Enum):
 class DiffResult:
     """A diff plus the reason it looks the way it does.
 
-    ``get_diff`` collapses every one of these onto ``""``, which is why the
-    stored corpus cannot say whether its 550 empty patches are genuinely empty
-    or masked failures.  Stage 3 needs them apart, so it reads this instead.
+    ``get_diff`` maps every status to ``""``; stage 3 uses this to tell an
+    empty diff from a failed request.
     """
 
     status: DiffStatus
@@ -165,15 +146,9 @@ def _rate_limit_wait(response: httpx.Response, attempt: int) -> tuple[float, flo
     """Decide how long to wait after a 403/429.
 
     Returns ``(seconds to sleep, absolute reset epoch or None, which header
-    decided)``.  ``Retry-After`` is checked first because GitHub's *secondary*
-    rate limit sends it and frequently omits ``X-RateLimit-Reset`` -- reading
-    only the reset header burns the retry budget in a few fast attempts and
-    then raises.  With a one-token pool that is normal operation, not an
-    exceptional path.
-
-    The reset epoch is absolute because :meth:`TokenPool.report_rate_limit`
-    compares it against ``time.time()``; handing it a delta marks the token
-    immediately available and produces a retry storm.
+    decided)``.  ``Retry-After`` is checked first because the secondary rate
+    limit sends it and often omits ``X-RateLimit-Reset``.  The reset epoch is
+    absolute because :meth:`TokenPool.report_rate_limit` compares it with ``time.time()``.
     """
     now = time.time()
     retry_after = _parse_retry_after(response.headers.get("Retry-After"))
@@ -201,9 +176,8 @@ def _iso_z(value: datetime) -> str:
 def _merged_search_query(owner: str, repo: str, lo: datetime, hi: datetime) -> str:
     """Build the search query for PRs merged in the half-open window ``[lo, hi)``.
 
-    GitHub's ``A..B`` range is inclusive at *both* ends, so the exclusive upper
-    bound loses one second.  That subtraction is the whole reason adjacent
-    shards stay disjoint.
+    GitHub's ``A..B`` range is inclusive at both ends, so one second is taken
+    off the upper bound to keep adjacent shards disjoint.
     """
     return f"repo:{owner}/{repo} is:pr is:merged merged:{_iso_z(lo)}..{_iso_z(hi - timedelta(seconds=1))}"
 
@@ -301,9 +275,7 @@ class GitHubClient:
         self._pool = token_pool
         self._http: httpx.AsyncClient | None = None
         self._last_token: str | None = None
-        # Bounds the search POSTs the bisection fans out.  Held around the
-        # request, never around the recursion -- see
-        # ``DATASMITH_GH_SEARCH_CONCURRENCY``.
+        # Limits concurrent search POSTs; see ``DATASMITH_GH_SEARCH_CONCURRENCY``.
         self._search_sem = asyncio.Semaphore(max(1, DATASMITH_GH_SEARCH_CONCURRENCY))
 
     async def _client(self) -> httpx.AsyncClient:
@@ -323,15 +295,8 @@ class GitHubClient:
     async def _auth_headers(self) -> dict[str, str]:
         """Get a usable token, awaiting a rate-limit reset rather than sleeping through it.
 
-        ``TokenPool.get_token`` blocks the calling thread when every token is
-        exhausted.  On the event loop that stops the whole stage: no logging,
-        no other requests, no progress, and nothing to distinguish it from a
-        crash.  A stage 3 run wedged exactly this way -- twenty silent minutes
-        while GitHub reported a full 5 000/5 000 budget, because a single bad
-        rate-limit report had marked the only token spent.
-
-        Awaiting keeps the loop alive, so the periodic notice below actually
-        gets printed and the other in-flight items keep moving.
+        ``TokenPool.get_token`` blocks the thread, which would stop the event
+        loop; awaiting keeps logging and other requests running.
         """
         waited = 0.0
         while True:
@@ -363,8 +328,7 @@ class GitHubClient:
 
         Statuses in :data:`_MISSING_STATUSES` normally collapse to ``None``.
         A caller that needs to tell 404 from 410 opts in with *soft_statuses*
-        and gets the response back instead; the default keeps every existing
-        caller's behaviour unchanged.
+        and gets the response back instead.
         """
         retries = DATASMITH_GH_RETRIES if _retries is None else _retries
         client = await self._client()
@@ -398,11 +362,7 @@ class GitHubClient:
             if resp.status_code in _MISSING_STATUSES:
                 return resp if resp.status_code in soft_statuses else None
             if resp.status_code in (429, 403):
-                # This attempt's outcome supersedes any earlier transport
-                # error.  Without the reset, a connect timeout on attempt 0
-                # followed by 403s for the rest of the budget would be reported
-                # as a timeout -- hiding a rate limit in exactly the one-token
-                # run that crosses a reset by design.
+                # A rate limit replaces any earlier transport error, so the final error reports the rate limit.
                 last_exc = None
                 delay, reset_at, source = _rate_limit_wait(resp, attempt)
                 token = headers["Authorization"].removeprefix("Bearer ")
@@ -418,17 +378,13 @@ class GitHubClient:
                     delay,
                     source,
                 )
-                # Sleep *before* asking for the next token.  ``get_token`` waits
-                # with a blocking ``time.sleep`` when every token is marked
-                # exhausted, which stalls the whole event loop; sleeping first
-                # means the reset has passed by the time we ask.
+                # Sleep before asking for the next token, so the reset has passed by then.
                 await asyncio.sleep(delay)
                 headers = {**await self._auth_headers(), **extra_headers}
                 continue
             resp.raise_for_status()
             return resp
 
-        # All retries exhausted
         if last_exc is not None:
             raise last_exc
         if resp is not None:
@@ -560,9 +516,8 @@ class GitHubClient:
     ) -> list[dict[str, Any]]:
         """Fetch every file changed in a pull request.
 
-        Paginated deliberately: the endpoint defaults to 30 files per page, and
-        ``check_file_compliance`` rejects at 500 files, so a single page can
-        never make that guard fire.
+        Paginated because the endpoint defaults to 30 files per page and
+        ``check_file_compliance`` rejects at 500 files.
         """
         size = DATASMITH_GH_FILES_PER_PAGE if per_page is None else per_page
         pages = DATASMITH_GH_FILES_MAX_PAGES if max_pages is None else max_pages
@@ -613,7 +568,6 @@ class GitHubClient:
                 yield item
             if len(items) < per_page:
                 return
-            # Search API has a stricter rate limit (30 req/min)
             await asyncio.sleep(2)
 
     async def paginate(
@@ -642,13 +596,8 @@ class GitHubClient:
     async def _decode_graphql_body(self, resp: httpx.Response, attempt: int, attempts: int) -> dict[str, Any] | None:
         """Parse a GraphQL body, or return ``None`` to signal "retry this attempt".
 
-        GitHub sometimes answers 200 and then truncates the body mid-stream.
-        Observed on PostHog/posthog, whose search pages are the largest this
-        client asks for: ``Unterminated string starting at line 1 column
-        215853``.  It falls between the two things that already retry -- it is
-        not a transport error, so :meth:`_request` never sees it, and there is
-        no parsed result for the ``errors`` loop to inspect -- so it used to
-        escape as a bare ``JSONDecodeError`` and cost the whole repository.
+        GitHub sometimes answers 200 and then truncates the body, which
+        :meth:`_request` does not retry, so this retries it here.
         """
         try:
             body: dict[str, Any] = resp.json()
@@ -665,11 +614,8 @@ class GitHubClient:
     async def _wait_out_graphql_rate_limit(self, resp: httpx.Response, attempt: int, attempts: int) -> None:
         """Report a GraphQL ``RATE_LIMITED`` to the pool and sleep until the reset.
 
-        The rate-limit headers ride along on the 200, so this reuses the same
-        decision :meth:`_request` makes for a 403.  A bare 1-2-4s backoff would
-        burn every attempt inside seven seconds while the real GraphQL window
-        runs to an hour, which would make the retry incapable of ever
-        succeeding.
+        The rate-limit headers come with the 200, so this uses the same wait
+        as :meth:`_request` does for a 403; a short backoff could never outlast the window.
         """
         delay, reset_at, source = _rate_limit_wait(resp, attempt)
         if self._last_token is not None:
@@ -732,18 +678,8 @@ class GitHubClient:
                 await self._wait_out_graphql_rate_limit(resp, attempt, max(1, attempts))
                 continue
 
-            # A scoped error alongside usable data is not a failed response --
-            # including a scoped NOT_FOUND.  This guard is deliberately *above*
-            # the NOT_FOUND raise: GitHub answers a multi-path query with the
-            # paths it could resolve plus one error per path it could not, so
-            # raising first would throw away good data because some unrelated
-            # field was missing (spec section 5).
-            #
-            # Nothing is swallowed by returning here.  Each error was already
-            # logged with its path above, and the consumers read their own
-            # path: ``_search_block`` raises when ``data.search`` is not a
-            # dict, so a NOT_FOUND on the path the caller actually asked about
-            # still fails loudly rather than reading as a healthy zero.
+            # Return partial data before the NOT_FOUND check: errors were logged, and
+            # each consumer (e.g. ``_search_block``) raises if its own path is missing.
             if _has_data(result):
                 return result
 
@@ -818,7 +754,6 @@ class GitHubClient:
             if not nodes:
                 return
 
-            # Normalize GraphQL shape to match REST field names
             page: list[dict[str, Any]] = []
             for node in nodes:
                 pr: dict[str, Any] = {
@@ -879,25 +814,16 @@ class GitHubClient:
     ) -> list[dict[str, Any]]:
         """Return every PR of ``owner/repo`` merged in the half-open window ``[since, until)``.
 
-        Asks GitHub the question stage 2 actually means.  ``IssueOrderField``
-        has no ``MERGED_AT``, so the repository connection cannot express this
-        and the search API is used instead.
-
-        Raises :class:`Truncated` when a leaf disagrees with its own
-        ``issueCount``, and :class:`RepositoryNotFoundError` when the
-        repository does not resolve -- both surface as a stage failure for that
-        repository rather than as an empty result.
+        Uses the search API because ``IssueOrderField`` has no ``MERGED_AT``.
+        Raises :class:`Truncated` when a leaf disagrees with its ``issueCount``
+        and :class:`RepositoryNotFoundError` when the repository does not resolve.
         """
         if since.tzinfo is None or until.tzinfo is None:
             raise ValueError(
                 "fetch_merged_prs needs timezone-aware bounds; a naive datetime silently shifts the merge window"
             )
         if since.microsecond or until.microsecond:
-            # ``merged:`` resolves to one second and ``_iso_z`` formats whole
-            # seconds, so a sub-second bound would be truncated into a shard
-            # that is short of the requested window -- and the per-leaf
-            # ``issueCount`` check would still pass, because it describes the
-            # window that was queried rather than the one that was asked for.
+            # ``merged:`` resolves to one second, so a sub-second bound would shorten the window unnoticed.
             raise ValueError(
                 "fetch_merged_prs needs whole-second bounds; GitHub's merged: qualifier has one-second resolution "
                 "and a sub-second bound would silently shorten the window"
@@ -986,9 +912,7 @@ class GitHubClient:
             nodes.extend(node for node in (search.get("nodes") or []) if node)
             page_info = search.get("pageInfo") or {}
 
-        # The assertion that turns a silent truncation into a loud failure.
-        # Per leaf only: shards are disjoint but a sum across them would hide
-        # a short leaf behind a long one.
+        # Checked per leaf, because a sum across shards could hide a short leaf behind a long one.
         if len(nodes) != total:
             raise Truncated(f"{owner}/{repo} [{_iso_z(lo)}, {_iso_z(hi)}): got {len(nodes)} of {total} PRs")
         return nodes
@@ -996,9 +920,7 @@ class GitHubClient:
     async def _search_once(self, variables: dict[str, Any]) -> dict[str, Any]:
         """Issue one search POST under the fan-out cap.
 
-        The slot covers the request alone.  A slot held across the recursive
-        ``gather`` would have every parent waiting on children that cannot
-        acquire, so any bisection tree deeper than the cap would deadlock.
+        The slot covers only the request; holding it across the recursion would deadlock.
         """
         async with self._search_sem:
             return await self.graphql(self._SEARCH_MERGED_PRS_QUERY, variables)
@@ -1023,10 +945,8 @@ class GitHubClient:
     ) -> None:
         """Re-fetch file lists over REST for PRs whose GraphQL ``files`` page truncated.
 
-        ``files(first: 100)`` caps the node list at 100 while ``totalCount``
-        reports the truth, so ``check_file_compliance``'s 500-file guard can
-        never fire and its 40 000-line guard undercounts.  Roughly 1% of PRs
-        are affected, and at least one of them flips its verdict.
+        ``files(first: 100)`` returns at most 100 nodes, so without this
+        ``check_file_compliance`` would undercount files and lines.
         """
         truncated = [node for node in nodes if _files_truncated(node)]
         if not truncated:

@@ -1,12 +1,8 @@
 """Wire format between the producer and the verifier.
 
-Every model is frozen. A report that can be mutated after grading is a report
-that can be re-graded, and grading is the one thing this subsystem exists to
-protect.
-
-`CheckResult.severity` is Optional and defaults to None on purpose. The
-verifier reports an observed CAUSE; `severity.py` maps that cause to HARD or
-SOFT. A verifier-supplied severity is advisory and is never trusted.
+Every model is frozen, so a report cannot change after grading.
+`CheckResult.severity` defaults to None: the verifier reports a cause and
+`severity.py` maps it to HARD or SOFT. A severity from the verifier is never trusted.
 """
 
 from __future__ import annotations
@@ -41,8 +37,7 @@ class Cause(str, enum.Enum):
     OTHER = "other"
 
 
-# The producer owns exactly these two scripts. Everything else in the build
-# context is ours, and an edit to it is out of bounds by construction.
+# The producer may edit only these two scripts; a plan naming any other file fails validation.
 PRODUCER_OWNED_FILES = ("docker_build_pkg.sh", "docker_build_run.sh")
 
 

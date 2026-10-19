@@ -78,7 +78,7 @@ class DockerContext(BaseModel):
                 with open(os.path.join(path, filename), "w") as f:
                     f.write(content)
 
-    # Fallback filenames for backward compatibility (old name -> new name).
+    # Old filename -> current filename, read when the current file is missing.
     _COMPAT_MAP: ClassVar[dict[str, str]] = {
         "run_tests.sh": "run-tests.sh",
     }
@@ -92,7 +92,6 @@ class DockerContext(BaseModel):
             if os.path.exists(fp):
                 with open(fp) as f:
                     return f.read()
-            # Try legacy filename
             legacy = {v: k for k, v in cls._COMPAT_MAP.items()}.get(name)
             if legacy:
                 fp = os.path.join(path, legacy)

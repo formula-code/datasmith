@@ -1,8 +1,8 @@
 """Select tasks to build: render records for chosen PRs, or a ranked sample of database candidates.
 
 Candidates must be performance PRs of an ingest-enabled repo with a patch, a base commit, a rendered problem and an
-environment image on Docker Hub that was built at the base commit. Rules and sampling are as in docs/TASK_PIPELINE.md
-(A1-A4, H4): oracle evidence first, then tier 1 images, then tier 2 round-robin over difficulty strata, large suites last.
+environment image on Docker Hub that was built at the base commit. Rules and sampling are as in
+docs/TASK_PIPELINE.md of formulacode-verified-rl (A1-A4, H4): oracle evidence first, then tier 1 images, then tier 2 round-robin over difficulty strata, large suites last.
 """
 
 from __future__ import annotations

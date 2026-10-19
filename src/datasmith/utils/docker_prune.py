@@ -13,25 +13,13 @@ logger = get_logger("utils.docker_prune")
 
 _DEFAULT_INTERVAL_SEC = 7200
 
-# Prune only when the Docker filesystem is actually under pressure.
-#
-# The watcher used to prune on a timer, unconditionally. That is the wrong
-# trigger: `docker builder prune` deletes the BuildKit cache, which is the thing
-# that makes a rebuild cheap, and it was firing every 7200s against a filesystem
-# at 8% capacity. Median attempt duration is 4098s, so it landed inside roughly
-# every second build.
-#
-# Disk pressure is the condition the watcher exists for, so test that condition.
+# Prune only at or above this disk usage, because pruning deletes the BuildKit
+# cache that makes rebuilds cheap.
 DATASMITH_DOCKER_PRUNE_MIN_USED_PCT: float = float(os.environ.get("DATASMITH_DOCKER_PRUNE_MIN_USED_PCT", "85"))
 
 
 def _docker_root() -> str | None:
-    """Where Docker actually stores its data. Not always on the root filesystem.
-
-    On this host it is /mnt/sdd2/docker, while / is the filesystem under
-    pressure. Pruning because / is full would delete cache to relieve a disk
-    Docker does not use.
-    """
+    """Return the Docker data root, which can be a different filesystem from /."""
     docker = shutil.which("docker")
     if docker is None:
         return None
@@ -63,8 +51,7 @@ def _used_pct(path: str) -> float | None:
 def _should_prune() -> tuple[bool, str]:
     """Decide whether to prune, and say why either way.
 
-    When usage cannot be determined the answer is yes. The watcher exists to
-    stop the disk filling, and a stalled pipeline costs more than a cold cache.
+    When usage cannot be read, prune: a full disk costs more than a cold cache.
     """
     root = _docker_root()
     if root is None:
@@ -129,11 +116,8 @@ def _run_prune(force: bool = False) -> None:
 def builder_prune_watcher(interval_sec: int | None = None) -> Iterator[None]:
     """Periodically run `docker builder prune -f` on a background thread.
 
-    Each tick prunes ONLY when the Docker filesystem is at or above
-    DATASMITH_DOCKER_PRUNE_MIN_USED_PCT (default 85). Below that the build cache
-    is left alone, because deleting it is what makes every rebuild pay full
-    price for downloads and compilation.
-
+    Each tick prunes only when the Docker filesystem is at or above
+    DATASMITH_DOCKER_PRUNE_MIN_USED_PCT (default 85).
     Set DATASMITH_DISABLE_DOCKER_PRUNE=1 to opt out entirely. Override the
     interval with DATASMITH_DOCKER_PRUNE_INTERVAL_SEC (default 7200s).
     """

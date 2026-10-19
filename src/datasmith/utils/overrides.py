@@ -1,9 +1,7 @@
 """Read per-task operator declarations from ``formulacode_task_overrides``.
 
-The overrides table holds facts about a task that cannot be derived from the
-repo or the PR. Two of its columns are invariant inputs, and both needed a
-host-side reader because the table is RLS-locked with no ``anon`` grant --
-neither the trial container nor the image build can query it themselves:
+The table holds facts about a task that cannot be derived from the repo or the
+PR. It has no ``anon`` grant, so the host reads it for the build and the trial:
 
 ``benchmark_dest``
     Passed into the image build as the ``BENCHMARK_DEST`` build arg, which
@@ -15,10 +13,8 @@ neither the trial container nor the image build can query it themselves:
     task's ``[verifier.env]`` section. Input to the ``dilution_ratio``
     invariant.
 
-Lookup failure is never fatal. Stage 6 and stage 7 must run on a machine where
-the migration has not been applied, and "no override" is a legitimate state for
-all but a handful of tasks -- the corresponding invariants then skip, which is
-the correct answer rather than a degraded one.
+A failed lookup is not fatal: it means "no override", and the matching
+invariants skip.
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ logger = get_logger("utils.overrides")
 
 TABLE = "formulacode_task_overrides"
 
-# The canonical task identity, per CLAUDE.md: (owner, repo, issue_number).
+# The task identity: (owner, repo, issue_number).
 TaskKey = tuple[str, str, int]
 
 
@@ -42,15 +38,8 @@ _ALL_CACHE: dict[TaskKey, dict[str, Any]] | None = None
 def all_overrides(*, refresh: bool = False) -> dict[TaskKey, dict[str, Any]]:
     """Every override row, read once per process.
 
-    The table is tiny (5 rows today, and it is hand-maintained), while its
-    consumers sit in per-item loops -- stage 6 synthesises one PR at a time and
-    enqueues neighbours mid-flight, so there is no single point at which the
-    full task set is known. Caching turns what would be one round-trip per
-    task into one per run.
-
-    A failed read caches ``{}`` too: if the table is absent, it will still be
-    absent on the next call, and retrying per item would be a slow way to
-    reach the same answer.
+    The table is small and callers look up one task at a time, so one read per
+    process is enough. A failed read caches ``{}`` too.
     """
     global _ALL_CACHE
     if _ALL_CACHE is not None and not refresh:
@@ -81,11 +70,8 @@ def all_overrides(*, refresh: bool = False) -> dict[TaskKey, dict[str, Any]]:
 def fetch_overrides(tasks: list[TaskKey]) -> dict[TaskKey, dict[str, Any]]:
     """Return ``{(owner, repo, issue_number): override_row}`` for *tasks*.
 
-    Tasks with no override row are simply absent from the mapping. A missing
-    table, an unreachable database, or any other read failure yields ``{}``
-    with a warning -- callers treat that identically to "no overrides exist",
-    so a fresh checkout behaves the same as a populated one minus the extra
-    checks.
+    Tasks with no override row are absent. Any read failure yields ``{}``
+    with a warning, which callers treat as "no overrides".
     """
     if not tasks:
         return {}
@@ -97,9 +83,8 @@ def fetch_overrides(tasks: list[TaskKey]) -> dict[TaskKey, dict[str, Any]]:
 def benchmark_dest_for(overrides: dict[TaskKey, dict[str, Any]], key: TaskKey) -> str:
     """The declared benchmark path for *key*, or "" when undeclared.
 
-    Empty string is deliberate: ``docker_build_run.sh`` gates its breadcrumb on
-    a non-empty ``$BENCHMARK_DEST``, so "" keeps the FATAL invariant skipping
-    rather than firing against a value nobody declared.
+    ``docker_build_run.sh`` writes its breadcrumb only for a non-empty
+    ``$BENCHMARK_DEST``, so "" makes the invariant skip.
     """
     row = overrides.get(key) or {}
     return str(row.get("benchmark_dest") or "")
@@ -108,8 +93,7 @@ def benchmark_dest_for(overrides: dict[TaskKey, dict[str, Any]], key: TaskKey) -
 def expected_n_for(overrides: dict[TaskKey, dict[str, Any]], key: TaskKey) -> int | None:
     """The declared benchmark count for *key*, or None when undeclared.
 
-    None (not 0) is the "not judged yet" signal: the dilution invariant skips
-    on None, and 0 would be a live comparison against a number nobody chose.
+    None, not 0, so the dilution invariant skips instead of comparing against 0.
     """
     row = overrides.get(key) or {}
     raw = row.get("expected_n")

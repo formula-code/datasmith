@@ -398,9 +398,8 @@ def _pytest_verify_fields(stdout: str) -> dict:
     from run_tests()'s captured stdout.
 
     pytest_runner.py's ``summary["error"]`` is incremented both by
-    ``pytest_collectreport`` (a genuine broken-import/collection failure --
-    the class of failure invariant #7 exists to catch, see
-    docs/superpowers/specs/2026-07-31-build-manifest-verification-design.md)
+    ``pytest_collectreport`` (a broken import or collection failure, which
+    invariant #7 catches)
     and by per-test setup/teardown errors (``pytest_runtest_logreport``).
     The printed block carries no separate collection-only counter, so
     "error > 0" is the closest available signal without a second read of

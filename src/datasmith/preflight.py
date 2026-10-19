@@ -95,7 +95,7 @@ def run_preflight() -> bool:  # noqa: C901
             f"and {token_count * 5000} GraphQL point(s) per hour for stages 2 and 3",
         )
 
-    hf_token_path = os.environ.get("HF_TOKEN_PATH", "/mnt/sdd3/llama_atharvas/huggingface/token")
+    hf_token_path = os.environ.get("HF_TOKEN_PATH", os.path.expanduser("~/.cache/huggingface/token"))
     hf_exists = Path(hf_token_path).exists()
     all_ok &= _check("HF_TOKEN", hf_exists, hf_token_path)
 
