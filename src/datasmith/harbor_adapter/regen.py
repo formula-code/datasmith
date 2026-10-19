@@ -277,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     ck.set_defaults(fn=cmd_check)
 
     args = ap.parse_args(argv)
-    return args.fn(args)
+    return int(args.fn(args))
 
 
 if __name__ == "__main__":

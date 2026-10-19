@@ -403,16 +403,14 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
         data = buf.getvalue()
         for method in ("POST", "PUT"):
             try:
-                req = urllib.request.Request(url, data=data, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=180):
+                req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310 (url is the configured Supabase storage URL)
+                with urllib.request.urlopen(req, timeout=180):  # noqa: S310
                     get_logger(__name__).info("Published oracle snapshots: %s", object_key)
                     return
             except urllib.error.HTTPError as e:
                 if method == "POST" and e.code in (400, 409):
                     continue  # exists -> overwrite
-                get_logger(__name__).warning(
-                    "Snapshot publish failed for %s (%s)", object_key, e.code
-                )
+                get_logger(__name__).warning("Snapshot publish failed for %s (%s)", object_key, e.code)
                 return
     except Exception as exc:
         get_logger(__name__).warning("Snapshot publish error: %s", exc)
@@ -548,9 +546,7 @@ async def run_harbor_healthcheck(
             # Persist the oracle behavioral baseline durably so agent trials can verify
             # against it (regression-relative correctness). Best-effort; never blocks.
             if row.get("agent_name") == "oracle":
-                _publish_oracle_snapshots(
-                    trial, row["owner"], row["repo"], row["issue_number"]
-                )
+                _publish_oracle_snapshots(trial, row["owner"], row["repo"], row["issue_number"])
                 if snapshots_dir is not None:
                     _keep_oracle_snapshots(trial, snapshots_dir)
 

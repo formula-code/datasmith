@@ -4,16 +4,17 @@ oracle's benchmarks on unchanged code (an empty diff selects nothing)."""
 from __future__ import annotations
 
 import shlex
+from typing import Any
 
 from harbor.agents.nop import NopAgent
 
 
-class NopTouch(NopAgent):
-    def __init__(self, *args, files: list[str] | None = None, **kwargs):
+class NopTouch(NopAgent):  # type: ignore[no-any-unimported]
+    def __init__(self, *args: Any, files: list[str] | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._files = list(files or [])
 
-    async def run(self, instruction, environment, context) -> None:
+    async def run(self, instruction: str, environment: Any, context: Any) -> None:
         if not self._files:
             return
         quoted = " ".join(shlex.quote(f) for f in self._files)
