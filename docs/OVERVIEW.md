@@ -36,7 +36,7 @@ flowchart TD
    candidate must be a performance PR with a patch, a base commit, a rendered problem, and an environment image on
    Docker Hub. The selection rules are in `docs/TASK_PIPELINE.md` of formulacode-verified-rl.
 2. **Render.** `fc-render-tasks render --records records.jsonl --out TASKS_ROOT` writes one Harbor task folder per record
-   from `src/datasmith/harbor_adapter/template/`. Render from a template tag (`template-v1.1`), so every task of a
+   from `src/datasmith/harbor_adapter/template/`. Render from a template tag (`template-v1.2`), so every task of a
    release has the same test scripts. Each folder gets `render_stamp.json`; `fc-render-tasks check` finds folders that
    no longer match the installed template.
 3. **Prompt.** `fc-verify prompt TASKS_ROOT PROMPTS_DIR` replaces the task description with approved prompt text.
@@ -84,7 +84,7 @@ image, the render and template commits, the CPU models of the runs, the license 
 ```bash
 echo "- owner/repo#N" > ids.md
 fc-verify records ids.md sel/                                # records.jsonl from the task database
-git -C datasmith checkout template-v1.1                       # render with the release template
+git -C datasmith checkout template-v1.2                       # render with the release template
 fc-render-tasks render --records sel/records.jsonl --out tasks/ --cpus 2 --memory 16G --storage 20G
 fc-verify prompt tasks/ prompts/ owner__repo__N               # only when the task has an approved prompt
 fc-verify env-image owner/repo#N --registry "${ECR_URI}"      # only when the Hub image is at the merge commit
@@ -103,7 +103,7 @@ the precheck and measure steps for many tasks at once and writes the state files
 
 | Repository | Branch or commit | Where it is set |
 |---|---|---|
-| datasmith | `main`; release template on `release/template-v1` (tags `template-v1`, `template-v1.1`) | the tag you render from |
+| datasmith | `main`; release template on `release/template-v1` (tags `template-v1`, `template-v1.1`, `template-v1.2`) | the tag you render from |
 | lsv | `main` at `9702a48` | `LSV_REF` in `harbor_adapter/template/environment/Dockerfile` and `docker/templates/docker_build_final.sh` |
 | snapshot-tester | `f08bb0c` | `SNAPSHOT_TESTER_REF` in the same two files |
 | harbor | `formulacode/harbor-reliability` | the harbor checkout that runs trials |
