@@ -8,6 +8,7 @@ one out folder: a task is claimed by creating <out>/queue/claimed/<task>.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -163,3 +164,23 @@ class BuildTaskImagesRunner(BaseRunner):
         return subprocess.run(
             ["docker", "image", "inspect", "-f", "{{.Id}}", ref], capture_output=True, text=True, check=False
         ).stdout.strip()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """fc-build-tasks TASKS_ROOT OUT [--ids-file F ...] [--workers N] [--retry-failed]"""
+    from datasmith.harbor_adapter.regen import load_ids
+
+    ap = argparse.ArgumentParser(prog="fc-build-tasks", description=__doc__)
+    ap.add_argument("tasks_root", type=Path)
+    ap.add_argument("out", type=Path)
+    ap.add_argument("--ids-file", action="append", type=Path, default=[], help="build only these ids (default: all)")
+    ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--retry-failed", action="store_true")
+    a = ap.parse_args(argv)
+    ids = load_ids(a.ids_file) or sorted(p.name for p in a.tasks_root.iterdir() if (p / "environment").is_dir())
+    asyncio.run(BuildTaskImagesRunner(a.out, a.workers, a.retry_failed).run([a.tasks_root / t for t in ids]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

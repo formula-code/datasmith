@@ -210,7 +210,7 @@ class TestMain:
         assert info["applied"] is False
 
 
-# The precheck fields reproduce datasmith.verify.in_image.coverage_check (tests/verify/test_precheck.py on verify/core).
+# The precheck fields that datasmith.measurement.precheck.decide reads.
 _OVERLAP_PATCH = """diff --git a/pkg/m.py b/pkg/m.py
 --- a/pkg/m.py
 +++ b/pkg/m.py
