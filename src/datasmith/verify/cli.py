@@ -12,6 +12,7 @@ fc-verify publish  TASKS_ROOT MANIFEST OUT [--region R] [--repo NAME] [--until-i
 fc-verify pins     TASKS_ROOT MANIFEST                    pin status of every task folder
 fc-verify measure  SURVEY TASK ... [--manifest M] [--workers N] [--oracle-runs 3] [--nop-runs 3] [--gate URL]
 fc-verify release-leases JOB_DIR [--gate URL]      free the gate slots of a stopped job
+fc-verify readiness SURVEY OUT_CSV [--registry-tags FILE] [--fetch-github] [--giveaway JSONL]
 fc-verify failure  LOG ...                       error class of failed image builds
 """
 
@@ -23,7 +24,7 @@ import re
 import sys
 from pathlib import Path
 
-from datasmith.verify import images, measure, pin, precheck, registry, report, review, status
+from datasmith.verify import images, measure, pin, precheck, registry, release, report, review, status
 from datasmith.verify.noise import classify_all, load_rule
 from datasmith.verify.survey import DECISIONS, Survey, task_id
 
@@ -89,6 +90,19 @@ def _measure(survey: Survey, a: argparse.Namespace) -> None:
         print(f"{task}: {phase}")
 
 
+def _readiness(survey: Survey, a: argparse.Namespace) -> None:
+    tags = set(a.registry_tags.read_text().split()) if a.registry_tags else None
+    giveaway = {}
+    if a.giveaway:
+        for line in a.giveaway.read_text().splitlines():
+            if line.strip():
+                g = json.loads(line)
+                giveaway[g["task"]] = g.get("score", "")
+    rows = release.readiness(survey, registry=tags, fetch=a.fetch_github, giveaway=giveaway)
+    release.write_csv(rows, a.out_csv)
+    print(json.dumps(release.summary(rows), indent=1))
+
+
 COMMANDS = {
     "status": _status,
     "classify": _classify,
@@ -97,6 +111,8 @@ COMMANDS = {
     "auto": _auto,
     "add": _add,
     "precheck": _precheck,
+    "measure": _measure,
+    "readiness": _readiness,
 }
 
 
@@ -160,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="fc-verify", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("status", "classify", "report", "review", "auto", "add", "precheck", "measure"):
+    for name in ("status", "classify", "report", "review", "auto", "add", "precheck", "measure", "readiness"):
         p = sub.add_parser(name)
         p.add_argument("survey", type=Path)
         if name in ("classify", "report", "add", "precheck", "measure"):
@@ -200,6 +216,11 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--confirm-rounds", type=int, default=0)
     m.add_argument("--max-heavy", type=int, default=1)
     m.add_argument("--harbor", default="harbor")
+    rd = sub.choices["readiness"]
+    rd.add_argument("out_csv", type=Path)
+    rd.add_argument("--registry-tags", type=Path, help="file with one registry tag per line")
+    rd.add_argument("--fetch-github", action="store_true", help="look up repo licenses and PR authors")
+    rd.add_argument("--giveaway", type=Path, help="JSON lines with task and score from a prompt audit")
     rl = sub.add_parser("release-leases")
     rl.add_argument("job_dir", type=Path)
     rl.add_argument("--gate", default="http://127.0.0.1:8267")

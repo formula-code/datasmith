@@ -95,3 +95,41 @@ def test_cli_status_and_dry_run(survey, capsys):
     assert main(["auto", str(survey), "--dry-run"]) == 0
     assert "would mark 2 not_approved" in capsys.readouterr().out
     assert {r["decision"] for r in Survey(survey).reviews()} == {"pending"}
+
+
+def test_every_command_has_a_handler():
+    import argparse
+
+    from datasmith.verify import cli
+
+    seen = []
+    real = argparse.ArgumentParser.parse_args
+
+    def capture(self, args=None, namespace=None):
+        if self.prog == "fc-verify":
+            sub = next(a for a in self._actions if isinstance(a, argparse._SubParsersAction))
+            seen.extend(sub.choices)
+            raise SystemExit(0)
+        return real(self, args, namespace)
+
+    argparse.ArgumentParser.parse_args = capture
+    try:
+        cli.main(["status", "x"])
+    except SystemExit:
+        pass
+    finally:
+        argparse.ArgumentParser.parse_args = real
+    assert set(seen) == set(cli.COMMANDS) | set(cli.NO_SURVEY)
+
+
+def test_readiness_rows_without_network(survey):
+    from datasmith.verify import release
+
+    s = Survey(survey)
+    review.set_decision(s, "o/r#1", "approved")
+    (survey / "pinned/o__r__1/task.toml").write_text('[environment]\ndocker_image = "fc-task/o__r__1:abc"\n')
+    rows = release.readiness(s, registry={"o__r__1__abc"}, giveaway={"o__r__1": 3})
+    assert len(rows) == 1
+    r = rows[0]
+    assert (r["in_registry"], r["oracle_runs"], r["nop_runs"], r["prompt_giveaway"]) == (True, 3, 3, 3)
+    assert release.summary(rows)["no_license"] == 1
