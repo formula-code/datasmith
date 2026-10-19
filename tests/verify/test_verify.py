@@ -3,7 +3,7 @@ import math
 
 from datasmith.verify import report, review, status
 from datasmith.verify.cli import main
-from datasmith.verify.noise import classify_all, load_rule, moved, robust_sd
+from datasmith.verify.noise import classify_all, load_rule, moved, robust_sd, verify
 from datasmith.verify.survey import Survey, display_id, task_id
 
 
@@ -21,6 +21,15 @@ def test_moved_needs_two_of_three_runs():
 def test_robust_sd_is_centered_at_zero():
     assert robust_sd([0.1, -0.1, 0.1], center=0.0) == 1.4826 * 0.1
     assert robust_sd([], center=0.0) is None
+
+
+def test_oracle_failing_tests_include_the_rerun():
+    runs = [
+        {"role": "oracle_baseline", "run": 1, "log_speedups": {"a.time_x": 0.4}, "tests": {"failing": ["t::a", "t::z"]}}
+    ]
+    rec = {"task": "o__r__1", "n_oracle": 1, "runs": runs, "oracle_tests_rerun": {"failing": ["t.py", "t::a"]}}
+    entry = verify(rec, {"form": "global", "theta": 0.03}, {})["entry"]
+    assert entry["oracle_failing_tests"] == ["t.py", "t::a", "t::z"]
 
 
 def test_classify_counts_gain_and_no_gain(survey):
