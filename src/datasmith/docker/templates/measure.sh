@@ -105,6 +105,7 @@ echo "[measure] applying oracle patch from ${PATCH_FILE} ..."
   --repo /workspace/repo \
   --benchmark-dir "${BENCHMARK_DIR:-}" \
   --base-sha "$BASE_SHA" \
+  --deps-db "${LSV_OUTPUT_DIR}/results/.lightspeed_deps.db" \
   --out "$PATCH_INFO" || echo "[measure] WARNING: apply_oracle_patch exited non-zero"
 
 # ── 4. Measure the impacted set after the patch ──────────────────────────
