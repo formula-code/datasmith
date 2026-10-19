@@ -9,8 +9,6 @@ tags:
 
 This document covers the `ds.resolution` module — dependency resolution for Python repositories. Given a commit SHA and a repository name, the module discovers the repository's packaging roots, reads what the project **declares** it needs, chooses an interpreter from that declaration, compiles one pinned dependency **seed** with `uv`, dry-runs the seed advisorily, and persists a row to the `packages` Supabase table. It runs as pipeline **stage 4** — after `classify_prs` and before `render_problems` — supplying the `env_payload`, `python_version` and `primary_root` that stage 6 needs to synthesize a correct Docker build context.
 
-The stage was rewritten against `docs/superpowers/specs/2026-08-23-stage4-resolution-redesign-design.md`, which remains the authority on intent. This document describes the code that implements it.
-
 ## High level overview
 
 ```mermaid
@@ -34,7 +32,7 @@ graph LR
 
 The synthesizer (`ds.agents.synthesizer`) expects `env_payload` (a JSON array of pinned dependencies) and `python_version` in order to generate Docker build contexts. Without them, `docker_build_env.sh` has no idea what packages to install, and synthesis is unreliable. Stage 4 exists to supply them.
 
-The first implementation was a direct port of `archive/execution/resolution/`, itself carried over from the old pipeline's `prepare_commits_for_building_reports.py`. An audit on 2026-08-23 profiled all 13,016 rows of `packages` and re-resolved 13 January-2026 commits, one per repository. It found 13 defects, five of them fatal to corpus yield or to correctness (`docs/superpowers/specs/2026-08-23-stage4-audit-findings.md`):
+The first implementation was a direct port of `archive/execution/resolution/`, itself carried over from the old pipeline's `prepare_commits_for_building_reports.py`. An audit on 2026-08-23 profiled all 13,016 rows of `packages` and re-resolved 13 January-2026 commits, one per repository. It found 13 defects, five of them fatal to corpus yield or to correctness:
 
 | Metric | Value |
 |---|---|

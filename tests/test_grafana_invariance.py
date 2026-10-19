@@ -49,9 +49,7 @@ def _panels_with_sql() -> list[tuple[str, str]]:
 
 
 class TestDashboardShape:
-    """The facts the constraint rests on. If these change, the risk analysis
-    in docs/superpowers/specs/2026-08-13-followon-plans-design.md is stale and
-    must be redone before any audit runs."""
+    """The facts the constraint rests on. If these change, redo the risk analysis before any audit runs."""
 
     def test_dashboard_exists_and_has_sql_panels(self):
         panels = _panels_with_sql()

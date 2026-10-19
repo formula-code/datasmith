@@ -34,7 +34,6 @@ theme:
 exclude_docs: |
   archive/
   design/Datasmith - Overview.md
-  design/archived/
   design/components/datasmith.*.md
 
 validation:
@@ -79,6 +78,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Pipeline Overview: OVERVIEW.md
   - Getting Started:
       - Installation: getting-started/installation.md
       - Pipeline (fc-data): guide/pipeline.md
