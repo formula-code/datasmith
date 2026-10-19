@@ -351,24 +351,8 @@ def summarize_lsv_init(lsv_results: dict) -> dict:
 
 
 
-# ── Trial-time invariants ────────────────────────────────────────────────────
-# Asserted here, after the agent has run, and echoed into reward.json under an
-# "invariants" block. These judge whether a trial's REWARD is TRUSTWORTHY --
-# distinct from the build-time invariants in datasmith.docker.manifest, which
-# judge whether an IMAGE is usable.
-#
-# Severity means something different here: a FATAL trial-time invariant does
-# not fail a build (the run is already paid for), it marks the reward as not
-# to be believed.
-#
-# Every check is three-valued: True (holds), False (violated), None (inputs
-# absent -> skipped). A partially-run trial must still produce a well-formed
-# block, so no check may raise.
-#
-# parser.py runs inside the trial container with no datasmith installed, so
-# these thresholds are read from the environment at module scope with literal
-# fallbacks -- it cannot import datasmith.docker.manifest.
-
+# Trial-time invariants: checked after the agent runs, written to reward.json under "invariants".
+# Each is True, False, or None (inputs absent); none may raise. Thresholds come from env vars (no datasmith here).
 DATASMITH_VERIFY_DILUTION_RATIO_MAX = float(
     os.environ.get("DATASMITH_VERIFY_DILUTION_RATIO_MAX", "3.0")
 )
@@ -473,8 +457,7 @@ def _ti_project_shadowed(ctx: dict) -> bool | None:
     return None if shadow is None else not shadow
 
 
-# (id, severity, check). Severity: "fatal" marks the reward untrustworthy;
-# "warn" is recorded and surfaced.
+# (id, severity, check). "fatal" marks the reward as not to be used; "warn" is only recorded.
 TRIAL_INVARIANTS = (
     ("baseline_sha_mismatch", "fatal", _ti_baseline_sha),
     ("degenerate_baseline", "fatal", _ti_degenerate_baseline),
@@ -522,8 +505,7 @@ def build_trial_context(
 ) -> dict:
     """Assemble every fact the trial-time invariants read.
 
-    Each key here must be supplied for its invariant to be evaluable at all;
-    ``trial_context_keys`` and its test exist to keep that honest.
+    An invariant can run only when its keys are here; ``trial_context_keys`` and its test check that.
 
     ``expected_n`` comes from FORMULACODE_EXPECTED_N, injected at task-render
     time from formulacode_task_overrides. It is NOT fetched here: that table
