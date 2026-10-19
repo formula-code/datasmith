@@ -2,7 +2,7 @@
 
 Upstream harbor's ``adapters/formulacode/run_adapter.py:to_record`` expects
 a pandas DataFrame row with column names from the FormulaCode HuggingFace
-schema. Datasmith instead owns the source of truth directly in Supabase,
+schema. Datasmith instead keeps the source of truth directly in Supabase,
 so we take a plain ``pull_requests`` row and map it into the shape the
 adapter wants. The FK into ``candidate_containers`` is implicit via
 ``(owner, repo, merge_commit_sha)``.

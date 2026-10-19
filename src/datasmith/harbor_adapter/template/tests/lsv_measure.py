@@ -573,30 +573,15 @@ def main() -> None:
             "baseline_str": delta.baseline_str,
             "current_str": delta.current_str,
             "params": delta.params,
-            # asv's own statistics for BOTH legs. asv.statistics.is_different
-            # runs Mann-Whitney U over the raw samples and only falls back to
-            # a CI-overlap check when they are absent, so dropping these here
-            # would silently downgrade every significance decision made from
-            # this file. getattr(..., None) keeps the template working against
-            # an image built with an LSV that predates these fields.
+            # Raw stats and samples let asv run Mann-Whitney U instead of its weaker CI-overlap check.
             "baseline_stats": _finite(getattr(delta, "baseline_stats", None)),
             "current_stats": _finite(getattr(delta, "current_stats", None)),
             "baseline_samples": _finite(getattr(delta, "baseline_samples", None)),
             "current_samples": _finite(getattr(delta, "current_samples", None)),
         }
 
-    # Benchmarks LSV selected but got no result for -- worker killed on
-    # timeout, or errored. Without this the geomean silently covers a smaller
-    # population, and a shrinking measured set is indistinguishable from a
-    # genuinely quieter one.
-    #
-    # THREE-VALUED, and the distinction is the whole point: an LSV that
-    # predates MeasureResult.dropped cannot report drops, so the count must be
-    # None (invariant SKIPS), never 0 (invariant reads "no drops" and PASSES).
-    # `getattr(..., [])` would collapse those two cases and report zero drops
-    # on exactly the images least able to detect them -- observed live on
-    # networkx#8148, where a benchmark vanished from 8 of 12 reps while the
-    # counter said 0.
+    # Selected benchmarks with no result. None when this LSV cannot report drops, so the invariant skips
+    # instead of reading 0 drops.
     _dropped = getattr(measure_result, "dropped", None)
     dropped = list(_dropped) if _dropped is not None else None
     if dropped:
