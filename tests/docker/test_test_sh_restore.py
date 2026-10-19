@@ -45,8 +45,12 @@ def run(repo: Path, tmp_path: Path) -> dict:
     out, index = tmp_path / "protected_restore.json", tmp_path / "index"
     # test.sh passes a copy of the index (FC_INDEX), so files the agent added show up in the diff.
     index.write_bytes((repo / ".git/index").read_bytes())
-    subprocess.run([sys.executable, "-c", restore_script(sha), git(repo, "rev-parse", "HEAD"), str(index), str(out)],
-                   cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [sys.executable, "-c", restore_script(sha), git(repo, "rev-parse", "HEAD"), str(index), str(out)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
     return json.loads(out.read_text())
 
 
@@ -60,7 +64,11 @@ def test_edited_and_added_test_files_are_discarded_and_library_edits_kept(repo: 
     rec = run(repo, tmp_path)
     assert rec["ran"] is True and rec["remaining"] == []
     assert rec["discarded"] == sorted([
-        "benchmarks/bench.py", "pkg/tests/test_m.py", "pkg/util_test.py", "tests/_card_render.py", "tests/test_new.py",
+        "benchmarks/bench.py",
+        "pkg/tests/test_m.py",
+        "pkg/util_test.py",
+        "tests/_card_render.py",
+        "tests/test_new.py",
     ])
     assert (repo / "tests/_card_render.py").read_text() == "expected = 'a'\n"
     assert not (repo / "tests/test_new.py").exists() and not (repo / "pkg/util_test.py").exists()

@@ -30,7 +30,9 @@ def repo(tmp_path: Path) -> Path:
     (tmp_path / "pkg" / "__init__.py").write_text("")
     (tmp_path / "pkg" / "text.py").write_text("def pad(s, n):\n    return s + ' ' * (n - len(s))\n")
     (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "test_text.py").write_text("from pkg.text import pad\n\ndef test_pad():\n    assert len(pad('a', 3)) == 3\n")
+    (tmp_path / "tests" / "test_text.py").write_text(
+        "from pkg.text import pad\n\ndef test_pad():\n    assert len(pad('a', 3)) == 3\n"
+    )
     (tmp_path / "tests" / "test_card.py").write_text(
         "from pkg.text import pad\n\ndef test_card():\n    assert pad('ab', 4) == 'ab  '\n\n"
         "def test_broken_at_base():\n    assert False\n"
