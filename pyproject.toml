@@ -80,7 +80,7 @@ packages = ["src/datasmith"]
 
 [tool.mypy]
 files = ["src"]
-exclude = ["src/datasmith/agents/templates/", "src/datasmith/docker/templates/", "src/datasmith/harbor_adapter/template/", "src/datasmith/verify/in_image/"]
+exclude = ["src/datasmith/agents/templates/", "src/datasmith/docker/templates/", "src/datasmith/harbor_adapter/template/"]
 disallow_untyped_defs = true
 disallow_any_unimported = true
 no_implicit_optional = true
@@ -106,7 +106,7 @@ markers = [
 target-version = "py312"
 line-length = 120
 fix = true
-extend-exclude = ["archive/", "dataset/", "scratch/", "src/datasmith/docker/templates/", "src/datasmith/agents/templates/", "src/datasmith/harbor_adapter/template/", "src/datasmith/verify/in_image/"]
+extend-exclude = ["archive/", "dataset/", "scratch/", "src/datasmith/docker/templates/", "src/datasmith/agents/templates/", "src/datasmith/harbor_adapter/template/"]
 force-exclude = true
 
 [tool.ruff.lint]
@@ -184,7 +184,7 @@ branch = true
 source = ["src"]
 
 [tool.deptry]
-exclude = ["src/datasmith/docker/templates/", "src/datasmith/agents/templates/", "src/datasmith/harbor_adapter/template/", "src/datasmith/verify/in_image/"]
+exclude = ["src/datasmith/docker/templates/", "src/datasmith/agents/templates/", "src/datasmith/harbor_adapter/template/"]
 ignore = ["DEP003"]
 [tool.deptry.per_rule_ignores]
 DEP001 = ["tomllib", "tomli"]

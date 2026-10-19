@@ -6,7 +6,6 @@ fc-verify report   SURVEY [TASK ...]             review summaries (default: meas
 fc-verify review   SURVEY TASK DECISION [--note]
 fc-verify auto     SURVEY [--dry-run]            automatic not_approved rules
 fc-verify add      SURVEY TASK ...               pending rows for new tasks
-fc-verify precheck SURVEY TASK ... [--measure-uncovered always_affected,compiled] [--rerun]
 fc-verify build    TASKS_ROOT OUT [--ids FILE ...] [--workers N] [--retry-failed]
 fc-verify publish  TASKS_ROOT MANIFEST OUT [--region R] [--repo NAME] [--until-idle]
 fc-verify push     MANIFEST OUT_JSONL [--region R] [--repo NAME]  push verified rows as they are (no scrub)
@@ -30,7 +29,7 @@ import sys
 from pathlib import Path
 
 from datasmith.measurement.noise import classify_all, load_rule
-from datasmith.verify import images, pin, precheck, registry, release, report, review, status
+from datasmith.verify import images, pin, registry, release, report, review, status
 from datasmith.verify.survey import DECISIONS, Survey, task_id
 
 
@@ -69,19 +68,6 @@ def _add(survey: Survey, a: argparse.Namespace) -> None:
     print("\n".join(review.add_pending(survey, _tasks(a.tasks))))
 
 
-def _precheck(survey: Survey, a: argparse.Namespace) -> None:
-    kinds = set(filter(None, a.measure_uncovered.split(",")))
-    for t in _tasks(a.tasks):
-        st = survey.state(t)
-        if not st.get("tag"):
-            print(json.dumps({"task": t, "error": "no image tag in state"}))
-            continue
-        end, result = precheck.precheck(survey, t, st["tag"], kinds, rerun=a.rerun)
-        if end:
-            survey.save_state(t, {**st, "phase": end})
-        print(json.dumps({"task": t, "end": end, **{k: result.get(k) for k in ("by_deps", "patch_failed", "error")}}))
-
-
 def _readiness(survey: Survey, a: argparse.Namespace) -> None:
     tags = set(a.registry_tags.read_text().split()) if a.registry_tags else None
     giveaway = {}
@@ -102,7 +88,6 @@ COMMANDS = {
     "review": _review,
     "auto": _auto,
     "add": _add,
-    "precheck": _precheck,
     "readiness": _readiness,
 }
 
@@ -279,22 +264,17 @@ def main(argv: list[str] | None = None) -> int:
         "review",
         "auto",
         "add",
-        "precheck",
         "readiness",
     ):
         p = sub.add_parser(name)
         p.add_argument("survey", type=Path)
-        if name in ("classify", "report", "add", "precheck"):
+        if name in ("classify", "report", "add"):
             p.add_argument("tasks", nargs="*")
     sub.choices["review"].add_argument("task")
     sub.choices["review"].add_argument("decision", choices=DECISIONS)
     sub.choices["review"].add_argument("--note", default="")
     sub.choices["review"].add_argument("--data", default="phase 1")
     sub.choices["auto"].add_argument("--dry-run", action="store_true")
-    sub.choices["precheck"].add_argument(
-        "--measure-uncovered", default="", help=",".join(precheck.MEASURE_UNCOVERED_KINDS)
-    )
-    sub.choices["precheck"].add_argument("--rerun", action="store_true")
     sub.add_parser("failure").add_argument("logs", nargs="+", type=Path)
     b = sub.add_parser("build")
     b.add_argument("tasks_root", type=Path)
