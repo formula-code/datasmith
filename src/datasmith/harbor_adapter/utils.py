@@ -83,7 +83,9 @@ def render_task_toml(
     memory: str = "4G",
     storage: str = "10G",
     verifier_env: dict[str, str] | None = None,
+    docker_image: str | None = None,
 ) -> str:
+    """``docker_image``: a built task image for harbor to run instead of building environment/."""
     check_verifier_env(verifier_env)
     env_lines = "".join(f'{k} = "{v}"\n' for k, v in (verifier_env or {}).items())
     verifier_env_section = f"\n[verifier.env]\n{env_lines}" if env_lines else ""
@@ -106,7 +108,7 @@ build_timeout_sec = 1800.0
 cpus = {cpus}
 memory = '{memory}'
 storage = '{storage}'
-"""
+""" + (f'docker_image = "{docker_image}"\n' if docker_image else "")
 
 
 def render_dockerfile(

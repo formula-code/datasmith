@@ -6,14 +6,9 @@ fc-verify report   SURVEY [TASK ...]             review summaries (default: meas
 fc-verify review   SURVEY TASK DECISION [--note]
 fc-verify auto     SURVEY [--dry-run]            automatic not_approved rules
 fc-verify add      SURVEY TASK ...               pending rows for new tasks
-fc-verify build    TASKS_ROOT OUT [--ids FILE ...] [--workers N] [--retry-failed]
-fc-verify publish  TASKS_ROOT MANIFEST OUT [--region R] [--repo NAME] [--until-idle]
-fc-verify push     MANIFEST OUT_JSONL [--region R] [--repo NAME]  push verified rows as they are (no scrub)
-fc-verify pins     TASKS_ROOT MANIFEST                    pin status of every task folder
 fc-verify readiness SURVEY OUT_CSV [--registry-tags FILE] [--fetch-github] [--giveaway JSONL]
 fc-verify records  IDS_MD OUT_DIR                  render records for chosen owner/repo#N ids (database)
 fc-verify select   OUT_DIR --hub TSV [--n 130] [--seed S] [--skip IDS_MD ...] [--exclude-repo owner/repo ...]
-fc-verify env-image owner/repo#N ... [--registry URI]   environment image rebuilt at the base commit
 fc-verify prompt   TASKS_ROOT PROMPTS_DIR [TASK ...] [--dry-run] [--drafts]   approved prompt text into rendered tasks
 fc-verify prompt-check TASKS_ROOT [TASK ...] [--model M --api-base URL]   symptom-only check, optional model score
 fc-verify prompt-draft TASKS_ROOT OUT_DIR TASK ... --model M [--api-base URL]   short prompt drafts for review
@@ -29,7 +24,7 @@ import sys
 from pathlib import Path
 
 from datasmith.measurement.noise import classify_all, load_rule
-from datasmith.verify import images, pin, registry, release, report, review, status
+from datasmith.verify import release, report, review, status
 from datasmith.verify.survey import DECISIONS, Survey, task_id
 
 
@@ -92,52 +87,6 @@ COMMANDS = {
 }
 
 
-def _ids(files: list[Path], root: Path) -> list[str]:
-    out = []
-    for f in files:
-        for line in f.read_text().splitlines():
-            if m := re.search(r"([\w.-]+)/([\w.-]+)#(\d+)", line):
-                out.append("__".join(m.groups()))
-            elif re.fullmatch(r"[\w.-]+__[\w.-]+__\d+", line.strip()):
-                out.append(line.strip())
-    return out or sorted(p.name for p in root.iterdir() if (p / "environment").is_dir())
-
-
-def _build(a: argparse.Namespace) -> int:
-    images.build(
-        a.tasks_root,
-        _ids(a.ids, a.tasks_root),
-        a.out,
-        a.workers,
-        images.Limits(keep_failed=a.keep_failed),
-        retry_failed=a.retry_failed,
-    )
-    return 0
-
-
-def _publish(a: argparse.Namespace) -> int:
-    def building() -> bool:
-        return images.sh(["pgrep", "-f", "[f]c-verify build"]).returncode == 0
-
-    registry.publish(a.tasks_root, a.manifest, a.out, registry.EcrRegistry(a.region, a.repo), a.until_idle, building)
-    return 0
-
-
-def _push(a: argparse.Namespace) -> int:
-    registry.push_rows(a.manifest, a.out, registry.EcrRegistry(a.region, a.repo))
-    return 0
-
-
-def _pins(a: argparse.Namespace) -> int:
-    rows, bad = images.rows_by_task(a.manifest), 0
-    for task_dir in sorted(p for p in a.tasks_root.iterdir() if (p / "task.toml").is_file()):
-        state, tag = pin.plan(task_dir, rows.get(task_dir.name))
-        if state not in ("ok", "unbuilt"):
-            bad += state in ("drift", "env-mismatch", "unverified-pinned")
-            print(f"{task_dir.name}: {state}" + (f" -> {tag}" if tag else ""))
-    return 1 if bad else 0
-
-
 def _records(a: argparse.Namespace) -> int:
     from datasmith.utils.db import get_client
     from datasmith.verify import selection
@@ -171,17 +120,6 @@ def _select(a: argparse.Namespace) -> int:
     rows = selection.sample([], pool, a.n, a.seed, lambda repo: a.cap, at_base)
     selection.write_selection(rows, a.out)
     print(f"wrote {len(rows)} rows to {a.out}")
-    return 0
-
-
-def _env_image(a: argparse.Namespace) -> int:
-    from datasmith.utils.db import get_client
-    from datasmith.verify import env_image
-
-    client = get_client()
-    for t in a.tasks:
-        owner, repo, num = re.fullmatch(r"([\w.-]+)/([\w.-]+)#(\d+)", t).groups()
-        print(json.dumps({"task": t, **env_image.build(client, owner, repo, int(num), a.registry)}))
     return 0
 
 
@@ -243,11 +181,6 @@ NO_SURVEY = {
     "prompt": _prompt,
     "records": _records,
     "select": _select,
-    "env-image": _env_image,
-    "push": _push,
-    "build": _build,
-    "publish": _publish,
-    "pins": _pins,
     "failure": _failure,
 }
 
@@ -276,22 +209,6 @@ def main(argv: list[str] | None = None) -> int:
     sub.choices["review"].add_argument("--data", default="phase 1")
     sub.choices["auto"].add_argument("--dry-run", action="store_true")
     sub.add_parser("failure").add_argument("logs", nargs="+", type=Path)
-    b = sub.add_parser("build")
-    b.add_argument("tasks_root", type=Path)
-    b.add_argument("out", type=Path)
-    b.add_argument(
-        "--ids", type=Path, action="append", default=[], help="files of owner/repo#N or owner__repo__N lines"
-    )
-    b.add_argument("--workers", type=int, default=1)
-    b.add_argument("--retry-failed", action="store_true")
-    b.add_argument("--keep-failed", action="store_true")
-    pb = sub.add_parser("publish")
-    pb.add_argument("tasks_root", type=Path)
-    pb.add_argument("manifest", type=Path)
-    pb.add_argument("out", type=Path)
-    pb.add_argument("--region", default="us-east-1")
-    pb.add_argument("--repo", default="formulacode")
-    pb.add_argument("--until-idle", action="store_true", help="keep publishing while a build runs")
     rd = sub.choices["readiness"]
     rd.add_argument("out_csv", type=Path)
     rd.add_argument("--registry-tags", type=Path, help="file with one registry tag per line")
@@ -314,9 +231,6 @@ def main(argv: list[str] | None = None) -> int:
         "--built-from", default="2026-04-12T19", help="images pushed earlier were built at the merge commit"
     )
     se.add_argument("--counts", action="store_true")
-    ei = sub.add_parser("env-image")
-    ei.add_argument("tasks", nargs="+")
-    ei.add_argument("--registry", help="repository URI to push the result to")
     pr = sub.add_parser("prompt")
     pr.add_argument("tasks_root", type=Path)
     pr.add_argument("prompts", type=Path)
@@ -332,14 +246,6 @@ def main(argv: list[str] | None = None) -> int:
         q.add_argument("--model", required=name == "prompt-draft", help="model name, e.g. openai/<served name>")
         q.add_argument("--api-base")
         q.add_argument("--api-key-env", default="OPENAI_API_KEY", help="environment variable holding the API key")
-    pu = sub.add_parser("push")
-    pu.add_argument("manifest", type=Path)
-    pu.add_argument("out", type=Path)
-    pu.add_argument("--region", default="us-east-1")
-    pu.add_argument("--repo", default="formulacode")
-    pp = sub.add_parser("pins")
-    pp.add_argument("tasks_root", type=Path)
-    pp.add_argument("manifest", type=Path)
     a = ap.parse_args(argv)
     if a.cmd in NO_SURVEY:
         return NO_SURVEY[a.cmd](a)

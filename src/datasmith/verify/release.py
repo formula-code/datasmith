@@ -9,13 +9,13 @@ from __future__ import annotations
 import csv
 import json
 import os
+import tomllib
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 from datasmith.measurement.run import _read_json as read_json
 from datasmith.measurement.run import trial_run
-from datasmith.verify.pin import read_pin
 from datasmith.verify.prompt_check import check_task
 from datasmith.verify.survey import Survey, task_id
 
@@ -86,7 +86,7 @@ def task_row(
 ) -> dict:
     td = survey.task_dir(task)
     toml = td / "task.toml"
-    image = read_pin(toml.read_text()) if toml.exists() else None
+    image = tomllib.loads(toml.read_text()).get("environment", {}).get("docker_image") if toml.exists() else None
     stamp = read_json(td / "render_stamp.json") or {}
     refresh = read_json(td / "TESTS_REFRESHED.json") or {}
     runs = (record or {}).get("runs") or []
