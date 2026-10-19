@@ -18,7 +18,9 @@ fc-verify readiness SURVEY OUT_CSV [--registry-tags FILE] [--fetch-github] [--gi
 fc-verify records  IDS_MD OUT_DIR                  render records for chosen owner/repo#N ids (database)
 fc-verify select   OUT_DIR --hub TSV [--n 130] [--seed S] [--skip IDS_MD ...] [--exclude-repo owner/repo ...]
 fc-verify env-image owner/repo#N ... [--registry URI]   environment image rebuilt at the base commit
-fc-verify prompt   TASKS_ROOT PROMPTS_DIR [TASK ...] [--dry-run]   approved prompt text into rendered tasks
+fc-verify prompt   TASKS_ROOT PROMPTS_DIR [TASK ...] [--dry-run] [--drafts]   approved prompt text into rendered tasks
+fc-verify prompt-check TASKS_ROOT [TASK ...] [--model M --api-base URL]   symptom-only check, optional model score
+fc-verify prompt-draft TASKS_ROOT OUT_DIR TASK ... --model M [--api-base URL]   short prompt drafts for review
 fc-verify failure  LOG ...                       error class of failed image builds
 """
 
@@ -230,8 +232,46 @@ def _env_image(a: argparse.Namespace) -> int:
 def _prompt(a: argparse.Namespace) -> int:
     from datasmith.verify import prompts
 
-    for t in prompts.apply(a.tasks_root, a.prompts, a.tasks or None, a.dry_run):
+    for t in prompts.apply(a.tasks_root, a.prompts, a.tasks or None, a.dry_run, a.drafts):
         print(f"{t}: prompt applied" + (" (dry run)" if a.dry_run else ""))
+    return 0
+
+
+def _model(a: argparse.Namespace):
+    import os
+
+    from datasmith.verify import short_prompt
+
+    return short_prompt.lm(a.model, a.api_base, os.environ.get(a.api_key_env))
+
+
+def _prompt_check(a: argparse.Namespace) -> int:
+    from datasmith.verify import prompt_check, short_prompt
+
+    model = _model(a) if a.model else None
+    tasks = a.tasks or sorted(p.name for p in a.tasks_root.iterdir() if (p / "instruction.md").exists())
+    failed = 0
+    for t in tasks:
+        d = a.tasks_root / t
+        row = {"task": t, "findings": prompt_check.check_task(d)}
+        if model:
+            row.update(
+                short_prompt.score(
+                    prompt_check.task_text((d / "instruction.md").read_text()), short_prompt._patch(d), model
+                )
+            )
+        failed += bool(row["findings"]) or row.get("score", 0) > short_prompt.TARGET_SCORE
+        print(json.dumps(row))
+    print(f"{failed} of {len(tasks)} prompts are not symptom-only", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def _prompt_draft(a: argparse.Namespace) -> int:
+    from datasmith.verify import short_prompt
+
+    for t, v in short_prompt.draft_tasks(a.tasks_root, a.out, _model(a), a.tasks).items():
+        if t in a.tasks:
+            print(json.dumps({"task": t, "score": v["score"], "findings": v["findings"]}))
     return 0
 
 
@@ -242,6 +282,8 @@ def _failure(a: argparse.Namespace) -> int:
 
 
 NO_SURVEY = {
+    "prompt-check": _prompt_check,
+    "prompt-draft": _prompt_draft,
     "prompt": _prompt,
     "records": _records,
     "select": _select,
@@ -348,6 +390,16 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("prompts", type=Path)
     pr.add_argument("tasks", nargs="*")
     pr.add_argument("--dry-run", action="store_true")
+    pr.add_argument("--drafts", action="store_true", help="also apply unapproved drafts (use on a preview copy)")
+    for name in ("prompt-check", "prompt-draft"):
+        q = sub.add_parser(name)
+        q.add_argument("tasks_root", type=Path)
+        if name == "prompt-draft":
+            q.add_argument("out", type=Path)
+        q.add_argument("tasks", nargs="*" if name == "prompt-check" else "+")
+        q.add_argument("--model", required=name == "prompt-draft", help="model name, e.g. openai/<served name>")
+        q.add_argument("--api-base")
+        q.add_argument("--api-key-env", default="OPENAI_API_KEY", help="environment variable holding the API key")
     pu = sub.add_parser("push")
     pu.add_argument("manifest", type=Path)
     pu.add_argument("out", type=Path)

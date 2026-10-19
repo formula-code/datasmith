@@ -19,6 +19,9 @@ logger = get_logger("runners.render_problems")
 # It paces the LLM backend, not GitHub: the linked-issue scrape above it is
 # async and rides the token pool instead.
 DATASMITH_RENDER_PROBLEMS_WORKERS: int = int(os.environ.get("DATASMITH_RENDER_PROBLEMS_WORKERS", "8"))
+# "short" (default): the prompt states only the symptom and leaves out the linked issues, which often state the fix.
+# "detailed": the extracted observations plus the linked issues. Every task uses one version.
+FC_PROMPT_VERSION: str = os.environ.get("FC_PROMPT_VERSION", "short")
 
 
 class RenderProblemsRunner(BaseRunner):
@@ -134,7 +137,7 @@ class RenderProblemsRunner(BaseRunner):
             functools.partial(
                 render_problem_statement,
                 pr,
-                issues=issues,
+                issues=[] if FC_PROMPT_VERSION == "short" else issues,
                 repo_description=repo_description,
                 anonymize=True,
                 extract=False,

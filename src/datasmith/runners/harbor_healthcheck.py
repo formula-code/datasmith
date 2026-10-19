@@ -414,7 +414,7 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
                     "Snapshot publish failed for %s (%s)", object_key, e.code
                 )
                 return
-    except Exception as exc:  # noqa: BLE001 — publishing must never break the healthcheck
+    except Exception as exc:
         get_logger(__name__).warning("Snapshot publish error: %s", exc)
 
 

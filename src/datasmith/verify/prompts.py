@@ -1,7 +1,7 @@
 """Replace the task description of rendered tasks with approved prompt text; nothing else in the task changes.
 
 A prompts folder holds versions.json ({task: {"version", "approved", "relevant_issues"}}), <task>.md with the new
-Initial Observations, and optionally <task>.issues.md for the Relevant Issues section. Each applied task gets
+Initial Observations, and optionally a file for the Relevant Issues section. Only entries with "approved" set are applied. Each applied task gets
 PROMPT_VERSION.json, and its old instruction.md is kept outside the task folder, so harbor does not upload it.
 """
 
@@ -25,8 +25,10 @@ def rewrite(text: str, observations: str, issues: str | None) -> str:
     return text[:i] + "**Initial Observations**\n\n" + observations.strip() + "\n" + section + text[j:]
 
 
-def apply(tasks_root: Path, prompts: Path, tasks: list[str] | None = None, dry_run: bool = False) -> list[str]:
-    """Apply the approved prompts to the tasks that have one (all of versions.json by default); returns the tasks changed."""
+def apply(
+    tasks_root: Path, prompts: Path, tasks: list[str] | None = None, dry_run: bool = False, drafts: bool = False
+) -> list[str]:
+    """Apply the approved prompts (with drafts=True also unapproved ones, for a preview copy); returns the tasks changed."""
     versions = json.loads((prompts / "versions.json").read_text())
     stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
     done = []
@@ -35,7 +37,11 @@ def apply(tasks_root: Path, prompts: Path, tasks: list[str] | None = None, dry_r
         if task not in versions or not ins.exists():
             continue
         v = versions[task]
-        issues = (prompts / v["relevant_issues"]).read_text() if v.get("relevant_issues") else None
+        if not v.get("approved") and not drafts:
+            continue
+        # relevant_issues: a file name replaces the section, "" removes it, null keeps it.
+        rel = v.get("relevant_issues")
+        issues = (prompts / rel).read_text() if rel else ("" if rel == "" else None)
         new = rewrite(ins.read_text(), (prompts / f"{task}.md").read_text(), issues)
         done.append(task)
         if dry_run:

@@ -15,6 +15,7 @@ from typing import Any
 
 from datasmith.verify.measure import read_json, trial_run
 from datasmith.verify.pin import read_pin
+from datasmith.verify.prompt_check import check_task
 from datasmith.verify.survey import Survey, task_id
 
 FIELDS = [
@@ -110,6 +111,7 @@ def task_row(
         "pr_url": prov.get("pr_url") or "",
         "merged_at": prov.get("merged_at") or "",
         "prompt_giveaway": giveaway.get(task, ""),
+        "prompt_findings": "; ".join(check_task(td)) if (td / "instruction.md").exists() else "",
         "note": prov.get("error", ""),
     }
 
@@ -138,6 +140,7 @@ def summary(rows: list[dict]) -> dict[str, Any]:
         "tests_not_run_everywhere": sum(r["tests_ran"] < r["oracle_runs"] + r["nop_runs"] for r in rows),
         "no_license": sum(not r["license"] for r in rows),
         "no_author": sum(not r["pr_author"] for r in rows),
+        "prompt_not_symptom_only": sum(bool(r["prompt_findings"]) for r in rows),
     }
 
 

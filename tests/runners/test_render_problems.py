@@ -6,6 +6,8 @@ import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from datasmith.runners.render_problems import RenderProblemsRunner
 
 
@@ -71,8 +73,10 @@ class TestRendersAndStoresProblem:
 
 
 class TestIncludesScrapedIssues:
-    async def test_render_includes_scraped_issues(self) -> None:
-        """scrape_links results are passed through to render_problem_statement."""
+    @pytest.mark.parametrize("version", ["detailed", "short"])
+    async def test_render_includes_scraped_issues(self, version: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Detailed prompts get the scraped issues; short prompts leave them out (they are still stored)."""
+        monkeypatch.setattr("datasmith.runners.render_problems.FC_PROMPT_VERSION", version)
         mock_client = _mock_supabase()
 
         from datasmith.github.models import IssueExpanded
@@ -100,9 +104,10 @@ class TestIncludesScrapedIssues:
             runner = RenderProblemsRunner(gh=gh, n_concurrent=1)
             await runner.run([item])
 
-        # The scraped issue should have been passed to render
-        call_kwargs = mock_render.call_args
-        issues_arg = call_kwargs.kwargs["issues"]
+        issues_arg = mock_render.call_args.kwargs["issues"]
+        if version == "short":
+            assert issues_arg == []
+            return
         assert len(issues_arg) == 1
         assert issues_arg[0].number == 99
         assert issues_arg[0].title == "Slow sort"
