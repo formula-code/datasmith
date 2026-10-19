@@ -355,8 +355,8 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
         data = buf.getvalue()
         for method in ("POST", "PUT"):
             try:
-                req = urllib.request.Request(url, data=data, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=180):
+                req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310
+                with urllib.request.urlopen(req, timeout=180):  # noqa: S310
                     get_logger(__name__).info("Published oracle snapshots: %s", object_key)
                     return
             except urllib.error.HTTPError as e:
@@ -366,7 +366,7 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
                     "Snapshot publish failed for %s (%s)", object_key, e.code
                 )
                 return
-    except Exception as exc:  # noqa: BLE001 — publishing must never break the healthcheck
+    except Exception as exc:  # publishing must never stop the healthcheck
         get_logger(__name__).warning("Snapshot publish error: %s", exc)
 
 
