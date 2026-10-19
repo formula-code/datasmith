@@ -212,3 +212,14 @@ def test_pr_number_sources():
     assert pr_number("", "fc-task/numpy__numpy__21464:cc3df4e2979b") == "21464"
     assert pr_number("", "formulacode/networkx-networkx:8138") == "8138"
     assert pr_number("", "formulacode/base:latest") == ""
+
+
+def test_push_rows_skips_unverified_and_pushed(tmp_path, monkeypatch):
+    m = tmp_path / "m.jsonl"
+    for r in ({"task_id": "a", "tag": "t:a", "verified": True}, {"task_id": "b", "tag": "t:b", "verified": False}):
+        images.append_jsonl(m, r)
+    monkeypatch.setattr(registry.images, "load", lambda r: r["tag"])
+    reg = FakeRegistry()
+    out = tmp_path / "pushed.jsonl"
+    assert [r["tag"] for r in registry.push_rows(m, out, reg)] == ["t:a"]
+    assert registry.push_rows(m, out, reg) == []

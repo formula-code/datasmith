@@ -166,3 +166,22 @@ def publish(
         if not until_idle or (not building() and not todo):
             return
         time.sleep(60)
+
+
+def push_rows(manifest: Path, out: Path, registry: Registry, tasks: set[str] | None = None) -> list[dict]:
+    """Push the newest verified row of each task (loading it first), skipping tags already in `out`."""
+    done = {r["tag"] for r in read_jsonl(out)}
+    pushed = []
+    for task, row in images.rows_by_task(manifest).items():
+        if not row.get("verified") or row["tag"] in done or (tasks and task not in tasks):
+            continue
+        try:
+            images.load(row)
+            rec = registry.push(task, row["tag"])
+        except (RuntimeError, OSError) as e:
+            print(f"{task}: FAILED {e}", flush=True)
+            continue
+        append_jsonl(out, rec)
+        pushed.append(rec)
+        print(f"{task}: {rec['uri']}", flush=True)
+    return pushed

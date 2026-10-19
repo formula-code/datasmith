@@ -9,6 +9,7 @@ fc-verify add      SURVEY TASK ...               pending rows for new tasks
 fc-verify precheck SURVEY TASK ... [--measure-uncovered always_affected,compiled] [--rerun]
 fc-verify build    TASKS_ROOT OUT [--ids FILE ...] [--workers N] [--retry-failed]
 fc-verify publish  TASKS_ROOT MANIFEST OUT [--region R] [--repo NAME] [--until-idle]
+fc-verify push     MANIFEST OUT_JSONL [--region R] [--repo NAME]  push verified rows as they are (no scrub)
 fc-verify pins     TASKS_ROOT MANIFEST                    pin status of every task folder
 fc-verify measure  SURVEY TASK ... [--manifest M] [--workers N] [--oracle-runs 3] [--nop-runs 3] [--gate URL]
 fc-verify capture  SURVEY TASK ... [--manifest M]    snapshot reference and its no-change check
@@ -155,6 +156,11 @@ def _publish(a: argparse.Namespace) -> int:
     return 0
 
 
+def _push(a: argparse.Namespace) -> int:
+    registry.push_rows(a.manifest, a.out, registry.EcrRegistry(a.region, a.repo))
+    return 0
+
+
 def _pins(a: argparse.Namespace) -> int:
     rows, bad = images.rows_by_task(a.manifest), 0
     for task_dir in sorted(p for p in a.tasks_root.iterdir() if (p / "task.toml").is_file()):
@@ -176,7 +182,14 @@ def _failure(a: argparse.Namespace) -> int:
     return 0
 
 
-NO_SURVEY = {"build": _build, "publish": _publish, "pins": _pins, "failure": _failure, "release-leases": _release}
+NO_SURVEY = {
+    "push": _push,
+    "build": _build,
+    "publish": _publish,
+    "pins": _pins,
+    "failure": _failure,
+    "release-leases": _release,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -247,6 +260,11 @@ def main(argv: list[str] | None = None) -> int:
     rl = sub.add_parser("release-leases")
     rl.add_argument("job_dir", type=Path)
     rl.add_argument("--gate", default="http://127.0.0.1:8267")
+    pu = sub.add_parser("push")
+    pu.add_argument("manifest", type=Path)
+    pu.add_argument("out", type=Path)
+    pu.add_argument("--region", default="us-east-1")
+    pu.add_argument("--repo", default="formulacode")
     pp = sub.add_parser("pins")
     pp.add_argument("tasks_root", type=Path)
     pp.add_argument("manifest", type=Path)
