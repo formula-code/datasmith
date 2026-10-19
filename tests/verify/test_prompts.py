@@ -36,3 +36,9 @@ def test_apply_writes_version_and_backup(tmp_path):
     assert "new text" in (root / "o__r__1" / "instruction.md").read_text()
     assert json.loads((root / "o__r__1" / "PROMPT_VERSION.json").read_text())["version"] == 2
     assert list((tmp_path / "prompt-backups" / "o__r__1").iterdir())
+
+
+def test_rewrite_handles_empty_problem_text():
+    empty = "Use the following information if needed to understand the problem:\n\n## Task Requirements\n- x\n"
+    out = prompts.rewrite(empty, "new text", None)
+    assert out.endswith("**Initial Observations**\n\nnew text\n## Task Requirements\n- x\n")
