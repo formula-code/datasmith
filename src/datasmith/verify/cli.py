@@ -15,6 +15,9 @@ fc-verify measure  SURVEY TASK ... [--manifest M] [--workers N] [--oracle-runs 3
 fc-verify capture  SURVEY TASK ... [--manifest M]    snapshot reference and its no-change check
 fc-verify release-leases JOB_DIR [--gate URL]      free the gate slots of a stopped job
 fc-verify readiness SURVEY OUT_CSV [--registry-tags FILE] [--fetch-github] [--giveaway JSONL]
+fc-verify records  IDS_MD OUT_DIR                  render records for chosen owner/repo#N ids (database)
+fc-verify select   OUT_DIR --hub TSV [--n 130] [--seed S] [--skip IDS_MD ...] [--exclude-repo owner/repo ...]
+fc-verify env-image owner/repo#N ... [--registry URI]   environment image rebuilt at the base commit
 fc-verify failure  LOG ...                       error class of failed image builds
 """
 
@@ -176,6 +179,53 @@ def _release(a: argparse.Namespace) -> int:
     return 0
 
 
+def _records(a: argparse.Namespace) -> int:
+    from datasmith.utils.db import get_client
+    from datasmith.verify import selection
+
+    ids = re.findall(r"[\w.-]+/[\w.-]+#\d+", a.ids.read_text())
+    recs, missing = selection.records_for(get_client(), ids)
+    rows = [{"task": f"{r['repo_name']}#{r['issue_number']}", "record": r} for r in recs]
+    selection.write_selection(rows, a.out)
+    print(f"{len(recs)} records in {a.out}; missing or incomplete: {missing or 'none'}")
+    return 0
+
+
+def _select(a: argparse.Namespace) -> int:
+    from datasmith.utils.db import get_client
+    from datasmith.verify import selection
+
+    if a.refresh_hub:
+        selection.refresh_hub(a.hub)
+    hub = selection.hub_tags(a.hub)
+    known = {t for f in a.skip for t in re.findall(r"[\w.-]+/[\w.-]+#\d+", f.read_text())}
+    exclude = {selection.image_name(*r.split("/")) for r in a.exclude_repo}
+    pool = selection.filter_pool(
+        selection.db_pool(get_client(), a.counts), hub, known, exclude, tuple(a.tier1), a.built_from, a.counts
+    )
+    a.out.mkdir(parents=True, exist_ok=True)
+
+    def at_base(c: dict) -> bool:
+        image, tag = c["record"]["container_name"].split("/", 1)[1].split(":")
+        return selection.image_ref(image, int(tag), a.out / "image_refs.tsv") == c["record"]["base_commit"]
+
+    rows = selection.sample([], pool, a.n, a.seed, lambda repo: a.cap, at_base)
+    selection.write_selection(rows, a.out)
+    print(f"wrote {len(rows)} rows to {a.out}")
+    return 0
+
+
+def _env_image(a: argparse.Namespace) -> int:
+    from datasmith.utils.db import get_client
+    from datasmith.verify import env_image
+
+    client = get_client()
+    for t in a.tasks:
+        owner, repo, num = re.fullmatch(r"([\w.-]+)/([\w.-]+)#(\d+)", t).groups()
+        print(json.dumps({"task": t, **env_image.build(client, owner, repo, int(num), a.registry)}))
+    return 0
+
+
 def _failure(a: argparse.Namespace) -> int:
     for log in a.logs:
         print(json.dumps({"log": str(log), **report.failure_reason(log)}))
@@ -183,6 +233,9 @@ def _failure(a: argparse.Namespace) -> int:
 
 
 NO_SURVEY = {
+    "records": _records,
+    "select": _select,
+    "env-image": _env_image,
     "push": _push,
     "build": _build,
     "publish": _publish,
@@ -260,6 +313,26 @@ def main(argv: list[str] | None = None) -> int:
     rl = sub.add_parser("release-leases")
     rl.add_argument("job_dir", type=Path)
     rl.add_argument("--gate", default="http://127.0.0.1:8267")
+    rc = sub.add_parser("records")
+    rc.add_argument("ids", type=Path)
+    rc.add_argument("out", type=Path)
+    se = sub.add_parser("select")
+    se.add_argument("out", type=Path)
+    se.add_argument("--hub", type=Path, required=True, help="Docker Hub tag list (tsv)")
+    se.add_argument("--refresh-hub", action="store_true")
+    se.add_argument("--n", type=int, default=130)
+    se.add_argument("--seed", default="fc-expand")
+    se.add_argument("--cap", type=int, default=5, help="tasks per repo")
+    se.add_argument("--skip", type=Path, nargs="*", default=[], help="lists of owner/repo#N already chosen")
+    se.add_argument("--exclude-repo", action="append", default=[])
+    se.add_argument("--tier1", nargs=2, default=["2026-08-18", "2026-09-01"], help="push dates of tier 1 images")
+    se.add_argument(
+        "--built-from", default="2026-04-12T19", help="images pushed earlier were built at the merge commit"
+    )
+    se.add_argument("--counts", action="store_true")
+    ei = sub.add_parser("env-image")
+    ei.add_argument("tasks", nargs="+")
+    ei.add_argument("--registry", help="repository URI to push the result to")
     pu = sub.add_parser("push")
     pu.add_argument("manifest", type=Path)
     pu.add_argument("out", type=Path)
