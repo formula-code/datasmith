@@ -3,7 +3,6 @@ import math
 from datetime import UTC, datetime
 from pathlib import Path
 
-import yaml
 from harbor.models.task.id import LocalTaskId
 from harbor.models.trial.config import AgentConfig, TrialConfig
 from harbor.models.trial.result import AgentInfo, ExceptionInfo, TrialResult
@@ -46,7 +45,7 @@ def fake_harbor(out, *, broken=False):
     """A harbor stand-in that writes the job's trials from the config it is given."""
 
     def run(cmd, **kw):
-        cfg = yaml.safe_load(Path(cmd[cmd.index("--config") + 1]).read_text())
+        cfg = json.loads(Path(cmd[cmd.index("--config") + 1]).read_text())
         for i, agent in enumerate(cfg["agents"]):
             nop = agent.get("import_path") == measure.NOP_AGENT
             exc = "SetupScriptError" if broken and i == 0 else None

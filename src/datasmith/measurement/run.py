@@ -153,7 +153,7 @@ def snapshot_mismatch(trial: Path) -> int | None:
     summary = next((_read_json(p) for p in sorted(outputs_dir(trial).glob("summary_*.json"))), None) or {}
     if not any("-to-" in k and isinstance(v, int) for k, v in summary.items()):
         return None
-    return summary.get("pass-to-fail", 0) + summary.get("skip-to-fail", 0)
+    return int(summary.get("pass-to-fail", 0) + summary.get("skip-to-fail", 0))
 
 
 def _seconds(span: Any) -> float | None:
@@ -219,7 +219,7 @@ def records(out: Path) -> dict[str, dict[str, Any]]:
 def confirm_spec(task: str, out: Path, rule: dict, rounds: int) -> dict:
     """tests/confirm.json: theta per benchmark from the task's existing record, else theta_min for every benchmark."""
     r = rule_for(rule, task.split("__")[1])
-    spec = {
+    spec: dict[str, Any] = {
         "rounds": rounds,
         "theta_default": r.get("theta_min", r.get("theta")),
         "theta": {},
@@ -307,32 +307,25 @@ def measure_task(
     out: Path,
     s: Settings,
     rule_path: Path | None = None,
-    grade: Callable[[Path, dict], dict] | None = None,
     run: Callable[..., Any] = subprocess.run,
 ) -> str:
     """Measure one rendered task into <out>/oracle/<task>.json and return its phase: measured, no_benchmarks or error.
 
-    `rule_path` (the noise rule) is needed for a confirmation pass. `grade(trial, run_row)` may add fields to each run,
-    for example a correctness verdict from the training grader.
+    `rule_path` (the noise rule) is needed for a confirmation pass.
     """
-    import yaml
-
     task = task_dir.name
     configs = out / "configs"
-    n = len(list(configs.glob(f"{task}__oracle*.yaml")))
+    n = len(list(configs.glob(f"{task}__oracle*.json")))
     job = f"{task}__oracle" + (f"-{n}" if n else "")
     confirm = None
     if s.confirm_rounds > 0 and rule_path is not None:
         confirm = confirm_spec(task, out, load_rule(rule_path), s.confirm_rounds)
-    config = configs / f"{job}.yaml"
+    config = configs / f"{job}.json"
     configs.mkdir(parents=True, exist_ok=True)
     cfg = job_config(task_dir, job, s, out, tasks_root_for(task_dir, job, out, confirm))
-    config.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    config.write_text(json.dumps(cfg, indent=2))
     trials = run_harbor(out, job, config, s, run)
     runs = [r for t in trials if (r := trial_run(t))]
-    for r in runs:
-        if grade:
-            r.update(grade(Path(r["trial_dir"]), r))
     infra = [r["trial"] for r in runs if r.pop("infra")]
     want = s.n_oracle + s.n_nop
     if len(runs) < want or infra:

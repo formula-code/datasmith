@@ -24,7 +24,7 @@ def source(files: list[str] | set[str]) -> set[str]:
 
 
 def decide(
-    measure: dict[str, Any], changed: list[str] | set[str], measure_uncovered: set[str] = frozenset()
+    measure: dict[str, Any], changed: list[str] | set[str], measure_uncovered: set[str] | frozenset[str] = frozenset()
 ) -> str | None:
     """`base_edited`, `patch_failed`, `uncovered`, or None when the task should be measured.
 
@@ -51,7 +51,9 @@ def decide(
     return "uncovered"
 
 
-def precheck(task_dir: Path, measure_uncovered: set[str] = frozenset()) -> tuple[str | None, dict[str, Any]]:
+def precheck(
+    task_dir: Path, measure_uncovered: set[str] | frozenset[str] = frozenset()
+) -> tuple[str | None, dict[str, Any]]:
     """(end state or None, measure block) for a rendered task, from its image's build check in the database."""
     from datasmith.utils.db import fetch_all
 
