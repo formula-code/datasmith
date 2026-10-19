@@ -448,7 +448,14 @@ def run_wide_check(changed_files, ran_ids, extra_args, repo_root, budget, base_r
 
     A test that fails twice with the agent's code and passes at base is a regression; only files with such
     failures run at base. (rich#3546: a rich/text.py change broke tests/test_card.py, which no name maps to.)"""
-    dirs = package_tests_fallback(changed_files, repo_root)
+    dirs = []
+    for path in changed_files:
+        if is_test_file(path) or not (python_file(path) or _COMPILED_SOURCE.search(path)):
+            continue
+        found = _nearest_tests_dir(path, repo_root)
+        if found and found not in dirs:
+            dirs.append(found)
+    dirs = dirs[:4]
     out = {"ran": False, "dirs": dirs, "budget_s": int(budget), "regressed": []}
     if not dirs or budget < 60:
         out["reason"] = "no tests folder" if not dirs else "no time left"

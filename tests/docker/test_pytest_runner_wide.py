@@ -95,3 +95,10 @@ def test_cli_adds_wide_regressions_to_the_regression_result(repo: Path, tmp_path
     assert out["regression"]["regressed"] == ["tests/test_card.py::test_card"]
     assert out["regression"]["n_regressed"] == 1
     assert out["regression_wide"]["ran"] is True
+
+
+def test_a_compiled_source_change_runs_the_tests_folder_above_it(runner, repo: Path) -> None:
+    # bottleneck: the patch changes only C templates, which no .py rule covered.
+    (repo / "pkg" / "fast.c").write_text("int x;\n")
+    out = runner.run_wide_check(["pkg/fast.c"], set(), "", str(repo), 120)
+    assert out["dirs"] == ["tests"] and out["ran"] is True
