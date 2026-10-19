@@ -531,7 +531,9 @@ class _ResultsPlugin(object):
         if self._stream:
             # Node ids are relative to pytest's rootdir, which need not be the repo root.
             with open(self._stream, "a") as fh:
-                fh.write(json.dumps({"rootdir": str(session.config.rootdir)}) + "\n")
+                # rootdir is gone in pytest 9; rootpath is pytest >= 6.1.
+                root = getattr(session.config, "rootpath", None) or session.config.rootdir
+                fh.write(json.dumps({"rootdir": str(root)}) + "\n")
 
     def pytest_runtest_logreport(self, report):
         if report.when not in ("setup", "call", "teardown"):
