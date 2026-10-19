@@ -1,5 +1,6 @@
 import json
 import math
+from pathlib import Path
 
 import yaml
 
@@ -31,7 +32,7 @@ def fake_harbor(survey_root, task, *, broken=False):
     """A harbor stand-in that writes the job's trials from the config it is given."""
 
     def run(cmd, **kw):
-        cfg = yaml.safe_load(open(cmd[cmd.index("--config") + 1]))
+        cfg = yaml.safe_load(Path(cmd[cmd.index("--config") + 1]).read_text())
         job_dir = survey_root / "jobs" / cfg["job_name"]
         for i, agent in enumerate(cfg["agents"]):
             nop = agent.get("import_path") == measure.NOP_AGENT
