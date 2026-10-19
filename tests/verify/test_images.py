@@ -29,6 +29,7 @@ def test_set_and_read_pin():
     assert pin.read_pin(pin.set_pin(pinned, "fc-task/a:2")) == "fc-task/a:2"
     assert pin.read_pin(pin.set_pin('[task]\nname = "x"\n', "t:1")) == "t:1"
     assert pin.read_pin('[task]\ndocker_image = "not-env"\n') is None
+    assert pin.read_pin('[environment]\ndocker_image = ""\n') is None
 
 
 def test_plan_pins_only_a_verified_image_of_the_same_context(tmp_path):

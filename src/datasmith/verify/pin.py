@@ -25,7 +25,7 @@ def _env_span(lines: list[str]) -> tuple[int, int] | None:
 def read_pin(toml_text: str) -> str | None:
     lines = toml_text.splitlines()
     start, end = _env_span(lines) or (0, 0)
-    return next((m[1] for line in lines[start + 1 : end] if (m := PIN.match(line))), None)
+    return next((m[1] or None for line in lines[start + 1 : end] if (m := PIN.match(line))), None)
 
 
 def set_pin(toml_text: str, tag: str) -> str:
