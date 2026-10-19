@@ -256,7 +256,7 @@ def confirm_spec(survey: Survey, task: str, rule: dict, rounds: int) -> dict:
 def job_config(survey: Survey, task: str, job: str, s: Settings, tasks_root: Path) -> dict[str, Any]:
     """Harbor job: the oracle once per oracle run and NopTouch once per no-change run, all concurrent."""
     timeout = s.timeout_s
-    agents = [{"name": "oracle", "override_timeout_sec": timeout}]
+    agents = [{"name": "oracle", "override_timeout_sec": timeout}] if s.n_oracle else []
     agents += [
         {"name": "oracle", "model_name": f"run{i}", "override_timeout_sec": timeout} for i in range(2, s.n_oracle + 1)
     ]

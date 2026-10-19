@@ -11,6 +11,7 @@ fc-verify build    TASKS_ROOT OUT [--ids FILE ...] [--workers N] [--retry-failed
 fc-verify publish  TASKS_ROOT MANIFEST OUT [--region R] [--repo NAME] [--until-idle]
 fc-verify pins     TASKS_ROOT MANIFEST                    pin status of every task folder
 fc-verify measure  SURVEY TASK ... [--manifest M] [--workers N] [--oracle-runs 3] [--nop-runs 3] [--gate URL]
+fc-verify capture  SURVEY TASK ... [--manifest M]    snapshot reference and its no-change check
 fc-verify release-leases JOB_DIR [--gate URL]      free the gate slots of a stopped job
 fc-verify readiness SURVEY OUT_CSV [--registry-tags FILE] [--fetch-github] [--giveaway JSONL]
 fc-verify failure  LOG ...                       error class of failed image builds
@@ -24,7 +25,7 @@ import re
 import sys
 from pathlib import Path
 
-from datasmith.verify import images, measure, pin, precheck, registry, release, report, review, status
+from datasmith.verify import capture, images, measure, pin, precheck, registry, release, report, review, status
 from datasmith.verify.noise import classify_all, load_rule
 from datasmith.verify.survey import DECISIONS, Survey, task_id
 
@@ -103,6 +104,12 @@ def _readiness(survey: Survey, a: argparse.Namespace) -> None:
     print(json.dumps(release.summary(rows), indent=1))
 
 
+def _capture(survey: Survey, a: argparse.Namespace) -> None:
+    s = measure.Settings(gate_url=a.gate, harbor=a.harbor)
+    for t in _tasks(a.tasks):
+        print(f"{t}: {capture.capture(survey, t, s, a.manifest)}")
+
+
 COMMANDS = {
     "status": _status,
     "classify": _classify,
@@ -113,6 +120,7 @@ COMMANDS = {
     "precheck": _precheck,
     "measure": _measure,
     "readiness": _readiness,
+    "capture": _capture,
 }
 
 
@@ -176,10 +184,21 @@ def main(argv: list[str] | None = None) -> int:
         prog="fc-verify", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("status", "classify", "report", "review", "auto", "add", "precheck", "measure", "readiness"):
+    for name in (
+        "status",
+        "classify",
+        "report",
+        "review",
+        "auto",
+        "add",
+        "precheck",
+        "measure",
+        "readiness",
+        "capture",
+    ):
         p = sub.add_parser(name)
         p.add_argument("survey", type=Path)
-        if name in ("classify", "report", "add", "precheck", "measure"):
+        if name in ("classify", "report", "add", "precheck", "measure", "capture"):
             p.add_argument("tasks", nargs="*")
     sub.choices["review"].add_argument("task")
     sub.choices["review"].add_argument("decision", choices=DECISIONS)
@@ -216,6 +235,10 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--confirm-rounds", type=int, default=0)
     m.add_argument("--max-heavy", type=int, default=1)
     m.add_argument("--harbor", default="harbor")
+    c = sub.choices["capture"]
+    c.add_argument("--manifest", type=Path)
+    c.add_argument("--gate", default="http://127.0.0.1:8267")
+    c.add_argument("--harbor", default="harbor")
     rd = sub.choices["readiness"]
     rd.add_argument("out_csv", type=Path)
     rd.add_argument("--registry-tags", type=Path, help="file with one registry tag per line")
