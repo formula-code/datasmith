@@ -35,6 +35,7 @@ dependencies = [
 [project.scripts]
 fc-data = "datasmith.update.cli:main"
 fc-render-tasks = "datasmith.harbor_adapter.regen:main"
+fc-verify = "datasmith.verify.cli:main"
 
 [project.urls]
 Homepage = "https://formula-code.github.io/datasmith/"
