@@ -40,7 +40,9 @@ flowchart TD
    release has the same test scripts. Each folder gets `render_stamp.json`; `fc-render-tasks check` finds folders that
    no longer match the installed template.
 3. **Prompt.** `fc-verify prompt TASKS_ROOT PROMPTS_DIR` replaces the task description with approved prompt text.
-   Nothing else in the task changes.
+   Nothing else in the task changes. New tasks get short prompts that describe only the symptom
+   (`FC_PROMPT_VERSION=short`, the default in stage 5). `fc-verify prompt-draft` writes model drafts for review, and `fc-verify prompt-check`
+   checks that a prompt names no benchmarks, changed code, diffs or PR and issue links.
 4. **Environment image.** Some Docker Hub images were built at the merge commit, so they already contain the fix.
    `fc-verify env-image owner/repo#N` rebuilds the environment image at the base commit for those tasks.
 5. **Build.** `fc-verify build TASKS_ROOT OUT` builds one image per task from its `environment/` folder. The image tag is
