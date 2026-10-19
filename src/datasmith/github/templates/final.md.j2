@@ -46,6 +46,7 @@ The micromamba environment includes **Pytest** for testing and **Airspeed Veloci
 * **Target the hot paths** shown by profiling.
 * **Evidence-driven**: justify changes with benchmark/profile data.
 * **Correctness first**: never trade correctness for speed.
+* **Leave the measurement setup alone**: the ASV benchmark files, `asv.conf*`, `conftest.py` and `.github/` are restored to their original state before your change is measured, so edits there are thrown away. Speed up the library code instead.
 {% if repo_description %}
 
 **Repository Description**
