@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -19,9 +20,6 @@ logger = get_logger("runners.render_problems")
 # It paces the LLM backend, not GitHub: the linked-issue scrape above it is
 # async and rides the token pool instead.
 DATASMITH_RENDER_PROBLEMS_WORKERS: int = int(os.environ.get("DATASMITH_RENDER_PROBLEMS_WORKERS", "8"))
-# "short" (default): the prompt states only the symptom and leaves out the linked issues, which often state the fix.
-# "detailed": the extracted observations plus the linked issues. Every task uses one version.
-FC_PROMPT_VERSION: str = os.environ.get("FC_PROMPT_VERSION", "short")
 
 
 class RenderProblemsRunner(BaseRunner):
@@ -81,6 +79,12 @@ class RenderProblemsRunner(BaseRunner):
             self._executor.shutdown(wait=True)
             self._executor = None
 
+    def _issues_for_render(self, issues: list[Any]) -> list[Any]:
+        return issues
+
+    def _check(self, problem_description: str, item: dict[str, Any]) -> None:
+        """Raise to keep a problem text from being stored; BaseRunner counts the error."""
+
     async def _process_item(self, item: Any) -> None:
         """Render the problem statement for a single PR dict."""
         owner: str = item["owner"]
@@ -129,6 +133,7 @@ class RenderProblemsRunner(BaseRunner):
             ),
         )
         problem_description = extraction.to_problem_markdown()
+        self._check(problem_description, item)
 
         # Render the full problem statement using the pre-extracted observations
         # (pass initial_observations to avoid a second ProblemExtractor call)
@@ -137,7 +142,7 @@ class RenderProblemsRunner(BaseRunner):
             functools.partial(
                 render_problem_statement,
                 pr,
-                issues=[] if FC_PROMPT_VERSION == "short" else issues,
+                issues=self._issues_for_render(issues),
                 repo_description=repo_description,
                 anonymize=True,
                 extract=False,
@@ -172,3 +177,41 @@ class RenderProblemsRunner(BaseRunner):
         }).eq("owner", owner).eq("repo", repo).eq("issue_number", issue_number).execute()
 
         logger.info("Rendered problem context for %s/%s#%d", owner, repo, issue_number)
+
+
+class PromptLeak(ValueError):
+    """The problem text names something that gives away the fix."""
+
+
+_ASV = re.compile(r"\bASV\b|\basv\b|\b[Bb]enchmarks?\b|\btime_\w+|\bpeakmem_\w+")
+_LINK = re.compile(r"https?://github\.com/\S+/(pull|issues)/\d+|(?<![\w/])#\d{2,}\b")
+_CODE = re.compile(r"```|^\+\+\+ |^--- a/|^@@ ", re.M)
+_DEF = re.compile(r"^[+-]?\s*(?:async\s+)?(?:def|class|cdef|cpdef)\s+([A-Za-z_]\w{3,})", re.M)
+_HUNK = re.compile(r"^@@ .*@@\s*(?:async\s+)?(?:def|class|cdef|cpdef)\s+([A-Za-z_]\w{3,})", re.M)
+
+
+def _leaks(text: str, patch: str) -> list[str]:
+    """Giveaways in a problem text: benchmark names, PR or issue links, code or a diff, internal code the patch changes."""
+    found = [
+        f"{kind}: {m.group(0)}"
+        for kind, rx in (("benchmarks", _ASV), ("link", _LINK), ("code", _CODE))
+        if (m := rx.search(text))
+    ]
+    changed = set(_DEF.findall("\n".join(line for line in patch.splitlines() if line[:1] in "+-")))
+    changed |= set(_HUNK.findall(patch))
+    # A public entry point may be named; an internal function or class may not.
+    found += [
+        f"internal code: {n}" for n in sorted(changed) if n.startswith("_") and re.search(rf"\b{re.escape(n)}\b", text)
+    ]
+    return found
+
+
+class RenderShortProblemsRunner(RenderProblemsRunner):
+    """The default prompt: only the symptom, without the linked issues (they often state the fix), and no giveaways."""
+
+    def _issues_for_render(self, issues: list[Any]) -> list[Any]:
+        return []
+
+    def _check(self, problem_description: str, item: dict[str, Any]) -> None:
+        if found := _leaks(problem_description, item.get("patch") or ""):
+            raise PromptLeak(f"{item['owner']}/{item['repo']}#{item['issue_number']}: {'; '.join(found)}")
