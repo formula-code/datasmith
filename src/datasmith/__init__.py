@@ -6,14 +6,14 @@ import importlib
 import os
 from typing import TYPE_CHECKING
 
-import dotenv
-
 __version__ = "0.1.0"
 
 
 def setup_environment() -> None:
     """Load environment variables from tokens.env if present."""
     if os.path.exists("tokens.env"):
+        import dotenv
+
         dotenv.load_dotenv("tokens.env")
 
 
