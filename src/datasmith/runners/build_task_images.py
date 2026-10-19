@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import os
 import re
@@ -39,8 +40,15 @@ class DiskStop(RuntimeError):
     """Docker's disk ran low; the task is not failed and stays unclaimed."""
 
 
+@functools.cache
+def _docker_disk() -> str:
+    """Docker's data dir, or / when the daemon does not answer or the dir cannot be read."""
+    root = docker_root()
+    return root if root and os.path.isdir(root) else "/"
+
+
 def _free_gb() -> float:
-    return shutil.disk_usage(docker_root() or "/").free / GIB
+    return shutil.disk_usage(_docker_disk()).free / GIB
 
 
 def _read_jsonl(path: Path) -> list[dict]:
