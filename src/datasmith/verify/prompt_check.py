@@ -15,6 +15,9 @@ DEF = re.compile(r"^[+-]?\s*(?:async\s+)?(?:def|class|cdef|cpdef)\s+([A-Za-z_]\w
 HUNK = re.compile(r"^@@ .*@@\s*(?:async\s+)?(?:def|class|cdef|cpdef)\s+([A-Za-z_]\w{3,})", re.M)
 
 
+PUBLIC_HOOK = re.compile(r"_(repr_\w+|ipython_\w+)_")
+
+
 def task_text(instruction: str) -> str:
     """The text between the task description lead-in and Task Requirements."""
     i = instruction.find(START)
@@ -47,7 +50,8 @@ def check(instruction: str, patch: str = "", benchmarks: set[str] | None = None)
             found.append(f"benchmark {b}")
             break
     # A public entry point may be named (giveaway score 1); an internal function or class may not.
-    for name in sorted(n for n in changed_names(patch) if n.startswith("_")):
+    # IPython display hooks such as _repr_html_ are public.
+    for name in sorted(n for n in changed_names(patch) if n.startswith("_") and not PUBLIC_HOOK.fullmatch(n)):
         if re.search(rf"\b{re.escape(name)}\b", text):
             found.append(f"changed internal code {name}")
     return found

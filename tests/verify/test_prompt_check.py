@@ -50,3 +50,8 @@ def test_drafts_are_scored_and_kept_unapproved(tmp_path, monkeypatch):
         and "#123" not in text
         and json.loads((d / "PROMPT_VERSION.json").read_text())["version"] == 1
     )
+
+
+def test_ipython_display_hooks_are_public():
+    patch = "--- a/m.py\n+++ b/m.py\n@@ -1 +1 @@ def _repr_html_(self):\n-a\n+b\n"
+    assert not [f for f in prompt_check.check("`arr._repr_html_()` is slow.", patch) if "internal" in f]
