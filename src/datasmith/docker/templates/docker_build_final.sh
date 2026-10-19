@@ -52,7 +52,7 @@ set -u
 
 # Same commits as LSV_REF and SNAPSHOT_TESTER_REF in harbor_adapter/template/environment/Dockerfile.
 micromamba run -n "$ENV_NAME" uv pip install git+https://github.com/formula-code/snapshot-tester.git@f08bb0cd51a03c891e65060e25e69f8700055ba2 || true
-micromamba run -n "$ENV_NAME" uv pip install --no-cache git+https://github.com/formula-code/lsv.git@9702a4811dccae4dfdb8dc13663367d6387adcef || true
+micromamba run -n "$ENV_NAME" uv pip install --no-cache git+https://github.com/formula-code/lsv.git@909ec2f0e9d3437b63c488d02a71fb045e0ee280 || true
 micromamba run -n "$ENV_NAME" uv pip install -q --upgrade coverage || true
 
 # ── Discover ASV benchmarks ──────────────────────────────────────────
