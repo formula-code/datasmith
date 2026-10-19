@@ -54,6 +54,15 @@ class Survey:
         path = self.root / "state" / f"{task}.json"
         return json.loads(path.read_text()) if path.exists() else {}
 
+    def save_state(self, task: str, state: dict[str, Any]) -> None:
+        path = self.root / "state" / f"{task}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({**state, "task": task, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        )
+        tmp.replace(path)
+
     def states(self) -> dict[str, dict[str, Any]]:
         return {p.stem: json.loads(p.read_text()) for p in sorted((self.root / "state").glob("*.json"))}
 

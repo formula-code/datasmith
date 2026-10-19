@@ -6,6 +6,7 @@ fc-verify report   SURVEY [TASK ...]             review summaries (default: meas
 fc-verify review   SURVEY TASK DECISION [--note]
 fc-verify auto     SURVEY [--dry-run]            automatic not_approved rules
 fc-verify add      SURVEY TASK ...               pending rows for new tasks
+fc-verify precheck SURVEY TASK ... [--measure-uncovered always_affected,compiled] [--rerun]
 fc-verify failure  LOG ...                       error class of failed image builds
 """
 
@@ -16,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-from datasmith.verify import report, review, status
+from datasmith.verify import precheck, report, review, status
 from datasmith.verify.noise import classify_all, load_rule
 from datasmith.verify.survey import DECISIONS, Survey, task_id
 
@@ -56,7 +57,28 @@ def _add(survey: Survey, a: argparse.Namespace) -> None:
     print("\n".join(review.add_pending(survey, _tasks(a.tasks))))
 
 
-COMMANDS = {"status": _status, "classify": _classify, "report": _report, "review": _review, "auto": _auto, "add": _add}
+def _precheck(survey: Survey, a: argparse.Namespace) -> None:
+    kinds = set(filter(None, a.measure_uncovered.split(",")))
+    for t in _tasks(a.tasks):
+        st = survey.state(t)
+        if not st.get("tag"):
+            print(json.dumps({"task": t, "error": "no image tag in state"}))
+            continue
+        end, result = precheck.precheck(survey, t, st["tag"], kinds, rerun=a.rerun)
+        if end:
+            survey.save_state(t, {**st, "phase": end})
+        print(json.dumps({"task": t, "end": end, **{k: result.get(k) for k in ("by_deps", "patch_failed", "error")}}))
+
+
+COMMANDS = {
+    "status": _status,
+    "classify": _classify,
+    "report": _report,
+    "review": _review,
+    "auto": _auto,
+    "add": _add,
+    "precheck": _precheck,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,16 +86,20 @@ def main(argv: list[str] | None = None) -> int:
         prog="fc-verify", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("status", "classify", "report", "review", "auto", "add"):
+    for name in ("status", "classify", "report", "review", "auto", "add", "precheck"):
         p = sub.add_parser(name)
         p.add_argument("survey", type=Path)
-        if name in ("classify", "report", "add"):
+        if name in ("classify", "report", "add", "precheck"):
             p.add_argument("tasks", nargs="*")
     sub.choices["review"].add_argument("task")
     sub.choices["review"].add_argument("decision", choices=DECISIONS)
     sub.choices["review"].add_argument("--note", default="")
     sub.choices["review"].add_argument("--data", default="phase 1")
     sub.choices["auto"].add_argument("--dry-run", action="store_true")
+    sub.choices["precheck"].add_argument(
+        "--measure-uncovered", default="", help=",".join(precheck.MEASURE_UNCOVERED_KINDS)
+    )
+    sub.choices["precheck"].add_argument("--rerun", action="store_true")
     sub.add_parser("failure").add_argument("logs", nargs="+", type=Path)
     a = ap.parse_args(argv)
 
