@@ -608,7 +608,7 @@ class Pipeline:
         # it is not what the window means. See ``window_filters``.
         rows = fetch_all(
             "pull_requests",
-            select="owner, repo, issue_number, merge_commit_sha, title, body, created_at",
+            select="owner, repo, issue_number, merge_commit_sha, title, body, created_at, patch",
             filters={"is_performance_commit": True, "is_performance_commit_symbolic": True},
             neq_filters={"merge_commit_sha": ""},
             **window_filters(start_date, end_date),
@@ -669,6 +669,7 @@ class Pipeline:
                 "title": r.get("title", ""),
                 "body": r.get("body", ""),
                 "created_at": r.get("created_at"),
+                "patch": r.get("patch") or "",
                 "repo_description": repo_descriptions.get((r["owner"], r["repo"]), ""),
                 "probe_status": probe_by_commit.get((r["owner"], r["repo"], sha)),
             })
@@ -694,14 +695,14 @@ class Pipeline:
 
         from datasmith.agents.config import AgentConfig, configure_dspy
         from datasmith.github.client import GitHubClient
-        from datasmith.runners.render_problems import RenderProblemsRunner
+        from datasmith.runners.render_problems import RenderShortProblemsRunner
         from datasmith.utils.tokens import TokenPool
 
         configure_dspy(AgentConfig.from_env())
 
         pool = TokenPool()
         gh = GitHubClient(pool)
-        runner = RenderProblemsRunner(
+        runner = RenderShortProblemsRunner(
             gh=gh,
             **({"n_concurrent": self._n_concurrent} if self._n_concurrent else {}),
         )

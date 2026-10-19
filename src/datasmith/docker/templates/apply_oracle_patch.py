@@ -24,6 +24,11 @@ exit code, which is 0 in some partial-application cases.
 
 Always exits 0.  Whether the patch applied is a fact for the invariants to
 judge, not a reason to abort the measure step.
+
+Precheck fields (same as datasmith.verify.in_image.coverage_check):
+by_deps = benchmarks LSV selects through a dependency on a file the patch changes (always_affected ones excluded).
+edited_before = tracked files the image already has edited, before the patch.
+edited_overlap = those files whose edited lines touch an oracle hunk (its changed or context lines).
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess  # noqa: S404
 import sys
 import tempfile
@@ -88,12 +94,52 @@ def filter_patch(text: str, excluded_prefixes: list[str]) -> tuple[str, int]:
     return "".join(kept), dropped
 
 
-def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
+def _git(repo: str, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(  # noqa: S603
         ["git", "-C", repo, *args],  # noqa: S607
         capture_output=True,
         text=True,
+        errors="replace",
+        env=env,
     )
+
+
+# unidiff is not available in the image (Python 3.8, no network), so hunk headers are parsed here.
+HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? ")
+
+
+def old_ranges(diff):
+    """{file: [(first, last)]} old-side line ranges of each hunk; a pure insertion covers the line it follows."""
+    out, cur = {}, None
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            cur = line[6:] if line.startswith("+++ b/") else None
+            if cur is not None:
+                out.setdefault(cur, [])
+            continue
+        m = HUNK.match(line)
+        if m and cur is not None:
+            start, n = int(m.group(1)), int(m.group(2) or 1)
+            out[cur].append((start, start + max(n, 1) - 1) if n else (start, start + 1))
+    return out
+
+
+def overlapping(image_diff, patch_text):
+    """Files whose image edits touch a hunk of the oracle patch."""
+    edits, patch = old_ranges(image_diff), old_ranges(patch_text)
+    return sorted(f for f, rs in edits.items() if any(a <= d and c <= b for a, b in rs for c, d in patch.get(f, [])))
+
+
+def deps_counts(db_path: str, changed: list[str]) -> tuple[int, int]:
+    """(by_deps, always_affected) from the deps DB lsv_init wrote; ``changed`` are absolute paths."""
+    from asv.contrib.lightspeed.deps_db import LightspeedDB
+    from asv.contrib.lightspeed.fingerprint import changed_files_with_fingerprints
+
+    db = LightspeedDB(db_path)
+    # shortcut: LightspeedDB has no public query for always_affected, so this reads db._con; upgrade when LSV adds one.
+    always = {r[0] for r in db._con.execute("select benchmark_id from benchmark_meta where always_affected = 1")}
+    affected = {str(b) for b in db.get_affected_benchmark_ids(changed_files_with_fingerprints(changed, db.get_stored_fshas()))}
+    return len(affected - always), len(always)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -103,9 +149,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--benchmark-dir", default="")
     ap.add_argument("--base-sha", default="")
     ap.add_argument("--out", default="/opt/formulacode/patch_info.json")
+    ap.add_argument("--deps-db", default="")
     args = ap.parse_args(argv)
 
     info = {"present": False, "applied": False, "files_changed": 0, "paths_excluded": 0}
+    info.update(dict.fromkeys(("by_deps", "always_affected", "edited_before", "edited_overlap")))
 
     try:
         with open(args.patch, encoding="utf-8", errors="replace") as fh:
@@ -128,6 +176,14 @@ def main(argv: list[str] | None = None) -> int:
         filtered, dropped = filter_patch(text, excluded)
         info["paths_excluded"] = dropped
 
+        info["edited_before"] = _git(args.repo, "diff", "--name-only", "HEAD").stdout.split()
+        info["edited_overlap"] = overlapping(_git(args.repo, "diff", "-U0", "HEAD").stdout, text)
+        # A copy of the starting tree in a separate index, so the files the patch changes exclude the image's own edits.
+        start_dir = tempfile.TemporaryDirectory()
+        start_env = dict(os.environ, GIT_INDEX_FILE=os.path.join(start_dir.name, "index"))
+        _git(args.repo, "read-tree", "HEAD", env=start_env)
+        _git(args.repo, "add", "-A", env=start_env)
+
         if filtered.strip():
             fd, tmp = tempfile.mkstemp(suffix=".patch")
             try:
@@ -149,6 +205,14 @@ def main(argv: list[str] | None = None) -> int:
                     os.unlink(tmp)
                 except OSError:
                     pass
+
+        patch_changed = [os.path.join(args.repo, p) for p in _git(args.repo, "diff", "--name-only", env=start_env).stdout.split()]
+        start_dir.cleanup()
+        if args.deps_db and os.path.exists(args.deps_db):
+            try:
+                info["by_deps"], info["always_affected"] = deps_counts(args.deps_db, patch_changed)
+            except Exception as exc:  # noqa: BLE001 — a missing LSV leaves the fields None
+                print(f"[apply_oracle_patch] deps count failed: {exc}", file=sys.stderr)
 
         if args.base_sha:
             diff = _git(args.repo, "diff", "--name-only", args.base_sha)

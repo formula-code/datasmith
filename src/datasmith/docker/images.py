@@ -6,6 +6,8 @@ import hashlib
 import os
 import posixpath
 import re
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from python_on_whales import DockerClient
@@ -73,6 +75,13 @@ def get_repo_image_name(owner: str, repo: str, py_version: str = "", build_root:
 def get_pr_image_name(owner: str, repo: str, issue_number: int) -> str:
     """Return the canonical tag for a PR image."""
     return f"{_docker_namespace()}/{owner}-{repo}:{issue_number}".lower()
+
+
+def task_image_tag(task_dir: Path) -> str:
+    """fc-task/<task>:<first 12 hex digits of the environment/ digest>."""
+    from datasmith.harbor_adapter.stamp import env_digest
+
+    return f"fc-task/{task_dir.name.lower()}:{env_digest(task_dir / 'environment')[:12]}"
 
 
 class ImageManager:
@@ -174,6 +183,19 @@ class ImageManager:
             builder=_BUILDER,
         )
         return tag
+
+    def build_task_image(
+        self, task_dir: Path, run: Callable[[list[str], dict[str, str]], tuple[int, str]] | None = None
+    ) -> tuple[str, int, str]:
+        """Build a rendered harbor task's environment/ with the legacy builder: (tag, exit code, why it was stopped).
+
+        ``run(cmd, env)`` runs the build, for example with output and disk limits; the default waits for it.
+        """
+        tag = task_image_tag(task_dir)
+        cmd = ["docker", "build", "--rm", "--force-rm", "--network", "host", "-t", tag, str(task_dir / "environment")]
+        env = dict(os.environ, DOCKER_BUILDKIT="0")
+        rc, why = run(cmd, env) if run else (subprocess.run(cmd, env=env, check=False).returncode, "")
+        return tag, rc, why
 
     def image_exists(self, tag: str) -> bool:
         try:

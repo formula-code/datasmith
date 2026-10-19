@@ -296,6 +296,63 @@ def evaluate_invariants(manifest: dict | None) -> InvariantReport:
     return report
 
 
+_TASK_IMAGE_CHECK = r"""
+set -u
+export NVM_DIR=/root/.nvm; set +u; . "$NVM_DIR/nvm.sh" >/dev/null; set -u
+echo "QWEN=$(qwen --version)"
+set +u; . /etc/profile.d/asv_build_vars.sh; set -u
+eval "$(micromamba shell hook --shell=bash)"
+micromamba run -n "$ENV_NAME" python -c "import asv_runner, coverage, jinja2, asv.contrib.lightspeed" && echo IMPORTS=ok
+micromamba run -n "$ENV_NAME" snapshot-tool --help >/dev/null 2>&1 && echo SNAPSHOT_TOOL=ok
+echo "HEAD=$(git -C /workspace/repo rev-parse HEAD 2>/dev/null)"
+echo "LSV_INIT=$(cat /opt/lsv/cache/lsv_init_results.json 2>/dev/null | tr -d '\n')"
+echo "ADDED_DEPS=$(cat /opt/lsv/cache/added_deps.json 2>/dev/null | tr -d '\n')"
+"""
+
+
+def _json_or(text: str | None, default: Any) -> Any:
+    try:
+        return json.loads(text or "null") or default
+    except json.JSONDecodeError:
+        return default
+
+
+def check_task_image(tag: str) -> tuple[dict, list[str]]:
+    """Facts about a built harbor task image and the problems that keep it from being measured."""
+    r = subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "--entrypoint", "bash", tag, "-c", _TASK_IMAGE_CHECK],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    out = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line and line.split("=", 1)[0].isupper())
+    problems = []
+    if not out.get("QWEN", "").strip():
+        problems.append("qwen-code does not run")
+    if out.get("IMPORTS") != "ok":
+        problems.append("import asv_runner/coverage/jinja2/asv.contrib.lightspeed failed")
+    if out.get("SNAPSHOT_TOOL") != "ok":
+        problems.append("snapshot-tool missing")
+    lsv = _json_or(out.get("LSV_INIT"), {})
+    info = {
+        "head": out.get("HEAD", ""),
+        "env_fingerprint": lsv.get("env_fingerprint"),
+        "baseline_sha": lsv.get("baseline_sha"),
+        "bake_cpus_bounded": lsv.get("bake_cpus_bounded"),
+        "benchmarks_discovered": len(lsv.get("benchmarks_discovered") or []),
+        "added_deps": _json_or(out.get("ADDED_DEPS"), None),
+    }
+    if not lsv.get("baseline_sha"):
+        problems.append("no stored baseline in /opt/lsv/cache/lsv_init_results.json")
+    elif lsv["baseline_sha"] != info["head"]:
+        problems.append(f"baseline_sha {lsv['baseline_sha']} != HEAD {info['head']}")
+    if not info["env_fingerprint"]:
+        problems.append("no env_fingerprint in the stored baseline")
+    if not r.stdout.strip():
+        problems.append(f"check container failed: {r.stderr.strip()[-500:]}")
+    return info, problems
+
+
 def read_build_manifest(image: str) -> dict | None:
     """Read the sealed manifest out of a built image.
 

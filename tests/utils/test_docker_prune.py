@@ -21,7 +21,7 @@ from datasmith.utils import docker_prune
 class TestShouldPrune:
     def test_below_threshold_keeps_the_cache(self):
         with (
-            patch.object(docker_prune, "_docker_root", return_value="/mnt/sdd2/docker"),
+            patch.object(docker_prune, "docker_root", return_value="/mnt/sdd2/docker"),
             patch.object(docker_prune, "_used_pct", return_value=12.4),
         ):
             wanted, reason = docker_prune._should_prune()
@@ -30,7 +30,7 @@ class TestShouldPrune:
 
     def test_at_or_above_threshold_prunes(self):
         with (
-            patch.object(docker_prune, "_docker_root", return_value="/mnt/sdd2/docker"),
+            patch.object(docker_prune, "docker_root", return_value="/mnt/sdd2/docker"),
             patch.object(docker_prune, "_used_pct", return_value=91.0),
         ):
             wanted, reason = docker_prune._should_prune()
@@ -39,7 +39,7 @@ class TestShouldPrune:
 
     def test_exactly_at_threshold_prunes(self):
         with (
-            patch.object(docker_prune, "_docker_root", return_value="/x"),
+            patch.object(docker_prune, "docker_root", return_value="/x"),
             patch.object(docker_prune, "_used_pct", return_value=docker_prune.DATASMITH_DOCKER_PRUNE_MIN_USED_PCT),
         ):
             wanted, _ = docker_prune._should_prune()
@@ -47,14 +47,14 @@ class TestShouldPrune:
 
     def test_unknown_docker_root_prunes(self):
         """Fail safe. A stalled pipeline costs more than a cold cache."""
-        with patch.object(docker_prune, "_docker_root", return_value=None):
+        with patch.object(docker_prune, "docker_root", return_value=None):
             wanted, reason = docker_prune._should_prune()
         assert wanted is True
         assert "unknown" in reason
 
     def test_unreadable_usage_prunes(self):
         with (
-            patch.object(docker_prune, "_docker_root", return_value="/gone"),
+            patch.object(docker_prune, "docker_root", return_value="/gone"),
             patch.object(docker_prune, "_used_pct", return_value=None),
         ):
             wanted, reason = docker_prune._should_prune()

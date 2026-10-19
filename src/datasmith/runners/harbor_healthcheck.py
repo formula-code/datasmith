@@ -370,6 +370,19 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
         get_logger(__name__).warning("Snapshot publish error: %s", exc)
 
 
+def _keep_oracle_snapshots(trial: Any, snapshots_dir: Path) -> None:
+    """Copy the trial's ``.snapshots/`` to ``<snapshots_dir>/<task>/`` when it has an entry that is not a skip."""
+    import shutil
+
+    snap = _trial_dir_from_uri(trial.trial_uri) / "artifacts" / ".snapshots"
+    try:
+        real = any(v != "skip" for v in json.loads((snap / "baseline.json").read_text())["entries"].values())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    if real:
+        shutil.copytree(snap, snapshots_dir / trial.task_id.get_name(), dirs_exist_ok=True)
+
+
 def _insert_harbor_runs(rows: list[dict[str, Any]], chunk_size: int = 100) -> int:
     """Insert new rows into harbor_runs; each row is a new run.
 
@@ -415,9 +428,11 @@ async def run_harbor_healthcheck(
     n_concurrent_trials: int = 4,
     rounds: int = 2,
     job_name: str | None = None,
+    snapshots_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Write tasks for *items*, run the oracle agent on them, and store one row per trial.
 
+    ``snapshots_dir`` also keeps each oracle snapshot reference with a real entry in ``<snapshots_dir>/<task>/``.
     Returns the inserted row dicts.
     """
     from harbor.job import Job
@@ -474,6 +489,8 @@ async def run_harbor_healthcheck(
                 _publish_oracle_snapshots(
                     trial, row["owner"], row["repo"], row["issue_number"]
                 )
+                if snapshots_dir is not None:
+                    _keep_oracle_snapshots(trial, snapshots_dir)
 
     n_success = sum(1 for r in rows if r["status"] == "success")
     n_fast = sum(

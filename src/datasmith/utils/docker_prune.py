@@ -18,7 +18,7 @@ _DEFAULT_INTERVAL_SEC = 7200
 DATASMITH_DOCKER_PRUNE_MIN_USED_PCT: float = float(os.environ.get("DATASMITH_DOCKER_PRUNE_MIN_USED_PCT", "85"))
 
 
-def _docker_root() -> str | None:
+def docker_root() -> str | None:
     """Return the Docker data root, which can be a different filesystem from /."""
     docker = shutil.which("docker")
     if docker is None:
@@ -53,7 +53,7 @@ def _should_prune() -> tuple[bool, str]:
 
     When usage cannot be read, prune: a full disk costs more than a cold cache.
     """
-    root = _docker_root()
+    root = docker_root()
     if root is None:
         return True, "docker root unknown; pruning to stay safe"
     used = _used_pct(root)
