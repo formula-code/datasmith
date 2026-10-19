@@ -64,8 +64,13 @@ printf '{"head":"%s","head_ct":%s,"remotes":"%s","refs":%s,"refs_ahead":%s,"unre
 """
 
 
-def pr_number(task_id: str) -> str:
-    m = re.search(r"__(\d+)$", task_id)
+def pr_number(task_id: str, image: str = "") -> str:
+    """The PR number from a task id, else from an fc-task or formulacode image name."""
+    m = (
+        re.search(r"__(\d+)$", task_id)
+        or re.search(r"__(\d+):", image)
+        or re.search(r"^formulacode/[^:]+:(\d+)$", image)
+    )
     return m[1] if m else ""
 
 

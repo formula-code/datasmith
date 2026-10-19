@@ -202,3 +202,12 @@ def test_image_check_records_added_modules(monkeypatch):
     )
     info, problems = images.check_image("t")
     assert info["added_deps"] is None and "no stored baseline in /opt/lsv/cache/lsv_init_results.json" in problems
+
+
+def test_pr_number_sources():
+    from datasmith.verify.scrub import pr_number
+
+    assert pr_number("numpy__numpy__21464") == "21464"
+    assert pr_number("", "fc-task/numpy__numpy__21464:cc3df4e2979b") == "21464"
+    assert pr_number("", "formulacode/networkx-networkx:8138") == "8138"
+    assert pr_number("", "formulacode/base:latest") == ""
