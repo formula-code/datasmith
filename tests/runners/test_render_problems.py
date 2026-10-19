@@ -6,7 +6,7 @@ import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from datasmith.runners.render_problems import RenderProblemsRunner, RenderShortProblemsRunner
+from datasmith.runners.render_problems import RenderProblemsRunner, RenderShortProblemsRunner, _leaks
 
 
 def _mock_supabase() -> MagicMock:
@@ -140,6 +140,10 @@ class TestShortProblems:
         assert mock_render.call_count == 1
         assert mock_render.call_args.kwargs["issues"] == []
         assert runner._error_types == {"PromptLeak": 2}
+
+    def test_ipython_display_hooks_are_public(self) -> None:
+        patch_text = "--- a/m.py\n+++ b/m.py\n@@ -1 +1 @@ def _repr_html_(self):\n-a\n+b\n"
+        assert _leaks("`arr._repr_html_()` is slow.", patch_text) == []
 
 
 class TestProblemExtractorIsHoisted:

@@ -171,6 +171,8 @@ _LINK = re.compile(r"https?://github\.com/\S+/(pull|issues)/\d+|(?<![\w/])#\d{2,
 _CODE = re.compile(r"```|^\+\+\+ |^--- a/|^@@ ", re.M)
 _DEF = re.compile(r"^[+-]?\s*(?:async\s+)?(?:def|class|cdef|cpdef)\s+([A-Za-z_]\w{3,})", re.M)
 _HUNK = re.compile(r"^@@ .*@@\s*(?:async\s+)?(?:def|class|cdef|cpdef)\s+([A-Za-z_]\w{3,})", re.M)
+# IPython display hooks such as _repr_html_ are public.
+_PUBLIC_HOOK = re.compile(r"_(repr_\w+|ipython_\w+)_")
 
 
 def _leaks(text: str, patch: str) -> list[str]:
@@ -184,7 +186,9 @@ def _leaks(text: str, patch: str) -> list[str]:
     changed |= set(_HUNK.findall(patch))
     # A public entry point may be named; an internal function or class may not.
     found += [
-        f"internal code: {n}" for n in sorted(changed) if n.startswith("_") and re.search(rf"\b{re.escape(n)}\b", text)
+        f"internal code: {n}"
+        for n in sorted(changed)
+        if n.startswith("_") and not _PUBLIC_HOOK.fullmatch(n) and re.search(rf"\b{re.escape(n)}\b", text)
     ]
     return found
 
