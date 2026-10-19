@@ -144,3 +144,61 @@ def test_publish_refuses_a_leaking_image(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "sh", lambda cmd, **kw: None)
     with pytest.raises(RuntimeError, match="still leaks"):
         registry.publish_one(d, row, FakeRegistry(), tmp_path)
+
+
+def guarded(monkeypatch, tmp_path, frees, idle_s=10**12, step=60, cmd=("sleep", "1")):
+    clock, readings = iter(range(0, 10**9, step)), iter(frees)
+    monkeypatch.setattr(images, "root_free_gb", lambda: next(readings, frees[-1]))
+    monkeypatch.setattr(images.time, "monotonic", lambda: next(clock))
+    real_sleep = images.time.sleep
+    monkeypatch.setattr(images.time, "sleep", lambda s: real_sleep(0.01))
+    return images.run_guarded(list(cmd), tmp_path / "log", images.Limits(min_free_gb=12.0, idle_s=idle_s))[1]
+
+
+def test_a_short_disk_spike_does_not_kill_the_build(monkeypatch, tmp_path):
+    assert guarded(monkeypatch, tmp_path, [26, 9, 26]) == ""
+
+
+def test_low_disk_that_lasts_kills_the_build(monkeypatch, tmp_path):
+    assert "killed" in guarded(monkeypatch, tmp_path, [26, 9, 9, 9, 9, 9])
+
+
+def test_below_the_hard_floor_kills_at_once(monkeypatch, tmp_path):
+    assert "killed" in guarded(monkeypatch, tmp_path, [2])
+
+
+def test_a_build_without_output_is_killed(monkeypatch, tmp_path):
+    assert "no output" in guarded(monkeypatch, tmp_path, [26], idle_s=14400, step=600, cmd=("sleep", "30"))
+
+
+def test_only_low_disk_is_a_disk_stop(tmp_path, monkeypatch):
+    d = task(tmp_path, "o__r__1")
+    (d / "render_stamp.json").write_text('{"params": {"base_image": "x"}}')
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "o__r__1.log").write_text("")
+    monkeypatch.setattr(images, "image_exists", lambda ref: True)
+    monkeypatch.setattr(images, "sh", lambda cmd, **kw: type("P", (), {"stdout": "", "returncode": 0})())
+    for why, disk in (("no output for 14400s; killed", False), ("root free 9.0G < 12.0G; killed", True)):
+        monkeypatch.setattr(images, "run_guarded", lambda *a, why=why, **kw: (-9, why))
+        _, err = images.build_one(d, tmp_path, images.Limits(keep_if_free_gb=0.0), set())
+        assert (err["stage"], err["disk"]) == ("build", disk)
+
+
+def test_image_check_records_added_modules(monkeypatch):
+    stdout = "\n".join([
+        "QWEN=0.22.3",
+        "IMPORTS=ok",
+        "SNAPSHOT_TOOL=ok",
+        "HEAD=abc",
+        'LSV_INIT={"baseline_sha": "abc", "env_fingerprint": {"cpus": 2}}',
+        'ADDED_DEPS={"discovery_retry": [{"module": "distributed", "installed": true}]}',
+    ])
+    monkeypatch.setattr(images, "sh", lambda cmd, **kw: type("P", (), {"stdout": stdout, "stderr": ""})())
+    info, problems = images.check_image("t")
+    assert problems == []
+    assert info["added_deps"]["discovery_retry"][0]["module"] == "distributed"
+    monkeypatch.setattr(
+        images, "sh", lambda cmd, **kw: type("P", (), {"stdout": "HEAD=abc\nADDED_DEPS=", "stderr": ""})()
+    )
+    info, problems = images.check_image("t")
+    assert info["added_deps"] is None and "no stored baseline in /opt/lsv/cache/lsv_init_results.json" in problems
