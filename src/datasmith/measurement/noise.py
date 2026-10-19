@@ -20,10 +20,10 @@ ORACLE_MIN_RUNS = 2
 
 
 def load_rule(path: Path) -> dict[str, Any]:
-    rule = json.loads(Path(path).read_text())
+    rule: dict[str, Any] = json.loads(Path(path).read_text())
     for repo in [None, *rule.get("repos", {})]:
         r = rule_for(rule, repo)
-        missing = [k for k in NEEDS.get(r.get("form"), ("form",)) if k not in r]
+        missing = [k for k in NEEDS.get(str(r.get("form")), ("form",)) if k not in r]
         if missing or r.get("bias_check", "aggregate") not in {"aggregate", "per_benchmark"}:
             raise ValueError(f"{path}: bad rule for repo {repo}: missing {missing} or bad bias_check")
     return rule
@@ -96,7 +96,7 @@ def oracle_problem(run: dict, max_broken: float = ORACLE_MAX_BROKEN) -> str | No
     """Why an oracle run cannot be the reference (crashed, measured nothing, broke most tests), else None."""
     tests = run.get("tests") or {}
     if run.get("exception"):
-        return run["exception"]
+        return str(run["exception"])
     if not run["log_speedups"]:
         return "no_benchmarks"
     if tests.get("n_base_pass") and (tests["n_tests"] == 0 or tests["n_regressed"] > max_broken * tests["n_base_pass"]):
