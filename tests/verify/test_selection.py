@@ -101,7 +101,13 @@ def test_records_for_reports_incomplete_rows():
 def test_sample_order_groups():
     def c(task, tier=2, large=False):
         repo = task.split("#")[0]
-        return {"task": task, "repo_key": selection.image_name(*repo.split("/")), "tier": tier, "stratum": "easy/na", "large": large}
+        return {
+            "task": task,
+            "repo_key": selection.image_name(*repo.split("/")),
+            "tier": tier,
+            "stratum": "easy/na",
+            "large": large,
+        }
 
     seeds = [c("a/x#1", tier=0)]
     pool = [c("pandas-dev/pandas#1", large=True), c("b/y#1"), c("b/y#2"), c("b/y#3"), c("c/z#1", tier=1)]

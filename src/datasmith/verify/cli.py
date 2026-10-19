@@ -18,6 +18,7 @@ fc-verify readiness SURVEY OUT_CSV [--registry-tags FILE] [--fetch-github] [--gi
 fc-verify records  IDS_MD OUT_DIR                  render records for chosen owner/repo#N ids (database)
 fc-verify select   OUT_DIR --hub TSV [--n 130] [--seed S] [--skip IDS_MD ...] [--exclude-repo owner/repo ...]
 fc-verify env-image owner/repo#N ... [--registry URI]   environment image rebuilt at the base commit
+fc-verify prompt   TASKS_ROOT PROMPTS_DIR [TASK ...] [--dry-run]   approved prompt text into rendered tasks
 fc-verify failure  LOG ...                       error class of failed image builds
 """
 
@@ -226,6 +227,14 @@ def _env_image(a: argparse.Namespace) -> int:
     return 0
 
 
+def _prompt(a: argparse.Namespace) -> int:
+    from datasmith.verify import prompts
+
+    for t in prompts.apply(a.tasks_root, a.prompts, a.tasks or None, a.dry_run):
+        print(f"{t}: prompt applied" + (" (dry run)" if a.dry_run else ""))
+    return 0
+
+
 def _failure(a: argparse.Namespace) -> int:
     for log in a.logs:
         print(json.dumps({"log": str(log), **report.failure_reason(log)}))
@@ -233,6 +242,7 @@ def _failure(a: argparse.Namespace) -> int:
 
 
 NO_SURVEY = {
+    "prompt": _prompt,
     "records": _records,
     "select": _select,
     "env-image": _env_image,
@@ -333,6 +343,11 @@ def main(argv: list[str] | None = None) -> int:
     ei = sub.add_parser("env-image")
     ei.add_argument("tasks", nargs="+")
     ei.add_argument("--registry", help="repository URI to push the result to")
+    pr = sub.add_parser("prompt")
+    pr.add_argument("tasks_root", type=Path)
+    pr.add_argument("prompts", type=Path)
+    pr.add_argument("tasks", nargs="*")
+    pr.add_argument("--dry-run", action="store_true")
     pu = sub.add_parser("push")
     pu.add_argument("manifest", type=Path)
     pu.add_argument("out", type=Path)
