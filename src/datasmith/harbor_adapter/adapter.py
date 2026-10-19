@@ -52,6 +52,7 @@ TEST_HELPERS = (
     "jinja_patch_plugin_pandas.py",
     "rebuild.sh",
     "project_imports.py",
+    "measure_lock.sh",
 )
 
 
