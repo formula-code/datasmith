@@ -209,7 +209,7 @@ def _run_block(tmp_path, conf):
     if conf is not None:
         (tests / "confirm.json").write_text(json.dumps(conf))
     script = f"""set -euo pipefail
-LOG_DIR={tmp_path}; FC_BASE=BASE; FC_REBUILD_CMD="bash rebuild"; export FC_REBUILD_CMD
+LOG_DIR={tmp_path}; FC_BASE=BASE; FC_REBUILD_CMD="bash rebuild"; export FC_REBUILD_CMD; _fc_skip_lsv=
 ts() {{ date +%s; }}
 mg_acquire() {{ echo "acquire $1" >> {tmp_path}/calls; }}
 mg_release() {{ echo release >> {tmp_path}/calls; }}

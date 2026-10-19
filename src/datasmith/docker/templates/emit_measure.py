@@ -129,6 +129,7 @@ def measure_block(
         "patch_applied": patch_info.get("applied"),
         "patch_files_changed": patch_info.get("files_changed"),
         "patch_paths_excluded": patch_info.get("paths_excluded"),
+        **{k: patch_info.get(k) for k in ("by_deps", "always_affected", "edited_before", "edited_overlap")},
         "benchmarks_impactable_n": impactable_n,
         "benchmarks_measured_n": measured_n,
         "benchmarks_degenerate_n": degenerate_n,
