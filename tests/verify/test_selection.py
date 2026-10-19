@@ -96,3 +96,21 @@ def test_records_for_reports_incomplete_rows():
     recs, missing = selection.records_for(client, ["o/r#1", "o/r#2", "o/r#3"])
     assert [r["issue_number"] for r in recs] == [1]
     assert missing == ["o/r#2", "o/r#3"]
+
+
+def test_sample_order_groups():
+    def c(task, tier=2, large=False):
+        repo = task.split("#")[0]
+        return {"task": task, "repo_key": selection.image_name(*repo.split("/")), "tier": tier, "stratum": "easy/na", "large": large}
+
+    seeds = [c("a/x#1", tier=0)]
+    pool = [c("pandas-dev/pandas#1", large=True), c("b/y#1"), c("b/y#2"), c("b/y#3"), c("c/z#1", tier=1)]
+    rows = selection.sample(seeds, pool, 5, "s", lambda repo: 2)
+    assert [r["group"] for r in rows] == ["seed", "tier1", "tier2", "fill", "large"]
+
+
+def test_a_rejected_row_is_replaced():
+    pool = [cand(f"b/y#{i}", "b-y", 2, "easy") for i in range(3)]
+    first = selection.sample([], pool, 1, "s", lambda repo: 5)[0]["task"]
+    rows = selection.sample([], pool, 2, "s", lambda repo: 5, accept=lambda c: c["task"] != first)
+    assert len(rows) == 2 and first not in [r["task"] for r in rows]
