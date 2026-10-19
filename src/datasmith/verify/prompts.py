@@ -21,7 +21,7 @@ def rewrite(text: str, observations: str, issues: str | None) -> str:
     i = text.index(START) + len(START)
     ends = ENDS[1:] if issues is not None else ENDS
     # From i - 1: an empty problem text leaves the section heading's newline just before i.
-    j = max(i, min(k for k in (text.find(e, i - 1) for e in ends) if k >= 0))
+    j = min(k for k in (text.find(e, i - 1) for e in ends) if k >= 0)
     section = f"\n**Relevant Issues**\n\n{issues.strip()}\n" if issues and issues.strip() else ""
     return text[:i] + "**Initial Observations**\n\n" + observations.strip() + "\n" + section + text[j:]
 

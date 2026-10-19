@@ -38,7 +38,9 @@ def test_apply_writes_version_and_backup(tmp_path):
     assert list((tmp_path / "prompt-backups" / "o__r__1").iterdir())
 
 
-def test_rewrite_handles_empty_problem_text():
-    empty = "Use the following information if needed to understand the problem:\n\n## Task Requirements\n- x\n"
-    out = prompts.rewrite(empty, "new text", None)
-    assert out.endswith("**Initial Observations**\n\nnew text\n## Task Requirements\n- x\n")
+def test_rewrite_fills_an_empty_problem_text():
+    text = "To understand the problem:\n\n## Task Requirements\n- x\n"
+    assert (
+        prompts.rewrite(text, "slow", "")
+        == "To understand the problem:\n\n**Initial Observations**\n\nslow\n\n## Task Requirements\n- x\n"
+    )
