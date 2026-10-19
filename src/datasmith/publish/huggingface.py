@@ -20,7 +20,9 @@ class HuggingFacePublisher:
         token_path: str = "",
     ) -> None:
         self._repo_id = repo_id
-        self._token_path = token_path or os.environ.get("HF_TOKEN_PATH", os.path.expanduser("~/.cache/huggingface/token"))
+        self._token_path = token_path or os.environ.get(
+            "HF_TOKEN_PATH", os.path.expanduser("~/.cache/huggingface/token")
+        )
         self._token: str | None = None
 
     def _get_token(self) -> str:

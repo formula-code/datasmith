@@ -362,9 +362,7 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
             except urllib.error.HTTPError as e:
                 if method == "POST" and e.code in (400, 409):
                     continue  # exists -> overwrite
-                get_logger(__name__).warning(
-                    "Snapshot publish failed for %s (%s)", object_key, e.code
-                )
+                get_logger(__name__).warning("Snapshot publish failed for %s (%s)", object_key, e.code)
                 return
     except Exception as exc:  # publishing must never stop the healthcheck
         get_logger(__name__).warning("Snapshot publish error: %s", exc)
@@ -486,9 +484,7 @@ async def run_harbor_healthcheck(
             rows.append(row)
             # Store the oracle baseline that agent trials check against.
             if row.get("agent_name") == "oracle":
-                _publish_oracle_snapshots(
-                    trial, row["owner"], row["repo"], row["issue_number"]
-                )
+                _publish_oracle_snapshots(trial, row["owner"], row["repo"], row["issue_number"])
                 if snapshots_dir is not None:
                     _keep_oracle_snapshots(trial, snapshots_dir)
 
