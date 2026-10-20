@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+from collections.abc import Sequence
 from pathlib import Path
 from textwrap import dedent
 
@@ -102,8 +104,18 @@ storage = '{storage}'
 """
 
 
-def render_dockerfile(base_image: str, numba_threads: int = 2, lsv_rounds: int = DATASMITH_LSV_ROUNDS) -> str:
-    """``numba_threads`` must equal the trial cpu quota and ``lsv_rounds`` the trial's ``--rounds``."""
+def render_dockerfile(
+    base_image: str,
+    numba_threads: int = 2,
+    lsv_rounds: int = DATASMITH_LSV_ROUNDS,
+    restore_paths: Sequence[str] = (),
+) -> str:
+    """``numba_threads`` must equal the trial cpu quota and ``lsv_rounds`` the trial's ``--rounds``.
+    ``restore_paths``: repo files to put back to the base commit (see base_restore.json)."""
     return render_template(
-        "environment/Dockerfile", base_image=base_image, numba_threads=int(numba_threads), lsv_rounds=int(lsv_rounds)
+        "environment/Dockerfile",
+        base_image=base_image,
+        numba_threads=int(numba_threads),
+        lsv_rounds=int(lsv_rounds),
+        restore_paths=shlex.join(restore_paths),
     )

@@ -142,6 +142,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     out_root = Path(args.out)
     if out_root.exists() and any(out_root.iterdir()) and not args.force:
         raise SystemExit(f"{out_root} is not empty; pass --force to re-render into it")
+    restore = json.loads(Path(args.restore_paths).read_text()) if args.restore_paths else {}
     adapter = FormulaCodeAdapter(harbor_tasks_root=out_root, force=False)
     for rec in records:
         out_dir = adapter.generate_task(
@@ -153,6 +154,7 @@ def cmd_render(args: argparse.Namespace) -> int:
             storage=args.storage,
             rounds=args.rounds,
             verifier_env=verifier_env,
+            restore_paths=restore.get(rec.task_dir_name),
         )
         print(f"[render] {out_dir}")
     print(
@@ -212,6 +214,11 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         metavar="KEY=VAL",
         help="[verifier.env] entries for task.toml (repeatable)",
+    )
+    rn.add_argument(
+        "--restore-paths",
+        default=str(Path(__file__).parent / "base_restore.json"),
+        help="json {task_id: [repo paths]} the image puts back to the base commit ('' for none)",
     )
     rn.add_argument("--no-pytest", action="store_true")
     rn.add_argument(

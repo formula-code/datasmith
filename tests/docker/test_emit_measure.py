@@ -105,6 +105,13 @@ class TestPatchAndProvenance:
         assert b["patch_files_changed"] == 0
         assert b["patch_paths_excluded"] == 2
 
+    def test_precheck_fields_are_passed_through(self):
+        m = _load()
+        fields = {"by_deps": 3, "always_affected": 1, "edited_before": ["a.py"], "edited_overlap": []}
+        b = _block(m, _lsv({}), _patch_info(**fields))
+        assert {k: b[k] for k in fields} == fields
+        assert _block(m, _lsv({}), _patch_info())["by_deps"] is None
+
     def test_absent_patch_reports_present_false(self):
         m = _load()
         b = _block(m, _lsv({}), _patch_info(present=False, applied=False, files_changed=0))
