@@ -34,7 +34,7 @@ def _render(run_pytest: bool) -> str:
 
 def _steps(run_pytest: bool) -> str:
     text = _render(run_pytest)
-    return text[text.index("# ── Snapshot vars") : text.index("# Per-step timings")]
+    return text[text.index("# ── Snapshot vars") : text.index("# ── Timing check")]
 
 
 def _prefix(text: str, tmp_path: Path) -> str:
@@ -210,13 +210,14 @@ def test_parser_marks_skipped_snapshots_as_not_run(tmp_path: Path, monkeypatch: 
 
 def _run_lsv(tmp_path: Path, env: dict[str, str], profile: str = "") -> tuple[list[str], Path]:
     text = _render(True)
-    steps = text[text.index("# ── LSV Phase 2") : text.index("# ── Snapshot vars")]
+    steps = text[text.index("# ── LSV Phase 2") : text.index("# Per-step timings")]
     (tmp_path / "confirm.json").write_text("{}")
     calls = tmp_path / "calls"
     script = f"""micromamba() {{ :; }}
 {_prefix(text, tmp_path)}
 LOG_DIR={tmp_path}
 FC_BASE=BASE
+_fc_timing_skipped=
 ts() {{ echo T; }}
 mg_acquire() {{ echo "acquire $1" >> {calls}; }}
 mg_release() {{ echo release >> {calls}; }}

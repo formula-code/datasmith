@@ -745,7 +745,8 @@ def main() -> None:
     lsv_results = load_lsv_results(LSV_DIR)
     lsv_init_summary = summarize_lsv_init(lsv_results)
     lsv_skip_path = LOG_DIR / "lsv_skipped.json"
-    lsv_skipped = json.loads(lsv_skip_path.read_text()).get("lsv_skipped") if lsv_skip_path.exists() else None
+    lsv_skip = json.loads(lsv_skip_path.read_text()) if lsv_skip_path.exists() else {}
+    lsv_skipped = lsv_skip.get("lsv_skipped")
     if not lsv_results and not lsv_skipped:
         print("[parser] No LSV results found. Writing zero reward.")
         write_reward(
@@ -769,7 +770,8 @@ def main() -> None:
 
     measure_results = lsv_results.get("measure", {}) or {}
     benchmarks = measure_results.get("benchmarks", {}) or {}
-    lsv_error = measure_results.get("error")
+    # test.sh skips the timing with an error when the timed trees would not be the agent's and setup's.
+    lsv_error = measure_results.get("error") or lsv_skip.get("error")
 
     # Compute speedups (baseline/current from LSV)
     speedups = compute_per_benchmark_speedups(benchmarks)

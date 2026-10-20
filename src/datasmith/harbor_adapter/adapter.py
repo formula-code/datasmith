@@ -53,6 +53,8 @@ TEST_HELPERS = (
     "rebuild.sh",
     "project_imports.py",
     "measure_lock.sh",
+    "timing_decision.py",
+    "base_digest.sh",
 )
 
 

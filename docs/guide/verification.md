@@ -64,6 +64,20 @@ A harbor task's `tests/test.sh` runs `tests/pytest_runner.py`, which selects tes
 - The runner then stashes the patch, rebuilds, and runs the same tests at the base commit. A test that passes at base and fails with the patch is a regression.
 - Oracle runs and agent attempts use the same selection.
 
+## Order in test.sh and when the timing is skipped
+
+`test.sh` runs snapshots and pytest first, then the LSV timing. It skips the timing (`lsv_skipped.json`) in these cases:
+
+| Reason | When | Graded as |
+|---|---|---|
+| `no_patch` | The patch changes no files | `no_patch` |
+| `pytest_regression` | A test passes at base and fails with the patch, and is not in `FC_ORACLE_FAILING_TESTS` | `pytest_regression` |
+| `snapshots_regressed` | A snapshot passes or skips at base and fails with the patch; libraries in `FORMULACODE_SNAPSHOT_SKIP_LIBS` (default `dask`) are exempt | `snapshots_regressed` |
+| `tree_not_restored` | After pytest's base run, the tree differs from the agent's (an edit left stashed is popped first) | failure |
+| `base_changed` | The base copy `/workspace/.fc_base` differs from its digest at the end of setup (`FC_BASE_DIGEST` from the host, else `/opt/fc_base_digest`) | failure |
+
+The first three follow the host's grading rules in `fcrl.grading`, so the reward is the same as with timing. They do not apply to the oracle, to replays with `FC_SKIP_PYTEST` or `FC_SKIP_SNAPSHOT`, or with `FC_TIMING_SHORT_CIRCUIT=0`, which noise studies use to time every patch.
+
 ## Preflight check
 
 Before running verification, confirm your environment is properly configured:

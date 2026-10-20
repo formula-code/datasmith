@@ -16,7 +16,7 @@ _TEST_SH = Path(__file__).parents[2] / "src" / "datasmith" / "harbor_adapter" / 
 def _pytest_block() -> str:
     text = _TEST_SH.read_text()
     start = text.index("pytest_start=$(date +%s)")
-    end = text.index("# Per-step timings")
+    end = text.index("# ── Timing check")
     block = re.sub(r"\{%-? else %\}.*?\{%-? endif %\}", "", text[start:end], flags=re.DOTALL)
     block = re.sub(r"\{%-? if run_pytest %\}", "", block)
     return re.sub(r"\{\{[^}]*\}\}", "BASE", block)
