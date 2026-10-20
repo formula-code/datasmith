@@ -1,16 +1,8 @@
-"""Async runner base: bounded concurrency, progress rows, and a loud ending.
+"""Async runner base: bounded concurrency, progress rows, and a summary line.
 
-``BaseRunner`` catches every per-item exception and keeps going, which is the
-behaviour the pipeline wants — one unreachable repository must not abort a
-stage.  The cost is that a stage which achieved nothing looks exactly like a
-stage that achieved everything.  A real run reported "154/154 repositories,
-zero failures" while storing 35 PRs, and had no way to say that was wrong.
-
-So every run ends with a summary line: total, succeeded, failed, and a count
-per distinct exception type.  It is logged unconditionally, at ``info``,
-including on the zero-failure runs — the motivating case *had* no failures, so
-a summary that only speaks up when something raised would have missed it
-entirely (spec section 5).
+``BaseRunner`` catches each per-item exception and continues, so one bad item
+does not abort a stage. Each run ends with a summary of totals and error types,
+logged even when nothing failed, so a stage that did nothing is visible.
 """
 
 from __future__ import annotations
@@ -83,12 +75,7 @@ class BaseRunner(ABC):
             self._log_summary()
 
     def _log_summary(self) -> None:
-        """Say how the stage went, whether or not anything failed.
-
-        Unconditional on purpose.  Silence is what made a stage that stored
-        35 of 461 PRs indistinguishable from a healthy one, so the end of a
-        run always states the three counts and the error types behind them.
-        """
+        """Log the item counts and error types, also when nothing failed."""
         if self._error_types:
             breakdown = ", ".join(f"{name}={count}" for name, count in sorted(self._error_types.most_common()))
         else:

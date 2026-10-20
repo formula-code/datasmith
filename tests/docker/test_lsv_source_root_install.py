@@ -17,7 +17,9 @@ def test_editable_install_in_a_nested_folder(tmp_path, monkeypatch):
     (repo / "python" / "src" / "nanoarrow").mkdir(parents=True)
     (repo / "python" / "src" / "nanoarrow" / "__init__.py").write_text("")
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/apache/arrow-nanoarrow.git"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/apache/arrow-nanoarrow.git"], check=True
+    )
     info = site / "nanoarrow-0.1.dist-info"
     info.mkdir(parents=True)
     (info / "METADATA").write_text("Metadata-Version: 2.1\nName: nanoarrow\nVersion: 0.1\n")

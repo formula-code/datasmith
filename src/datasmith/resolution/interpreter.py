@@ -1,16 +1,8 @@
 """Choose the Python interpreter for a commit, and record why.
 
-The predecessor assigned ``python_version`` unconditionally before checking
-whether the attempt had succeeded (``orchestrator.py:603-607``), tried candidates
-newest-first, and broke out of the loop on the first non-ABI error.  The value it
-stored was therefore "the newest interpreter that did not crash", and re-running
-the same 13 commits changed it on 7 of them.  The project's own
-``requires-python`` was parsed and then discarded.
-
-Here the choice is a declared ladder.  Take the newest version that satisfies the
-declaration and existed at commit date, and record which rung supplied it.
-Measured coverage over 155 cached repositories: rung 1 alone 84%, plus rung 2
-91%, plus rung 3 99%.
+The choice is a ladder of declarations (``requires-python``, trove classifiers,
+ASV pythons): take the newest version that satisfies the first usable rung and
+existed at commit date, and record which rung supplied it.
 """
 
 from __future__ import annotations
@@ -36,9 +28,8 @@ __all__ = [
 
 #: Oldest interpreter the container toolchain still supports.
 DATASMITH_PYTHON_FLOOR: str = os.environ.get("DATASMITH_PYTHON_FLOOR", "3.8")
-#: Newest interpreter the container toolchain is known to build against.  This is
-#: a ceiling on purpose: a fresh run must not silently start choosing an
-#: interpreter no existing image was built with.
+#: Newest interpreter the container toolchain is known to build against, so a run
+#: never picks an interpreter no existing image was built with.
 DATASMITH_PYTHON_CEILING: str = os.environ.get("DATASMITH_PYTHON_CEILING", "3.12")
 
 _TROVE_RE = re.compile(r"Programming Language :: Python :: (\d+\.\d+)\s*$")
@@ -78,11 +69,8 @@ def _supported(commit_date: dt.datetime) -> list[str]:
 def _declared_version(value: object) -> str:
     """Coerce one declared version to ``"major.minor"``.
 
-    ``ASVCfgAggregate.pythons`` holds ``set[tuple[int, ...]]``, so a plain
-    ``str(value)`` reads ``(3, 10)`` as ``"(3, 10)"`` -- a string that matches no
-    supported interpreter, silently emptying the asv rung and dropping the choice
-    to the commit-date default.  A three-part ``"3.10.2"`` narrows to ``"3.10"``
-    for the same reason: the ladder compares minor versions.
+    Accepts ``(3, 10)`` tuples from ``ASVCfgAggregate.pythons`` and narrows
+    ``"3.10.2"`` to ``"3.10"``, because the ladder compares minor versions.
     """
     if isinstance(value, tuple | list):
         text = ".".join(str(part) for part in value)
@@ -97,21 +85,9 @@ def _declared_version(value: object) -> str:
 def _declares_minor(spec: SpecifierSet, candidate: str) -> bool:
     """Does ``spec`` allow ``candidate``, a bare ``"major.minor"`` version?
 
-    ``SpecifierSet("==3.12.12").contains("3.12")`` is ``False``: the declaration
-    is exact and ``3.12`` is not ``3.12.12``.  PostHog declares exactly that, so
-    the rung matched nothing, the choice fell through, and the row recorded
-    ``commit-date`` for a project that does declare ``requires-python``.  The
-    interpreter was right; only its provenance was wrong, which is the harder
-    kind of wrong to notice.
-
-    The ladder compares minor versions, so a declaration that pins a patch level
-    of ``3.12`` is a declaration of ``3.12``.  **Only the pinning operators may
-    be read that way.**  ``<3.12`` carries the release ``(3, 12)`` just as
-    ``==3.12.12`` does, and truncating that to a minor version would make
-    ``>=3.9,<3.12`` select the one interpreter it exists to exclude.
-
-    Every specifier in the set must agree, so a bound that really does exclude
-    the candidate still excludes it however the others read.
+    A pin such as ``==3.12.12`` counts as declaring ``3.12``, which
+    ``SpecifierSet.contains`` alone would reject.  Only pinning operators are
+    read that way, so ``<3.12`` still excludes ``3.12``.  Every specifier must agree.
     """
     want = _as_tuple(candidate)
     for specifier in spec:
@@ -153,17 +129,13 @@ def select_interpreter(
 ) -> InterpreterChoice:
     """Pick the newest supported interpreter the project declares.
 
-    Rungs are tried in order and the first that yields a usable version wins.  A
-    declaration nothing can satisfy -- pymc's ``>=3.6,<3.7``, say -- falls through
-    to the next rung rather than failing the commit.
-
-    ``asv_pythons`` takes the shape the repository actually holds them in --
-    ``ASVCfgAggregate.pythons`` is a set of ``(3, 10)`` tuples -- as well as
-    ``"3.10"`` strings.
+    Rungs are tried in order and the first that yields a usable version wins; an
+    unsatisfiable declaration falls through to the next rung.  ``asv_pythons``
+    accepts ``(3, 10)`` tuples as well as ``"3.10"`` strings.
     """
     available = _supported(commit_date)
     if not available:
-        # Older than every supported interpreter; the floor is the only honest answer.
+        # Older than every supported interpreter, so use the floor.
         return InterpreterChoice(version=DATASMITH_PYTHON_FLOOR, source="commit-date")
 
     if requires_python:
@@ -184,15 +156,8 @@ def select_interpreter(
         if allowed:
             return InterpreterChoice(version=allowed[0], source=source)
 
-    # Nothing declared was usable. Distinguish "the project said nothing" from
-    # "the project said something this operator does not build", because they
-    # call for different actions and the version chosen is the same either way.
-    #
-    # The first real run made the difference matter: PostHog declares
-    # ``==3.13.13`` on 2,775 commits, and with the ceiling at 3.12 every one of
-    # them recorded ``commit-date`` -- indistinguishable from a repository that
-    # declares nothing at all. 99% of that run's ``commit-date`` rows were this
-    # case. ``ceiling-clamped`` says which knob to turn.
+    # Nothing declared was usable; ``ceiling-clamped`` marks a declaration above the
+    # ceiling, apart from a project that declares nothing.
     if _clamped_by_ceiling(requires_python, trove_versions, asv_pythons, commit_date):
         return InterpreterChoice(version=available[0], source="ceiling-clamped")
     return InterpreterChoice(version=available[0], source="commit-date")
@@ -206,10 +171,8 @@ def _clamped_by_ceiling(
 ) -> bool:
     """Would some rung have matched if ``DATASMITH_PYTHON_CEILING`` were higher?
 
-    Re-runs the same rungs against the interpreters the ceiling excluded. Only
-    the ceiling is lifted -- the floor and the commit date still apply, so a
-    declaration that is merely too old, or names an interpreter that did not
-    exist yet, is not reported as clamped.
+    Re-runs the rungs against the interpreters above the ceiling; the floor and
+    the commit date still apply.
     """
     floor = _as_tuple(DATASMITH_PYTHON_FLOOR)
     ceiling = _as_tuple(DATASMITH_PYTHON_CEILING)

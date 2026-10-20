@@ -119,7 +119,7 @@ class ProblemExtractor:
                 pr_body: str = dspy.InputField(desc="The GitHub PR description")
                 pr_comments: str = dspy.InputField(desc="Comments on the PR thread.")
                 initial_observations: str = dspy.OutputField(
-                    desc="Objective symptoms of the problematic behavior, described in the present tense. Focus strictly on what is happening (metrics, user impact, frequency). Do not include causes, hypotheses, or explanations."
+                    desc="Objective symptoms of the problematic behavior, described in the present tense, as the developer would describe them before any fix existed: what is slow, the rough data size and the rough time. Do not include causes, hypotheses, explanations, internal functions, the slow code path, the fix, benchmark names, benchmark timings, links or code."
                 )
                 triage_attempts: str = dspy.OutputField(
                     desc="The investigative steps and reasoning used to narrow down contributing factors—what you checked, what you ruled out, and what evidence you gathered to understand where the issue originates."

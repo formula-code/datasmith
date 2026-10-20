@@ -145,10 +145,8 @@ _sigint_count = 0
 def _sigint_handler(signum: int, frame: object) -> None:
     """Handle CTRL+C by killing agent subprocesses so worker threads unblock.
 
-    Agent subprocesses run in their own sessions (``start_new_session=True``)
-    and don't receive SIGINT from the terminal.  Without this handler the
-    threads blocked on ``proc.communicate()`` never return and the process
-    hangs.
+    Agent subprocesses run in their own sessions, so they do not get the
+    terminal's SIGINT and threads blocked on them would hang.
 
     First CTRL+C: SIGTERM all tracked agent processes, raise KeyboardInterrupt.
     Second CTRL+C: SIGKILL all tracked agent processes, force-exit immediately.

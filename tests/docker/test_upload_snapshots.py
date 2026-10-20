@@ -22,6 +22,10 @@ def test_extracts_without_tar_filter_support(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(upload, "_request", lambda *a, **k: buf.getvalue())
     monkeypatch.delattr(tarfile, "data_filter", raising=False)
     real = tarfile.TarFile.extractall
-    monkeypatch.setattr(tarfile.TarFile, "extractall", lambda self, path=".", members=None, *, numeric_owner=False: real(self, path, members))
+    monkeypatch.setattr(
+        tarfile.TarFile,
+        "extractall",
+        lambda self, path=".", members=None, *, numeric_owner=False: real(self, path, members),
+    )
     assert upload.download_snapshots("http://x", "o", "r", 1, tmp_path / ".snapshots")
     assert (tmp_path / ".snapshots" / "baseline.json").read_text() == '{"a": 1}'

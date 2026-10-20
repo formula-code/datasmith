@@ -15,6 +15,9 @@ def test_src_layout_package_with_another_name(tmp_path, monkeypatch):
         (tmp_path / d).mkdir(parents=True)
     (tmp_path / "src/skimage/__init__.py").write_text("")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin", "https://github.com/scikit-image/scikit-image.git"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "remote", "add", "origin", "https://github.com/scikit-image/scikit-image.git"],
+        check=True,
+    )
     monkeypatch.setattr(m, "REPO_ROOT", tmp_path)
     assert m.detect_source_root() == tmp_path / "src" / "skimage"

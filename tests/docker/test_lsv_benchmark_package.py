@@ -17,6 +17,8 @@ def test_benchmark_folder_becomes_a_package_git_ignores(tmp_path):
     subprocess.run(["git", "-C", str(tmp_path), "add", "benchmarks/bench_a.py"], check=True)
     assert m.make_benchmark_package(tmp_path, tmp_path / "benchmarks")
     assert (tmp_path / "benchmarks" / "__init__.py").is_file()
-    others = subprocess.check_output(["git", "-C", str(tmp_path), "ls-files", "--others", "--exclude-standard"], text=True)
+    others = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "ls-files", "--others", "--exclude-standard"], text=True
+    )
     assert "__init__.py" not in others
     assert not m.make_benchmark_package(tmp_path, tmp_path / "benchmarks")

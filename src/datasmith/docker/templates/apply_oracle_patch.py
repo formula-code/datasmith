@@ -25,7 +25,7 @@ exit code, which is 0 in some partial-application cases.
 Always exits 0.  Whether the patch applied is a fact for the invariants to
 judge, not a reason to abort the measure step.
 
-Precheck fields (same as datasmith.verify.in_image.coverage_check):
+Precheck fields in patch_info.json:
 by_deps = benchmarks LSV selects through a dependency on a file the patch changes (always_affected ones excluded).
 edited_before = tracked files the image already has edited, before the patch.
 edited_overlap = those files whose edited lines touch an oracle hunk (its changed or context lines).

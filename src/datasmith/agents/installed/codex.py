@@ -10,50 +10,24 @@ from datasmith.utils import get_logger
 
 logger = get_logger("agents.installed.codex")
 
-# Codex CLI's `background_terminal_max_timeout` defaults to 300_000 ms (5 min).
-# That's the polling window for backgrounded shell tool calls; if the model
-# launches `python3 local_ci.py` (which runs a multi-stage docker build
-# typically lasting 15-40 minutes), the polling window expires long before
-# the verifier finishes, codex returns control to the model with no completion
-# event, and the agent eventually exits leaving the verifier orphaned and no
-# result file on disk. We raise the cap to match SYNTHESIS_TIMEOUT_S so a full
-# verifier run can complete inside one tool call.
+# Codex polls a backgrounded shell call for only 5 minutes by default, but local_ci.py
+# runs 15 to 40 minutes; match SYNTHESIS_TIMEOUT_S so one verifier run fits in one tool call.
 _SYNTHESIS_TIMEOUT_S = int(os.environ.get("SYNTHESIS_TIMEOUT_S", "14400"))
 _BG_TERMINAL_MAX_TIMEOUT_MS = _SYNTHESIS_TIMEOUT_S * 1000
 
-# Token budget for storing individual tool/function outputs in history.
-# Default is small; bumping this prevents codex from truncating long docker
-# build logs and `failure.json` reads which the model needs intact to diagnose
-# failures across turns. 100k is generous (each tool call is capped here, not
-# the whole session) but small enough that one call can't blow past the
-# model's context window on its own.
+# Output limit per tool call, high so long docker build logs and failure.json reads stay intact.
 _TOOL_OUTPUT_TOKEN_LIMIT = int(os.environ.get("CODEX_TOOL_OUTPUT_TOKEN_LIMIT", "100000"))
 
-# Token threshold at which codex auto-compacts history. Codex's compactor
-# summarizes older turns into a recap, and on overflow falls back to dropping
-# the oldest history items entirely (the binary literally logs
-# "Context window exceeded while compacting; removing oldest history item.").
-# Both behaviors risk silently losing the launch prompt's hard requirements
-# and earlier failure context — i.e. the agent forgets the rules halfway
-# through a long synthesis session and starts skipping local_ci.py
-# again. We push the threshold high to defer compaction past most sessions,
-# and override compact_prompt below so that when compaction *does* happen,
-# the rules survive into the post-compaction state.
+# Compaction can drop the launch prompt's rules and earlier failures, so defer it past most
+# sessions; _COMPACT_PROMPT restates the rules when it does happen.
 _AUTO_COMPACT_TOKEN_LIMIT = int(os.environ.get("CODEX_AUTO_COMPACT_TOKEN_LIMIT", "200000"))
 
-# Custom compaction prompt. Replaces codex's default summarization instructions.
-# Codex sends this to the model along with the history to be compacted; the
-# model returns a summary that replaces the older turns. We use it to re-state
-# the hard requirements verbatim so they survive into the post-compaction
-# state, and to require preservation of the current docker_build_*.sh contents
-# and the most recent failure.json so the agent doesn't lose its place.
-# Model and reasoning effort are knobs, so they follow the DATASMITH_ rule in
-# CLAUDE.md: read from the environment at module scope, with a literal default.
-# Both were hardcoded ("gpt-5.4-mini" at "xhigh") until 2026-08-23, so no run
-# could be reproduced against a different model without editing this file.
+# Model and reasoning effort, read from the environment with a literal default.
 DATASMITH_CODEX_MODEL: str = os.environ.get("DATASMITH_CODEX_MODEL", "gpt-5.6-luna")
 DATASMITH_CODEX_REASONING_EFFORT: str = os.environ.get("DATASMITH_CODEX_REASONING_EFFORT", "medium")
 
+# Replaces codex's default compaction instructions, so the summary keeps the hard
+# requirements, the current docker_build_*.sh contents and the latest failure.json.
 _COMPACT_PROMPT = """\
 You are compacting the history of a long synthesis session for the FormulaCode
 Docker build verifier. Produce a concise summary that REPLACES older turns,

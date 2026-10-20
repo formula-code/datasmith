@@ -44,12 +44,18 @@ def test_removes_later_history_and_keeps_head(tmp_path):
     git(repo, "config", "gc.pruneExpire", "never")
     describe = git(repo, "describe", "--tags")
 
-    subprocess.run(["bash", str(SCRIPT), str(repo)], check=True, capture_output=True)
+    bench = repo / "benchmarks"
+    bench.mkdir()
+    git(bench, "init", "-q")
+    commit(bench, "later")
+
+    subprocess.run(["bash", str(SCRIPT), str(repo), str(tmp_path)], check=True, capture_output=True)
 
     assert git(repo, "rev-parse", "HEAD") == base
     assert git(repo, "describe", "--tags") == describe
     assert git(repo, "tag") == "v1"
     assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", fix]).returncode != 0
+    assert (repo / ".git").is_dir() and not (bench / ".git").exists() and (bench / "later").exists()
 
 
 def test_task_image_runs_it_last():

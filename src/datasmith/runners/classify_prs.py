@@ -1,22 +1,9 @@
-"""Stage 3 — fetch the diff, apply the size gate, then classify.
+"""Stage 3: fetch the diff, apply the size gate, then classify.
 
-The diff fetch used to live in stage 2, next to the rest of the symbolic
-pre-screen.  Measured on 4 000 PRs merged since 2024, the pre-screen's three
-components reject 40.4% on the title, 4.3% on file compliance, and 3.0% on
-patch size — and only the last needs the diff.  Every one of those 121
-patch-size rejections was "too large", against a ``MAX_PATCH_TOKENS`` of
-16 000 that ``PerfClassifier.truncate_patch`` then truncates to anyway.  The
-gate exists to protect the classifier, so it belongs with the classifier.
-
-Moving it here also stops stage 2 spending a REST call on PRs that never get
-classified, and lets the rate-limit waits overlap with LLM latency.
-
-Budget, and why the concurrency here is deliberately small: the token pool
-holds one token, REST core allows 5 000 requests an hour, and July 2026 needs
-roughly 5 616 diff fetches.  A monthly run therefore crosses at least one
-rate-limit reset by design — waiting is a correctness requirement, not an
-optimisation.  The failure mode to avoid is a *silent* wait, so every stall is
-logged while it is happening rather than after it ends.
+The patch size check is the only part of the symbolic screen that needs a diff,
+so it runs here, next to the classifier it protects. Concurrency is small
+because one token allows 5 000 REST requests an hour, so a monthly run waits
+out at least one rate-limit reset; each wait is logged while it happens.
 """
 
 from __future__ import annotations
@@ -34,41 +21,21 @@ from datasmith.utils import get_client, get_logger
 
 logger = get_logger("runners.classify_prs")
 
-# ---------------------------------------------------------------------------
-# Tunable knobs.  These pace GitHub, not the machine: stage 4 is the stage that
-# scales with cores.  Keeping the two budgets on separate dials means raising
-# one cannot trip the other's rate limits (spec section 6.4).
-# ---------------------------------------------------------------------------
+# These settings pace GitHub, not the machine, so they are separate from stage 4's.
 
-# Concurrent diff fetches.  Low on purpose — one token, 5 000 REST requests an
-# hour, and GitHub's *secondary* limit punishes bursts even while the primary
-# budget still has room.
+# Concurrent diff fetches; low because GitHub's secondary limit punishes bursts.
 DATASMITH_CLASSIFY_DIFF_CONCURRENCY: int = int(os.environ.get("DATASMITH_CLASSIFY_DIFF_CONCURRENCY", "4"))
 
-# Minimum spacing between diff fetches.  0.75 s is about 4 800 requests an
-# hour, just inside the 5 000 core budget, so a run paces itself rather than
-# sprinting into a 403 and then sleeping out the remainder of the window.
-# Set to 0 to disable pacing.
+# Minimum spacing between diff fetches; 0.75 s is about 4 800 requests an hour,
+# just inside the 5 000 limit. Set to 0 to disable pacing.
 DATASMITH_CLASSIFY_DIFF_MIN_INTERVAL_S: float = float(os.environ.get("DATASMITH_CLASSIFY_DIFF_MIN_INTERVAL_S", "0.75"))
 
-# How often to say out loud that a diff fetch is still waiting.  A rate-limit
-# reset can be an hour away, and an hour of silence is indistinguishable from
-# a hang.
+# How often to log that a diff fetch is still waiting, since a rate-limit reset
+# can be an hour away.
 DATASMITH_CLASSIFY_DIFF_STALL_LOG_S: float = float(os.environ.get("DATASMITH_CLASSIFY_DIFF_STALL_LOG_S", "30"))
 
-# ---------------------------------------------------------------------------
-# A third budget, and the one dial that does *not* pace GitHub.  The two
-# ``classify`` calls are blocking DSPy requests, so they run on threads; the
-# thing they queue against is the LLM backend, not the REST budget and not the
-# disk.  It gets its own knob for the same reason stages 2 and 4 have theirs:
-# raising the dial that governs one backend must not silently raise the load
-# on another.
-#
-# The pool is explicit because ``run_in_executor(None, ...)`` is the
-# interpreter default sized ``min(32, cpu_count + 4)`` — a number that means
-# something different on every host, and that every other library in the
-# process shares (spec section 6.4).
-# ---------------------------------------------------------------------------
+# Threads for the blocking DSPy classify calls; this paces the LLM backend.
+# An explicit pool, because the default executor's size varies by host.
 DATASMITH_CLASSIFY_LLM_WORKERS: int = int(os.environ.get("DATASMITH_CLASSIFY_LLM_WORKERS", "8"))
 
 
@@ -94,12 +61,7 @@ class ClassifyPRsRunner(BaseRunner):
         self._executor: ThreadPoolExecutor | None = None
 
     async def run(self, items: list[Any]) -> None:
-        """Run the stage against a pool this runner owns and shuts down.
-
-        Built here rather than in ``__init__`` so a runner that is constructed
-        and never run leaves no threads behind, and so the pool dies with the
-        stage even when the stage raises.
-        """
+        """Run the stage on a thread pool that is created here and shut down at the end."""
         self._executor = ThreadPoolExecutor(
             max_workers=self._max_workers,
             thread_name_prefix="classify-prs",
@@ -131,16 +93,8 @@ class ClassifyPRsRunner(BaseRunner):
 
             diff = await self._fetch_diff(owner, repo, issue_number)
             if diff.status is not DiffStatus.OK:
-                # GitHub answered definitively that it will not serve this
-                # diff (404/406/410/451).  That is a decided outcome, not a
-                # failure: recording it terminally stops a resumed run paying
-                # the same REST call again forever.  A request that *failed*
-                # never reaches here — it raises out of the client and
-                # BaseRunner writes a runner_failures row instead.
-                #
-                # is_performance_commit_symbolic is deliberately left alone.
-                # The size gate was never evaluated, so writing False would
-                # claim a verdict the screen never reached.
+                # GitHub will never serve this diff (404/406/410/451): record it so a
+                # resumed run does not refetch. The symbolic verdict stays unset.
                 logger.warning(
                     "%s/%s#%d: GitHub will not serve this diff (%s, HTTP %d); "
                     "recording it as not a performance commit without an LLM call",
@@ -155,21 +109,11 @@ class ClassifyPRsRunner(BaseRunner):
             patch = diff.text
             fetched = True
 
-        # Off the event loop.  check_patch_size can fall through to tiktoken,
-        # which is CPU-bound BPE over the whole diff, and PostHog patches reach
-        # 150 KB.  Called inline it stalled the loop for minutes at a time:
-        # every other item stopped, the pacer stopped, and the stall logger
-        # built to report exactly this could not run either, so the stage went
-        # silent and looked like a deadlock.
+        # Off the event loop, because tokenizing a large diff is CPU bound.
         size_ok = await asyncio.get_running_loop().run_in_executor(self._executor, check_patch_size, patch)
         if not size_ok:
-            # The last component of the symbolic screen, evaluated where the
-            # diff is.  Stage 2 wrote is_performance_commit_symbolic from the
-            # title filter and file compliance alone; this completes it.
-            #
-            # The patch is not persisted.  Every measured rejection was "too
-            # large", and storing large patches table-wide is what took
-            # PostgREST down with an out-of-memory abort.
+            # Completes the symbolic screen. The patch is not stored, because large
+            # patches across the table can make PostgREST run out of memory.
             logger.info(
                 "%s/%s#%d: patch fails the size gate; recorded without an LLM call",
                 owner,
@@ -185,18 +129,8 @@ class ClassifyPRsRunner(BaseRunner):
             return
 
         if fetched:
-            # Persist what the REST call bought *before* spending an LLM call
-            # on it.  The resume predicate is ``is_performance_commit IS
-            # NULL``, so a classifier or judge failure re-selects this row on
-            # the next run; writing the patch afterwards would mean the row
-            # comes back with an empty patch and buys the same diff again out
-            # of a budget that is already short (roughly 5 616 fetches for
-            # July against 5 000 REST requests an hour, on one token).
-            #
-            # This write is deliberately after the size gate, never before it.
-            # Every measured size rejection was "too large", and storing large
-            # patches table-wide is what took PostgREST down with an
-            # out-of-memory abort.
+            # Store the patch before the LLM call, so a classifier failure does not
+            # cost another fetch on resume. Only after the size gate, to keep large patches out.
             self._update_pr(owner, repo, issue_number, {"patch": patch})
 
         loop = asyncio.get_running_loop()
@@ -228,9 +162,7 @@ class ClassifyPRsRunner(BaseRunner):
     async def _fetch_diff(self, owner: str, repo: str, issue_number: int) -> Any:
         """Fetch one diff under the semaphore and the pacer.
 
-        Both are released before the LLM call: the REST budget is the scarce
-        resource, and holding a diff slot across a multi-second DSPy call would
-        make GitHub's dial govern the classifier's throughput too.
+        Both are released before the LLM call, so diff slots do not limit classifier throughput.
         """
         if self._gh is None:
             raise RuntimeError(
@@ -248,9 +180,7 @@ class ClassifyPRsRunner(BaseRunner):
     async def _pace(self) -> None:
         """Space fetch starts by at least the configured interval.
 
-        The module global is read here, not cached on the instance, so an
-        operator's ``tokens.env`` value and a test's monkeypatch both take
-        effect.
+        Reads the module global on each call, so environment values and test patches apply.
         """
         interval = DATASMITH_CLASSIFY_DIFF_MIN_INTERVAL_S
         if interval <= 0:
@@ -264,13 +194,9 @@ class ClassifyPRsRunner(BaseRunner):
             self._next_fetch_at = max(now, self._next_fetch_at) + interval
 
     async def _await_loudly(self, coro: Any, label: str) -> Any:
-        """Await *coro*, reporting periodically for as long as it is blocked.
+        """Await *coro*, logging periodically while it is blocked.
 
-        With one token a monthly run has to wait out a rate-limit reset, and
-        that wait happens inside the client — ``TokenPool.get_token`` blocks
-        until the earliest reset when every token is exhausted.  Without this
-        the stage prints nothing for up to an hour, which reads exactly like a
-        hang.
+        ``TokenPool.get_token`` can block up to an hour for a rate-limit reset.
         """
         task = asyncio.ensure_future(coro)
         started = time.monotonic()
@@ -287,7 +213,6 @@ class ClassifyPRsRunner(BaseRunner):
                     getattr(getattr(self._gh, "_pool", None), "size", 0),
                 )
         finally:
-            # A raising fetch must not leave the task pending: pytest reports
-            # that as a warning, and in production it keeps a connection open.
+            # Cancel a pending task, so it does not keep a connection open.
             if not task.done():
                 task.cancel()

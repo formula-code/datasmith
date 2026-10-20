@@ -26,7 +26,7 @@ Environment, and why each is needed:
 
     SUPABASE_URL=http://127.0.0.1:54321   local only, never the tunnel
     DATASMITH_DISABLE_DOCKER_PRUNE=1      keep BuildKit cache during the run
-    TMPDIR=/mnt/sdd2/tmp-prepass          / is 98% full; Docker lives on sdd2
+    TMPDIR=<dir on the Docker disk>       when / has little free space
 
 Results are appended to the output file AS EACH TASK FINISHES, not at the end,
 so a run that dies half way still leaves what it learned.
@@ -66,11 +66,8 @@ def _env() -> dict[str, str]:
     env["SUPABASE_URL"] = "http://127.0.0.1:54321"
     env["DATASMITH_DISABLE_DOCKER_PRUNE"] = "1"
     env["DATASMITH_SKIP_SIMILAR_CONTEXTS"] = "1"
-    # A trial measures a build rate. It has no reason to upload two dozen
-    # images to a public registry, and the push dominated wall clock in the
-    # 2026-08-23 run: building finished while stage 6 was still uploading.
+    # A trial measures the build rate; pushing images would dominate its wall clock.
     env.setdefault("DATASMITH_SKIP_IMAGE_PUSH", "1")
-    env.setdefault("TMPDIR", "/mnt/sdd2/tmp-prepass")
     return env
 
 

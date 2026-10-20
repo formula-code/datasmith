@@ -245,3 +245,16 @@ class TestRemoveAndPrune:
     def test_prune_dangling(self, manager: ImageManager) -> None:
         manager.prune_dangling()
         manager._mock_docker.image.prune.assert_called_once_with(all=False)  # type: ignore[attr-defined]
+
+
+class TestBuildTaskImage:
+    def test_tag_follows_the_environment_digest(self, manager: ImageManager, tmp_path) -> None:
+        env = tmp_path / "o__r__1" / "environment"
+        env.mkdir(parents=True)
+        (env / "Dockerfile").write_text("FROM base\n")
+        calls = []
+        tag, rc, _ = manager.build_task_image(env.parent, run=lambda cmd, e: calls.append((cmd, e)) or (0, ""))
+        assert tag.startswith("fc-task/o__r__1:") and rc == 0
+        assert calls[0][0][-1] == str(env) and calls[0][1]["DOCKER_BUILDKIT"] == "0"
+        (env / "Dockerfile").write_text("FROM other\n")
+        assert manager.build_task_image(env.parent, run=lambda cmd, e: (0, ""))[0] != tag

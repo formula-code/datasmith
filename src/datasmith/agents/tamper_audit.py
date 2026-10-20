@@ -1,10 +1,8 @@
 """Post-verification tamper audit for synthesized build contexts.
 
-Runs regex-based detectors over the agent's finalised `docker_build_*.sh`
-scripts AFTER `local_ci.py` reports success but BEFORE the synthesizer
-commits the context to `candidate_containers`. Catches bypass shapes that
-the local-CI verifier itself can't see because they don't affect the
-build/test exit codes:
+Runs regex detectors over the agent's final `docker_build_*.sh` scripts after
+`local_ci.py` reports success and before the context is saved. It catches
+bypasses that do not change the build or test exit codes:
 
   - Forged validator artifacts (`/logs/summary_*.json`, test_results.json)
   - Test file forgery (`test_*.py` writes, trivial asserts, append-to-tracked)
@@ -12,11 +10,8 @@ build/test exit codes:
   - ASV config and benchmark file fabrication (new asv.*.json,
     new benchmarks/*.py files, manual asv_benchmarks.txt writes)
 
-This runs **silently**: detections are recorded to `error_logs` with a
-`tamper_detected` stage and the synthesis attempt is downgraded to a
-failure without telling the agent which specific pattern was flagged.
-This preserves the cooperative framing — the agent sees "verification
-failed, here's the build output", not "you were caught bypassing X".
+Detections go to `error_logs` with stage `tamper_detected`, and the attempt
+fails without telling the agent which pattern matched.
 """
 
 from __future__ import annotations

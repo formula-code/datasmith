@@ -1,9 +1,7 @@
 """Grading. The only place severity is decided.
 
-Deliberately NOT in the verifier's prompt. The agent reports an observed cause
-and this module maps it. That is the structural answer to the objection that a
-Turing-complete agent always defeats a verifier: it does not get to decide the
-hard set, only to reason inside it.
+The agent reports an observed cause and this module maps it, so the agent never
+decides which checks are hard. This is deliberately not in the verifier's prompt.
 """
 
 from __future__ import annotations
@@ -26,30 +24,15 @@ HARD_CHECK_IDS: frozenset[str] = frozenset({
     "numpy_moved_major_minor",
 })
 
-# Checks whose severity depends on the observed cause.
-# Soft whatever the cause. Only the pass ratio qualifies: a test that FAILS is
-# a statement about the repository, not about whether we built it.
-#
-# `repo_smoke_test` used to live here and does not any more. Unconditional
-# softness gave it a broader waiver than pytest_collect or import_sweep get,
-# and a smoke test that fails because nothing is installed is a missing
-# dependency the producer can fix.
+# Soft whatever the cause. Only the pass ratio qualifies: a failing test is a fact
+# about the repository, not about the build.
 _SOFT_CHECK_IDS: frozenset[str] = frozenset({"pytest_pass_ratio"})
 
-# Only this cause can make a check soft. Everything else is hard.
-#
-# The discriminator is failure MODE, not package availability. cupy is on
-# PyPI, resolves into env_payload, installs cleanly, and still raises when no
-# CUDA driver exists -- so presence is evidence FOR a capability claim rather
-# than against it.
+# The only cause that can make a check soft. cupy installs cleanly and still raises
+# without a CUDA driver, so the cause is the failure mode, not package availability.
 _SOFTENING_CAUSES: frozenset[Cause] = frozenset({Cause.IMPORT_RAISED_ON_HOST_FACILITY})
 
-# ...and only for THESE check ids. An earlier draft let the cause soften ANY
-# unrecognised id, so `classify("anything_the_agent_invented",
-# IMPORT_RAISED_ON_HOST_FACILITY)` returned SOFT and grade() accepted it on any
-# non-empty waiver_reason. That relocated the standing cheating concern from
-# the producer to a persuaded verifier, which is worse: the verifier is the
-# thing we were trusting.
+# ...and only for these check ids, so the verifier cannot soften an id the agent invented.
 _CAUSE_DISCRIMINATED_CHECK_IDS: frozenset[str] = frozenset({"pytest_collect", "import_sweep", "repo_smoke_test"})
 
 # A host-facility claim whose own evidence names ModuleNotFoundError is
@@ -66,7 +49,7 @@ def contradicts_host_facility_claim(cause: Cause, evidence: str) -> bool:
 
 
 def classify(check_id: str, cause: Cause, evidence: str = "") -> Severity:
-    """Grade one check. Unknown ids fail closed to HARD, whatever the cause."""
+    """Grade one check. Unknown ids grade HARD, whatever the cause."""
     if check_id in HARD_CHECK_IDS:
         return Severity.HARD
     if check_id in _SOFT_CHECK_IDS:
@@ -90,9 +73,8 @@ class GradedReport:
 def grade(report: RejectionReport) -> GradedReport:
     """Decide the verdict from the checks, ignoring the agent's own verdict.
 
-    A soft failure must carry a waiver_reason with actual content. A waiver has
-    to be argued, not merely asserted, and the reason is what a human reads
-    when the container is later found to be bad. Whitespace does not argue.
+    A soft failure must carry a non-blank waiver_reason, which a human reads if the
+    container is later found to be bad.
     """
     hard: list[str] = []
     soft: list[str] = []
@@ -124,8 +106,7 @@ def grade(report: RejectionReport) -> GradedReport:
         elif (check.waiver_reason or "").strip():
             soft.append(check.id)
         else:
-            # A waiver has to be ARGUED. Truthiness alone accepted "   ", which
-            # says nothing and still admitted the container.
+            # A blank waiver_reason does not waive a soft failure.
             hard.append(check.id)
 
     return GradedReport(

@@ -22,6 +22,8 @@ def test_base_copy_makes_two_equal_trees_without_moving_the_repo(tmp_path):
     subprocess.run(["bash", "-c", "set -euo pipefail\n" + block(tmp_path)], check=True, capture_output=True)
     for tree in (repo, tmp_path / ".fc_base"):
         assert (tree / "a.py").read_text() == "x = 1\n"
-        assert subprocess.run(["git", "-C", str(tree), "rev-parse", "HEAD"], capture_output=True, text=True).stdout == head
+        assert (
+            subprocess.run(["git", "-C", str(tree), "rev-parse", "HEAD"], capture_output=True, text=True).stdout == head
+        )
     assert not (tmp_path / ".fc_new").exists()
     assert " mv /workspace/repo " not in SETUP.read_text()

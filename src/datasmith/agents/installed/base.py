@@ -85,11 +85,8 @@ def _kill_process_group(proc: subprocess.Popen[str], sig: int = signal.SIGTERM) 
         os.killpg(os.getpgid(proc.pid), sig)
 
 
-# ---------------------------------------------------------------------------
-# Global subprocess registry — allows the SIGINT handler to reach agent
-# processes that live in their own sessions (start_new_session=True) and
-# therefore don't receive CTRL+C from the terminal.
-# ---------------------------------------------------------------------------
+# Registry of running agent subprocesses, so the SIGINT handler can reach processes
+# started with start_new_session=True, which do not receive CTRL+C.
 _active_procs: set[subprocess.Popen[str]] = set()
 _active_procs_lock = threading.Lock()
 
