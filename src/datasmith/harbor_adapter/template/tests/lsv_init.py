@@ -471,9 +471,11 @@ def env_fingerprint(rounds: int) -> dict:
 PAIRED_KEYS = ("lsv_commit",)
 
 
-def image_timing_skipped(build_mode: bool) -> bool:
-    """Paired trials read only the dependency DB, so the image build skips LSV's full-suite timing unless asked."""
-    return build_mode and os.environ.get("FC_LSV_PAIRED", "1") != "0" and os.environ.get("FORMULACODE_IMAGE_TIMING") != "1"
+def image_timing_skipped(build_mode: bool, paired: bool = False) -> bool:
+    """Paired trials read only the dependency DB, so the image build and a paired trial skip LSV's full-suite timing
+    unless asked."""
+    paired_build = build_mode and os.environ.get("FC_LSV_PAIRED", "1") != "0"
+    return (paired_build or paired) and os.environ.get("FORMULACODE_IMAGE_TIMING") != "1"
 
 
 def skip_suite_timing(lsv_session_module) -> None:
@@ -847,12 +849,12 @@ def main() -> None:
         print(f"[{_ts()}] [phase] LSV initialize_diffcheck (force={_force})")
         print("=" * 64)
 
-        _timed = not image_timing_skipped(_build_mode)
+        _timed = not image_timing_skipped(_build_mode, _paired)
         if not _timed:
             import asv.contrib.lightspeed.session as _lsv_session
 
             skip_suite_timing(_lsv_session)
-            print(f"[{_ts()}] [lsv_init] image build: coverage pass only (paired trials do not read baseline timings)")
+            print(f"[{_ts()}] [lsv_init] coverage pass only (paired timing does not read baseline timings)")
         init_result = session.initialize_diffcheck(
             source_root=source_root,
             force=_force,

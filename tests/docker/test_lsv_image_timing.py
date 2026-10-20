@@ -26,6 +26,14 @@ def test_timing_skipped_only_at_paired_image_build(monkeypatch):
     assert not m.image_timing_skipped(True)
 
 
+def test_paired_trial_skips_the_timing(monkeypatch):
+    m = _load()
+    monkeypatch.delenv("FORMULACODE_IMAGE_TIMING", raising=False)
+    assert m.image_timing_skipped(False, paired=True) and not m.image_timing_skipped(False, paired=False)
+    monkeypatch.setenv("FORMULACODE_IMAGE_TIMING", "1")
+    assert not m.image_timing_skipped(False, paired=True)
+
+
 def test_skip_suite_timing_replaces_the_timing_calls():
     m = _load()
     fake = types.SimpleNamespace(run_benchmarks=lambda *a, **k: 1 / 0, _store_baseline=lambda *a, **k: 1 / 0)
