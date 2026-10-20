@@ -164,4 +164,8 @@ if [ $lsv_exit -ne 0 ]; then
   exit $lsv_exit
 fi
 echo "[$(ts)] [setup] LSV init complete."
+
+SETUP_PHASE="base_digest"
+source /tests/base_digest.sh
+if [ -d /workspace/.fc_base ]; then fc_base_digest > /opt/fc_base_digest; fi
 SETUP_PHASE="complete"
