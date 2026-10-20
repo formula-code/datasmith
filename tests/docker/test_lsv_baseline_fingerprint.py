@@ -98,8 +98,13 @@ def test_baseline_commit_reuses_the_image_measured_at_its_parent(m, tmp_path, mo
     import subprocess
 
     def git(*a):
-        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=tmp_path, check=True,
-                              capture_output=True, text=True).stdout.strip()
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *a],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
 
     git("init", "-q")
     git("commit", "-q", "--allow-empty", "-m", "upstream")
