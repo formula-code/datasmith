@@ -1,12 +1,7 @@
 """Parsing metadata from the packaging files a project declares its dependencies in.
 
-``requirements*.txt`` and ``environment.yml`` are deliberately not among them.
-Globbing them harvested documentation and CI requirements as *runtime*
-dependencies (``sphinx``, ``towncrier``, ``torch``, ``cupy``, ``conda-build``)
-and conda-only names that do not exist on PyPI (``boost-cpp``, ``libprotobuf``).
-Discovering them also minted a packaging *root* out of any directory that held
-one, which is how scipp resolved to ``binder`` -- a Binder configuration
-directory, not a package.
+``requirements*.txt`` and ``environment.yml`` are not read: they hold docs and CI
+tools and conda-only names, and a directory holding only them is not a package root.
 """
 
 from __future__ import annotations
@@ -341,12 +336,8 @@ def select_primary_candidate(  # noqa: C901
     """Heuristic to select the primary package root from multiple candidates."""
     norm = lambda p: str(Path(p).as_posix().strip("./")) or "."
     paths = []
-    # ``install_cmds`` is a set, and a set of strings iterates in hash order.
-    # Reading it directly made the first matching root depend on the hash seed,
-    # so a monorepo whose asv configs name two roots -- arrow, scipp,
-    # MDAnalysis -- answered differently from run to run. Token order *inside*
-    # one command still decides, because there the first path argument is the
-    # package the command means to install.
+    # Sorted so the result does not depend on set hash order; within one command
+    # the first path argument still wins.
     for cmd in sorted(install_cmds):
         toks = shlex.split(cmd)
         for t in toks:
@@ -365,10 +356,7 @@ def select_primary_candidate(  # noqa: C901
             nm = meta.name.lower().replace("_", "-")
             if nm == repo_suffix or nm == repo_suffix.replace("-", ""):
                 by_name.append(root)
-    # Every remaining tiebreak is sorted. The predecessor returned from
-    # unordered dict iteration, so scipp picked 'python', 'binder' or 'scippy'
-    # depending on the run — and 'binder' is a Binder config directory, not a
-    # package.
+    # Every remaining tiebreak is sorted so the choice is the same on every run.
     depth_then_name = lambda s: (len(Path(s).parts), s)
     if by_name:
         return sorted(by_name, key=depth_then_name)[0]

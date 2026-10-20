@@ -113,3 +113,13 @@ def test_measure_task_writes_the_record_and_reruns_under_a_new_job(tmp_path):
     assert rec["job"] == "o__r__1__oracle-1" and rec["tag"] == "fc-task/o__r__1:x"
     assert [r["role"] for r in rec["runs"]] == ["oracle_baseline", "oracle", "oracle", "nop", "nop", "nop"]
     assert rec["cpu_models"] == ["Intel Xeon"]
+
+
+def test_a_job_past_the_time_limit_ends_too_slow(tmp_path):
+    harbor = tmp_path / "harbor"
+    harbor.write_text("#!/bin/sh\nsleep 60\n")
+    harbor.chmod(0o755)
+    s = measure.Settings(harbor=str(harbor), time_limit_s=1, lock_dir=tmp_path / "lock", lock_slots=2)
+    out = tmp_path / "out"
+    assert measure.measure_task(task_dir(tmp_path), out, s) == "too_slow"
+    assert not (out / "oracle" / "o__r__1.json").exists()

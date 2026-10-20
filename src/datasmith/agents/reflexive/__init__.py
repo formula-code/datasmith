@@ -1,7 +1,4 @@
-"""Producer/verifier reflexive container builds.
-
-See docs/superpowers/specs/2026-08-23-producer-verifier-design.md
-"""
+"""Producer/verifier reflexive container builds (stage 6, behind DATASMITH_PV_ENABLED)."""
 
 from datasmith.agents.reflexive.schema import (
     Cause,

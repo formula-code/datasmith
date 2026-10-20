@@ -1,26 +1,11 @@
 """The verifier half: collect facts, ask the agent, grade the answer.
 
-The governing rule is that an ERROR IS A REJECTION, NEVER AN ACCEPTANCE. Every
-failure path in this module ends in accepted=False. The predecessor inverted
-this once -- a host-side timeout returned success, which silently verified
-about 34% of candidate_containers.
+Every failure path in this module ends in accepted=False.
 
-Facts arrive through TWO channels, and the difference between them is the
-whole reason this file was rewritten.
-
-`image_integrity` reads the image from the HOST -- `docker create` plus
-`docker export`, walked as a tar -- and never runs anything from the image.
-`battery` runs commands INSIDE the container, so everything it reports is
-mediated by an interpreter the builder configured. `formulacode/attack-demo:1`
-proved that distinction is not academic: 19 lines of `sitecustomize.py` patched
-`Path.is_file` and `shutil.which`, the in-container honesty probe reported a
-clean container, and the verifier accepted the negative control while reasoning
-correctly from false facts.
-
-So the host scan is authoritative and the battery is corroborating. A fatal
-integrity finding rejects on its own, before the battery runs and before the
-agent is asked, because no reasoning over in-container output can rebut a fact
-the container never got to touch.
+Facts come from two places. `image_integrity` reads the image from the host and
+runs nothing from it. `battery` runs commands inside the container, where an
+interpreter the builder configured can lie. So a fatal host scan finding rejects
+on its own, before the battery runs or the agent is asked.
 """
 
 from __future__ import annotations
@@ -138,10 +123,8 @@ def _facts_block(facts: list[BatteryFact]) -> str:
 def _integrity_checks(integrity: ImageIntegrity) -> list[CheckResult]:
     """Fatal integrity findings, as checks `severity.py` will grade HARD.
 
-    Two ids reach here. `tamper_audit` is in `HARD_CHECK_IDS` explicitly;
-    `image_scan_failed` is not, and grades HARD through `classify`'s fail-
-    closed default for unrecognised ids. Neither can be softened by a cause or
-    a waiver_reason, and `severity.py` needed no edit to make that true.
+    `tamper_audit` is in `HARD_CHECK_IDS`; `image_scan_failed` grades HARD as an
+    unknown id. Neither can be softened by a cause or a waiver_reason.
     """
     return [
         CheckResult(
@@ -185,11 +168,8 @@ def verify(
             )
 
         if integrity.findings:
-            # Short-circuit, for two reasons. The verdict cannot change --
-            # these ids are hard and unwaivable, so neither the battery nor the
-            # agent can move it -- and running eight commands inside a
-            # container we have already proven adversarial spends up to
-            # 8 x DATASMITH_PV_BATTERY_TIMEOUT_S executing its code.
+            # Stop here: these ids are hard and cannot be waived, and running the battery
+            # would execute code from an image already found to be tampered.
             logger.error(
                 "host image scan rejected %s: %s",
                 image_tag,
@@ -221,25 +201,8 @@ def verify(
         if report is not None:
             graded = grade(report)
             if mode == "build_failed" or image_tag is None:
-                # A BUILD THAT FAILED CAN NEVER BE AN ACCEPT.
-                #
-                # `grade()` computes `accepted = not hard`, so a report with an
-                # EMPTY checks list is an acceptance. In build_failed mode there
-                # are no battery facts to report checks about, so an agent that
-                # dutifully reports nothing accepts a container that does not
-                # exist.
-                #
-                # Observed on mars-project/mars#3329: round 1 failed to build,
-                # the verifier accepted it, `_save_context` stored the context,
-                # the runner logged "Successfully synthesized image", and the
-                # next step died with a DockerException building an image whose
-                # build had already failed.
-                #
-                # The 16-container set cannot catch this: it only ever runs
-                # mode="container_built" against images that already exist.
-                #
-                # The agent's report is still kept -- it is what tells the
-                # producer WHY -- but the verdict is not the agent's to give.
+                # A failed build is never accepted: `grade()` accepts an empty checks list, and in
+                # build_failed mode there are no battery facts. The report is kept for the producer.
                 return grade(
                     RejectionReport(
                         verdict=Verdict.REJECT,

@@ -1,26 +1,14 @@
 """Collect the dependencies a project actually declares.
 
-The predecessor built its requirement set from four sources, three of which are
-not declarations:
-
-* ``requirements*.txt`` globbed anywhere in the tree — which is how ``sphinx``,
-  ``towncrier``, ``ruff``, ``PyInstaller``, ``myst-nb``, ``jupytext``, ``torch``,
-  ``jax``, ``cupy`` and ``conda-build`` became *runtime* dependencies.  scipy's
-  resolution failed on a ``conda-build`` yanked-version conflict: a documentation
-  requirement made the environment unsatisfiable.
-* ``environment.yml`` — conda names such as ``boost-cpp``, ``thrift-cpp``,
-  ``libprotobuf`` and ``lz4-c``, which do not exist on PyPI.
-* import analysis — which produced ``arraypad``, ``multiarray``, ``umath``,
-  ``mtrand`` (numpy's own submodules), plus ``version`` and ``plex``.  ``version``
-  is a dead py2 distribution whose sdist raises ``ImportError: cannot import name
-  'izip_longest'``, and that single harvested token is what failed numpy.
-
-Only these are declarations, and only these are read here:
+Only these sources are read:
 
 * ``[project].dependencies`` / ``[project.optional-dependencies]``
 * ``install_requires`` / ``options.extras_require``
 * ``[build-system].requires``
-* ASV ``matrix.req`` — a genuine statement of what the benchmarks need
+* ASV ``matrix.req``, which states what the benchmarks need
+
+Globbed ``requirements*.txt``, ``environment.yml`` and import analysis are not
+read: they add docs tools, conda-only names and submodule names that break resolution.
 """
 
 from __future__ import annotations
@@ -50,21 +38,11 @@ def _matrix_requirements(matrix: Mapping[str, set[str]] | None) -> list[str]:
     The keys carry the package names.  Passing a bare version such as ``0.29.21``
     to the resolver treats it as a package name, so the key must not be dropped.
 
-    Four shapes of version set mean four different things, and conflating them
-    either inverts the answer or destroys the seed:
-
-    * an empty set -- the matrix names the package with no version, meaning "any
-      version": emit the bare name;
-    * a set holding exactly one real version -- emit that pin;
-    * a set holding several real versions -- the matrix asks for a *sweep*, which
-      a single environment cannot be.  Emitting one ``==`` pin per version makes
-      the set unsatisfiable and takes every unrelated requirement down with it
-      (lmfit-py names ``scipy`` at ``0.18`` and ``0.19``, and its whole seed came
-      back empty).  A seed is one environment, so it states the weakest true
-      thing: the bare name;
-    * a set whose every entry is ``"None"`` -- ASV's ``null``, meaning "do not
-      install in this combination".  Emit **nothing**.  Falling through to the
-      bare name here would turn "never install cython" into "install any cython".
+    * an empty set means any version: emit the bare name;
+    * exactly one real version: emit that pin;
+    * several real versions (a sweep): emit the bare name, since one
+      environment cannot satisfy several ``==`` pins;
+    * every entry ``"None"`` (ASV's ``null``, do not install): emit nothing.
     """
     out: list[str] = []
     for pkg, versions in (matrix or {}).items():

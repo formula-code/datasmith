@@ -1,7 +1,7 @@
 """fc-measure: check rendered tasks before timing, and time them.
 
 fc-measure precheck TASKS_ROOT TASK ... [--measure-uncovered always_affected,compiled]
-fc-measure measure  TASKS_ROOT OUT TASK ... [--workers N] [--oracle-runs 3] [--nop-runs 3] [--confirm-rounds R --rule FILE]
+fc-measure measure  TASKS_ROOT OUT TASK ... [--workers N] [--oracle-runs 3] [--nop-runs 3] [--confirm-rounds R --rule FILE] [--time-limit S]
 
 TASK is owner/repo#N or owner__repo__N.
 """
@@ -37,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--confirm-rounds", type=int, default=0)
     m.add_argument("--rule", type=Path, help="noise rule json; needed for --confirm-rounds")
     m.add_argument("--harbor", default="harbor")
+    m.add_argument("--time-limit", type=int, default=0, help="seconds per measure job; a job past it ends as too_slow")
     a = ap.parse_args(argv)
     if a.cmd == "measure" and a.confirm_rounds and not a.rule:
         ap.error("--confirm-rounds needs --rule")
@@ -47,7 +48,13 @@ def main(argv: list[str] | None = None) -> int:
             end, block = precheck(d, kinds)
             print(json.dumps({"task": d.name, "end": end, **{k: block.get(k) for k in ("by_deps", "patch_applied")}}))
         return 0
-    s = Settings(n_oracle=a.oracle_runs, n_nop=a.nop_runs, confirm_rounds=a.confirm_rounds, harbor=a.harbor)
+    s = Settings(
+        n_oracle=a.oracle_runs,
+        n_nop=a.nop_runs,
+        confirm_rounds=a.confirm_rounds,
+        harbor=a.harbor,
+        time_limit_s=a.time_limit,
+    )
     for task, phase in measure_many(task_dirs, a.out, s, a.workers, a.rule).items():
         print(f"{task}: {phase}")
     return 0

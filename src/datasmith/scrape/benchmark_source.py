@@ -180,9 +180,7 @@ def _extract_from_file(py_file: Path, module_dotted: str) -> list[BenchmarkSourc
                 method_src = _source_of(child, text)
                 if not method_src:
                     continue
-                # The website shows the method body, but the class header (and
-                # any class-level attrs like params/param_names) is needed for
-                # context. Concatenate them when both are available.
+                # Store the whole class source, so the header and params give the method context.
                 if class_src:
                     combined = class_src
                 else:

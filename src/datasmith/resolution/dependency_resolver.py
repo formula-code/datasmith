@@ -73,9 +73,8 @@ def uv_compile(requirements: Iterable[str], *, python_version: str | None, cutof
     return out
 
 
-#: Prefix of the log a dry-run writes when it never ran, because the throwaway
-#: environment could not be built.  It names a fact about the host, not about the
-#: requirements, and must stay distinguishable from a resolution failure.
+#: Log prefix when the throwaway probe environment could not be built, so a host
+#: problem is not mistaken for a resolution failure.
 VENV_SETUP_FAILED = "probe environment unavailable"
 
 
@@ -99,19 +98,9 @@ def uv_dry_run_install(
 ) -> tuple[bool, str]:
     """Run a dry-run install to validate that dependencies can be installed.
 
-    The target is always an interpreter uv is allowed to write to.  The previous
-    ``--python <version> --system`` fallback asked uv to install into whatever
-    interpreter that version resolved to, and on any host whose Pythons are
-    uv-managed -- which is every host this pipeline runs on -- uv refuses:
-    "externally managed ... should not be modified".  Every commit then came back
-    ``failed``, and the recorded status was the host's refusal rather than a fact
-    about the seed.  So when no usable venv is handed in, one is built for the
-    requested version and thrown away afterwards.
-
-    There is deliberately no ``--system`` path left to fall back to: if the
-    throwaway environment cannot be built, the answer says so with
-    :data:`VENV_SETUP_FAILED` instead of re-describing a host refusal as a
-    resolution failure.
+    Without a usable *venv_path*, a throwaway venv is built for *python_version*,
+    because uv refuses to write to uv-managed system interpreters.  If that venv
+    cannot be built, the log starts with :data:`VENV_SETUP_FAILED`.
     """
     text_lines = seed_lines(pinned, context="uv pip install --dry-run")
     if not text_lines:
