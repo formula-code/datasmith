@@ -112,3 +112,16 @@ for the full list of overridable knobs.
 ## Dependencies on resolution
 
 The synthesizer requires `env_payload` (pinned dependencies) and `python_version` from pipeline Stage 4 (Resolve Packages). Without this data, `docker_build_env.sh` cannot install the correct packages. Always run resolution before synthesis.
+
+## Repositories that often fail synthesis
+
+- **Native extensions** (numpy, scipy, astropy, h5py, MDAnalysis, shapely, cartopy, geopandas, scikit-image): the
+  build needs system libraries and compilers (BLAS/LAPACK, GDAL, GEOS, PROJ, HDF5, Fortran) that the generated
+  `build_pkg_sh` often does not install.
+- **GPU or vendor toolchains** (mujoco_warp, dpctl, dpnp, NVIDIA/warp, NVIDIA/physicsnemo): CUDA or SYCL is not in the
+  base image and cannot be installed with pip.
+- **Not a plain Python package** (PostHog/posthog, conda/conda-build): not installable with `pip install -e .`.
+- **Multi-package ecosystems** (dask, dask/distributed, mars-project/mars): the package needs companion packages at
+  matching versions.
+- **Old commits**: pins resolved at the commit date can still fail on the code of that time. Reusing a nearby
+  successful build context helps only when one exists.

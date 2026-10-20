@@ -1,11 +1,7 @@
 """Render (or re-render) Harbor task directories from a records file.
 
-The datasmith pipeline (``fc-data --stage 7``) renders task dirs from live
-Supabase rows and immediately runs them through Harbor. For RL we need a
-render-only path that works on any box, without database access, from a
-committed input. That input is a JSON-lines file of ``FormulaCodeRecord``
-dicts, which is exactly what every rendered task dir already carries in
-``tests/config.json``.
+Renders without database access from a JSON-lines file of ``FormulaCodeRecord``
+dicts, the same records each rendered task dir carries in ``tests/config.json``.
 
     # 1. one-time export from an existing rendered tree (records travel with the repo)
     python -m datasmith.harbor_adapter.regen export \
@@ -46,8 +42,7 @@ _ID_DIR = re.compile(
     r"(?<![A-Za-z0-9_.-])([A-Za-z0-9.-]+(?:_[A-Za-z0-9.-]+)*)__([A-Za-z0-9.-]+(?:_[A-Za-z0-9.-]+)*)__(\d+)(?![A-Za-z0-9_])"
 )
 
-# FormulaCodeRecord fields, in declaration order. ``task_id`` (a derived property
-# that config.json also surfaces) is intentionally not a record field.
+# FormulaCodeRecord fields in declaration order; ``task_id`` is derived, so it is not listed.
 _RECORD_FIELDS = (
     "container_name",
     "patch",

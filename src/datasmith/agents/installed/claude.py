@@ -106,8 +106,7 @@ class ClaudeAgent(InstalledAgent):
 
         logger.debug("claude command: %s", " ".join(cmd))
 
-        # Nesting guard: unset Claude Code env vars to avoid
-        # "cannot be launched inside another Claude Code session" error.
+        # Unset Claude Code env vars, or the CLI refuses to start inside another Claude Code session.
         env = os.environ.copy()
         env.pop("CLAUDE_CODE_ENTRYPOINT", None)
         env.pop("CLAUDECODE", None)

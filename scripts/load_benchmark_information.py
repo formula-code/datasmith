@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from functools import cache
 from pathlib import Path
@@ -28,7 +29,7 @@ from datasmith.utils.db import get_client
 
 logger = logging.getLogger("load_benchmark_information")
 
-DEFAULT_TB_ROOT = Path("/mnt/sdd1/atharvas/formulacode/eval_frameworks/terminal-bench")
+DEFAULT_TB_ROOT = Path(os.environ.get("DATASMITH_TB_ROOT", "terminal-bench"))
 DEFAULT_TASKS_FILE = DEFAULT_TB_ROOT / "analysis" / "tasks.txt"
 
 

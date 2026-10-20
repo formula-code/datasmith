@@ -1,24 +1,9 @@
 """Compose the resolution units for one commit.
 
-The predecessor was one 669-line function with two paths through it.  The first
-compiled the project's packaging file directly and returned early on success; the
-second aggregated requirements from every file it could find, healed whatever
-failed, and injected test tooling.  Two commits of one repository could therefore
-be resolved by different halves and get different environments for no principled
-reason, and neither half recorded which one had answered.
-
-Here the flow is one path made of six small units, each testable alone:
-
-``discover`` finds the packaging roots, ``declare`` reads what the project states
-it needs, ``interpreter`` picks the Python from that declaration, ``pin`` compiles
-it once, ``probe`` dry-runs the result advisorily, and this module emits the row.
-
-Two things the predecessor did are gone rather than repaired.  It gated: a failed
-dry-run set ``can_install = False`` and stages 5 and 6 then skipped the PR, so
-3,217 performance PRs were never attempted.  The probe now orders the queue
-instead.  And it installed the resolved set for real on the host, which proves
-nothing about the container -- different interpreter, different base image, no
-compilers -- while dominating the stage's runtime.
+The flow is one path of small units, each testable alone: ``discover`` finds the
+packaging roots, ``declare`` reads what the project states it needs,
+``interpreter`` picks the Python, ``pin`` compiles it once, ``probe`` dry-runs the
+result (it orders the queue, it does not filter), and this module emits the row.
 """
 
 from __future__ import annotations
@@ -31,9 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import json5
-from git import Commit
 
 from datasmith.utils import get_logger
+from git import Commit
 
 from .cache import cache_completion
 from .constants import CACHE_LOCATION
@@ -49,8 +34,7 @@ logger = get_logger("resolution.orchestrator")
 
 __all__ = ["RESOLVER_VERSION", "ResolutionResult", "analyze_commit", "collect_asv_cfg"]
 
-#: Stamped on every row this resolver writes.  Rows carrying ``legacy`` came from
-#: the predecessor and carry no provenance at all.
+#: Stamped on every row this resolver writes; ``legacy`` rows came from an older resolver.
 RESOLVER_VERSION = "2026.08.23"
 
 #: Keys of an ASV ``matrix`` that name a section rather than a package.  Modern
@@ -74,7 +58,7 @@ _ASV_PIP_PREFIX = "pip+"
 
 @dataclass(frozen=True)
 class ResolutionResult:
-    """One commit's resolved environment, and the story of how it was reached."""
+    """One commit's resolved environment, and how it was reached."""
 
     owner_repo: str
     sha: str
@@ -96,21 +80,9 @@ class ResolutionResult:
 def _matrix_entries(matrix: object, environment_type: object = None) -> dict[str, list[str]]:
     """Read the PyPI packages an ASV ``matrix`` names, in whichever shape it is written.
 
-    asv >= 0.6 nests them: ``{"req": {"numpy": ["1.20", ""]}, "env": {...}}``.
-    Reading such a config flat offers ``req`` and ``env`` to the resolver as
-    package names, so the section keys are stepped through rather than into.
-    Older configs name the packages at the top level, which is the fallback.
-
-    ``environment_type`` decides which namespace those keys are in, and it is the
-    whole of the decision -- the nesting says nothing about it.  Under ``conda``
-    (or ``mamba``, or a site plugin such as ``oggm_conda``) a matrix names conda
-    packages: ``boost-cpp``, ``libprotobuf``, ``lz4-c`` and ``thrift-cpp`` are not
-    on PyPI at all, so the compile fails and the whole seed is lost; worse,
-    ``geos``, ``snappy``, ``re2`` and ``zstd`` *do* resolve on PyPI, to unrelated
-    projects -- shapely's ``geos`` is a Flask application, and it dragged nine of
-    its dependencies into shapely's seed.  Design section 4.2 removes conda names
-    at source, so under a conda-family environment only asv's own ``pip+`` escape
-    hatch survives, which states a PyPI name explicitly.
+    asv >= 0.6 nests them under ``req``; older configs name them at the top level.
+    Under a conda-family ``environment_type`` the keys are conda names (some match
+    unrelated PyPI projects), so only ``pip+`` entries are kept.
     """
     if not isinstance(matrix, dict):
         return {}
@@ -126,13 +98,8 @@ def _matrix_entries(matrix: object, environment_type: object = None) -> dict[str
             continue
         if not name:
             continue
-        # ``null`` is kept, as the string ``"None"``, deliberately.  It means "do
-        # not install this package in this combination", which is NOT the same as
-        # an empty version list -- that means "install any version".  Dropping the
-        # null here collapses the two, and ``declare`` would then read "never
-        # install pytables" as "install any pytables".  ``_matrix_requirements``
-        # is where the sentinel is resolved, and it is the only reader that needs
-        # to know.
+        # ``null`` is kept as ``"None"`` (do not install), which differs from an empty
+        # list (any version); ``_matrix_requirements`` resolves it.
         values = value if isinstance(value, list | tuple | set) else [value]
         out[name] = [str(v) for v in values]
     return out
@@ -141,15 +108,8 @@ def _matrix_entries(matrix: object, environment_type: object = None) -> dict[str
 def collect_asv_cfg(commit: Commit) -> ASVCfgAggregate:
     """Aggregate every ASV config in the commit.
 
-    The predecessor read each parsed config with ``getattr(cfg, "pythons", [])``.
-    ``json5.loads`` returns a ``dict``, and a dict has no such attribute, so every
-    field came back empty: the asv rung of the interpreter ladder never fired and
-    ``matrix`` never reached ``declare``.  Reads here go through ``dict.get``.
-
-    An absent ``pythons`` stays absent.  The predecessor substituted the full
-    supported set, which is a declaration the project never made -- and with the
-    reads fixed it would make the asv rung fire for every repository and override
-    the two rungs above it.
+    An absent ``pythons`` stays empty, so the asv rung only fires when the project
+    declares versions.
     """
     aggregate = ASVCfgAggregate()
     for cfg_file in asv_finder(commit):
@@ -188,14 +148,8 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> Reso
     """Resolve one commit's environment seed.
 
     Returns ``None`` only when the repository declares no packaging root at this
-    commit -- there is then nothing to resolve.  Everything else is an answer,
-    including an empty seed: a project that declares no dependencies gets ``[]``
-    and says so, where the predecessor would invent a list by guessing PyPI names
-    from import statements.
-
-    The cache table is ``commit_analysis_v2``.  The predecessor's rows hold a
-    ``dict`` of a different shape, and unpickling one into this dataclass would
-    fail far from here.
+    commit.  A project that declares no dependencies gets an empty seed.  The cache
+    table is ``commit_analysis_v2`` because older rows have a different shape.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         repo, _checkout_dir, cleanup_checkout = prepare_repo_checkout(repo_name, sha, Path(tmpdir))
@@ -226,9 +180,7 @@ def analyze_commit(sha: str, repo_name: str, bypass_cache: bool = False) -> Reso
                 commit_date=commit_date,
             )
 
-            # ``extras`` and ``operator_pins`` are the per-repository opt-ins the
-            # design gives ``formulacode_task_overrides``. Nothing reads that
-            # table yet, so the defaults stand: extras stay out of the seed.
+            # Per-repository ``extras`` and ``operator_pins`` are not read yet, so extras stay out of the seed.
             pinned = pin(declared, python_version=choice.version, commit_date=commit_date)
             probed = probe(pinned, python_version=choice.version)
 

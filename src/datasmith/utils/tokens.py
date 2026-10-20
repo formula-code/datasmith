@@ -7,9 +7,8 @@ import threading
 import time
 from dataclasses import dataclass
 
-# Ceiling on how far into the future a reported rate-limit reset may sit.
-# GitHub's real windows are an hour; anything longer came from a malformed
-# header, and trusting it verbatim wedges the pool until the process restarts.
+# Longest accepted rate-limit reset, in seconds. GitHub windows are an hour, so
+# a longer value is a malformed header.
 DATASMITH_TOKEN_MAX_RESET_S: float = float(os.environ.get("DATASMITH_TOKEN_MAX_RESET_S", "3600"))
 
 
@@ -43,9 +42,8 @@ class TokenPool:
     def try_get_token(self) -> tuple[str | None, float]:
         """Return ``(token, 0.0)`` if one is usable now, else ``(None, seconds to wait)``.
 
-        The non-blocking half of :meth:`get_token`, so an async caller can
-        ``await`` the wait instead of sleeping the thread it is running on.
-        See :meth:`get_token` for why that distinction is load-bearing.
+        The non-blocking form of :meth:`get_token`, so an async caller can
+        ``await`` the wait instead of sleeping its thread.
         """
         with self._lock:
             now = time.time()
@@ -61,13 +59,8 @@ class TokenPool:
     def get_token(self) -> str:
         """Return a token that is not currently rate-limited, blocking if none is.
 
-        NOT safe to call from a coroutine.  This sleeps the calling thread, so
-        on an event loop it stops everything: no logging, no other requests, no
-        progress, and no way to tell the difference from a crash.  A stage 3
-        run wedged exactly this way -- silent for twenty minutes with GitHub
-        reporting a full 5 000/5 000 budget, because one bad rate-limit report
-        had marked the only token exhausted.  Async callers must use
-        :meth:`try_get_token` and await the wait themselves.
+        Do not call from a coroutine: it sleeps the thread and stops the event
+        loop. Async callers use :meth:`try_get_token` and await the wait.
         """
         while True:
             token, wait = self.try_get_token()
@@ -79,11 +72,7 @@ class TokenPool:
         """Update rate-limit state for a token (called on 429/403).
 
         ``reset_at`` is clamped to at most :data:`DATASMITH_TOKEN_MAX_RESET_S`
-        from now.  It comes from a response header, and a malformed or
-        misparsed one used to be trusted verbatim: a single bogus far-future
-        epoch marked the token dead for hours, with no way to recover short of
-        restarting the process.  The real GitHub windows are an hour, so
-        anything beyond that is a bug in the input, not a genuine wait.
+        from now, so a malformed header cannot block the token for hours.
         """
         with self._lock:
             if token in self._rate_limits:

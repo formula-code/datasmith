@@ -1,27 +1,11 @@
 """Pin a declared dependency set to concrete versions.
 
-Two deliberate exclusions.
+Tooling the base image installs (``asv``, ``pytest``, ``setuptools`` ...) is
+removed from both the declared and the compiled set, so the payload never
+overrides the image's versions.  Extras are opt-in per repository.
 
-**Tooling.**  The base image already installs ``hypothesis``, ``pytest`` and
-``versioneer`` (``docker_build_base.sh:769``), ``asv`` (``:771``) and
-``pip setuptools wheel`` (``docker_build_env.sh:262``).  The predecessor's
-fallback path also injected ``pytest``, ``setuptools`` and ``hypothesis`` into
-``env_payload`` while its pyproject path did not, so the two paths disagreed and
-the payload fought the image: an unconstrained ``hypothesis`` in the payload
-overrides the image's deliberate ``hypothesis<5``.  The image owns tooling.
-The exclusion is applied to the compiled set as well as to the declared one:
-tooling arrives transitively -- ``setuptools-scm`` is a legitimate build
-requirement and pulls ``setuptools`` in behind it -- and a transitive pin starts
-the same fight as a declared one.
-
-**Extras.**  The predecessor always passed ``--all-extras``, which resolved
-PostHog to 412 packages and napari to 291 — every optional cloud SDK and
-documentation theme.  Extras are opt-in, declared per repository through
-``formulacode_task_overrides``.
-
-The commit-date cutoff is a preference, not a rule.  It is tried first because it
-cheaply yields era-appropriate versions; if it makes the set unsatisfiable the
-compile is retried without it and ``cutoff_relaxed`` records that it happened.
+The commit-date cutoff is tried first; if it makes the set unsatisfiable the
+compile is retried without it and ``cutoff_relaxed`` records that.
 """
 
 from __future__ import annotations
@@ -55,7 +39,7 @@ TOOLING_OWNED_BY_BASE_IMAGE: frozenset[str] = frozenset({
 
 @dataclass(frozen=True)
 class Pinned:
-    """A pinned dependency set and the story of how it was reached."""
+    """A pinned dependency set and how it was reached."""
 
     requirements: list[str] = field(default_factory=list)
     cutoff_used: str | None = None
@@ -70,7 +54,7 @@ def _owned_by_base_image(line: str) -> bool:
 
 
 def _strip_tooling(reqs: Iterable[str]) -> list[str]:
-    """Drop anything the base image owns, comparing on the bare package name."""
+    """Drop packages the base image installs, comparing on the bare package name."""
     parsed, _ = parse_many(reqs)
     return render(r for r in parsed if r.name.lower() not in TOOLING_OWNED_BY_BASE_IMAGE)
 
@@ -78,17 +62,8 @@ def _strip_tooling(reqs: Iterable[str]) -> list[str]:
 def _strip_resolved_tooling(resolved: Iterable[str]) -> list[str]:
     """Drop base-image packages from a *compiled* set, keeping every other line intact.
 
-    Stripping the input is not enough, because tooling arrives transitively.
-    ``setuptools-scm`` is not tooling and compiles fine, and it requires
-    ``setuptools`` -- so tqdm's seed carried ``setuptools==75.4.0`` even though
-    the ``setuptools`` tqdm declared had been removed before the compile.  That
-    is precisely the version fight the exclusion exists to prevent: the payload
-    pin overrides what the image installed.
-
-    A line the parser does not recognise is kept.  ``uv pip compile`` can emit a
-    direct URL, which has no PEP 508 form; dropping it would silently delete a
-    real requirement, and it can never be a base-image package under a name we
-    would have matched anyway.
+    Needed because tooling arrives transitively (``setuptools-scm`` pulls in
+    ``setuptools``).  Lines the parser does not recognise, such as direct URLs, are kept.
     """
     return [line for line in resolved if not _owned_by_base_image(line)]
 

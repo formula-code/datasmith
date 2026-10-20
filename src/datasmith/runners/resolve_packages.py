@@ -1,18 +1,8 @@
 """Runner for resolving Python dependencies for classified PRs.
 
-This is the stage that cores scale.  ``analyze_commit`` shells out to ``git
-clone`` and ``uv pip compile``, so its parallelism is a property of the
-machine — unlike stages 2 and 3, whose ceiling is one GitHub token and does
-not care how large the host is.  The two live on separate knobs so raising one
-cannot trip the other's rate limits (spec section 6.4).
-
-The work used to run on ``run_in_executor(None, ...)``, the interpreter's
-default pool, sized ``min(32, cpu_count + 4)``.  That silently means something
-different on every machine, and on a 128-core host it becomes 32 concurrent
-clones and compiles — all of them contending for the same disk.  It is also
-shared: anything else in the process that reaches for the default executor
-queues behind the clones.  The pool here is explicit, bounded, and owned by
-the runner.
+``analyze_commit`` runs ``git clone`` and ``uv pip compile``, so this stage is
+limited by the machine, not by GitHub. It uses its own bounded thread pool
+instead of the default executor, whose size varies by host.
 """
 
 from __future__ import annotations
@@ -34,20 +24,16 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance, typing only
 
 logger = get_logger("runners.resolve_packages")
 
-# Threads running ``git clone`` plus ``uv pip compile``.  Disk-bound rather
-# than CPU-bound, which is why the default is a modest fixed number instead of
-# a function of ``cpu_count()``: an operator who has measured their own disk
-# raises it in ``tokens.env``.
+# Threads running ``git clone`` and ``uv pip compile``. A fixed default, because
+# the work is limited by disk, not CPU.
 DATASMITH_RESOLVE_PACKAGES_WORKERS: int = int(os.environ.get("DATASMITH_RESOLVE_PACKAGES_WORKERS", "8"))
 
 
 @functools.lru_cache(maxsize=1)
 def _uv_version() -> str:
-    """Report the ``uv`` that compiled the seed, once per process.
+    """Return the ``uv`` version that compiled the seed, or ``unknown``.
 
-    Provenance is the point: two rows resolved months apart differ in what
-    resolved them, and until now nothing recorded it.  A version that cannot be
-    read is ``unknown`` -- honest, and never a reason to lose the row.
+    Stored on each row as provenance.
     """
     try:
         proc = subprocess.run(["uv", "--version"], capture_output=True, text=True, timeout=30, check=False)
@@ -60,17 +46,8 @@ def _uv_version() -> str:
 def build_row(owner: str, repo: str, sha: str, result: ResolutionResult) -> dict[str, Any]:
     """Map a resolution result onto a ``packages`` row.
 
-    ``requires_python`` is stored. Its predecessor hardcoded ``None`` here while
-    the parsed value was computed upstream and discarded.
-
-    ``build_commands``, ``install_commands`` and ``resolution_strategy`` are gone:
-    a reader audit found zero consumers outside this module for all three, and
-    the explicit provenance columns say what ``resolution_strategy`` was trying to.
-
-    ``can_install`` is gone too.  It was the probe's verdict under a name that
-    claimed "this builds", and stages 5 and 6 read it as a gate; the column is
-    retained and nullable for compatibility, and a row this resolver writes
-    leaves it null because this resolver never answers that question.
+    ``can_install`` is left null, because this resolver does not test whether
+    the package builds.
     """
     return {
         "owner": owner,
@@ -102,12 +79,9 @@ class ResolvePackagesRunner(BaseRunner):
         self._executor: ThreadPoolExecutor | None = None
 
     async def run(self, items: list[Any]) -> None:
-        """Run the stage against a pool this runner owns and shuts down.
+        """Run the stage on a thread pool that is created here and shut down at the end.
 
-        ``n_concurrent`` still bounds how many coroutines are in flight; the
-        pool bounds how many of them are actually cloning at once.  They are
-        separate numbers on purpose — the first is a queue depth, the second
-        is what the disk has to survive.
+        ``n_concurrent`` limits items in flight; the pool limits concurrent clones.
         """
         self._executor = ThreadPoolExecutor(
             max_workers=self._max_workers,
@@ -121,8 +95,7 @@ class ResolvePackagesRunner(BaseRunner):
         try:
             await super().run(items)
         finally:
-            # Shut down even when the stage raises, so a failed run does not
-            # leave clone threads alive behind it.
+            # Shut down even when the stage raises, so no threads are left running.
             self._executor.shutdown(wait=True)
             self._executor = None
 

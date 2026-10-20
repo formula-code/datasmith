@@ -202,11 +202,10 @@ shown, and exists so a patch can never overflow the model's context.
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
-    """Cut *text* to *max_tokens*, marking the cut so the model knows it happened.
+    """Cut *text* to *max_tokens* and mark the cut so the model knows it happened.
 
-    Falls back to a characters-per-token estimate when tiktoken is missing,
-    because returning the text untouched is what allowed a context overflow to
-    reach the model in the first place.
+    Falls back to a characters-per-token estimate when tiktoken is missing, so an
+    oversized text never reaches the model.
     """
     if not text:
         return text
@@ -258,26 +257,11 @@ class PerfClassifier:
     ) -> tuple[bool, str]:
         """Return ``(is_performance, reasoning)``, or raise if the model could not answer.
 
-        Raising is the point.  This used to catch every exception and return
-        ``(False, "Classification failed")``, which stage 3 then wrote as
-        ``is_performance_commit = False``.  The resume predicate is
-        ``is_performance_commit IS NULL``, so a transient model timeout became
-        a permanent exclusion that no re-run would revisit, and it was
-        indistinguishable from a PR the model had genuinely judged.  Across
-        the roughly 9 400 calls a July-plus-August run makes, a one percent
-        error rate silently discards about ninety commits.
-
-        Letting it propagate costs one ``runner_failures`` row and leaves the
-        column NULL, so the next run picks the PR up again.
+        Raising leaves ``is_performance_commit`` NULL so the next run retries the PR;
+        returning False would store a failure as a final verdict.
         """
         predictor = self._get_predictor()
-        # Truncate before the call, never after a failure.  ClassifyJudge has
-        # always done this and PerfClassifier never did, so an oversized patch
-        # reached the model and came back as ContextWindowExceededError.  That
-        # is unrecoverable by retry -- the patch is the same size next time --
-        # and since a failed classify leaves is_performance_commit NULL, the
-        # resume predicate re-selected the row on every subsequent run.  A
-        # permanent failure dressed as a transient one.
+        # Truncate before the call: an oversized patch fails with ContextWindowExceededError on every retry.
         result = predictor(
             problem_description=problem_description,
             github_patch=_truncate_to_tokens(github_patch, DATASMITH_CLASSIFY_PATCH_TOKENS),

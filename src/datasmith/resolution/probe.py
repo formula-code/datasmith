@@ -1,12 +1,7 @@
 """Dry-run the pinned seed, advisorily.
 
-The predecessor's ``can_install`` gated stages 5 and 6.  It blocked 3,217
-performance PRs that were then never attempted, while passing h5py on a single
-dependency and failing apache/arrow on a corrupted marker.  It claimed to mean
-"this builds"; it meant "uv could install these wheels into an empty venv".
-
-This keeps the cheap check and drops the claim.  ``status`` orders the stage 5
-queue.  It excludes nobody.
+A dry run only shows that uv could install the wheels into an empty venv, not
+that the project builds.  ``status`` orders the stage 5 queue and excludes nothing.
 """
 
 from __future__ import annotations

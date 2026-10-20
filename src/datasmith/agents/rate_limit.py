@@ -1,13 +1,10 @@
-"""Detect CLI-agent rate-limit / budget-exhaustion errors in raw output.
+"""Detect CLI-agent rate-limit and budget-exhaustion errors in raw output.
 
-Stage 6 (synthesize_images) drives `codex` and `claude` CLI agents against
-a shared weekly budget. When the budget runs out, each subsequent attempt
-fails in ~2s with an unhelpful `failure_stage='aborted'` unless we
-recognise the pattern. This module parses the raw JSONL stream emitted
-by either CLI and, if a rate-limit signal is present, returns the
-budget-reset timestamp so the runner can pause until the limit clears.
+Parses the JSONL stream from the codex or claude CLI and, when a rate-limit
+signal is present, returns the budget reset time so the runner can pause until
+the limit clears.
 
-Detection schemas (observed in error_logs):
+Detection schemas:
 
 * **Codex** — free-text error event:
       {"type":"error","message":"You've hit your usage limit. ... try again
@@ -160,9 +157,7 @@ def _parse_codex_reset(match: re.Match[str]) -> datetime.datetime:
     if match.group("ampm").upper() == "PM":
         hour += 12
     minute = int(match.group("minute"))
-    # Codex does not disclose a timezone for the reset time. Assume UTC —
-    # this is slightly conservative (may resume up to a few hours early or
-    # late) but correct to within a budget cycle.
+    # Codex gives no timezone for the reset time; assume UTC, which is right to within a budget cycle.
     return datetime.datetime(year, month, day, hour, minute, tzinfo=datetime.UTC)
 
 

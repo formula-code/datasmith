@@ -1,22 +1,8 @@
-"""Stage 2 — store every pull request merged inside the ingestion window.
+"""Stage 2: store every pull request merged inside the ingestion window.
 
-The window means ``merged_at``, half-open ``[since, until)``, and GitHub is
-asked that question directly: :meth:`GitHubClient.fetch_merged_prs` issues a
-``merged:`` search per repository and bisects it when the search cap would
-truncate the answer.
-
-This replaces a client-side filter that paged the repository connection in
-``CREATED_AT DESC`` order and halted on the first PR created before the window
-while accepting on ``merged_at``.  Stage 2 therefore captured only PRs both
-created *and* merged inside the window: measured on 2026-08-01, 46 of 81
-in-window PRs were lost, and the loss was biased — whole repositories with a
-deliberate review process disappeared (devito 6 of 6, newton-physics 3 of 3)
-while same-day-merge repositories survived intact.
-
-Stage 2 spends no REST budget.  Everything stored here comes from GraphQL; the
-only REST calls are the ~1% ``files`` fallback inside the fetcher.  The diff is
-fetched by stage 3, next to the classifier the patch-size gate exists to
-protect.
+The window is ``merged_at`` in ``[since, until)``. :meth:`GitHubClient.fetch_merged_prs`
+runs a ``merged:`` search per repository and bisects it when the search cap
+would truncate the result. Data comes from GraphQL; stage 3 fetches the diff.
 """
 
 from __future__ import annotations
@@ -32,19 +18,15 @@ from datasmith.utils.db import abatch_upsert, afetch_all, window_filters
 
 logger = get_logger("runners.scrape_commits")
 
-# How many repositories stage 2 scrapes at once when the CLI does not say.
-# Stage 2 is GraphQL-only and one GitHub token supplies 5 000 points an hour
-# against a need of roughly 170, so this dial is about GitHub-side pacing
-# rather than about machine size — see spec section 6.4.
+# Repositories scraped at once when the CLI does not say; this paces GitHub,
+# not the machine.
 DATASMITH_SCRAPE_COMMITS_CONCURRENCY: int = int(os.environ.get("DATASMITH_SCRAPE_COMMITS_CONCURRENCY", "5"))
 
 
 def _parse_iso(value: str) -> datetime:
     """Parse an ISO-8601 date or datetime into a timezone-aware UTC datetime.
 
-    A naive input is read as UTC rather than left naive: the fetcher rejects
-    naive bounds, and a bound that raises per repository turns one bad flag
-    into one ``runner_failures`` row per tracked repository.
+    A naive input is read as UTC, because the fetcher rejects naive bounds.
     """
     cleaned = value.strip().replace("Z", "+00:00")
     parsed = datetime.fromisoformat(cleaned)
@@ -56,9 +38,8 @@ def _parse_iso(value: str) -> datetime:
 def _parse_window_bound(name: str, value: str) -> datetime:
     """Parse and validate one end of the ingestion window.
 
-    Validated once at construction, not once per repository, so a malformed
-    ``--start-date`` fails the stage immediately instead of producing a
-    failure row for every repository in the corpus.
+    Called once at construction, so a bad date fails the stage at once
+    instead of once per repository.
     """
     if not value:
         raise ValueError(
@@ -84,23 +65,10 @@ def _symbolic_without_patch(
     file_changes: list[dict[str, Any]],
     changed_files: int,
 ) -> bool:
-    """Evaluate the two attribute-compliance components that GraphQL can answer.
+    """Evaluate the title filter and file compliance; stage 3 checks patch size.
 
-    ``symbolic_compliance`` has three components — the title filter, file
-    compliance, and ``check_patch_size``.  Stage 2 has no patch, so **the
-    patch-size component is not evaluated here at all**.  It is not estimated
-    either: no proxy for a token count was available, so inventing one would
-    put a number in the database that nothing measured.  Stage 3 fetches the
-    diff and applies ``check_patch_size`` there, next to the classifier the
-    gate exists to protect.
-
-    ``changed_files`` is the GraphQL ``files.totalCount``, which stays truthful
-    when ``files(first: 100)`` truncates the node list.  The fetcher normally
-    repairs a truncated list over REST; when that fallback comes back empty the
-    list is short and both size guards would read from it — the 500-file guard
-    could not fire and the 40 000-line sum would undercount.  A PR measured
-    with ``totalCount = 3000`` passes the screen on its truncated list and must
-    not, so a list still short of its own total is refused rather than trusted.
+    ``changed_files`` is GraphQL's ``files.totalCount``. A file list shorter than
+    that total is truncated, so the PR is refused rather than checked on part of its files.
     """
     if not message_filter(title):
         return False
@@ -114,10 +82,8 @@ def _symbolic_without_patch(
 def _build_record(owner: str, repo: str, pr_data: dict[str, Any]) -> dict[str, Any]:
     """Build the ``pull_requests`` row for one merged PR.
 
-    Every record carries the same keys.  PostgREST rejects a bulk upsert whose
-    objects disagree on their key set, so the conditional ``patch`` /
-    ``file_changes`` keys that were harmless for a per-PR upsert would fail a
-    whole repository's batch.
+    Every record has the same keys, because PostgREST rejects a bulk upsert
+    whose objects have different key sets.
     """
     title = _sanitize_text(pr_data.get("title", "") or "")
     file_changes: list[dict[str, Any]] = list(pr_data.get("file_changes") or [])
@@ -165,17 +131,8 @@ class ScrapeCommitsRunner(BaseRunner):
     async def _process_item(self, item: Any) -> None:
         """Scrape one ``(owner, repo)``: fetch, screen, and store in one batch.
 
-        Nothing here is caught.  ``Truncated`` from the fetcher, and
-        ``RepositoryNotFoundError`` for a repository that no longer resolves,
-        propagate to ``BaseRunner``, which writes a ``runner_failures`` row and
-        carries on with the rest of the corpus — that repository fails, not the
-        stage.  Returning an empty list instead is what made a failed run
-        indistinguishable from a quiet one.
-
-        A repository answering under a different ``nameWithOwner`` — a silent
-        rename such as ``pymc-devs/pymc3`` → ``pymc-devs/pymc`` — is warned
-        about inside ``fetch_merged_prs``, which still holds the node's
-        ``repository`` block; normalisation drops it.
+        Fetch errors such as ``Truncated`` and ``RepositoryNotFoundError`` are not
+        caught, so ``BaseRunner`` records a failure for this repository only.
         """
         owner, repo = item if isinstance(item, tuple) else item.split("/")
 
@@ -198,9 +155,7 @@ class ScrapeCommitsRunner(BaseRunner):
         for pr_data in prs:
             number = int(pr_data["number"])
             if number in seen:
-                # One batch per repository means duplicates are no longer
-                # merely wasteful: Postgres refuses an upsert that touches the
-                # same primary key twice in one statement.
+                # Postgres refuses an upsert that has the same primary key twice.
                 continue
             seen.add(number)
             if not pr_data.get("merged_at"):
@@ -227,11 +182,8 @@ class ScrapeCommitsRunner(BaseRunner):
     async def _existing_issue_numbers(self, owner: str, repo: str) -> set[int]:
         """Read the issue numbers already stored *for this window*.
 
-        Scoped to the window and served by the ``(owner, repo, merged_at)``
-        index from migration 00027.  The predecessor read every stored
-        ``issue_number`` for the repository — 25 802 rows for pandas, roughly
-        265 000 across a run, about 18 s of a 56 s run — so the cost grew with
-        the table while the work stayed flat.
+        Limited to the window, so the read uses the ``(owner, repo, merged_at)``
+        index and does not grow with the table.
         """
         rows = await afetch_all(
             "pull_requests",

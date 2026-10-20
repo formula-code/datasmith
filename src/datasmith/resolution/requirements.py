@@ -1,31 +1,8 @@
-r"""PEP 508 requirement parsing.
+"""PEP 508 requirement parsing.
 
-The predecessor -- the marker-spacing repair in ``package_filters``, audit B1 --
-tried to fix markers with two unanchored substitutions::
-
-    re.sub(r"(?<=[^\s])and(?=[^\s])", " and ", marker)
-    re.sub(r"(?<=[^\s])or(?=[^\s])",  " or ",  marker)
-
-``or`` occurs inside ``platform`` and ``and`` occurs inside ``standard``, so it
-turned ``platform_system`` into ``platf or m_system`` and ``extra=='standard'``
-into ``extra=='st and ard'``.  uv then refused to parse the result and the whole
-compile failed, which is how one ``pyuwsgi`` requirement removed apache/arrow
-from the dataset.
-
-The rule here is the opposite: parse with the real parser, and if a string does
-not parse, drop it and say so.  Never rewrite a requirement, and never let one
-bad string decide the fate of its siblings.
-
-Two shapes are requirements-*file* syntax rather than requirement syntax, and
-both are handled here so that routing a file line through the parser does not
-lose it:
-
-* an inline ``# comment``, which is not part of the requirement the line states;
-* a bare archive or VCS URL, which uv installs from a requirements file but for
-  which PEP 508 has no syntax at all.
-
-Removing a comment is not a rewrite of a requirement -- it is reading the line
-the way the file format defines it, exactly as uv reads the same line.
+Strings are parsed with the real parser; one that does not parse is dropped with
+a reason, never rewritten, so one bad string cannot break its siblings.  Inline
+``# comments`` are removed and bare archive or VCS URLs are kept as uv reads them.
 """
 
 from __future__ import annotations
@@ -55,9 +32,7 @@ class Dropped:
     reason: str
 
 
-#: Why a string was not usable.  The reason is stored next to the string, so it
-#: has to name the actual cause -- a pip directive is not "unparseable", it was
-#: never offered to the parser.
+#: Why a string was not usable; stored next to the string, so each names the actual cause.
 REASON_DIRECTIVE = "requirements-file directive, not a requirement"
 REASON_LOCAL_PATH = "local path, not a PyPI requirement"
 REASON_PLACEHOLDER = "unexpanded template placeholder"
@@ -97,11 +72,7 @@ def is_direct_url_line(text: str) -> bool:
 def _rejection_reason(text: str) -> str | None:
     """Name the reason a string is not a requirement at all, or ``None``."""
     if text.startswith("-"):
-        # This also refuses ``-e <url>``, which uv would accept. That is
-        # deliberate: an editable install belongs to the build, not to the
-        # dependency seed, and ``-e .`` -- by far the common form -- installs the
-        # project under resolution into its own environment. The refusal is
-        # reported with this reason rather than being silent.
+        # Also refuses ``-e <url>``: an editable install belongs to the build, not the dependency seed.
         return REASON_DIRECTIVE
     if text.startswith("."):
         return REASON_LOCAL_PATH
@@ -169,15 +140,9 @@ def parse_many(raws: Iterable[str]) -> tuple[list[Requirement], list[Dropped]]:
 def to_requirement_lines(raws: Iterable[str]) -> tuple[list[str], list[Dropped]]:
     """Turn requirements-file lines into the exact text to hand to uv.
 
-    This is the single entry point for "what does this commit ask uv to
-    install".  Every line it returns is in the seed and every line it refuses is
-    in ``dropped`` with its reason, so the two lists together account for the
-    input.  Prefer it over :func:`parse_many` for anything that feeds a resolver
-    or a stored record: a bare archive URL belongs in the seed but has no PEP 508
-    form, so ``parse_many`` alone would report a shipped requirement as dropped.
-
-    Output is sorted and deduplicated, so the same input in a different order
-    gives the same answer.
+    Every input line is either returned or listed in ``dropped`` with its reason.
+    Prefer it over :func:`parse_many` for anything that feeds a resolver, because
+    it keeps bare URL lines.  Output is sorted and deduplicated.
     """
     lines: list[str] = []
     dropped: list[Dropped] = []
