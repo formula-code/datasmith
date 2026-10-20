@@ -146,8 +146,10 @@ def commit_all(repo: Path, msg: str) -> None:
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg], cwd=repo, check=True)
 
 
-def test_a_test_file_that_no_longer_imports_is_a_regression(runner, repo: Path) -> None:
+def test_a_test_file_that_no_longer_imports_is_a_regression(runner, repo: Path, monkeypatch) -> None:
     # dascore#415: the restored tests import a name the patch removed, and pytest stopped before any test ran.
+    # test.sh runs from the repo; elsewhere pytest's rootdir is the common parent of the cwd and the repo.
+    monkeypatch.chdir(repo)
     m = (repo / "test_m.py").read_text()
     subprocess.run(["git", "checkout", "--", "test_m.py"], cwd=repo, check=True)
     (repo / "m.py").write_text("def f():\n    return 1\n")
