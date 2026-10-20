@@ -84,6 +84,7 @@ class FormulaCodeAdapter:
         verifier_env: dict[str, str] | None = None,
         expected_n: int | None = None,
         restore_paths: list[str] | None = None,
+        docker_image: str | None = None,
     ) -> Path:
         """Render the Harbor task dir for ``rec``.
 
@@ -91,6 +92,7 @@ class FormulaCodeAdapter:
         ``expected_n`` (from ``formulacode_task_overrides``) becomes ``FORMULACODE_EXPECTED_N`` for the
         dilution_ratio invariant; ``None`` emits no key, so the invariant skips.
         ``restore_paths`` are repo files the image puts back to the base commit (base_restore.json).
+        ``docker_image`` pins a built task image in task.toml.
         """
         rounds = DATASMITH_LSV_ROUNDS if rounds is None else rounds
         out_dir = self.out_root / rec.task_dir_name
@@ -120,6 +122,7 @@ class FormulaCodeAdapter:
             memory=memory,
             storage=storage,
             verifier_env=verifier_env,
+            docker_image=docker_image,
         )
         _write(out_dir / "task.toml", task_toml)
 

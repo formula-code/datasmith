@@ -832,3 +832,24 @@ class TestPytestPassRatioIsRecordedNotGated:
         fields = local_ci._pytest_verify_fields(stdout)
         assert "pytest_pass_ratio" not in fields
         assert "pytest_total_at_base" not in fields
+
+
+def test_task_image_check_records_added_modules(monkeypatch):
+    from datasmith.docker import manifest
+
+    stdout = "\n".join([
+        "QWEN=0.22.3",
+        "IMPORTS=ok",
+        "SNAPSHOT_TOOL=ok",
+        "HEAD=abc",
+        'LSV_INIT={"baseline_sha": "abc", "env_fingerprint": {"cpus": 2}}',
+        'ADDED_DEPS={"discovery_retry": [{"module": "distributed", "installed": true}]}',
+    ])
+    monkeypatch.setattr(manifest.subprocess, "run", lambda *a, **kw: type("P", (), {"stdout": stdout, "stderr": ""})())
+    info, problems = manifest.check_task_image("t")
+    assert problems == []
+    assert info["added_deps"]["discovery_retry"][0]["module"] == "distributed"
+    out = "HEAD=abc\nADDED_DEPS="
+    monkeypatch.setattr(manifest.subprocess, "run", lambda *a, **kw: type("P", (), {"stdout": out, "stderr": ""})())
+    info, problems = manifest.check_task_image("t")
+    assert info["added_deps"] is None and "no stored baseline in /opt/lsv/cache/lsv_init_results.json" in problems

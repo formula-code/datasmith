@@ -403,19 +403,30 @@ def _publish_oracle_snapshots(trial: Any, owner: str, repo: str, issue_number: i
         data = buf.getvalue()
         for method in ("POST", "PUT"):
             try:
-                req = urllib.request.Request(url, data=data, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=180):
+                req = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310 (url is the configured Supabase storage URL)
+                with urllib.request.urlopen(req, timeout=180):  # noqa: S310
                     get_logger(__name__).info("Published oracle snapshots: %s", object_key)
                     return
             except urllib.error.HTTPError as e:
                 if method == "POST" and e.code in (400, 409):
                     continue  # exists -> overwrite
-                get_logger(__name__).warning(
-                    "Snapshot publish failed for %s (%s)", object_key, e.code
-                )
+                get_logger(__name__).warning("Snapshot publish failed for %s (%s)", object_key, e.code)
                 return
-    except Exception as exc:  # noqa: BLE001 — publishing must never break the healthcheck
+    except Exception as exc:
         get_logger(__name__).warning("Snapshot publish error: %s", exc)
+
+
+def _keep_oracle_snapshots(trial: Any, snapshots_dir: Path) -> None:
+    """Copy the trial's ``.snapshots/`` to ``<snapshots_dir>/<task>/`` when it has an entry that is not a skip."""
+    import shutil
+
+    snap = _trial_dir_from_uri(trial.trial_uri) / "artifacts" / ".snapshots"
+    try:
+        real = any(v != "skip" for v in json.loads((snap / "baseline.json").read_text())["entries"].values())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    if real:
+        shutil.copytree(snap, snapshots_dir / trial.task_id.get_name(), dirs_exist_ok=True)
 
 
 def _insert_harbor_runs(rows: list[dict[str, Any]], chunk_size: int = 100) -> int:
@@ -471,9 +482,12 @@ async def run_harbor_healthcheck(
     n_concurrent_trials: int = 4,
     rounds: int = 2,
     job_name: str | None = None,
+    snapshots_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Materialize *items* into *task_dir*, run Harbor's oracle agent on the
     whole batch, and persist one ``harbor_runs`` row per trial.
+
+    ``snapshots_dir`` also keeps each oracle snapshot reference with a real entry in ``<snapshots_dir>/<task>/``.
 
     Returns the list of row dicts that were inserted (useful for tests).
     """
@@ -532,9 +546,9 @@ async def run_harbor_healthcheck(
             # Persist the oracle behavioral baseline durably so agent trials can verify
             # against it (regression-relative correctness). Best-effort; never blocks.
             if row.get("agent_name") == "oracle":
-                _publish_oracle_snapshots(
-                    trial, row["owner"], row["repo"], row["issue_number"]
-                )
+                _publish_oracle_snapshots(trial, row["owner"], row["repo"], row["issue_number"])
+                if snapshots_dir is not None:
+                    _keep_oracle_snapshots(trial, snapshots_dir)
 
     n_success = sum(1 for r in rows if r["status"] == "success")
     n_fast = sum(

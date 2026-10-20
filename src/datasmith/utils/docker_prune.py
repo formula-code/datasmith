@@ -25,7 +25,7 @@ _DEFAULT_INTERVAL_SEC = 7200
 DATASMITH_DOCKER_PRUNE_MIN_USED_PCT: float = float(os.environ.get("DATASMITH_DOCKER_PRUNE_MIN_USED_PCT", "85"))
 
 
-def _docker_root() -> str | None:
+def docker_root() -> str | None:
     """Where Docker actually stores its data. Not always on the root filesystem.
 
     On this host it is /mnt/sdd2/docker, while / is the filesystem under
@@ -66,7 +66,7 @@ def _should_prune() -> tuple[bool, str]:
     When usage cannot be determined the answer is yes. The watcher exists to
     stop the disk filling, and a stalled pipeline costs more than a cold cache.
     """
-    root = _docker_root()
+    root = docker_root()
     if root is None:
         return True, "docker root unknown; pruning to stay safe"
     used = _used_pct(root)
