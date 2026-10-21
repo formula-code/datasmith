@@ -44,7 +44,7 @@ def test_staged_and_new_files_are_changed_files(runner, repo: Path) -> None:
     git(repo, "add", "m.py")
     (repo / "new.py").write_text("y = 1\n")
     (repo / ".fc_base_pytest.cfg").write_text("")
-    kw = dict(base_ref="HEAD", repo_root=str(repo))
+    kw = {"base_ref": "HEAD", "repo_root": str(repo)}
     assert runner.get_changed_files(**kw) == []
     assert runner.get_changed_files(include_staged=True, include_untracked=True, **kw) == ["m.py", "new.py"]
 
@@ -69,7 +69,9 @@ def test_an_agent_pytest_ini_that_deselects_a_failing_test_is_not_read(runner, r
     monkeypatch.setenv("FC_PYTEST_CONFIG", runner.write_base_pytest_config("HEAD", str(repo)))
     (repo / "pytest.ini").write_text("[pytest]\naddopts = --deselect test_fc_deselect_case.py::test_a\n")
     res = runner.run_pytest_and_collect(["test_fc_deselect_case.py"], extra_args="-p no:cacheprovider", cwd=str(repo))
-    assert {t["nodeid"]: t["outcome"] for t in res["tests"] if t.get("when") == "call"} == {"test_fc_deselect_case.py::test_a": "failed"}
+    assert {t["nodeid"]: t["outcome"] for t in res["tests"] if t.get("when") == "call"} == {
+        "test_fc_deselect_case.py::test_a": "failed"
+    }
 
 
 def test_benchmarks_timed_only_at_base_are_listed() -> None:
@@ -82,8 +84,12 @@ def test_benchmarks_timed_only_at_base_are_listed() -> None:
 def test_parser_records_the_pytest_time_out(tmp_path: Path, monkeypatch) -> None:
     parser = _load("parser")
     monkeypatch.setattr(parser, "LOG_DIR", tmp_path)
-    assert parser._pytest_status() == {"pytest_runner_exit_code": None, "pytest_timed_out": False,
-                                       "pytest_base_also_timed_out": False}
-    (tmp_path / "pytest_status.json").write_text(json.dumps({"runner_exit_code": 124, "timed_out": True,
-                                                              "base_exit_code": 124, "base_also_timed_out": True}))
+    assert parser._pytest_status() == {
+        "pytest_runner_exit_code": None,
+        "pytest_timed_out": False,
+        "pytest_base_also_timed_out": False,
+    }
+    (tmp_path / "pytest_status.json").write_text(
+        json.dumps({"runner_exit_code": 124, "timed_out": True, "base_exit_code": 124, "base_also_timed_out": True})
+    )
     assert parser._pytest_status()["pytest_base_also_timed_out"] is True

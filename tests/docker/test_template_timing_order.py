@@ -53,11 +53,19 @@ def _run(
     (log / ".snapshots").mkdir()
     (log / ".snapshots" / "baseline.json").write_text("{}")
     text = render_template(
-        "tests/test.sh", base_commit="BASE", run_pytest=True, rounds=None, owner=owner, repo="r", issue_number=1,
+        "tests/test.sh",
+        base_commit="BASE",
+        run_pytest=True,
+        rounds=None,
+        owner=owner,
+        repo="r",
+        issue_number=1,
         task_id=f"{owner}__r__1",
     )
     head = text[: text.index("\nset -u\n", text.index("set +u")) + len("\nset -u\n")]
-    head = head.replace("cd /workspace/repo || exit 1", f"cd {repo}").replace("/etc/profile.d/", f"{tmp_path}/profile.d/")
+    head = head.replace("cd /workspace/repo || exit 1", f"cd {repo}").replace(
+        "/etc/profile.d/", f"{tmp_path}/profile.d/"
+    )
     (tmp_path / "profile.d").mkdir()
     for f in ("asv_utils.sh", "asv_build_vars.sh"):
         (tmp_path / "profile.d" / f).write_text("")
@@ -93,7 +101,10 @@ echo REACHED_REWARD
         (tmp_path / "base" / "core.py").write_text("x = 1\n")
         fn = (_TESTS / "base_digest.sh").read_text()
         digest = subprocess.run(
-            ["bash", "-c", fn + "fc_base_digest"], capture_output=True, text=True, check=True,
+            ["bash", "-c", fn + "fc_base_digest"],
+            capture_output=True,
+            text=True,
+            check=True,
             env={**os.environ, "FC_BASE_COPY": str(tmp_path / "base")},
         ).stdout.strip()
         (tmp_path / "fc_base_digest").write_text(digest + "\n")
@@ -101,7 +112,9 @@ echo REACHED_REWARD
             (tmp_path / "base" / "core.py").write_text(base)
     clean = {k: v for k, v in os.environ.items() if not k.startswith(("FC_", "FORMULACODE_"))}
     clean["FC_BASE_COPY"] = str(tmp_path / "base")
-    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, env={**clean, **(env or {})})
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=60, env={**clean, **(env or {})}
+    )
     assert "REACHED_REWARD" in out.stdout, out.stderr
     return calls.read_text().splitlines(), log
 

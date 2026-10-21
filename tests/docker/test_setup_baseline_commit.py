@@ -10,7 +10,11 @@ def baseline_block(sha_file: Path) -> str:
     text = SETUP.read_text()
     start, end = text.index('SETUP_PHASE="baseline_commit"'), text.index('SETUP_PHASE="base_copy"')
     stage = (SETUP.parents[1] / "shared" / "stage_tree.sh").read_text()
-    block = re.sub(r'\{% filter indent\(2\) %\}\n\{% include "shared/stage_tree.sh" %\}\n\{% endfilter %\}\n', lambda _: stage, text[start:end])
+    block = re.sub(
+        r'\{% filter indent\(2\) %\}\n\{% include "shared/stage_tree.sh" %\}\n\{% endfilter %\}\n',
+        lambda _: stage,
+        text[start:end],
+    )
     return block.replace("/opt/fc_baseline_sha", str(sha_file))
 
 
@@ -25,8 +29,12 @@ def test_baseline_commit_starts_no_background_gc(tmp_path):
     git("-c", "user.name=t", "-c", "user.email=t@t", "-c", "gc.auto=0", "commit", "-q", "-m", "base")
     git("config", "gc.auto", "1")
     (repo / "edit.txt").write_text("image edit\n")
-    subprocess.run(["bash", "-c", "set -euo pipefail\n" + baseline_block(tmp_path / "sha")], cwd=repo, check=True,
-                   capture_output=True)
+    subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + baseline_block(tmp_path / "sha")],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
     time.sleep(2)
     assert git("log", "-1", "--format=%s").strip() == "fc-baseline"
     assert not list((repo / ".git/objects/pack").glob("*.pack"))
