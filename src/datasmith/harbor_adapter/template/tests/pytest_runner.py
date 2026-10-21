@@ -164,8 +164,11 @@ def candidate_test_paths_for_source(src_path, search_roots):
                 expanded.add(p)
 
     candidates |= expanded
+    root = os.path.realpath(search_roots[0])
+    # glob follows links to folders; a path through one is a copy of a real test file.
     existing = [
         p for p in candidates if os.path.isfile(os.path.join(search_roots[0], p))
+        and os.path.relpath(os.path.realpath(os.path.join(root, p)), root).replace("\\", "/") == p
     ]
     return sorted(set(existing))
 
@@ -183,6 +186,9 @@ def discover_test_files_from_changed(changed_files, repo_root):
     for path in changed_files:
         rel = path.replace("\\", "/")
         abs_path = os.path.join(repo_root, rel)
+        # A link to a folder (dask/repo -> /workspace/repo) would collect every test many times over.
+        if os.path.islink(abs_path) and os.path.isdir(abs_path):
+            continue
 
         if os.path.isdir(abs_path):
             tests_in_dir = []

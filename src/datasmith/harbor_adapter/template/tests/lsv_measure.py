@@ -176,13 +176,23 @@ def get_changed_files(base_commit: str) -> list[str]:
                                cwd=str(REPO_ROOT)).stdout
 
     files = []
+    repo = REPO_ROOT.resolve()
     for line in sorted(set((result.stdout + "\n" + untracked).splitlines())):
         line = line.strip()
         if line:
             path = REPO_ROOT / line
-            if path.exists():
+            # LSV reads each file: a link to a folder (dask/repo -> /workspace/repo) crashed the timing.
+            if path.is_file() and (not path.is_symlink() or _inside(path.resolve(), repo)):
                 files.append(str(path))
     return files
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _finite(obj):
