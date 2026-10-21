@@ -1,5 +1,6 @@
 import json
 import math
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -123,3 +124,29 @@ def test_a_job_past_the_time_limit_ends_too_slow(tmp_path):
     out = tmp_path / "out"
     assert measure.measure_task(task_dir(tmp_path), out, s) == "too_slow"
     assert not (out / "oracle" / "o__r__1.json").exists()
+
+
+def test_trial_ip_times_the_oracle_on_the_trial_network(tmp_path):
+    d, out, envs = task_dir(tmp_path), tmp_path / "out", []
+    harbor = fake_harbor(out)
+
+    def run(cmd, **kw):
+        envs.append(kw["env"])
+        harbor(cmd, **kw)
+
+    s = measure.Settings(lock_dir=tmp_path / "lock", lock_slots=2, trial_ip="172.31.250.1")
+    assert measure.measure_task(d, out, s, run=run) == "measured"
+    cfg = json.loads((out / "configs" / "o__r__1__oracle.json").read_text())
+    assert "HARBOR_DOCKER_HOST_NET" not in envs[0]
+    assert cfg["verifier"]["env"]["SUPABASE_URL"] == "http://172.31.250.1:8268"
+    assert "fc-trials" in Path(cfg["environment"]["extra_docker_compose"][0]).read_text()
+    toml = tomllib.loads((Path(cfg["datasets"][0]["path"]) / "o__r__1" / "task.toml").read_text())
+    policy = {"network_mode": "allowlist", "allowed_hosts": ["172.31.250.1"]}
+    assert toml["agent"] == policy and toml["verifier"] == policy
+    assert toml["environment"]["docker_image"] == "fc-task/o__r__1:x" and "allowlist" not in (d / "task.toml").read_text()
+
+
+def test_host_network_by_default(tmp_path):
+    cfg = measure.job_config(task_dir(tmp_path), "j", settings(tmp_path), tmp_path, tmp_path / "tasks")
+    assert "extra_docker_compose" not in cfg["environment"]
+    assert cfg["verifier"]["env"]["SUPABASE_URL"] == measure.SNAPSHOT_GATEWAY_URL
