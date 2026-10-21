@@ -214,13 +214,39 @@ fi
 if [ "${_fc_skip_snapshot}" != 1 ] && [ "${AGENT_KEY}" != "oracle" ] && [ -n "${BENCHMARK_DIR}" ] && \
    [ -f "${SNAPSHOT_DIR}/baseline.json" ] && command -v snapshot-tool >/dev/null 2>&1; then
   echo "[$(ts)] [test] Running snapshot verification..."
-  timeout --kill-after=60 "${SNAPSHOT_STEP_TIMEOUT}" snapshot-tool verify \
-    --filter "${SNAPSHOT_FILTER}" \
-    --snapshot-dir "${SNAPSHOT_DIR}" \
-    --summary "${LOG_DIR}/summary_${AGENT_KEY}.json" \
-    --timeout "${SNAPSHOT_TIMEOUT}" \
-    ${SNAPSHOT_PARALLEL_ARGS} \
-    "${BENCHMARK_DIR}" || echo "WARNING: snapshot verification failed (exit $?; 124 = over ${SNAPSHOT_STEP_TIMEOUT}s)"
+  fc_snapshot_verify() {
+    timeout --kill-after=60 "${SNAPSHOT_STEP_TIMEOUT}" snapshot-tool verify \
+      --filter "${SNAPSHOT_FILTER}" \
+      --snapshot-dir "${SNAPSHOT_DIR}" \
+      --summary "$1" \
+      --timeout "${SNAPSHOT_TIMEOUT}" \
+      ${SNAPSHOT_PARALLEL_ARGS} \
+      "${BENCHMARK_DIR}"
+  }
+  if fc_snapshot_verify "${LOG_DIR}/summary_${AGENT_KEY}.json"; then _snap_rc=0; else _snap_rc=$?; fi
+  [ "${_snap_rc}" = 0 ] || echo "WARNING: snapshot verification failed (exit ${_snap_rc}; 124 = over ${SNAPSHOT_STEP_TIMEOUT}s)"
+  _snap_base_rc=""
+  # A patch that makes a benchmark hang must not skip the check: run the same verify at base with the same limit.
+  if [ "${_snap_rc}" = 124 ] || [ "${_snap_rc}" = 137 ]; then
+    echo "[$(ts)] [test] snapshot verify over ${SNAPSHOT_STEP_TIMEOUT}s; running it at base with the same limit" >&2
+    _snap_head="$(git rev-parse HEAD)"
+    git reset -q --soft "${FC_BASE}" 2>/dev/null || true
+    if git stash push -q -m fc-snapshot-base 2>/dev/null && git stash list | grep -q fc-snapshot-base; then
+      if [ -z "${FC_REBUILD_CMD}" ] || ${FC_REBUILD_CMD} >> "${LOG_DIR}/rebuild.log" 2>&1; then
+        if fc_snapshot_verify "${LOG_DIR}/.snapshot_base_summary.json"; then _snap_base_rc=0; else _snap_base_rc=$?; fi
+      fi
+      git stash pop -q --index 2>/dev/null || git stash pop -q 2>/dev/null || true
+      if [ -n "${FC_REBUILD_CMD}" ]; then ${FC_REBUILD_CMD} >> "${LOG_DIR}/rebuild.log" 2>&1 || true; fi
+    fi
+    git reset -q --soft "${_snap_head}" 2>/dev/null || true
+  fi
+  python - "${LOG_DIR}/snapshot_status.json" "${_snap_rc}" "${_snap_base_rc}" <<'PYEOF' || true
+import json, sys
+path, rc, base_rc = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+timed_out = rc in (124, 137)
+json.dump({"verify_exit_code": rc, "timed_out": timed_out, "base_exit_code": int(base_rc) if base_rc else None,
+           "base_also_timed_out": timed_out and base_rc in ("124", "137")}, open(path, "w"))
+PYEOF
 fi
 
 snapshot_end=$(date +%s)

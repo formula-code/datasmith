@@ -601,6 +601,19 @@ def _pytest_status() -> dict:
     }
 
 
+def _snapshot_status() -> dict:
+    """test.sh's record of a snapshot verify over its time limit and of the same verify at base (snapshot_status.json)."""
+    try:
+        st = json.loads((LOG_DIR / "snapshot_status.json").read_text())
+    except (OSError, ValueError):
+        st = {}
+    return {
+        "snapshot_timed_out": bool(st.get("timed_out")),
+        "snapshot_base_exit_code": st.get("base_exit_code"),
+        "snapshot_base_also_timed_out": bool(st.get("base_also_timed_out")),
+    }
+
+
 def write_reward(
     reward_dir: Path,
     advantages: dict[str, float] | None,
@@ -668,6 +681,7 @@ def write_reward(
         "patch_broke_benchmarks": (lsv_measure_raw or {}).get("patch_broke_benchmarks") or [],
         "lsv_discovery_failed_side": (lsv_measure_raw or {}).get("discovery_failed_side"),
         **_pytest_status(),
+        **_snapshot_status(),
         # ── structured dossier ────────────────────────────────────────────
         "patch": patch or {},
         "lsv": {

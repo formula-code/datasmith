@@ -84,7 +84,15 @@ echo REACHED_REWARD
     return lines, log
 
 
-_ALL_STEPS = ["acquire tests", "python -c", "snapshot verify", "python /tests/pytest_runner.py", "python -", "release"]
+_ALL_STEPS = [
+    "acquire tests",
+    "python -c",
+    "snapshot verify",
+    "python -",
+    "python /tests/pytest_runner.py",
+    "python -",
+    "release",
+]
 
 
 @pytest.mark.parametrize("run_pytest", [True, False])
@@ -109,7 +117,7 @@ def test_unset_without_pytest_config_writes_the_configured_results(tmp_path: Pat
 @pytest.mark.parametrize("run_pytest", [True, False])
 def test_skip_pytest_skips_only_pytest(tmp_path: Path, run_pytest: bool) -> None:
     calls, log = _run(tmp_path, {"FC_SKIP_PYTEST": "1"}, run_pytest=run_pytest)
-    assert calls == ["acquire tests", "python -c", "snapshot verify", "release"]
+    assert calls == ["acquire tests", "python -c", "snapshot verify", "python -", "release"]
     assert json.loads((log / "test_results.json").read_text()) == {
         "pytest_skipped": "FC_SKIP_PYTEST",
         "tests_ran": False,
