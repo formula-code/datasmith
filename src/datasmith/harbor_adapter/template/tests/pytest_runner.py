@@ -126,6 +126,31 @@ def strip_src_prefix(path):
     return path
 
 
+def package_test_paths_for_source(src_path, repo_root):
+    """Test files for 'pkg/sub/foo.py' in the nearest tests folder above it (test_foo.py, test_sub_foo.py, foo_test.py)
+    or next to it; else test_sub.py in that tests folder."""
+    mod = os.path.splitext(os.path.basename(src_path))[0]
+    parent = os.path.basename(os.path.dirname(src_path))
+    names = []
+    for m in dict.fromkeys((mod, mod.lstrip("_"))):
+        names += ["test_%s.py" % m, "%s_test.py" % m] + (["test_%s_%s.py" % (parent, m)] if parent else [])
+    dirs = [os.path.dirname(src_path)]
+    tests_dir = _nearest_tests_dir(src_path, repo_root)
+    if tests_dir:
+        dirs.insert(0, tests_dir)
+    found = []
+    for d in dirs:
+        for n in names:
+            rel = os.path.join(d, n).replace("\\", "/")
+            if os.path.isfile(os.path.join(repo_root, rel)) and rel not in found:
+                found.append(rel)
+    if not found and tests_dir and parent:
+        rel = "%s/test_%s.py" % (tests_dir, parent)
+        if os.path.isfile(os.path.join(repo_root, rel)):
+            found.append(rel)
+    return sorted(found)
+
+
 def candidate_test_paths_for_source(src_path, search_roots):
     """
     Given a source file like 'pkg/foo.py' return likely test file candidates:
@@ -135,6 +160,10 @@ def candidate_test_paths_for_source(src_path, search_roots):
     Also check sibling test files in the same directory:
       pkg/test_foo.py
     """
+    # dask/array/core.py must map to dask/array/tests/, not to dask/tests/test_core.py by name.
+    by_package = package_test_paths_for_source(src_path, search_roots[0])
+    if by_package:
+        return by_package
     src_rel = strip_src_prefix(src_path)
     src_dir = os.path.dirname(src_rel).replace("\\", "/")
     mod = os.path.splitext(os.path.basename(src_rel))[0]
