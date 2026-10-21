@@ -7,6 +7,8 @@ infrastructure failures, runs again under a new job name, so harbor never resume
 
 Settings: FC_MEASURE_LOCK_DIR is the host lock folder (default /tmp/fc-measure-lock); FC_MEASURE_LOCK_SLOTS is the number
 of slot files made when the folder is empty (default 9). RL trials on the same host must mount the same folder.
+FC_MEASURE_TRIAL_IP (for example 172.31.250.1) times the oracle on the fc-trials Docker network, where only that host IP
+is reachable: names do not resolve and outside connections are refused, as in the RL trials and the RL timing replay.
 """
 
 from __future__ import annotations
@@ -49,6 +51,14 @@ INFRA_EXCEPTIONS = {
     "DownloadVerifierDirError",
 }
 SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD")
+# Puts harbor's egress sidecar, and so the trial, on the fc-trials network.
+TRIAL_NETWORK_COMPOSE = """services:
+  harbor-docker-egress-control-sidecar:
+    networks: [fc-trials]
+networks:
+  fc-trials:
+    external: true
+"""
 
 
 @dataclass
@@ -62,6 +72,8 @@ class Settings:
     # /tmp so that every job and RL trial on the host finds the same folder.
     lock_dir: Path = field(default_factory=lambda: Path(os.environ.get("FC_MEASURE_LOCK_DIR", "/tmp/fc-measure-lock")))  # noqa: S108
     lock_slots: int = field(default_factory=lambda: int(os.environ.get("FC_MEASURE_LOCK_SLOTS", "9")))
+    # None: host networking.
+    trial_ip: str | None = field(default_factory=lambda: os.environ.get("FC_MEASURE_TRIAL_IP") or None)
 
 
 def _read_json(path: Path) -> Any:
@@ -248,7 +260,8 @@ def job_config(task_dir: Path, job: str, s: Settings, out: Path, tasks_root: Pat
         {"import_path": NOP_AGENT, "model_name": f"run{i}", "kwargs": {"files": files}} for i in range(1, s.n_nop + 1)
     ]
     lock = {"type": "bind", "source": str(lock_folder(s.lock_dir, s.lock_slots)), "target": LOCK_MOUNT}
-    return {
+    gateway = SNAPSHOT_GATEWAY_URL.replace("127.0.0.1", s.trial_ip) if s.trial_ip else SNAPSHOT_GATEWAY_URL
+    cfg: dict[str, Any] = {
         "job_name": job,
         "jobs_dir": str(out / "jobs"),
         "n_attempts": 1,
@@ -265,7 +278,7 @@ def job_config(task_dir: Path, job: str, s: Settings, out: Path, tasks_root: Pat
         },
         "verifier": {
             "env": {
-                "SUPABASE_URL": SNAPSHOT_GATEWAY_URL,
+                "SUPABASE_URL": gateway,
                 "SUPABASE_ANON_KEY": "local",
                 "FORMULACODE_SNAPSHOT_FILTER": ".*",
                 "FORMULACODE_NO_UPLOAD": "",
@@ -275,19 +288,43 @@ def job_config(task_dir: Path, job: str, s: Settings, out: Path, tasks_root: Pat
         "agents": agents,
         "datasets": [{"path": str(tasks_root), "task_names": [task_dir.name]}],
     }
+    if s.trial_ip:
+        compose = out / "trial_network.yaml"
+        compose.parent.mkdir(parents=True, exist_ok=True)
+        compose.write_text(TRIAL_NETWORK_COMPOSE)
+        cfg["environment"]["extra_docker_compose"] = [str(compose)]
+    return cfg
 
 
-def tasks_root_for(task_dir: Path, job: str, out: Path, confirm: dict | None) -> Path:
-    """The task's tasks root, or a copy for this job with tests/confirm.json for the confirmation pass.
+def allow_only(toml: Path, ip: str) -> None:
+    """Agent and verifier phases may reach only `ip`; harbor takes the policy only from task.toml."""
+    text = toml.read_text()
+    policy = f'network_mode = "allowlist"\nallowed_hosts = ["{ip}"]\n'
+
+    def add(h: re.Match[str]) -> str:
+        return h.group(0) + policy
+
+    for section in ("agent", "verifier"):
+        text, n = re.subn(rf"^\[{section}\][ \t]*\n", add, text, count=1, flags=re.M)
+        text = text if n else f"{text.rstrip()}\n\n[{section}]\n{policy}"
+    toml.write_text(text)
+
+
+def tasks_root_for(task_dir: Path, job: str, out: Path, confirm: dict | None, trial_ip: str | None = None) -> Path:
+    """The task's tasks root, or a copy for this job: with tests/confirm.json for the confirmation pass, and with the
+    allowlist network policy when `trial_ip` is set.
 
     shortcut: the template reads the confirmation spec only from /tests/confirm.json; pass it in the verifier env once
     the template reads it from there.
     """
-    if not confirm:
+    if not confirm and not trial_ip:
         return task_dir.parent
-    dst = out / "tasks-confirm" / job
+    dst = out / ("tasks-confirm" if confirm else "tasks-allowlist") / job
     shutil.copytree(task_dir, dst / task_dir.name, symlinks=True, dirs_exist_ok=True)
-    (dst / task_dir.name / "tests" / "confirm.json").write_text(json.dumps(confirm))
+    if confirm:
+        (dst / task_dir.name / "tests" / "confirm.json").write_text(json.dumps(confirm))
+    if trial_ip:
+        allow_only(dst / task_dir.name / "task.toml", trial_ip)
     return dst
 
 
@@ -299,6 +336,8 @@ def run_harbor(out: Path, job: str, config: Path, s: Settings, run: Callable[...
     """Run the job; past s.time_limit_s, stop its process group (SIGINT so harbor removes its containers) and raise TooSlow."""
     env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
     env.update(HARBOR_DOCKER_HOST_NET="1", COMPOSE_BAKE="false", DOCKER_BUILDKIT="0")
+    if s.trial_ip:
+        del env["HARBOR_DOCKER_HOST_NET"]
     (out / "logs").mkdir(parents=True, exist_ok=True)
     cmd = [s.harbor, "run", "--config", str(config)]
     with (out / "logs" / f"{job}.log").open("a") as log:
@@ -339,7 +378,7 @@ def measure_task(
         confirm = confirm_spec(task, out, load_rule(rule_path), s.confirm_rounds)
     config = configs / f"{job}.json"
     configs.mkdir(parents=True, exist_ok=True)
-    cfg = job_config(task_dir, job, s, out, tasks_root_for(task_dir, job, out, confirm))
+    cfg = job_config(task_dir, job, s, out, tasks_root_for(task_dir, job, out, confirm, s.trial_ip))
     config.write_text(json.dumps(cfg, indent=2))
     try:
         trials = run_harbor(out, job, config, s, run)
