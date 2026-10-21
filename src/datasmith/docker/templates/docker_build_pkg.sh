@@ -43,27 +43,35 @@ export NPY_NUM_BUILD_JOBS="${NPY_NUM_BUILD_JOBS:-2}"
 # here so they are baked into the Docker image and available at runtime.
 # Modify URLs, branches, or destination paths as needed.
 ORIGIN_URL=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+BASE_DATE=$(git -C "$REPO_ROOT" log -1 --format=%cI HEAD)
+# The benchmark repo as it was at the base commit's date, so the suite matches the code.
+clone_at_base() {
+    git clone -q --filter=blob:none "$1" "$2"
+    local c; c=$(git -C "$2" rev-list -n1 --before="$BASE_DATE" HEAD)
+    [ -n "$c" ] || { warn "$1 has no commit before $BASE_DATE; using its first commit"; c=$(git -C "$2" rev-list --max-parents=0 HEAD | tail -1); }
+    git -C "$2" checkout -q "$c"
+    fc_note "benchmark_repo=$1@$c"
+}
 
 if [[ "$ORIGIN_URL" =~ github\.com/dask/dask(\.git)?$ ]]; then
     log "Cloning dask-benchmarks"
-    git clone --depth 1 https://github.com/dask/dask-benchmarks.git /tmp/benchmarks
+    clone_at_base https://github.com/dask/dask-benchmarks.git /tmp/benchmarks
     cp -rf /tmp/benchmarks/dask/* "$REPO_ROOT/"
     rm -rf /tmp/benchmarks
 elif [[ "$ORIGIN_URL" =~ github\.com/dask/distributed(\.git)?$ ]]; then
     log "Cloning dask-benchmarks (distributed)"
-    git clone --depth 1 https://github.com/dask/dask-benchmarks.git /tmp/benchmarks
+    clone_at_base https://github.com/dask/dask-benchmarks.git /tmp/benchmarks
     cp -rf /tmp/benchmarks/distributed/* "$REPO_ROOT/"
     rm -rf /tmp/benchmarks
 elif [[ "$ORIGIN_URL" =~ github\.com/joblib/joblib(\.git)?$ ]]; then
     log "Cloning joblib_benchmarks"
-    git clone --depth 1 https://github.com/pierreglaser/joblib_benchmarks.git /tmp/benchmarks
+    clone_at_base https://github.com/pierreglaser/joblib_benchmarks.git /tmp/benchmarks
     cp -rf /tmp/benchmarks/* "$REPO_ROOT/"
     rm -rf /tmp/benchmarks
 elif [[ "$ORIGIN_URL" =~ github\.com/astropy/astropy(\.git)?$ ]]; then
     log "Cloning astropy-benchmarks"
     rm -rf "$REPO_ROOT/astropy-benchmarks"
-    git clone -b main --depth 1 --single-branch \
-        https://github.com/astropy/astropy-benchmarks.git "$REPO_ROOT/astropy-benchmarks"
+    clone_at_base https://github.com/astropy/astropy-benchmarks.git "$REPO_ROOT/astropy-benchmarks"
 fi
 
 # =====================================================================
