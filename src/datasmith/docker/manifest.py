@@ -307,6 +307,25 @@ micromamba run -n "$ENV_NAME" snapshot-tool --help >/dev/null 2>&1 && echo SNAPS
 echo "HEAD=$(git -C /workspace/repo rev-parse HEAD 2>/dev/null)"
 echo "LSV_INIT=$(cat /opt/lsv/cache/lsv_init_results.json 2>/dev/null | tr -d '\n')"
 echo "ADDED_DEPS=$(cat /opt/lsv/cache/added_deps.json 2>/dev/null | tr -d '\n')"
+cd /workspace/repo && echo "SUITE=$(python3 - <<'SUITEPY'
+import glob, json, os, re, subprocess
+def git(*a, cwd="."):
+    return subprocess.run(["git", "-C", cwd, *a], capture_output=True, text=True).stdout.strip()
+def bdir(text):
+    m = re.search(r'"benchmark_dir"\s*:\s*"([^"]*)"', text or "")
+    return m.group(1) if m else ("benchmarks" if text else None)
+confs = []
+for c in sorted(glob.glob("asv*.json") + glob.glob("*/asv*.json")):
+    now, base = bdir(open(c, errors="replace").read()), bdir(git("show", f"HEAD:{c}") or None)
+    d = os.path.normpath(os.path.join(os.path.dirname(c), now))
+    changed = git("status", "--porcelain", "--untracked-files=all", "--", d).splitlines()
+    confs.append({"conf": c, "benchmark_dir": now, "benchmark_dir_at_base": base, "files_differing_from_base": len(changed)})
+repos = [{"dir": os.path.dirname(g), "commit": git("rev-parse", "HEAD", cwd=os.path.dirname(g)),
+          "date": git("log", "-1", "--format=%cI", cwd=os.path.dirname(g))}
+         for g in glob.glob("*/.git") + glob.glob("*/*/.git")]
+print(json.dumps({"base_date": git("log", "-1", "--format=%cI"), "confs": confs, "benchmark_repos": repos}))
+SUITEPY
+)"
 """
 
 
@@ -341,6 +360,8 @@ def check_task_image(tag: str) -> tuple[dict, list[str]]:
         "bake_cpus_bounded": lsv.get("bake_cpus_bounded"),
         "benchmarks_discovered": len(lsv.get("benchmarks_discovered") or []),
         "added_deps": _json_or(out.get("ADDED_DEPS"), None),
+        # Report only: a suite that differs from the base commit's is a task question, not an image failure.
+        "suite": _json_or(out.get("SUITE"), None),
     }
     if not lsv.get("baseline_sha"):
         problems.append("no stored baseline in /opt/lsv/cache/lsv_init_results.json")
