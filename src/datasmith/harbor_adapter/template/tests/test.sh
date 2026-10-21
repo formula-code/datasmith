@@ -167,6 +167,8 @@ _fc_tree_before="$(fc_tree_sum)"
 SNAPSHOT_DIR="${LOG_DIR}/.snapshots"
 SNAPSHOT_FILTER="${FORMULACODE_SNAPSHOT_FILTER:-^(lexer|verifier)\\.}"
 SNAPSHOT_TIMEOUT="${FORMULACODE_SNAPSHOT_TIMEOUT:-30}"
+# a whole baseline or verify run; a benchmark stuck in native code would otherwise hold the verifier to its limit
+SNAPSHOT_STEP_TIMEOUT="${FC_SNAPSHOT_STEP_TIMEOUT:-1800}"
 BENCHMARK_DIR="${BENCHMARK_DIR:-}"
 # Snapshots compare values, not timings, so parallel verify is safe. Default to the trial cpu quota:
 # snapshot-tool's own default counts host cores.
@@ -190,11 +192,11 @@ fi
 # ── Snapshot baseline (oracle only) ─────────────────────────────────────
 if [ "${_fc_skip_snapshot}" != 1 ] && [ "${AGENT_KEY}" = "oracle" ] && [ -n "${BENCHMARK_DIR}" ] && command -v snapshot-tool >/dev/null 2>&1; then
   echo "[$(ts)] [test] Recording snapshot baseline (oracle)..."
-  snapshot-tool baseline \
+  timeout --kill-after=60 "${SNAPSHOT_STEP_TIMEOUT}" snapshot-tool baseline \
     --filter "${SNAPSHOT_FILTER}" \
     --snapshot-dir "${SNAPSHOT_DIR}" \
     --timeout "${SNAPSHOT_TIMEOUT}" \
-    "${BENCHMARK_DIR}" || echo "WARNING: snapshot baseline failed"
+    "${BENCHMARK_DIR}" || echo "WARNING: snapshot baseline failed (exit $?; 124 = over ${SNAPSHOT_STEP_TIMEOUT}s)"
 fi
 
 # ── Download oracle snapshots (production runs) ─────────────────────────
@@ -212,13 +214,13 @@ fi
 if [ "${_fc_skip_snapshot}" != 1 ] && [ "${AGENT_KEY}" != "oracle" ] && [ -n "${BENCHMARK_DIR}" ] && \
    [ -f "${SNAPSHOT_DIR}/baseline.json" ] && command -v snapshot-tool >/dev/null 2>&1; then
   echo "[$(ts)] [test] Running snapshot verification..."
-  snapshot-tool verify \
+  timeout --kill-after=60 "${SNAPSHOT_STEP_TIMEOUT}" snapshot-tool verify \
     --filter "${SNAPSHOT_FILTER}" \
     --snapshot-dir "${SNAPSHOT_DIR}" \
     --summary "${LOG_DIR}/summary_${AGENT_KEY}.json" \
     --timeout "${SNAPSHOT_TIMEOUT}" \
     ${SNAPSHOT_PARALLEL_ARGS} \
-    "${BENCHMARK_DIR}" || echo "WARNING: snapshot verification failed"
+    "${BENCHMARK_DIR}" || echo "WARNING: snapshot verification failed (exit $?; 124 = over ${SNAPSHOT_STEP_TIMEOUT}s)"
 fi
 
 snapshot_end=$(date +%s)
