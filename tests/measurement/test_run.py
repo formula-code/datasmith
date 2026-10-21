@@ -143,7 +143,9 @@ def test_trial_ip_times_the_oracle_on_the_trial_network(tmp_path):
     toml = tomllib.loads((Path(cfg["datasets"][0]["path"]) / "o__r__1" / "task.toml").read_text())
     policy = {"network_mode": "allowlist", "allowed_hosts": ["172.31.250.1"]}
     assert toml["agent"] == policy and toml["verifier"] == policy
-    assert toml["environment"]["docker_image"] == "fc-task/o__r__1:x" and "allowlist" not in (d / "task.toml").read_text()
+    assert (
+        toml["environment"]["docker_image"] == "fc-task/o__r__1:x" and "allowlist" not in (d / "task.toml").read_text()
+    )
 
 
 def test_host_network_by_default(tmp_path):
