@@ -117,7 +117,7 @@ class TestRowToRecord:
         assert rec["base_sha"] == "base000"
         assert rec["head_sha"] == "head111"
         assert rec["labels"] == ["performance"]
-        assert "patch" in rec
+        assert "patch" not in rec
         assert rec["file_changes"] == [{"filename": "foo.py", "additions": 5, "deletions": 2}]
         assert isinstance(rec["is_performance_commit_symbolic"], bool)
 
