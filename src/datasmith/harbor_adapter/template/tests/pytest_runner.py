@@ -322,8 +322,10 @@ class _BaseRebuildFailed(Exception):
     pass
 
 
-def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base_ref=None, full_agent_run=True):
-    """Stash the agent's edits, rerun the same tests at base, restore; flag base-pass -> agent-fail."""
+def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base_ref=None, full_agent_run=True,
+                      timeout=None):
+    """Stash the agent's edits, rerun the same tests at base, restore; flag base-pass -> agent-fail. With ``timeout``
+    the base run stops after that many seconds (``timed_out``)."""
     import sys as _sys
     import tempfile as _tempfile
 
@@ -343,6 +345,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
     base_args = " ".join([extra_args or ""] + ["--ignore=" + shlex.quote(f) for f in new_tests]).strip()
     base_oc = {}
     base_error = None
+    base_timed_out = False
     # test.sh sets this when the patch touches compiled sources; base must not import the patched .so.
     rebuild = os.environ.get("FC_REBUILD_CMD")
     if stashed:
@@ -367,7 +370,15 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
             _old_pyc = os.environ.get("PYTHONPYCACHEPREFIX")
             os.environ["PYTHONPYCACHEPREFIX"] = _tempfile.mkdtemp(prefix="fcbase_pyc_")
             try:
-                base_code, _, base_err = _run([_sys.executable, "-c", script], cwd=repo_root)
+                if timeout is None:
+                    base_code, _, base_err = _run([_sys.executable, "-c", script], cwd=repo_root)
+                else:
+                    try:
+                        p = subprocess.run([_sys.executable, "-c", script], cwd=repo_root, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, timeout=max(1, int(timeout)))
+                        base_code, base_err = p.returncode, p.stderr.decode("utf-8", "replace")
+                    except subprocess.TimeoutExpired:
+                        base_code, base_err, base_timed_out = None, "", True
             finally:
                 if _old_pyc is None:
                     os.environ.pop("PYTHONPYCACHEPREFIX", None)
@@ -383,7 +394,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
                     os.remove(tf)
                 except OSError:
                     pass
-            if not base_oc:
+            if not base_oc and not base_timed_out:
                 base_error = "base run produced no results (rc=%s): %s" % (
                     base_code, (base_err or "").strip()[-400:])
         except _BaseRebuildFailed as e:
@@ -420,6 +431,8 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
     }
     if base_error:
         out["base_error"] = base_error
+    if timeout is not None:
+        out["timed_out"] = base_timed_out
     return out
 
 
@@ -470,7 +483,9 @@ def run_wide_check(changed_files, ran_ids, extra_args, repo_root, budget, base_r
     """The tests folders of the changed packages, beyond the tests mapped by name, within ``budget`` seconds.
 
     A test that fails twice with the agent's code and passes at base is a regression; only files with such
-    failures run at base. (rich#3546: a rich/text.py change broke tests/test_card.py, which no name maps to.)"""
+    failures run at base. (rich#3546: a rich/text.py change broke tests/test_card.py, which no name maps to.)
+    A run over ``budget`` with no regression runs again at base with the same limit: over it there too is not run,
+    in time at base is ``timed_out_patch_only``."""
     dirs = []
     for path in changed_files:
         if is_test_file(path) or not (python_file(path) or _COMPILED_SOURCE.search(path)):
@@ -496,7 +511,8 @@ def run_wide_check(changed_files, ran_ids, extra_args, repo_root, budget, base_r
     files = sorted({path_of(n) for n in failing})[:WIDE_MAX_FILES]
     failing = [n for n in failing if path_of(n) in files]
     if failing:
-        again, _, _, _ = _agent_run_limited(files, extra_args, repo_root, (budget - (time.time() - t0)) / 2)
+        # At least 60 s: after a time-out nothing is left, and the failures found would be dropped unchecked.
+        again, _, _, _ = _agent_run_limited(files, extra_args, repo_root, max(60, (budget - (time.time() - t0)) / 2))
         failing = [n for n in failing if again.get(n) in ("failed", "error")]
         files = sorted({path_of(n) for n in failing})
     out["n_agent_failing"] = len(failing)
@@ -506,6 +522,18 @@ def run_wide_check(changed_files, ran_ids, extra_args, repo_root, budget, base_r
         out["base"] = {k: v for k, v in base.items() if k != "regressed"}
         out["regressed"] = base["regressed"]
     out["ran"] = bool(first)
+    if timed_out and not out["regressed"]:
+        # The tests that did not finish checked nothing, so a time-out is never a pass (dask#11263: 601 s, "no regression").
+        out["ran"] = False
+        base = run_base_and_diff(dirs, extra_args, repo_root, {}, base_ref=base_ref, full_agent_run=False, timeout=budget)
+        out["base_timed_out"] = bool(base.get("timed_out"))
+        if out["base_timed_out"]:
+            out["reason"] = "timed out with and without the patch"
+        elif base.get("base_error") or not base.get("stashed"):
+            out["reason"] = "timed out; no base result: %s" % (base.get("base_error") or "nothing to stash")
+        else:
+            out["timed_out_patch_only"] = True
+            out["ran"] = True
     out["duration_s"] = round(time.time() - t0, 1)
     return out
 
@@ -1198,7 +1226,8 @@ if __name__ == "__main__":
 
     # Wider check, in what is left of FC_PYTEST_TIMEOUT minus a margin.
     try:
-        left = float(os.environ.get("FC_PYTEST_TIMEOUT") or 1800) - (time.time() - _t_start) - 180
+        # Half: a time-out runs the same folders again at base with the same limit.
+        left = (float(os.environ.get("FC_PYTEST_TIMEOUT") or 1800) - (time.time() - _t_start) - 180) / 2
         wide = run_wide_check(
             output.get("changed_files") or [], set(_final_outcomes(output.get("results"))),
             args.extra_args if output.get("selected_tests") else _orig_extra,

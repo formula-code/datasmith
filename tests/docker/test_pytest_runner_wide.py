@@ -104,3 +104,50 @@ def test_a_compiled_source_change_runs_the_tests_folder_above_it(runner, repo: P
     (repo / "pkg" / "fast.c").write_text("int x;\n")
     out = runner.run_wide_check(["pkg/fast.c"], set(), "", str(repo), 120)
     assert out["dirs"] == ["tests"] and out["ran"] is True
+
+
+SLOW_TEST = "import time\n\ndef test_fast():\n    pass\n\ndef test_slow():\n    time.sleep(%d)\n"
+
+
+def test_a_time_out_with_the_patch_only_is_not_a_pass(runner, repo: Path) -> None:
+    (repo / "pkg" / "text.py").write_text(
+        "import time\ntime.sleep(120)\n\ndef pad(s, n):\n    return s + ' ' * (n - len(s))\n"
+    )
+    out = runner.run_wide_check(["pkg/text.py"], set(), "", str(repo), 60)
+    assert out["timed_out"] is True and out["regressed"] == []
+    assert out["base_timed_out"] is False and out["timed_out_patch_only"] is True and out["ran"] is True
+    assert "sleep" in (repo / "pkg" / "text.py").read_text()
+
+
+def test_a_time_out_at_base_too_is_not_run(runner, repo: Path) -> None:
+    (repo / "tests" / "test_slow.py").write_text(SLOW_TEST % 120)
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "slow")
+    (repo / "pkg" / "text.py").write_text("def pad(s, n):\n    return s.ljust(n)\n")
+    out = runner.run_wide_check(["pkg/text.py"], set(), "", str(repo), 60)
+    assert out["timed_out"] is True and out["ran"] is False
+    assert out["base_timed_out"] is True and out["reason"] == "timed out with and without the patch"
+    assert "timed_out_patch_only" not in out and "ljust" in (repo / "pkg" / "text.py").read_text()
+
+
+def test_a_regression_found_before_the_time_out_still_counts(runner, repo: Path) -> None:
+    (repo / "tests" / "test_slow.py").write_text(SLOW_TEST % 120)
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "slow")
+    (repo / "pkg" / "text.py").write_text("def pad(s, n):\n    return s.rjust(n)\n")
+    out = runner.run_wide_check(["pkg/text.py"], set(), "", str(repo), 60)
+    assert out["timed_out"] is True and out["ran"] is True
+    assert out["regressed"] == ["tests/test_card.py::test_card"] and "base_timed_out" not in out
+
+
+def test_parser_counts_a_wide_time_out_with_the_patch_only(tmp_path: Path, monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("_fc_template_parser_wide", _RUNNER.parent / "parser.py")
+    parser = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(parser)
+    monkeypatch.setattr(parser, "LOG_DIR", tmp_path)
+    (tmp_path / "test_results.json").write_text(json.dumps({"regression_wide": {"timed_out_patch_only": True}}))
+    st = parser._pytest_status()
+    assert st["pytest_timed_out"] is True and st["pytest_wide_timed_out"] is True
+    assert st["pytest_base_also_timed_out"] is False
+    (tmp_path / "test_results.json").write_text(json.dumps({"regression_wide": {"timed_out": True, "ran": False}}))
+    assert parser._pytest_status()["pytest_timed_out"] is False
