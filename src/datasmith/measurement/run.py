@@ -261,7 +261,7 @@ def job_config(task_dir: Path, job: str, s: Settings, out: Path, tasks_root: Pat
     ]
     lock = {"type": "bind", "source": str(lock_folder(s.lock_dir, s.lock_slots)), "target": LOCK_MOUNT}
     gateway = SNAPSHOT_GATEWAY_URL.replace("127.0.0.1", s.trial_ip) if s.trial_ip else SNAPSHOT_GATEWAY_URL
-    cfg = {
+    cfg: dict[str, Any] = {
         "job_name": job,
         "jobs_dir": str(out / "jobs"),
         "n_attempts": 1,
@@ -300,8 +300,12 @@ def allow_only(toml: Path, ip: str) -> None:
     """Agent and verifier phases may reach only `ip`; harbor takes the policy only from task.toml."""
     text = toml.read_text()
     policy = f'network_mode = "allowlist"\nallowed_hosts = ["{ip}"]\n'
+
+    def add(h: re.Match[str]) -> str:
+        return h.group(0) + policy
+
     for section in ("agent", "verifier"):
-        text, n = re.subn(rf"^\[{section}\][ \t]*\n", lambda h: h.group(0) + policy, text, count=1, flags=re.M)
+        text, n = re.subn(rf"^\[{section}\][ \t]*\n", add, text, count=1, flags=re.M)
         text = text if n else f"{text.rstrip()}\n\n[{section}]\n{policy}"
     toml.write_text(text)
 
