@@ -307,9 +307,9 @@ def load_patch_info(log_dir: Path) -> dict:
 
 
 def load_setup_status(log_dir: Path) -> dict:
-    """Read setup_status.json written by setup.sh's EXIT trap.
+    """Read setup_status.json written by prepare.sh's EXIT trap.
 
-    Missing file means setup.sh never ran the trap (earlier crash, or an
+    Missing file means prepare.sh never ran the trap (earlier crash, or an
     old image built without the trap). Return a conservative default:
     exit_code=None so downstream code can treat it as 'unknown' rather
     than 'succeeded'.
@@ -324,7 +324,7 @@ def load_setup_status(log_dir: Path) -> dict:
 
 
 def load_timings(log_dir: Path) -> dict:
-    """Merge setup_timings.json (from setup.sh) and test_timings.json
+    """Merge setup_timings.json (from prepare.sh) and test_timings.json
     (from test.sh). Missing files contribute no keys."""
     merged: dict = {}
     for name in ("setup_timings.json", "test_timings.json"):
@@ -588,6 +588,19 @@ def evaluate_trial_invariants(ctx: dict) -> dict:
 # ── Reward output ────────────────────────────────────────────────────────────
 
 
+def _pytest_status() -> dict:
+    """test.sh's record of a pytest runner that exited non-zero or timed out (pytest_status.json)."""
+    try:
+        st = json.loads((LOG_DIR / "pytest_status.json").read_text())
+    except (OSError, ValueError):
+        st = {}
+    return {
+        "pytest_runner_exit_code": st.get("runner_exit_code"),
+        "pytest_timed_out": bool(st.get("timed_out")),
+        "pytest_base_also_timed_out": bool(st.get("base_also_timed_out")),
+    }
+
+
 def write_reward(
     reward_dir: Path,
     advantages: dict[str, float] | None,
@@ -652,6 +665,9 @@ def write_reward(
         "lsv_error": lsv_error,
         "lsv_skipped": lsv_skipped,
         "project_shadowed": (lsv_measure_raw or {}).get("project_shadowed"),
+        "patch_broke_benchmarks": (lsv_measure_raw or {}).get("patch_broke_benchmarks") or [],
+        "lsv_discovery_failed_side": (lsv_measure_raw or {}).get("discovery_failed_side"),
+        **_pytest_status(),
         # ── structured dossier ────────────────────────────────────────────
         "patch": patch or {},
         "lsv": {
@@ -732,7 +748,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Load all sidecars written by setup.sh / test.sh. Each helper returns
+    # Load all sidecars written by prepare.sh / test.sh. Each helper returns
     # an empty/default payload if its file is missing, so a partially-run
     # trial still produces a well-formed reward.json.
     patch_info = load_patch_info(LOG_DIR)

@@ -5,7 +5,7 @@ LightspeedSession from the same results_dir used during init (the
 .lightspeed_deps.db persists on disk), computes changed files via
 git diff against base_commit, and runs measure_impacted.
 
-When setup.sh left a base copy at /workspace/.fc_base, the base and patched trees are
+When prepare.sh left a base copy at /workspace/.fc_base, the base and patched trees are
 timed in the same container instead, alternating round by round (see measure_paired).
 
 Usage:
@@ -41,7 +41,7 @@ os.environ.setdefault("DATA_GEN_PYTHON", sys.executable)
 os.environ.setdefault("BENCHMARK_DATA", os.path.join(tempfile.gettempdir(), "fc_benchmark_data"))
 os.makedirs(os.environ["BENCHMARK_DATA"], exist_ok=True)
 OUTPUT_DIR = Path(os.environ.get("LSV_OUTPUT_DIR", "/logs/artifacts/lsv"))
-# setup.sh copies the unpatched repo (with its build) here; when it exists, base and patched are timed in pairs.
+# prepare.sh copies the unpatched repo (with its build) here; when it exists, base and patched are timed in pairs.
 BASE_COPY = Path("/workspace/.fc_base")
 PARKED = Path("/workspace/.fc_patched")
 DEFAULT_OUT = "lsv_measure_results.json"
@@ -278,6 +278,33 @@ def paired_stats(rounds: list[dict], min_pairs: int) -> dict:
     return out
 
 
+def broke_by_patch(rounds: list[dict], min_pairs: int) -> list[str]:
+    """Benchmarks with base times in at least min_pairs rounds and no time with the patch."""
+    bids = sorted({b for r in rounds for b in r.get("base", {})})
+    return [b for b in bids if sum(1 for r in rounds if r["base"].get(b)) >= min_pairs
+            and not any(r["patched"].get(b) for r in rounds)]
+
+
+class DiscoveryFailed(RuntimeError):
+    def __init__(self, side: str, err: Exception):
+        super().__init__(f"benchmark discovery failed ({side}): {err}")
+        self.side = side
+
+
+def load_benchmarks_or_side(session):
+    """The benchmark suite; on failure, which side cannot load it ("patched" when the base copy can)."""
+    try:
+        return session._load_benchmarks()
+    except Exception as e:  # noqa: BLE001
+        try:
+            with base_in_place():
+                session._load_benchmarks()
+            side = "patched"
+        except Exception:  # noqa: BLE001
+            side = "both"
+        raise DiscoveryFailed(side, e) from e
+
+
 def read_only(path: str) -> tuple[set, dict]:
     """--only file: a JSON list of benchmark ids, or {"ids": [...], ...} whose other keys go to the output's top level."""
     data = json.loads(Path(path).read_text())
@@ -338,7 +365,7 @@ def measure_paired(session, changed: list[str], args, only: set | None = None) -
     if not session.deps_db_path.exists():
         raise RuntimeError(f"Dependency database not found: {session.deps_db_path}")
     os.chdir("/")
-    benchmarks = session._load_benchmarks()
+    benchmarks = load_benchmarks_or_side(session)
     db = LightspeedDB(str(session.deps_db_path))
     changes = changed_files_with_fingerprints(changed, db.get_stored_fshas())
     names = {bid.name for bid in db.get_affected_benchmark_ids(changes)}
@@ -382,6 +409,7 @@ def measure_paired(session, changed: list[str], args, only: set | None = None) -
         "skipped_count": len(benchmarks) - n_selected,
         "dropped_count": len(dropped),
         "dropped": dropped[:200],
+        "patch_broke_benchmarks": broke_by_patch(rounds, (args.rounds + 1) // 2),
         "timing": {"total_s": time.perf_counter() - t0, "phases": None},
         "error": f"LSV selected {n_selected} benchmarks but measured 0 in paired rounds." if names and not bench else None,
         "paired": {"rounds": args.rounds, "min_pairs": (args.rounds + 1) // 2, "order": [side for r in rounds for side in r]},
@@ -490,7 +518,8 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001 -- a crashed measure still writes results with the error
             print(f"[{_ts()}] [lsv_measure] ERROR: paired measure raised: {e}")
             measure_data = {"benchmarks": {}, "selected_count": 0, "total_count": 0, "skipped_count": 0,
-                            "timing": {"total_s": 0.0}, "error": f"LSV paired measure raised: {e}"}
+                            "timing": {"total_s": 0.0}, "error": f"LSV paired measure raised: {e}",
+                            "discovery_failed_side": getattr(e, "side", None)}
         measure_data = _finite({**measure_data, **args.extra})
         (OUTPUT_DIR / args.out).write_text(json.dumps(measure_data, indent=2))
         if args.out == DEFAULT_OUT:
@@ -512,12 +541,12 @@ def main() -> None:
     except Exception as e:
         msg = str(e)
         # Distinguish "lsv_init never created the dep DB" from "measure ran
-        # but crashed mid-flight". The first means setup.sh failed earlier;
+        # but crashed mid-flight". The first means prepare.sh failed earlier;
         # the second is an LSV runtime bug or a patch that broke the build.
         if "Dependency database not found" in msg or "deps.db" in msg:
             err = (
                 "LSV measure aborted: dependency database missing. "
-                "lsv_init.py did not complete successfully in setup.sh — "
+                "lsv_init.py did not complete successfully in prepare.sh — "
                 "see setup_status.json for the failing phase."
             )
         else:

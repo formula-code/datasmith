@@ -98,7 +98,7 @@ def get_changed_files(
     normalized = []
     for path in sorted(changed):
         norm = path.replace("\\", "/").strip()
-        if norm:
+        if norm and not norm.startswith(BASE_PYTEST_CONFIG):
             normalized.append(norm)
     return normalized
 
@@ -303,11 +303,26 @@ def _final_outcomes(results):
     return out
 
 
+def skipped_or_missing(base_oc, agent_oc):
+    """Tests that pass at base and are skipped with the patch, or have no result with it. A missing id whose test
+    function still has a result under another parameter id (ids built from values can change) is not counted."""
+    def func(nid):
+        return nid.split("[", 1)[0]
+
+    agent_funcs = {func(n) for n in agent_oc}
+    broken_files = {n for n, o in agent_oc.items() if "::" not in n and o == "error"}
+    passed = [n for n, o in base_oc.items() if o == "passed" and "::" in n]
+    skipped = sorted(n for n in passed if agent_oc.get(n) == "skipped")
+    missing = sorted(n for n in passed if n not in agent_oc and func(n) not in agent_funcs
+                     and n.split("::")[0] not in broken_files)
+    return skipped, missing
+
+
 class _BaseRebuildFailed(Exception):
     pass
 
 
-def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base_ref=None):
+def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base_ref=None, full_agent_run=True):
     """Stash the agent's edits, rerun the same tests at base, restore; flag base-pass -> agent-fail."""
     import sys as _sys
     import tempfile as _tempfile
@@ -386,12 +401,20 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
         if o in ("failed", "error")
         and (base_oc.get(n) == "passed" or ("::" not in n and n in base_files and base_oc.get(n) != "error"))
     )
+    skipped, missing = skipped_or_missing(base_oc, agent_oc) if agent_oc else ([], [])
+    if not full_agent_run:
+        missing = []
+    regressed = sorted(set(regressed) | set(skipped) | set(missing))
+    n_base_pass = sum(1 for o in base_oc.values() if o == "passed")
     out = {
-        "ran": bool(stashed and selected_tests and base_oc),
+        # Tests that all skip at base check nothing, so they do not count as a pytest run.
+        "ran": bool(stashed and selected_tests and base_oc and n_base_pass),
+        "skipped_with_patch": skipped,
+        "missing_with_patch": missing,
         "stashed": stashed,
         "n_selected_tests": len(selected_tests),
         "n_agent_tests": len(agent_oc),
-        "n_base_pass": sum(1 for o in base_oc.values() if o == "passed"),
+        "n_base_pass": n_base_pass,
         "regressed": regressed,
         "n_regressed": len(regressed),
     }
@@ -479,7 +502,7 @@ def run_wide_check(changed_files, ran_ids, extra_args, repo_root, budget, base_r
     out["n_agent_failing"] = len(failing)
     if failing:
         agent = {"tests": [{"nodeid": n, "when": "call", "outcome": "failed"} for n in failing]}
-        base = run_base_and_diff(files, extra_args, repo_root, agent, base_ref=base_ref)
+        base = run_base_and_diff(files, extra_args, repo_root, agent, base_ref=base_ref, full_agent_run=False)
         out["base"] = {k: v for k, v in base.items() if k != "regressed"}
         out["regressed"] = base["regressed"]
     out["ran"] = bool(first)
@@ -689,6 +712,9 @@ def run_pytest_and_collect(test_paths, extra_args=None, cwd=None, stream=None):
         sys.path.insert(0, repo_dir)
 
     args = unique_paths + list(extra_args)
+    # Both runs read the base commit's pytest configuration; the agent's config files are never read.
+    if os.environ.get("FC_PYTEST_CONFIG") and "-c" not in args:
+        args = ["-c", os.environ["FC_PYTEST_CONFIG"], "--rootdir", repo_dir] + args
     # By default one module that does not import stops the whole run, so no test result is left.
     if "--continue-on-collection-errors" not in args:
         args.append("--continue-on-collection-errors")
@@ -803,10 +829,45 @@ def run_changed_tests(
     return result
 
 
+# pytest's own order; a file without a pytest section is skipped, as pytest does.
+_PYTEST_CONFIG_FILES = (
+    ("pytest.ini", None, ".ini"),
+    (".pytest.ini", None, ".ini"),
+    ("pyproject.toml", r"(?m)^\[tool\.pytest\.ini_options\]", ".toml"),
+    ("tox.ini", r"(?m)^\[pytest\]", ".ini"),
+    ("setup.cfg", r"(?m)^\[tool:pytest\]", ".cfg"),
+)
+BASE_PYTEST_CONFIG = ".fc_base_pytest"
+
+
+def write_base_pytest_config(base_ref, repo_root):
+    """The base commit's pytest config file, copied to the repo root (so rootdir and conftest lookup stay) for -c."""
+    for name, section, suffix in _PYTEST_CONFIG_FILES:
+        code, text, _ = _run(["git", "show", "%s:%s" % (base_ref, name)], cwd=repo_root)
+        if code != 0 or (section and not re.search(section, text)):
+            continue
+        if name == "tox.ini":
+            text = "\n".join(re.findall(r"(?ms)^\[pytest\].*?(?=^\[|\Z)", text))
+        path = os.path.join(repo_root, BASE_PYTEST_CONFIG + suffix)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+    path = os.path.join(repo_root, BASE_PYTEST_CONFIG + ".ini")
+    with open(path, "w") as fh:
+        fh.write("[pytest]\n")
+    return path
+
+
 # --------------------------- CLI ---------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run pytest only for changed files (committed/unstaged/staged/untracked)."
+    )
+    parser.add_argument(
+        "--base-only",
+        dest="base_only",
+        default=None,
+        help="Run the tests listed in this pytest_selected.json at the base commit only (after an agent run timed out).",
     )
     parser.add_argument(
         "--all",
@@ -957,6 +1018,8 @@ def main(args) -> dict:
     selected_tests, mapping = discover_test_files_from_changed(
         changed, repo_root=repo_root
     )
+    if selected_tests:
+        write_selected(selected_tests, args.extra_args, repo_root, args.base_ref)
 
     note = None
     if not selected_tests:
@@ -1058,9 +1121,38 @@ def write_results(output):
             pass
 
 
+def _logs_root():
+    return Path(os.environ.get("T_BENCH_TASK_LOGS_PATH") or os.environ.get("T_BENCH_CONTAINER_LOGS_PATH") or "/logs/artifacts")
+
+
+def write_selected(selected, extra, repo_root, base_ref):
+    """The tests about to run, written first, so a timed-out run can still be repeated at base."""
+    try:
+        _logs_root().mkdir(parents=True, exist_ok=True)
+        (_logs_root() / "pytest_selected.json").write_text(json.dumps(
+            {"selected_tests": selected, "extra_args": extra, "repo_root": repo_root, "base_ref": base_ref}))
+    except OSError as e:
+        print("[pytest_runner] pytest_selected.json not written: %s" % e, file=sys.stderr)
+
+
+def base_only(args):
+    """The selected tests of a timed-out agent run, at base; test.sh runs this under the same time limit."""
+    sel = json.loads(Path(args.base_only).read_text())
+    repo_root = sel.get("repo_root") or detect_repo_root()
+    reg = run_base_and_diff(sel["selected_tests"], sel.get("extra_args"), repo_root, {}, base_ref=sel.get("base_ref"))
+    (_logs_root() / "pytest_base_rerun.json").write_text(json.dumps(reg, sort_keys=True))
+
+
 if __name__ == "__main__":
     _t_start = time.time()
     args = parse_args()
+    try:
+        os.environ["FC_PYTEST_CONFIG"] = write_base_pytest_config(args.base_ref, args.repo_root or detect_repo_root())
+    except Exception as e:  # noqa: BLE001 -- without it pytest reads the repo's own config, as before
+        print("[pytest_runner] base pytest config not written: %s" % e, file=sys.stderr)
+    if args.base_only:
+        base_only(args)
+        sys.exit(0)
     # The retries below mutate extra_args; fallback tests use the originals.
     _orig_extra = args.extra_args
     output = main(args)
@@ -1086,6 +1178,7 @@ if __name__ == "__main__":
             fb, strategy = fallback_tests(output.get("changed_files") or [], repo_root)
             if fb:
                 selected = fb
+                write_selected(selected, extra, repo_root, output.get("base_ref") or args.base_ref)
                 agent_res = run_pytest_and_collect(selected, extra_args=extra, cwd=repo_root)
                 output["results"] = agent_res
                 output["selected_tests"] = selected
@@ -1123,3 +1216,5 @@ if __name__ == "__main__":
         output["regression_wide"] = {"ran": False, "error": "%s: %s" % (type(e).__name__, e)}
 
     write_results(output)
+    for _cfg in glob(os.path.join(output.get("repo_root") or detect_repo_root(), BASE_PYTEST_CONFIG + ".*")):
+        os.remove(_cfg)
