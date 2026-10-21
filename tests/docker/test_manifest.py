@@ -853,3 +853,20 @@ def test_task_image_check_records_added_modules(monkeypatch):
     monkeypatch.setattr(manifest.subprocess, "run", lambda *a, **kw: type("P", (), {"stdout": out, "stderr": ""})())
     info, problems = manifest.check_task_image("t")
     assert info["added_deps"] is None and "no stored baseline in /opt/lsv/cache/lsv_init_results.json" in problems
+
+
+def test_task_image_check_reports_the_benchmark_suite_without_failing(monkeypatch):
+    import json
+
+    from datasmith.docker import manifest
+
+    suite = {"base_date": "2025-01-02T00:00:00+00:00", "benchmark_repos": [],
+             "confs": [{"conf": "asv_bench/asv.conf.json", "benchmark_dir": "benchmarks_focus",
+                        "benchmark_dir_at_base": "benchmarks", "files_differing_from_base": 1}]}
+    stdout = "\n".join([
+        "QWEN=0.22.3", "IMPORTS=ok", "SNAPSHOT_TOOL=ok", "HEAD=abc",
+        'LSV_INIT={"baseline_sha": "abc", "env_fingerprint": {"cpus": 2}}', "SUITE=" + json.dumps(suite),
+    ])
+    monkeypatch.setattr(manifest.subprocess, "run", lambda *a, **kw: type("P", (), {"stdout": stdout, "stderr": ""})())
+    info, problems = manifest.check_task_image("t")
+    assert problems == [] and info["suite"] == suite
