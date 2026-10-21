@@ -451,6 +451,19 @@ def _ti_baseline_from_cache(ctx: dict) -> bool | None:
     return cached is False
 
 
+def merge_setup_shadow(measure: dict, lsv_error, report_path: Path):
+    """Setup's import check (project_imports.json) when the measure did not check, so a trial without timing
+    (FC_SKIP_LSV) that tests an installed copy instead of the repo is not trusted either."""
+    try:
+        shadow = json.loads(report_path.read_text()).get("shadowed") or {}
+    except (OSError, ValueError, AttributeError):
+        shadow = {}
+    if shadow and measure.get("project_shadowed") is None:
+        measure["project_shadowed"] = shadow
+        lsv_error = lsv_error or "project shadowed: " + ", ".join(f"{k} -> {v}" for k, v in shadow.items())
+    return measure, lsv_error
+
+
 def _ti_project_shadowed(ctx: dict) -> bool | None:
     """FATAL -- the benchmark processes imported the project from outside the repo, so timing was skipped."""
     shadow = ctx.get("project_shadowed")
@@ -802,6 +815,8 @@ def main() -> None:
     benchmarks = measure_results.get("benchmarks", {}) or {}
     # test.sh skips the timing with an error when the timed trees would not be the agent's and setup's.
     lsv_error = measure_results.get("error") or lsv_skip.get("error")
+    measure_results, lsv_error = merge_setup_shadow(measure_results, lsv_error, LOG_DIR / "project_imports.json")
+    lsv_results["measure"] = measure_results
 
     # Compute speedups (baseline/current from LSV)
     speedups = compute_per_benchmark_speedups(benchmarks)

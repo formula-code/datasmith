@@ -283,3 +283,25 @@ class TestProducerCoverage:
         m = _load()
         keys = m.trial_context_keys()
         assert key in keys, f"{inv_id} reads {key!r}, which the trial context never supplies"
+
+
+class TestSetupShadow:
+    """uxarray#574: an installed copy hid the repo; a trial without timing must not trust its tests either."""
+
+    def test_setup_report_fills_an_unchecked_measure(self, tmp_path):
+        report = tmp_path / "project_imports.json"
+        report.write_text('{"shadowed": {"uxarray": "/site-packages/uxarray/__init__.py"}}')
+        measure, err = _load().merge_setup_shadow({}, None, report)
+        assert measure["project_shadowed"] == {"uxarray": "/site-packages/uxarray/__init__.py"}
+        assert err == "project shadowed: uxarray -> /site-packages/uxarray/__init__.py"
+        assert _load().evaluate_trial_invariants(_ctx(project_shadowed=measure["project_shadowed"]))["fatal"] == [
+            "project_shadowed"
+        ]
+
+    def test_measure_result_and_clean_report_are_kept(self, tmp_path):
+        report = tmp_path / "project_imports.json"
+        report.write_text('{"shadowed": {}}')
+        assert _load().merge_setup_shadow({}, None, report) == ({}, None)
+        report.write_text('{"shadowed": {"a": "/x"}}')
+        assert _load().merge_setup_shadow({"project_shadowed": {}}, "e", report) == ({"project_shadowed": {}}, "e")
+        assert _load().merge_setup_shadow({}, None, tmp_path / "missing.json") == ({}, None)
