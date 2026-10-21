@@ -77,7 +77,7 @@ def test_missing_or_empty_folder_logs_ungated_without_waiting(tmp_path: Path) ->
 
 
 def test_scripts_use_the_lock_and_no_http_gate() -> None:
-    for name in ("setup.sh", "test.sh"):
+    for name in ("prepare.sh", "test.sh"):
         text = (_TESTS / name).read_text()
         assert "source /tests/measure_lock.sh" in text
         assert "MEASURE_GATE" not in text and "curl" not in text

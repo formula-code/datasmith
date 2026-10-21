@@ -175,8 +175,8 @@ def test_digest_from_the_host_wins_over_the_container_file(tmp_path: Path) -> No
     assert "lsv_measure" not in calls and _skipped(log)["lsv_skipped"] == "base_changed"
 
 
-def test_setup_and_test_hash_the_base_copy_with_the_same_helper() -> None:
-    setup, test = ((_TESTS / f).read_text() for f in ("setup.sh", "test.sh"))
+def test_prepare_and_test_hash_the_base_copy_with_the_same_helper() -> None:
+    setup, test = ((_TESTS / f).read_text() for f in ("prepare.sh", "test.sh"))
     assert "source /tests/base_digest.sh" in setup and "source /tests/base_digest.sh" in test
 
 

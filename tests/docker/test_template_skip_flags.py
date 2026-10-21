@@ -84,7 +84,7 @@ echo REACHED_REWARD
     return lines, log
 
 
-_ALL_STEPS = ["acquire tests", "python -c", "snapshot verify", "python /tests/pytest_runner.py", "release"]
+_ALL_STEPS = ["acquire tests", "python -c", "snapshot verify", "python /tests/pytest_runner.py", "python -", "release"]
 
 
 @pytest.mark.parametrize("run_pytest", [True, False])
@@ -119,7 +119,7 @@ def test_skip_pytest_skips_only_pytest(tmp_path: Path, run_pytest: bool) -> None
 
 def test_skip_snapshot_skips_only_snapshots(tmp_path: Path) -> None:
     calls, log = _run(tmp_path, {"FC_SKIP_SNAPSHOT": "1"})
-    assert calls == ["acquire tests", "python /tests/pytest_runner.py", "release"]
+    assert calls == ["acquire tests", "python /tests/pytest_runner.py", "python -", "release"]
     assert json.loads((log / "snapshot_skipped.json").read_text()) == {"snapshot_skipped": "FC_SKIP_SNAPSHOT"}
 
 

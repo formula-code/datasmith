@@ -1,4 +1,4 @@
-# Sourced by setup.sh and test.sh. The host mounts FC_MEASURE_LOCK_DIR with one file per slot; a step runs ungated when
+# Sourced by prepare.sh and test.sh. The host mounts FC_MEASURE_LOCK_DIR with one file per slot; a step runs ungated when
 # the folder has no slot files or none frees up within FC_MEASURE_LOCK_WAIT seconds. Logged as "<step> <slot> 1|0".
 mg_acquire() {
   local dir="${FC_MEASURE_LOCK_DIR:-/fc-measure-lock}" end=$((SECONDS + ${FC_MEASURE_LOCK_WAIT:-7200})) slot

@@ -42,7 +42,7 @@ class FormulaCodeRecord:
         return self.task_id
 
 
-# Harbor uploads tests/ to /tests before setup.sh runs, so the helpers are read from there.
+# Harbor uploads tests/ to /tests in both containers (setup.sh in the agent's, test.sh in the verifier's).
 TEST_HELPERS = (
     "lsv_init.py",
     "lsv_measure.py",
@@ -55,6 +55,7 @@ TEST_HELPERS = (
     "measure_lock.sh",
     "timing_decision.py",
     "base_digest.sh",
+    "write_asv_conf.py",
 )
 
 
@@ -125,6 +126,7 @@ class FormulaCodeAdapter:
             storage=storage,
             verifier_env=verifier_env,
             docker_image=docker_image,
+            collect_command=render_template("shared/collect.sh", base_commit=rec.base_commit),
         )
         _write(out_dir / "task.toml", task_toml)
 
@@ -147,8 +149,12 @@ class FormulaCodeAdapter:
         _write(tests / "test.sh", test_sh, executable=True)
         _write(tests / "config.json", config_json)
         _write(solution / "solve.sh", render_template("solution/solve.sh", solution_patch=rec.patch), executable=True)
-        setup_sh = render_template("tests/setup.sh", rounds=rounds, extra_setup_commands="", **ids)
+        setup_sh = render_template("tests/setup.sh", extra_setup_commands="")
         _write(tests / "setup.sh", setup_sh, executable=True)
+        prepare_sh = render_template(
+            "tests/prepare.sh", base_commit=rec.base_commit, rounds=rounds, extra_setup_commands="", **ids
+        )
+        _write(tests / "prepare.sh", prepare_sh, executable=True)
 
         # Imported here so `python -m datasmith.harbor_adapter.stamp` does not re-import itself via the package.
         from datasmith.harbor_adapter.stamp import write_stamp
