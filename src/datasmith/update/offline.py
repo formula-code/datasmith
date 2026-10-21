@@ -127,8 +127,7 @@ def _row_to_record(row: pd.Series) -> dict[str, Any]:
             file_changes=file_changes,
         ),
     }
-    if patch:
-        record["patch"] = patch
+    # The legacy patch is `git format-patch -1 <merge commit>`: one commit, not the PR. classify_prs fetches the PR diff.
     if file_changes:
         record["file_changes"] = file_changes
     return record
