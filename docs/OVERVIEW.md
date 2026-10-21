@@ -42,8 +42,10 @@ flowchart TD
 5. **Pin.** `fc-render-tasks render ... --force --images OUT/manifest.jsonl` renders again and writes `docker_image` in
    `task.toml` when the task's last verified image has the same `environment/` digest.
 6. **Precheck.** `fc-measure precheck TASKS_ROOT TASK` loads the image build check from the database: does the oracle
-   patch apply, did the image already contain part of it, and does at least one benchmark run the changed code. A task
-   that fails ends as `uncovered`, `base_edited` or `patch_failed` and is not timed.
+   patch apply, did the image already contain part of it, and does LSV select at least one benchmark (through a
+   dependency on a changed file, or always affected). A task that fails ends as `uncovered`, `base_edited` or
+   `patch_failed` and is not timed. A task whose only selected benchmarks are always affected, and of which the build
+   check timed none, ends as `no_measurement`: the suite does not run in the image.
 7. **Measure.** `fc-measure measure TASKS_ROOT OUT TASK` runs one Harbor job per task: 3 oracle runs and 3 no-change
    runs. Each run times the base and the patched code in one container in the order A-B-B-A. Each timing step takes a
    slot file of the host lock folder (`FC_MEASURE_LOCK_DIR`, `FC_MEASURE_LOCK_SLOTS` files), because timing is
