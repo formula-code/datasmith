@@ -47,6 +47,7 @@ def _run(
     owner: str = "o",
     env: dict[str, str] | None = None,
     base: str | None = None,
+    snapshot_cmd: str | None = None,
 ) -> tuple[list[str], Path]:
     repo, log = _repo(tmp_path), tmp_path / "logs"
     log.mkdir()
@@ -83,7 +84,7 @@ patch_files={patch_files}
 ts() {{ echo T; }}
 mg_acquire() {{ echo "acquire $1" >> {calls}; }}
 mg_release() {{ :; }}
-snapshot-tool() {{ echo "snapshot $1" >> {calls}; {summary}; }}
+snapshot-tool() {{ echo "snapshot $1" >> {calls}; {summary}; {snapshot_cmd or ":"}; }}
 timeout() {{ shift 2; "$@"; }}
 python() {{
   case "$1" in
@@ -156,6 +157,37 @@ def test_snapshot_regression_skips_the_timing_except_for_skipped_libraries(tmp_p
     assert "lsv_measure" not in calls and _skipped(log) == {"lsv_skipped": "snapshots_regressed"}
     calls, log = _run(tmp_path / "b", snapshot=snap, owner="dask")
     assert "lsv_measure" in calls
+
+
+HANG_WITH_PATCH = 'grep -q "x = 2" core.py && return 124; return 0'
+
+
+def _status(log: Path) -> dict:
+    return json.loads((log / "snapshot_status.json").read_text())
+
+
+def test_snapshot_verify_over_its_limit_only_with_the_patch_fails(tmp_path: Path) -> None:
+    calls, log = _run(tmp_path, snapshot_cmd=HANG_WITH_PATCH)
+    assert calls.count("snapshot verify") == 2 and "lsv_measure" not in calls
+    assert _status(log) == {
+        "verify_exit_code": 124,
+        "timed_out": True,
+        "base_exit_code": 0,
+        "base_also_timed_out": False,
+    }
+    assert _skipped(log) == {"lsv_skipped": "snapshots_regressed"}
+    assert (tmp_path / "repo" / "core.py").read_text() == "x = 2\n" and (tmp_path / "repo" / "new.py").exists()
+
+
+def test_snapshot_verify_over_its_limit_also_at_base_is_not_a_failure(tmp_path: Path) -> None:
+    calls, log = _run(tmp_path, snapshot_cmd="return 124")
+    assert calls.count("snapshot verify") == 2 and "lsv_measure" in calls
+    assert _status(log)["base_also_timed_out"] is True and _skipped(log) is None
+
+
+def test_finished_snapshot_verify_runs_once(tmp_path: Path) -> None:
+    calls, log = _run(tmp_path)
+    assert calls.count("snapshot verify") == 1 and _status(log)["timed_out"] is False
 
 
 def test_empty_patch_skips_the_timing(tmp_path: Path) -> None:

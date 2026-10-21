@@ -93,3 +93,17 @@ def test_parser_records_the_pytest_time_out(tmp_path: Path, monkeypatch) -> None
         json.dumps({"runner_exit_code": 124, "timed_out": True, "base_exit_code": 124, "base_also_timed_out": True})
     )
     assert parser._pytest_status()["pytest_base_also_timed_out"] is True
+
+
+def test_parser_records_the_snapshot_time_out(tmp_path: Path, monkeypatch) -> None:
+    parser = _load("parser")
+    monkeypatch.setattr(parser, "LOG_DIR", tmp_path)
+    assert parser._snapshot_status()["snapshot_timed_out"] is False
+    (tmp_path / "snapshot_status.json").write_text(
+        json.dumps({"verify_exit_code": 124, "timed_out": True, "base_exit_code": 0, "base_also_timed_out": False})
+    )
+    assert parser._snapshot_status() == {
+        "snapshot_timed_out": True,
+        "snapshot_base_exit_code": 0,
+        "snapshot_base_also_timed_out": False,
+    }

@@ -24,7 +24,13 @@ def snapshot_regressed(log_dir, owner, skip_libs):
             continue
         compared += sum(v for k, v in s.items() if isinstance(v, int) and "-to-" in str(k))
         regressions += int(s.get("pass-to-fail", 0) or 0) + int(s.get("skip-to-fail", 0) or 0)
-    return compared > 0 and regressions > 0
+    if compared > 0 and regressions > 0:
+        return True
+    try:
+        st = json.loads((Path(log_dir) / "snapshot_status.json").read_text())
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(st.get("timed_out")) and not st.get("base_also_timed_out")
 
 
 def decide(log_dir, patch_files, owner, oracle_failing=(), skip_libs=("dask",)):
