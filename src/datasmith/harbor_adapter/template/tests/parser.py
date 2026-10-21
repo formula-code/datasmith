@@ -594,10 +594,17 @@ def _pytest_status() -> dict:
         st = json.loads((LOG_DIR / "pytest_status.json").read_text())
     except (OSError, ValueError):
         st = {}
+    try:
+        wide = json.loads((LOG_DIR / "test_results.json").read_text()).get("regression_wide") or {}
+    except (OSError, ValueError, AttributeError):
+        wide = {}
+    # pytest_runner.py's wider check: over its limit with the patch, in time at base.
+    wide_timed_out = bool(wide.get("timed_out_patch_only"))
     return {
         "pytest_runner_exit_code": st.get("runner_exit_code"),
-        "pytest_timed_out": bool(st.get("timed_out")),
+        "pytest_timed_out": bool(st.get("timed_out")) or wide_timed_out,
         "pytest_base_also_timed_out": bool(st.get("base_also_timed_out")),
+        "pytest_wide_timed_out": wide_timed_out,
     }
 
 

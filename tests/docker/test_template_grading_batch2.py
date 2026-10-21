@@ -88,6 +88,7 @@ def test_parser_records_the_pytest_time_out(tmp_path: Path, monkeypatch) -> None
         "pytest_runner_exit_code": None,
         "pytest_timed_out": False,
         "pytest_base_also_timed_out": False,
+        "pytest_wide_timed_out": False,
     }
     (tmp_path / "pytest_status.json").write_text(
         json.dumps({"runner_exit_code": 124, "timed_out": True, "base_exit_code": 124, "base_also_timed_out": True})
