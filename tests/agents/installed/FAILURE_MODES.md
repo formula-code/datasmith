@@ -226,7 +226,7 @@ correspond to real benchmarks.
   (dipy — last-resort fallback after legitimate discovery failed)
 
 **Detection**: `ASV_BENCHMARKS_WRITE_RE` (advisory, not auto-delete) in
-`backfill_tainted_containers.py`.
+`src/datasmith/agents/tamper_audit.py`.
 
 **Fix**: `docker_build_final.sh` overwrites `asv_benchmarks.txt`
 authoritatively after all agent scripts run. `run-tests.sh` has a runtime
