@@ -65,11 +65,11 @@ def test_base_pytest_config_is_found_in_pytest_order(runner, repo: Path) -> None
 
 
 def test_an_agent_pytest_ini_that_deselects_a_failing_test_is_not_read(runner, repo: Path, monkeypatch) -> None:
-    (repo / "test_m.py").write_text("def test_a():\n    assert False\n")
+    (repo / "test_fc_deselect_case.py").write_text("def test_a():\n    assert False\n")
     monkeypatch.setenv("FC_PYTEST_CONFIG", runner.write_base_pytest_config("HEAD", str(repo)))
-    (repo / "pytest.ini").write_text("[pytest]\naddopts = --deselect test_m.py::test_a\n")
-    res = runner.run_pytest_and_collect(["test_m.py"], extra_args="-p no:cacheprovider", cwd=str(repo))
-    assert {t["nodeid"]: t["outcome"] for t in res["tests"] if t.get("when") == "call"} == {"test_m.py::test_a": "failed"}
+    (repo / "pytest.ini").write_text("[pytest]\naddopts = --deselect test_fc_deselect_case.py::test_a\n")
+    res = runner.run_pytest_and_collect(["test_fc_deselect_case.py"], extra_args="-p no:cacheprovider", cwd=str(repo))
+    assert {t["nodeid"]: t["outcome"] for t in res["tests"] if t.get("when") == "call"} == {"test_fc_deselect_case.py::test_a": "failed"}
 
 
 def test_benchmarks_timed_only_at_base_are_listed() -> None:
