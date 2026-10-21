@@ -90,7 +90,7 @@ the precheck and measure steps for many tasks at once and keeps the review decis
 | Repository | Branch or commit | Where it is set |
 |---|---|---|
 | datasmith | `main`; release template on `release/template-v1` (tags `template-v1` to `template-v1.4`) | the tag you render from |
-| lsv | `main` at `9702a48` | `LSV_REF` in `harbor_adapter/template/environment/Dockerfile` and `docker/templates/docker_build_final.sh` |
+| lsv | `main` at `68a548f` | `LSV_REF` in `harbor_adapter/template/environment/Dockerfile` and `docker/templates/docker_build_final.sh` |
 | snapshot-tester | `f08bb0c` | `SNAPSHOT_TESTER_REF` in the same two files |
 | harbor | `formulacode/harbor-reliability` | the harbor checkout that runs trials |
 | skyrl | `main` | the trainer checkout |
