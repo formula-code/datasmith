@@ -40,12 +40,7 @@ if not os.path.isabs(conf):
 
 
 def load_conf(path):
-    # asv.conf.json is JSONC, not JSON. 12 of the 16 validation-set configs
-    # carry an inline `// for git` after a value or a trailing comma before a
-    # brace, and the first draft of this script dropped only WHOLE comment
-    # lines -- so json.loads raised on 12 of 16 and every one of them printed
-    # ERR, which the verifier graded as a hard failure of a healthy container.
-    # asv's own loader is the definition of what this file means, so use it.
+    # asv.conf.json is JSONC (inline comments, trailing commas), so read it with asv's own loader.
     try:
         from asv import util
         try:
@@ -56,10 +51,8 @@ def load_conf(path):
         return {}
 
 
-# benchmark_dir is optional -- asv resolves it relative to the config's own
-# directory and most configs omit it. An unparseable config must not stop the
-# count either: walking the config's directory still finds the benchmark
-# package underneath it, which is a superset, never a silent zero.
+# benchmark_dir is optional and relative to the config. If the config cannot be read, walk the
+# config's directory, which finds a superset of the benchmarks.
 bench = load_conf(conf).get("benchmark_dir") or ""
 if not os.path.isabs(bench):
     bench = os.path.join(os.path.dirname(conf), bench)

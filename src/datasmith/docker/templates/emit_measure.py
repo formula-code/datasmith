@@ -102,12 +102,7 @@ def measure_block(
     benchmarks = measure.get("benchmarks") or {}
     if not isinstance(benchmarks, dict):
         benchmarks = {}
-    # parser.py's compute_per_benchmark_speedups calls .get() on every value
-    # and raises AttributeError on a non-dict entry -- verified directly
-    # against the real function, which has no isinstance guard. Filter here
-    # so a malformed entry is DATA (counted degenerate) rather than a crash
-    # that would cost us the whole block, and so the real function and the
-    # local fallback above agree on the same input.
+    # compute_per_benchmark_speedups fails on a non-dict entry, so drop such entries here (counted degenerate).
     usable = {k: v for k, v in benchmarks.items() if isinstance(v, dict)}
 
     speedups = speedups_fn(usable)
@@ -133,11 +128,8 @@ def measure_block(
         "benchmarks_impactable_n": impactable_n,
         "benchmarks_measured_n": measured_n,
         "benchmarks_degenerate_n": degenerate_n,
-        # Selected to run but produced no result at all (worker killed on
-        # timeout / errored). Distinct from `degenerate`, which DID return a
-        # value that could not be turned into a ratio. None when the LSV in
-        # this image predates the field, so an invariant over it SKIPS rather
-        # than reading a missing count as zero.
+        # Selected but gave no result (killed or errored), unlike `degenerate`. None when this LSV
+        # does not report it, so the invariant skips.
         "benchmarks_dropped_n": measure.get("dropped_count"),
         "geomean_speedup": geomean_fn(values) if values else None,
         "max_speedup": max(values) if values else None,
