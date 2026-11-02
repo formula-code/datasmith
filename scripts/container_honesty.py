@@ -178,13 +178,8 @@ def _c_extensions_import(f: dict) -> bool | None:
 def _c_benchmarks_discovered(f: dict) -> bool | None:
     """A suite must exist in the source, and asv must not contradict it.
 
-    `discovered_n` alone is not enough. It comes from `Benchmarks.load`, which
-    reads `results/benchmarks.json` and is absent in an image that has never
-    run asv -- so the check used to SKIP, and a container with no benchmarks
-    read the same as one that simply had not run yet.
-
-    `source_n` is parsed from the benchmark directory and cannot be moved by
-    anything the build wrote, so it is the load-bearing number here.
+    `discovered_n` comes from `results/benchmarks.json`, which is absent until asv runs.
+    `source_n` is parsed from the benchmark directory, so nothing the build wrote can change it.
     """
     b = f["benchmarks"]
     source_n = b.get("source_n")

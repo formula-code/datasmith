@@ -125,7 +125,7 @@ micromamba run -n "$ENV_NAME" asv run --bench just-discover --config "$REAL_TEST
 # asv publish --config "$REAL_TEST_CONF" | tee "${LOG_DIR}.publish.log" || true
 cd "$OLD_DIR"
 
-# Record base SHA for robust compare later
+# Record the base SHA for the later comparison
 echo "$COMMIT_SHA" > "$BASE_SHA_FILE"
 
 # Bundle everything once

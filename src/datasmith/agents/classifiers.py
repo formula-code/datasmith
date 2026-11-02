@@ -161,32 +161,8 @@ If the diff is not in the NO list above and you genuinely cannot tell whether it
 YES and let the benchmark decide."""
 """Instructions for :class:`PerfClassifier`.
 
-A module constant rather than a docstring on the nested signature class, because
-this text is the thing most worth reviewing in a diff and it was previously
-invisible three levels down inside a method.
-
-Measured against 400 PRs carrying maintainer-written commit prefixes (``PERF:``
-as positives, ``DOC|TST|CI|BLD|STY|TYP:`` as negatives), on
-google/gemma-4-26B-A4B-it at temperature 0:
-
-===================  ==============  ==============  ==============
-prompt               title+body+diff  body+diff       diff only
-===================  ==============  ==============  ==============
-previous              97.5% / 0.0%    95.5% / 0.0%    87.0% / 0.0%
-this one              98.5% / 3.0%    98.5% / 2.0%    96.5% / 3.0%
-===================  ==============  ==============  ==============
-
-(recall / false-positive rate.)
-
-The middle and right columns decide it.  Only 43% of the 13,008 PRs this
-pipeline has confirmed as performance commits carry a performance keyword in
-the title, so most real work looks like the right-hand column -- titles such as
-"Chunkless", "Refactor randoms", "Dev".  The previous wording leaned on those
-keywords and shed ten points of recall without them.
-
-The hard-NO list is load-bearing and must stay ahead of the YES guidance.  An
-earlier draft that omitted it, and ended with an unscoped "if you cannot tell,
-answer YES", admitted ``CI: Bump dask`` and ``DOC: whats new v0.20``.
+Most performance PRs have no performance keyword in the title, so the prompt does not rely on keywords.
+The hard NO list must stay before the YES guidance; without it the model accepts CI and documentation PRs.
 """
 
 
