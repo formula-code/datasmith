@@ -73,8 +73,8 @@ state directory, never in the image.
 
 - **They are local to the host.** BuildKit cache mounts cannot be exported or pulled. A rebuild on a different host
   starts cold and also pulls the full base image.
-- **BuildKit garbage-collects them.** `docker buildx inspect default` shows the GC rule for `type==exec.cachemount`
-  (by default 48 hours). `fc-data` runs monthly, so the cache of one run is gone before the next. A longer time needs
+- **BuildKit garbage-collects them.** `docker buildx inspect default` shows the GC rule and keep duration for
+  `type==exec.cachemount`, which is shorter than a month. `fc-data` runs monthly, so the cache of one run is gone before the next. A longer time needs
   a `builder.gc` policy in `/etc/docker/daemon.json` and a Docker restart, which stops running builds.
 - **`--no-cache` empties them.** No `docker.build()` call passes it; `tests/docker/test_build_caches.py` checks this.
 - **`docker builder prune` deletes them.** `utils/docker_prune.py` prunes only when disk use is at or above
