@@ -97,10 +97,71 @@ mgr = ImageManager()
 mgr.build_base_image()                               # formulacode/base:latest
 mgr.build_repo_image("pandas-dev", "pandas")          # formulacode/pandas-dev-pandas:latest
 mgr.build_pr_image("pandas-dev", "pandas", 16222)     # formulacode/pandas-dev-pandas:16222
+
+# Each call also takes a custom build context in place of the default template.
+mgr.build_pr_image("pandas-dev", "pandas", 16222, context="path/to/custom/context")
 ```
+
+Every task image holds a build manifest. Read it and evaluate its invariants without a rebuild or a container run:
+
+```python
+from datasmith.docker import read_build_manifest, evaluate_invariants
+
+manifest = read_build_manifest("formulacode/pandas-dev-pandas:16222")
+report = evaluate_invariants(manifest)
+# report.ok: True (all fatal invariants hold), False (a fatal invariant failed), None (no manifest).
+# report.fatal, report.warnings and report.skipped list the invariant ids.
+```
+
+## Synthesizing a build context
+
+The synthesizer is a state machine. It checks Supabase for a cached context, tries build scripts from similar PRs, then runs an installed CLI agent (Claude Code, Codex, Gemini or Qwen Code):
+
+```python
+from datasmith.agents import Synthesizer
+
+synth = Synthesizer(max_attempts=3)
+ctx = synth.run(
+    owner="pandas-dev",
+    repo="pandas",
+    issue_number=16222,
+    pr_context="This PR optimizes groupby performance by ...",
+    sha="abc123def456",
+    base_sha="def456abc123",   # the commit before the optimization, which the image checks out
+    env_payload='{"dependencies": ["numpy==1.26.0", "cython==3.0.0"]}',
+    python_version="3.10",
+    solution_patch=pr_patch,   # the oracle patch, used only to check that the task is measurable
+)
+```
+
+`local_ci.py` checks each attempt inside the sandbox: it builds the image, runs the tests, runs the measure step and checks the fatal invariants of the build manifest. A success is stored in the `candidate_containers` table and `ctx` is the `DockerContext`. Every attempt is logged to the `error_logs` table. If all attempts fail, `ctx` is `None`.
+
+`SynthesizeImagesRunner(synth, n_concurrent=8)` runs synthesis over many PRs. Each LLM attempt costs agent tokens.
+
+## Publishing a dataset
+
+```python
+from datasmith.publish import records_from_supabase, HuggingFacePublisher
+
+# Verified, unpublished performance PRs merged in the window.
+records = records_from_supabase(start_date="2026-02-01", end_date="2026-03-01")
+
+HuggingFacePublisher().publish(records, version="formulacode@2026-03")
+```
+
+## Rendering Harbor tasks
+
+```python
+from datasmith.harbor_adapter.adapter import FormulaCodeAdapter, FormulaCodeRecord
+
+FormulaCodeAdapter(harbor_tasks_root="tasks/").generate_task(FormulaCodeRecord(**record))
+```
+
+The `fc-render-tasks render` command does the same from a records file.
 
 ## Next steps
 
 - [Pipeline guide](../guide/pipeline.md) — Run the monthly update workflow
 - [Synthesis guide](../guide/synthesis.md) — Automatically generate Docker build contexts
 - [Configuration](../guide/configuration.md) — Environment variables reference
+- [Overview](../OVERVIEW.md) — From a rendered task to measurement, review and RL training
