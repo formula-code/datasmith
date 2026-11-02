@@ -115,28 +115,7 @@ report = evaluate_invariants(manifest)
 
 ## Synthesizing a build context
 
-The synthesizer is a state machine. It checks Supabase for a cached context, tries build scripts from similar PRs, then runs an installed CLI agent (Claude Code, Codex, Gemini or Qwen Code):
-
-```python
-from datasmith.agents import Synthesizer
-
-synth = Synthesizer(max_attempts=3)
-ctx = synth.run(
-    owner="pandas-dev",
-    repo="pandas",
-    issue_number=16222,
-    pr_context="This PR optimizes groupby performance by ...",
-    sha="abc123def456",
-    base_sha="def456abc123",   # the commit before the optimization, which the image checks out
-    env_payload='{"dependencies": ["numpy==1.26.0", "cython==3.0.0"]}',
-    python_version="3.10",
-    solution_patch=pr_patch,   # the oracle patch, used only to check that the task is measurable
-)
-```
-
-`local_ci.py` checks each attempt inside the sandbox: it builds the image, runs the tests, runs the measure step and checks the fatal invariants of the build manifest. A success is stored in the `candidate_containers` table and `ctx` is the `DockerContext`. Every attempt is logged to the `error_logs` table. If all attempts fail, `ctx` is `None`.
-
-`SynthesizeImagesRunner(synth, n_concurrent=8)` runs synthesis over many PRs. Each LLM attempt costs agent tokens.
+`Synthesizer.run` writes and checks the build scripts for one PR, and `SynthesizeImagesRunner` runs it over many PRs. See the [Synthesis guide](../guide/synthesis.md) for the states, an example and the cost controls.
 
 ## Publishing a dataset
 

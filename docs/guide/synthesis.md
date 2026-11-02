@@ -1,18 +1,20 @@
 # Synthesis
 
-The synthesizer automatically generates Docker build contexts for pull requests. It is a state machine that tries cached and similar scripts before falling back to LLM-based generation.
+The synthesizer writes Docker build contexts for pull requests. It is a state machine that tries cached, similar and default scripts before it asks an LLM agent.
 
 ## How it works
 
-The synthesizer follows a strict try-existing-first strategy:
+The synthesizer tries existing scripts first:
 
-1. **Check cache** — Look up Supabase for an existing build script for this PR
-2. **Find similar** — Query Supabase for similar scripts from the same repository
-3. **Try similar** — Run each similar script against the verifier chain
-4. **LLM generate** — Fall back to an installed coding agent (Claude Code, Codex, Gemini, or Qwen Code)
-5. **Fail** — Log all attempts and return `None`
+1. **Check cache**: look up a stored build context for this commit in Supabase.
+2. **Find similar**: query stored contexts from other PRs of the same repository. `DATASMITH_SKIP_SIMILAR_CONTEXTS=1` skips this step and the next.
+3. **Try similar**: build and check each similar context.
+4. **Try default**: build with the stock template scripts in `docker/templates/`. This step is skipped for a repository where the default already succeeded, after too many default failures, or when a stored context exists for the commit.
+5. **Produce and verify**: when `DATASMITH_PV_ENABLED` is set, a producer agent edits the context and a verifier agent checks the image (`DATASMITH_PV_PRODUCER_AGENT` and `DATASMITH_PV_VERIFIER_AGENT`, default `codex`).
+6. **LLM generate**: an installed coding agent (Claude Code, Codex, Gemini or Qwen Code) writes the scripts in a sandbox.
+7. **Fail**: return `None`.
 
-All attempts are logged to the `build_attempts` table so failed PRs can be retried later with improved prompts or models.
+`local_ci.py` checks each attempt inside the sandbox: it builds the image, runs the tests, runs the measure step and checks the fatal invariants of the build manifest. A built context also goes through a tamper audit of its scripts and a scan of the image on the host before it is stored. A success is stored in the `candidate_containers` table. Every attempt is logged to the `error_logs` table, so a failed PR can be retried later.
 
 ## Basic usage
 
@@ -26,14 +28,13 @@ ctx = synth.run(
     issue_number=16222,
     pr_context="This PR optimizes groupby performance by ...",
     sha="abc123def456",
+    base_sha="def456abc123",   # the commit before the optimization, which the image checks out
     env_payload='{"dependencies": ["numpy==1.26.0", "cython==3.0.0"]}',
     python_version="3.10",
+    solution_patch=pr_patch,   # the oracle patch, used only to check that the task is measurable
 )
-# ctx is a DockerContext with the working build scripts, or None if all attempts failed
+# ctx is a DockerContext with the working build scripts, or None if all attempts failed.
 ```
-
-The synthesizer handles verification internally — it builds the Docker image
-from the generated context and runs the verifier chain as part of each attempt.
 
 ## Running at scale
 
@@ -42,11 +43,10 @@ from datasmith.runners import SynthesizeImagesRunner
 
 runner = SynthesizeImagesRunner(synth, n_concurrent=8)
 await runner.run(pr_items)
-# Returns None entries for PRs where synthesis failed
 ```
 
 !!! warning
-    Running synthesis at scale can be expensive — each LLM attempt may consume significant tokens. Use `n_concurrent` to control parallelism.
+    Each LLM attempt uses many agent tokens. Use `n_concurrent` to limit parallelism.
 
 ## Agent backends
 
@@ -63,29 +63,20 @@ The agent runs in a sandboxed workspace with the Docker build context, edits bui
 
 ## Chronological neighborhood cascade
 
-`SynthesizeImagesRunner` uses a queue-based worker pool rather than a fixed
-task list. Whenever a PR synthesises successfully, the runner queries for
-other PRs in the same repo whose `created_at` is within
-`±DATASMITH_NEIGHBOR_WINDOW_DAYS` (default 60) and enqueues them (capped at
-`DATASMITH_NEIGHBOR_CAP` per success, default 40). Those neighbor items
-re-enter the state machine at `CHECK_CACHE → FIND_SIMILAR`, where
-`TRY_SIMILAR` almost always reuses the freshly-cached context for free.
-Only PRs whose environment has genuinely drifted fall through to
-`LLM_GENERATE` and consume agent budget.
+`SynthesizeImagesRunner` uses a queue of work items. When a PR succeeds, the
+runner queries other PRs in the same repository whose `created_at` is within
+`±DATASMITH_NEIGHBOR_WINDOW_DAYS` (default 60) and enqueues them, at most
+`DATASMITH_NEIGHBOR_CAP` (default 40) per success. A neighbor starts at
+`CHECK_CACHE`, and `TRY_SIMILAR` usually reuses the new context. Only a PR
+whose environment differs reaches `LLM_GENERATE` and uses agent budget.
+A successful neighbor enqueues its own neighbors.
 
-This replaces the old two-pass workflow (run once with `--agent codex`,
-then again with `--agent none`) with a single pass that spreads each win
-across its chronological neighborhood automatically. A successful
-neighbor cascades its own neighbors onto the queue, so a single codex
-session can hydrate an entire repo's worth of adjacent PRs.
-
-Seed items still respect `--tasks-per-repo`; neighbors are additive and
-only bounded by `DATASMITH_NEIGHBOR_CAP` and the `_enqueued` dedupe set.
+`--tasks-per-repo` limits only the first items. Neighbors are limited by
+`DATASMITH_NEIGHBOR_CAP` and by the set of items already enqueued.
 
 ## Rate-limit handling
 
-Codex and Claude both enforce periodic usage limits (five-hour and weekly
-buckets) that can exhaust mid-run. The synthesizer detects these from the
+Codex and Claude have usage limits per five hours and per week, which a run can use up. The synthesizer detects these from the
 raw agent output in two ways:
 
 - **Codex** — parses the free-text `{"type":"error", ...}` event (the
@@ -97,21 +88,21 @@ raw agent output in two ways:
 
 When detected, the attempt is logged to `error_logs` with
 `failure_stage='rate_limited'` and `rate_limit_reset_at` set to the parsed
-reset time. A `RateLimitError` bubbles up into
-`SynthesizeImagesRunner._process_item`, which installs a shared pause on
-the runner — every worker blocks in `_wait_for_rate_limit` until the clock
-passes the reset time (plus a small jitter) instead of continuing to burn
-the attempt budget on sub-3-second failures. Each item is retried up to
+reset time. A `RateLimitError` goes up to
+`SynthesizeImagesRunner._process_item`, which sets a pause shared by all
+workers. Each worker waits in `_wait_for_rate_limit` until the reset time plus
+`DATASMITH_RL_PAUSE_JITTER_S`, so the attempt budget is not spent on failures
+that take a few seconds. Each item is retried up to
 `DATASMITH_RL_MAX_RETRIES` times across rate-limit pauses before being
 marked as failed. If no reset time could be parsed, the pause defaults to
 `DATASMITH_RL_DEFAULT_PAUSE_S` seconds.
 
 See [Configuration → Tunable constants](configuration.md#tunable-constants)
-for the full list of overridable knobs.
+for the variables that change these values.
 
 ## Dependencies on resolution
 
-The synthesizer requires `env_payload` (pinned dependencies) and `python_version` from pipeline Stage 4 (Resolve Packages). Without this data, `docker_build_env.sh` cannot install the correct packages. Always run resolution before synthesis.
+The synthesizer needs `env_payload` (pinned dependencies) and `python_version` from stage 4 (resolve packages). Without them, `docker_build_env.sh` cannot install the correct packages. Run stage 4 before synthesis.
 
 ## Repositories that often fail synthesis
 
