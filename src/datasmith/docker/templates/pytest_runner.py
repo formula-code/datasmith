@@ -453,16 +453,8 @@ def run_pytest_and_collect(test_paths, extra_args=None, cwd=None):
         unique_paths = default_test_paths(base)
         scoped_by_default = bool(unique_paths)
 
-    # One test module that cannot be imported must not hide the rest of the
-    # suite. Without this, pytest stops at the first collection error and
-    # reports zero tests, which is indistinguishable from a suite that does not
-    # exist. NCAR/geocat-comp#748 and AllenCellModeling/aicsimageio#486 both
-    # aborted on optional-dependency imports (dask, bioformats) with hundreds of
-    # unrelated tests never attempted.
-    #
-    # The errors are still counted, in summary["error"] and results["errors"],
-    # so a caller can tell "ran with N import failures" from "ran clean". That
-    # distinction is the caller's to act on, not ours to suppress.
+    # One module that cannot be imported must not stop the rest of the suite.
+    # The errors are still counted in summary["error"] and results["errors"].
     flag = "--continue-on-collection-errors"
     extra_args = list(extra_args)
     if flag not in extra_args:
@@ -745,23 +737,7 @@ def main(args) -> dict:
         }
         return out
 
-        # if args.json_out:
-        #     out_path = os.path.abspath(args.json_out)
-        #     with open(out_path, 'w', encoding='utf-8') as f:
-        #         json.dump(out, f, indent=2, sort_keys=False)
-        #     # print("Wrote JSON to %s" % out_path)
-
-        # s = res.get("summary", {})
-        # print("Strategy: %s" % strategy)
-        # if note:
-        # print("Note: %s" % note)
-        # print("Selected tests: %d" % len(out["selected_tests"]))
-        # print("Pytest exit code:", res.get("exit_code"))
-        # print("Summary: total={total} passed={passed} failed={failed} skipped={skipped} xfailed={xfailed} xpassed={xpassed} error={error}".format(**s))
-        # return int(res.get("exit_code", 1))
-
     except SystemExit:
-        # return int(getattr(se, 'code', 1))
         return out
     except Exception:
         return out
@@ -786,9 +762,7 @@ if __name__ == "__main__":
     with open("/logs/test_results.json", "w", encoding="utf-8") as f:
         json.dump(output, f, sort_keys=True)
 
-    # Propagate pytest's exit code so run-tests.sh (and local_ci.py) can
-    # gate on it.  Without this, the script always exits 0 and broken test
-    # suites silently pass verification.
+    # Pass on pytest's exit code to run-tests.sh and local_ci.py.
     #
     # Exit code semantics (pytest.ExitCode):
     #   0 = OK (all passed)          → success

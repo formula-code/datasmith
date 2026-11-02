@@ -127,16 +127,8 @@ echo "Agent solution patch saved to: $PATCH_PATH"
 reset_repo_state {{ base_commit }}
 
 
-# ASV benchmark discovery is normally handled authoritatively by
-# docker_build_final.sh during the `final` Docker stage (local_ci.py builds
-# target="final"), so /workspace/repo/asv_benchmarks.txt is populated at
-# image-build time. But ASV discovery is sometimes flaky in the build env
-# (missing runtime deps, late-bound imports, etc.), so if the file is empty
-# we re-run discovery here at container-run time as a self-healing fallback.
-# This does NOT reopen the agent-write bypass landscape: docker_build_final.sh
-# still runs AFTER every agent-editable script during the image build and
-# overwrites anything the agent wrote, so the only way asv_benchmarks.txt
-# can be empty here is a *legitimate* discovery failure at build time.
+# docker_build_final.sh writes asv_benchmarks.txt at build time, after every agent-editable script.
+# If build-time discovery failed and the file is empty, discover again here.
 if [ ! -s /workspace/repo/asv_benchmarks.txt ]; then
   echo "[run-tests] asv_benchmarks.txt empty; retrying discovery at runtime ..."
   REAL_CONF="$(realpath "$CONF_NAME")"
