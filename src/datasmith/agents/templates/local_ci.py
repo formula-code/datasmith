@@ -322,9 +322,7 @@ def run_tests(
 ) -> tuple[bool, str, str, int]:
     """Run /run-tests.sh inside the built image.
 
-    A host-side timeout is a FAILURE.  It previously returned success, which
-    meant a container killed at the limit was indistinguishable from one that
-    passed — that inversion silently verified ~34% of candidate_containers.
+    A host-side timeout is a FAILURE.
 
     rc == 78 (EX_CONFIG) or the FORMULACODE_NO_BENCHMARKS sentinel still means
     the repo has no ASV suite at this commit: task-level unsuitability, not a

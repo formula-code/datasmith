@@ -272,23 +272,10 @@ def _count_source_benchmarks(bench_dir: Path) -> int:
 def benchmark_facts(conf_name: str | None, repo_root: str | None) -> dict:
     """Count the benchmark suite two independent ways.
 
-    `asv_benchmarks.txt` lives in the repository and is writable by whatever
-    built the image. Two trials in the stored corpus rewrote it, one of them
-    down to a single benchmark. So neither that file nor anything else the
-    build produced can be the only source.
-
-    `Benchmarks.load` is NOT that independent source, despite an earlier
-    version of this docstring saying so. It reads `results/benchmarks.json`
-    from the results directory and raises when the file is absent -- which is
-    the normal state of an image that has never run asv. The check then
-    reported `discovered_n=None` and SKIPPED, so a container with no
-    benchmarks at all was indistinguishable from one that simply had not run
-    yet. Observed on pandas.
-
-    So we also parse the benchmark directory with `ast` and count functions
-    that follow the asv naming convention. That reads repository source and
-    nothing the build wrote. The two numbers answer different questions:
-    `source_n` is "does a suite exist", `discovered_n` is "can asv see it".
+    `asv_benchmarks.txt` is writable by the build, so it cannot be the only source.
+    `discovered_n` comes from `Benchmarks.load` (`results/benchmarks.json`, absent until asv runs):
+    "can asv see it". `source_n` counts asv-named functions in the benchmark directory with `ast`,
+    reading only repository source: "does a suite exist".
     """
     facts: dict = {
         "conf_name": conf_name,
