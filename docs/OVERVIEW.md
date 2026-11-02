@@ -23,7 +23,7 @@ flowchart TD
     E --> F["precheck<br/>fc-measure precheck<br/>coverage, base edits, patch applies"]
     F --> G["measure<br/>fc-measure measure<br/>3 oracle + 3 no-change runs,<br/>paired A-B-B-A, host lock folder"]
     G --> H["classify, review, release<br/>formulacode-verified-rl"]
-    H --> I["Phase 2 agent trials and RL training<br/>formulacode-verified-rl, skyrl, harbor"]
+    H --> I["agent trials and RL training<br/>formulacode-verified-rl, skyrl, harbor"]
 ```
 
 1. **Collect.** `fc-data` collects performance PRs into the task database. Its `render_problems` stage uses
@@ -57,7 +57,7 @@ flowchart TD
    $\theta_b = \mathrm{clip}(k\sigma_b, \theta_{\min}, \theta_{\max})$ with $k = 2$. A benchmark is **up** when at least
    2 of the 3 oracle runs are above $+\theta_b$, and **down** when at least 2 are below $-\theta_b$. The user then
    reviews each measured task, and approved gold prompts are applied there (`apply_gold_prompt.py`).
-9. **Agent trials and RL training.** formulacode-verified-rl runs agents on the approved tasks (Phase 2) and trains
+9. **Agent trials and RL training.** formulacode-verified-rl runs agents on the approved tasks and trains
    with skyrl. Trials run on Harbor with the same task folders and images, and mount the same lock folder at
    `/fc-measure-lock`.
 
@@ -73,7 +73,7 @@ image, the render and template commits, the CPU models of the runs, the license 
 
 ```bash
 echo "- owner/repo#N" > ids.md
-git -C datasmith checkout template-v1.4                       # render with the release template
+git -C datasmith checkout template-vX.Y                       # render with a release template tag
 fc-render-tasks export --from-db --ids-file ids.md --out records.jsonl
 fc-render-tasks render --records records.jsonl --out tasks/ --cpus 2 --memory 16G --storage 20G
 fc-build-tasks tasks/ images/ --ids-file ids.md
@@ -89,9 +89,9 @@ the precheck and measure steps for many tasks at once and keeps the review decis
 
 | Repository | Branch or commit | Where it is set |
 |---|---|---|
-| datasmith | `main`; release template on `release/template-v1` (tags `template-v1` to `template-v1.4`) | the tag you render from |
-| lsv | `main` at `68a548f` | `LSV_REF` in `harbor_adapter/template/environment/Dockerfile` and `docker/templates/docker_build_final.sh` |
-| snapshot-tester | `f08bb0c` | `SNAPSHOT_TESTER_REF` in the same two files |
+| datasmith | `main`; release templates are the `template-v*` tags | the tag you render from |
+| lsv | a pinned `main` commit | `LSV_REF` in `harbor_adapter/template/environment/Dockerfile`, and the same commit in `docker/templates/docker_build_final.sh` |
+| snapshot-tester | a pinned commit | `SNAPSHOT_TESTER_REF` in the same two files |
 | harbor | `formulacode/harbor-reliability` | the harbor checkout that runs trials |
 | skyrl | `main` | the trainer checkout |
 | formulacode-verified-rl | `main` | the survey and recipe checkout |
