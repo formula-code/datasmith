@@ -245,8 +245,7 @@ def _run_container_with_timeout(
     """
     name = f"fc-{uuid.uuid4().hex[:8]}"
     cmd = ["docker", "run", "--name", name, "--pull", "never"]
-    # Label every container with the run that owns it.
-    #
+    # Label every container with its run.
     # sandbox.py can kill this process on timeout while the container (no --rm, for metrics) keeps running.
     # The label lets the parent remove it, since the parent never sees the uuid name.
     run_label = os.environ.get("FC_RUN_LABEL", "")
@@ -412,17 +411,8 @@ def _pytest_verify_fields(stdout: str) -> dict:
         except (TypeError, ValueError):
             pass
 
-    # Recorded, NOT gated. Today any failing test fails the build, because
-    # run-tests.sh exits with pytest's code and run_tests treats rc != 0 as a
-    # failure. CalebBell/fluids#38 is rejected at 554/559 -- 99.1% -- for five
-    # numba TypingErrors, with zero collection errors.
-    #
-    # Whether that is the right policy needs a distribution, and the one we
-    # have is survivorship-biased: all 68 harbor_runs ratios come from
-    # containers that already passed this gate, and 60 of them sit at exactly
-    # 1.0. It cannot show how many repos are being rejected just below 1.0.
-    # So record the ratio on every run, including rejected ones, and set a
-    # threshold from that evidence rather than from one repository.
+    # Recorded on every run, rejected ones included, to choose a pass-ratio threshold from data.
+    # Any failing test fails the build: run-tests.sh exits with pytest's code.
     for key, name in (("total", "pytest_total_at_base"), ("passed", "pytest_passed_at_base")):
         if key in summary:
             try:
@@ -465,22 +455,14 @@ def run_measure(
         image_tag,
         ["/measure.sh", "/tmp/solution.patch"],
         limit,
-        # metrics=None deliberately: _run_container_with_timeout writes
-        # test_duration_s / peak_memory_bytes, and passing our metrics dict
-        # here would overwrite run_tests' values with the measure step's.
-        # The measure duration is timed separately below.
+        # None, so the measure step does not overwrite run_tests' duration and memory; it is timed below.
         metrics=None,
         mounts=[f"{patch_path}:/tmp/solution.patch:ro"],
     )
     if metrics is not None:
         metrics["measure_timeout_s"] = limit
         metrics["measure_timed_out"] = timed_out
-        # Recorded BESIDE the limit for the same reason the predecessor spec
-        # added timeout_s beside test_duration_s: a duration whose limit is
-        # unknown is uninterpretable, and a limit whose duration is unknown
-        # cannot tell us whether the 3600 default was right. 3600 was chosen
-        # from 83 harbor_runs rows; this field is how it gets re-derived
-        # from stage-6's own data.
+        # Recorded next to the limit, so the default limit can be checked against real durations.
         metrics["measure_duration_s"] = round(time.time() - start, 2)
     if timed_out:
         return (
@@ -492,11 +474,7 @@ def run_measure(
             rc,
         )
     if rc == 127:
-        # bash exits 127 for "command not found". Every image built before
-        # measurability verification existed has no /measure.sh, and no edit
-        # to docker_build_pkg.sh or docker_build_run.sh can fix that -- so
-        # say so, rather than letting the agent burn attempts on a build
-        # that was never broken.
+        # 127: the image has no /measure.sh, which no build script edit can fix, so say so.
         return (
             False,
             stdout,
@@ -595,16 +573,8 @@ def _c_secrets(b: dict, v: dict) -> bool | None:
 
 
 def _c_collect(b: dict, v: dict) -> bool | None:
-    # Not wired into _FATAL_INVARIANTS below: pytest_collect_failed is warn
-    # severity in datasmith.docker.manifest (pytest_runner.py's
-    # summary["error"] mixes genuine collection failures with ordinary
-    # per-test setup/teardown errors, and only the flat summary reaches this
-    # file, so the two are indistinguishable here). Kept, not deleted, so
-    # datasmith.docker.manifest.evaluate_invariants -- which re-evaluates the
-    # merged manifest downstream with no such gap -- still has a local_ci.py
-    # equivalent to diff against. Returns to _FATAL_INVARIANTS once
-    # len(results["errors"]) is read from /logs/test_results.json (already
-    # written by pytest_runner.py) to separate the two failure classes.
+    # Not in _FATAL_INVARIANTS: warn severity in datasmith.docker.manifest, because summary["error"]
+    # mixes collection errors with per-test setup errors. Kept as the counterpart of manifest.py's check.
     return None if v.get("pytest_collect_ok") is None else bool(v["pytest_collect_ok"])
 
 
@@ -628,48 +598,18 @@ def _c_oracle_patch(b: dict, v: dict) -> bool | None:
     return None if v.get("patch_applied") is None else bool(v["patch_applied"])
 
 
-# Every check returns True (holds), False (violated), or None (inputs absent
-# -> skipped, per check_fatal_invariants below).  This mirrors the three-
-# valued _c_* functions in datasmith.docker.manifest exactly -- a bool()-only
-# form would treat "not yet populated" as a violation, which is precisely
-# the inversion this task exists to prevent.
+# Each check returns True (holds), False (violated) or None (inputs absent, skipped), as in datasmith.docker.manifest.
 _FATAL_INVARIANTS = (
-    # Reached only under --skip-test-gate: in the default path run_tests()
-    # returns ok=False on timeout and verify() returns before
-    # check_fatal_invariants runs. Under the skipped gate this is the
-    # fail-closed backstop -- a timed-out test run still sets
-    # test_timed_out=True in the merged manifest, so it fails here rather
-    # than being laundered into a success. Retained (not dead code) either
-    # way, because the merged manifest -- including this field -- is
-    # persisted and re-evaluated downstream by
-    # datasmith.docker.manifest.evaluate_invariants, which has no such
-    # short-circuit.
+    # Reached only under --skip-test-gate, where a test timeout must still fail; manifest.py re-checks it later.
     ("test_timed_out", _c_timed_out),
     ("discovered_n_zero", _c_discovered_n),
-    # INERT pending a producer for BENCHMARK_DEST: see the matching comment
-    # on this Invariant in datasmith.docker.manifest -- nothing in this tree
-    # sets $BENCHMARK_DEST yet, so this check returns None (skipped) on
-    # every build. Kept registered rather than removed; the value is
-    # expected to come from the per-task override record once one exists.
+    # Skipped unless $BENCHMARK_DEST is set, as in datasmith.docker.manifest.
     ("benchmark_dest_missing", _c_dest_present),
-    # benchmark_init_missing is intentionally NOT here: it is warn-severity
-    # in datasmith.docker.manifest (build-time it's either a false-positive
-    # gate on repos that legitimately lack __init__.py, or tautological if
-    # we create it unconditionally -- see the comment on that Invariant for
-    # the full reasoning). Do not add it back without also flipping
-    # manifest.py's severity, or the parity test below will catch the drift.
+    # benchmark_init_missing is warn severity in manifest.py, so it is not here; the parity test checks this.
     ("head_commit_drift", lambda b, v: _shas_match(b.get("head_at_seal"), b.get("declared_commit"))),
     ("secrets_present", _c_secrets),
-    # pytest_collect_failed is intentionally NOT here: it is warn-severity in
-    # datasmith.docker.manifest (see the comment on _c_collect above and on
-    # that Invariant in manifest.py). Do not add it back without also
-    # flipping manifest.py's severity, or the parity test below will catch
-    # the drift.
-    #
-    # Measurability -- the gates that make verification prove a container can
-    # MEASURE a speedup rather than merely build. Their inputs come from the
-    # FORMULACODE_MEASURE block that measure.sh prints, merged into
-    # manifest["verify"] by verify() below.
+    # pytest_collect_failed is warn severity in manifest.py, so it is not here.
+    # Measurability checks: inputs come from the FORMULACODE_MEASURE block that measure.sh prints.
     ("measure_timed_out", _c_measure_timed_out),
     ("asv_exec_failed", _c_asv_exec),
     ("oracle_patch_failed", _c_oracle_patch),
@@ -809,12 +749,8 @@ def verify(task_dir: Path) -> bool:
     if not ok:
         print(f"Tests failed for {task_dir.name} -- gate skipped, the verifier grades it")
 
-    # Measurement -- prove the container can MEASURE a speedup, not just
-    # build. In the default path it runs only after tests pass, so a doomed
-    # attempt never pays the ~14-minute median cost. Under --skip-test-gate
-    # that trade is deliberately reversed: the verifier needs the measurement
-    # facts to grade a container whose pytest run is failing for reasons
-    # severity.py may waive.
+    # Check that the container can measure a speedup. It runs after tests pass, or always under
+    # --skip-test-gate, where the verifier grades containers whose test failures severity.py may waive.
     patch_path = str((task_dir / "solution.patch").resolve())
     m_ok, m_stdout, m_stderr, m_rc = run_measure(tag, patch_path, metrics=metrics)
     if manifest is not None:
