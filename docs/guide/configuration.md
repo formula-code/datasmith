@@ -1,6 +1,6 @@
 # Configuration
 
-fc-data is configured primarily through a `tokens.env` file in the repository root. The `Settings` class (powered by `pydantic-settings`) loads these automatically.
+fc-data reads its configuration from a `tokens.env` file in the repository root. `datasmith/__init__.py` loads the file on import, and the `Settings` class (`pydantic-settings`) reads it too.
 
 ## Environment variables
 
@@ -16,13 +16,13 @@ fc-data is configured primarily through a `tokens.env` file in the repository ro
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DSPY_MODEL` | Model identifier (e.g., `openai/gpt-oss-120b`) | — |
-| `DSPY_API_BASE` | API base URL | — |
-| `DSPY_API_KEY` | API key for the LLM provider | — |
+| `DSPY_MODEL` | Model identifier | `openai/gpt-oss-120b` |
+| `DSPY_API_BASE` | API base URL | `http://localhost:30001/v1` |
+| `DSPY_API_KEY` | API key for the LLM provider | `local` |
 | `DSPY_MAX_TOKENS` | Maximum tokens per request | `16000` |
-| `DSPY_TEMPERATURE` | Sampling temperature | `0.0` |
+| `DSPY_TEMPERATURE` | Sampling temperature | `0` |
 | `PORTKEY_API_KEY` | Portkey AI gateway key (alternative backend) | — |
-| `ANTHROPIC_API_KEY` | Anthropic API key (alternative backend) | — |
+| `PORTKEY_MODEL_NAME` | Model for Portkey | `@anthropic/claude-3-5-sonnet-latest` |
 
 ### Publishing
 
@@ -30,16 +30,14 @@ fc-data is configured primarily through a `tokens.env` file in the repository ro
 |----------|-------------|
 | `DOCKERHUB_USERNAME` | DockerHub username |
 | `DOCKERHUB_TOKEN` | DockerHub access token |
-| `HF_TOKEN_PATH` | Path to HuggingFace token file |
+| `HF_TOKEN_PATH` | Path to HuggingFace token file (default `~/.cache/huggingface/token`; `HF_TOKEN` is used if the file is missing) |
 
 ### Tunable constants
 
-Any module-level constant that is a knob — timeouts, retries, caps,
-windows, concurrency limits — is overridable from `tokens.env` without a
-code change. Every such variable is prefixed `DATASMITH_` so it is
-globally greppable in both Python and shell env. `tokens.env` is loaded
-at import time by `datasmith/__init__.py`, so setting one of these in the
-file is enough; no export needed.
+Each tunable module constant (timeouts, retries, caps, windows,
+concurrency limits) reads an environment variable with the `DATASMITH_`
+prefix. Set it in `tokens.env` to change it without a code change.
+The tables below list the stage 6 variables.
 
 #### Stage 6: synthesize_images
 
@@ -56,20 +54,20 @@ Chronological neighborhood cascade (see [Synthesis → Chronological neighborhoo
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATASMITH_NEIGHBOR_WINDOW_DAYS` | ± window, in days of PR `created_at`, for enqueuing neighbor PRs after a successful synthesis | `60` |
-| `DATASMITH_NEIGHBOR_CAP` | Hard ceiling on neighbor PRs enqueued per successful item | `40` |
+| `DATASMITH_NEIGHBOR_CAP` | Maximum neighbor PRs enqueued per successful item | `40` |
 
-Setting `DATASMITH_NEIGHBOR_CAP=0` disables the cascade entirely — the
-runner then behaves like a pre-cascade fixed-item pool, useful for tight
-unit-style reruns where extra enqueues would confuse progress tracking.
+`DATASMITH_NEIGHBOR_CAP=0` turns off the cascade. The runner then processes
+only the items it was given, which keeps progress counts exact in small reruns.
 
 ## Agent backend resolution
 
-The agent configuration (`agents/config.py`) checks environment variables in priority order:
+`agents/config.py` configures DSPy for stages 3 and 5 in this order:
 
-1. **Portkey** — `PORTKEY_API_KEY` present → uses Portkey AI gateway
-2. **Anthropic** — `ANTHROPIC_API_KEY` present → uses `anthropic/claude-3-opus-20240229`
-3. **vLLM/Local** — `DSPY_API_KEY` present → uses `DSPY_MODEL` + `DSPY_API_BASE`
-4. **Fallback** — Local defaults
+1. **DSPy endpoint**: if `DSPY_API_KEY` and `DSPY_MODEL` are not empty, it uses `DSPY_MODEL` at `DSPY_API_BASE`. Both have defaults, so this is the usual case.
+2. **Portkey**: if one of them is set to an empty value and `PORTKEY_API_KEY` is set, it uses the Portkey gateway with `PORTKEY_MODEL_NAME`.
+3. Otherwise no LLM is configured and a warning is logged.
+
+Stage 6 also uses DSPy when it renders a missing problem statement. Its build agent is a CLI agent that uses its own login.
 
 ## tokens.env template
 
@@ -81,7 +79,7 @@ SUPABASE_KEY=your-service-role-key
 # GitHub (required — comma-separated for multiple tokens)
 GH_TOKENS=github_pat_xxx,github_pat_yyy
 
-# LLM backends (for classification and synthesis)
+# LLM backend (for classification and problem rendering)
 DSPY_MODEL=openai/gpt-oss-120b
 DSPY_API_BASE=http://localhost:30000/v1
 DSPY_API_KEY=local

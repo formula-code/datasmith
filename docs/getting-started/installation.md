@@ -62,7 +62,7 @@ GH_TOKENS=github_pat_xxx
 
 ### LLM backend variables
 
-Required for stages 3 (classify PRs) and 5 (render problems):
+Required for stages 3 (classify PRs), 5 (render problems) and 6 (synthesis, for missing problem statements):
 
 ```bash
 # === LLM backends ===
@@ -73,7 +73,7 @@ DSPY_API_KEY=local
 DSPY_MAX_TOKENS=16000
 ```
 
-Stage 6 (synthesis) runs a CLI agent (`claude`, `codex`, `gemini` or `qwen`) with its own login. See [Configuration](../guide/configuration.md#agent-backend-resolution) for the Portkey alternative.
+The stage 6 build agent is a CLI agent (`claude`, `codex`, `gemini` or `qwen`) that uses its own login. See [Configuration](../guide/configuration.md#agent-backend-resolution) for the Portkey alternative.
 
 ### Publishing variables
 
