@@ -298,14 +298,7 @@ for version in $PY_VERSIONS; do
 done
 
 # ── Manifest breadcrumbs: requested vs. resolved pins ─────────────────
-# NOTE: $ENV_PAYLOAD is deliberately NOT used here. By this point in the
-# script it holds the *path* docker_build_env.sh was invoked with
-# (`--env-payload /tmp/env_payload.json`, see the arg-parsing block above,
-# which reassigns the exported ENV_PAYLOAD build ARG to "$2"), not the raw
-# JSON payload text. $DEPENDENCIES_PATH is the flattened, one-spec-per-line
-# file that was actually fed to `uv pip install -r`, which is a more direct
-# and reliable source for "what was requested" than re-parsing JSON out of
-# an env var that no longer holds it.
+# Use $DEPENDENCIES_PATH (the file given to `uv pip install -r`), because $ENV_PAYLOAD here holds a path, not the JSON.
 fc_note pins_requested="$(tr '\n' ' ' < "$DEPENDENCIES_PATH" 2>/dev/null || true)"
 fc_note pins_resolved="$(micromamba run -n "$ENV_NAME" python -m pip freeze 2>/dev/null | tr '\n' ' ' || true)"
 

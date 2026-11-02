@@ -162,14 +162,8 @@ EXTRACT_EOF
   fi
 fi
 
-# Early exit: no ASV benchmarks discovered — task is useless for FormulaCode
-#
-# "The repository has no benchmarks" and "our discovery broke" both land here
-# and used to print the same line, so a repo with a real suite was written off
-# as useless. Count the suite from SOURCE before deciding which one it is:
-# parse benchmark_dir for functions following the asv naming convention. That
-# imports nothing, so a benchmark module with a missing optional dependency
-# still counts, and no file the build wrote can move the number.
+# Early exit: no ASV benchmarks discovered.
+# Count asv-named functions in benchmark_dir from source (no imports) to tell "no benchmarks" from "discovery failed".
 if [ ! -f /workspace/repo/asv_benchmarks.txt ] || [ ! -s /workspace/repo/asv_benchmarks.txt ]; then
   _SRC_N="$(micromamba run -n "$ENV_NAME" python - "$CONF_NAME" <<'SRC_COUNT_EOF' 2>/dev/null || echo "?"
 import ast, json, os, sys
@@ -222,15 +216,7 @@ EOF
 
 tmux
 {%- if run_pytest %}
-# A pandas-specific shim, written ONLY for pandas.
-#
-# It used to be written into every repository root and passed to every pytest
-# run as `-p jinja_patch_plugin_pandas`. Two things were wrong with that. The
-# body was indented at module level, so the file raised IndentationError and
-# was never importable -- it has never worked for pandas either. And planting
-# it in every repo means any project that collects its rootdir tries to import
-# it: CalebBell/fluids#38 died on `ERROR jinja_patch_plugin_pandas.py`, our own
-# file, in our own build.
+# A pandas-only pytest plugin; in other repos a file in the rootdir breaks pytest collection.
 _PYTEST_PLUGIN_ARGS=""
 if [ "${IMPORT_NAME:-}" = "pandas" ]; then
   pip install -U jinja2
