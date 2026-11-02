@@ -10,10 +10,10 @@ structured output.
 |-------|-----------|---------|
 | Claude Code | `claude` | `npm install -g @anthropic-ai/claude-code` |
 | Codex | `codex` | `npm install -g @openai/codex` |
-| Gemini CLI | `gemini` | `npm install -g @anthropic-ai/gemini-cli` |
+| Gemini CLI | `gemini` | `npm install -g @google/gemini-cli` |
 | Qwen Code | `qwen` | `npm install -g @qwen-code/qwen-code` |
 
-## Interface contract
+## Interface requirements
 
 Every `InstalledAgent` implementation must satisfy these requirements:
 
@@ -27,7 +27,7 @@ Every `InstalledAgent` implementation must satisfy these requirements:
 
 ## Auto-detection
 
-`get_agent()` tries agents in preference order (default: `claude → codex → gemini`)
+`get_agent()` tries agents in preference order (default: `claude → codex → gemini → qwen`)
 and returns the first one whose CLI binary is on `PATH`:
 
 ```python

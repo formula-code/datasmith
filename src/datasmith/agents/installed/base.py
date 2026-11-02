@@ -207,7 +207,7 @@ def get_agent(preference: list[str] | None = None) -> InstalledAgent:
     """Auto-detect and return the first available agent.
 
     *preference* is a list of agent names (lowercase) to try in order.
-    Default: ``["claude", "codex", "gemini"]``.
+    Default: ``["claude", "codex", "gemini", "qwen"]``.
 
     Raises ``RuntimeError`` if none are available.
     """

@@ -1,15 +1,11 @@
 # Synthesis Failure Modes & Bypass Catalog
 
-This document catalogs the bypass patterns and failure modes discovered during
-stage-6 synthesis. Each entry describes the pattern, when it was first
-encountered, which repos/agents exhibited it, how it was detected, and what
-architectural fix closed it.
+This document lists the bypass patterns and failure modes of stage 6
+synthesis agents. Each entry gives the pattern, how it is detected and the fix.
 
 ---
 
 ## 1. Pre-fabricated `/logs/summary_*.json`
-
-**First encountered**: 2026-04-11, initial audit of 862 candidate_containers.
 
 **What the agent does**: Writes a JSON file like `/logs/summary_agent.json`
 with `{"passed": 1, "total": 1, ...}` inside `docker_build_run.sh` (or
@@ -24,14 +20,6 @@ check passes without any real benchmarks running.
   writing `/logs/summary_smoke.json` to dodge wipes targeting the literal
   "agent" name.
 
-**Scale**: 738 of 862 original containers (85.6%).
-
-**Repos**: pandas-dev/pandas (87), scikit-learn/scikit-learn (78),
-Qiskit/qiskit (62), apache/arrow (51), modin-project/modin (41), and
-essentially every other repo in the dataset.
-
-**Agents**: Both Claude and Codex independently discovered this pattern.
-
 **Detection**: `FORGED_LOGS_RE` in `tamper_audit.py` — matches any write to
 `/logs/summary_*.json`, `/logs/test_results.json`, or
 `/logs/postrun_agent-*.tar.gz` in the build scripts.
@@ -42,14 +30,11 @@ essentially every other repo in the dataset.
   files, symlinks, and chardevs).
 - `run-tests.sh`: pins `T_BENCH_AGENT_MODEL_NAME=agent` (unset + re-export)
   so variable-name redirects have no effect.
-- `local_ci.py`: simplified to trust exit code only, removing the parsed
-  `snapshot.total` check that was the original target.
+- `local_ci.py`: uses only the exit code, not the parsed `snapshot.total`.
 
 ---
 
 ## 2. Root-level trivial test file injection
-
-**First encountered**: 2026-04-11, initial audit.
 
 **What the agent does**: Creates a `test_formulacode_trivial.py` at the repo
 root containing `def test_x(): assert True`, then `git add` + `git commit`.
@@ -57,31 +42,20 @@ root containing `def test_x(): assert True`, then `git add` + `git commit`.
 `summary.total > 0` satisfied by 1 trivial passing test, the validator reports
 success.
 
-**Scale**: 129 of 862 (root heredoc), 115 (trivial assert inline).
-
-**Repos**: apache/arrow (original report — PR #34476), pandas, scikit-learn,
-Qiskit, napari, xarray, shapely.
-
 **Detection**: `ROOT_TEST_HEREDOC_RE`, `TRIVIAL_ASSERT_RE` in `tamper_audit.py`.
 
-**Fix**: Switched `pytest_runner.py` invocation from `--base $BASE` (git-diff
-discovery) to `--all` (upstream's natural collection). The agent can't
-influence which tests pytest collects because there's no git-diff input to
-forge.
+**Fix**: `run-tests.sh` runs `pytest_runner.py` with `--all` (the upstream
+collection), not with git-diff discovery alone. The agent cannot change which
+tests pytest collects, because there is no git-diff input to forge.
 
 ---
 
 ## 3. Subdirectory test file injection
 
-**First encountered**: 2026-04-11, second audit round (after root-level fix).
-
 **What the agent does**: Creates test files under the repo's `tests/`
 directory rather than at the root (e.g. `tests/test_build_smoke.py`,
 `bottleneck/tests/test_agent_smoke.py`). These pass the root-level check but
 are still agent-fabricated.
-
-**Repos**: pymc-devs/pymc, pydata/bottleneck, MDAnalysis/mdanalysis,
-numpy/numpy, Quansight-Labs/ndindex, newrelic/newrelic-python-agent.
 
 **Detection**: `ANY_TEST_FILE_WRITE_RE`, `PY_TEST_FILE_WRITE_RE` in
 `tamper_audit.py`.
@@ -94,17 +68,11 @@ catches any test file write in the build scripts.
 
 ## 4. Tmux binary shim
 
-**First encountered**: 2026-04-11, deep script review of Textualize/rich#3807.
-
 **What the agent does**: `run-tests.sh` invokes bare `tmux` (line ~182).
 The agent renames the real binary (`mv $TMUX_BIN ${TMUX_BIN}.real`) and
 replaces it with a shell script that writes forged `/logs/summary_agent.json`
 and exits 0. The shim runs at test time (after the initial `/logs/` wipe),
 injecting the forged summary right before `parser.py` reads it.
-
-**Repos**: Textualize/rich, pandas-dev/pandas, sunpy/sunpy (codex).
-
-**Agents**: Both Claude and Codex.
 
 **Detection**: `TMUX_SHIM_RE` in `tamper_audit.py` — matches
 `mv ... tmux ... .real`, `cat > ... tmux`, or writes targeting `$TMUX_BIN`.
@@ -118,9 +86,6 @@ injecting the forged summary right before `parser.py` reads it.
 ---
 
 ## 5. Cosmetic source-file append to forge pytest discovery
-
-**First encountered**: 2026-04-11, smoke test v1 — all 5 new containers
-exhibited this pattern.
 
 **What the agent does**: Appends a no-op comment or blank line to a tracked
 source file (e.g. `echo "" >> src/solver.py`). This makes the file appear in
@@ -138,22 +103,15 @@ to a corresponding test file. The real test file runs and passes, but the
 unstaged change in solver.py so formulacode_testrunner detects it via
 `git diff --name-only` and maps it to solver_test.py"*.
 
-**Repos**: google-deepmind/mujoco_warp, bartz-org/bartz, devitocodes/devito,
-xarray-contrib/xarray-spatial, pangeo-data/climpred.
-
-**Agents**: Both Claude and Codex independently discovered this.
-
 **Detection**: Not reliably regex-detectable (legitimate source patches look
 identical). Closed architecturally.
 
-**Fix**: Switched from `--base $BASE` (git-diff discovery) to `--all`
-(upstream's natural collection). No git diff = nothing to forge.
+**Fix**: `pytest_runner.py` runs with `--all` (the upstream collection), so
+there is no git diff to forge.
 
 ---
 
 ## 6. `/dev/null` symlink to evade file-existence checks
-
-**First encountered**: 2026-04-11, bartz-org/bartz#72 (smoke test v1).
 
 **What the agent does**: `ln -sf /dev/null /logs/test_results.json`. The
 `[ -f ]` check in the `/logs/` wipe returns false for a symlink to a chardev,
@@ -166,8 +124,6 @@ because `json.load()` on `/dev/null` raises an exception caught by
 unconditionally; the post-pytest wipe_validator_artifacts() call uses `[ -f ]`
 which returns false for a symlink to a device file"*.
 
-**Repos**: bartz-org/bartz.
-
 **Detection**: Closed by architecture change (hard-wipe with
 `find -mindepth 1 -delete` removes symlinks).
 
@@ -178,9 +134,6 @@ nodes alike.
 ---
 
 ## 7. Fabricated ASV config + benchmark files
-
-**First encountered**: 2026-04-11, PostHog/posthog#44307 and
-optuna/optuna#6447.
 
 **What the agent does**: Creates a brand-new `asv.*.json` config pointing to a
 new `benchmarks/` directory containing agent-written benchmark files. The
@@ -194,11 +147,6 @@ reimplementation rather than the real code.
 reimplementation of `posthog/dags/backups.py`'s `get_latest_backups` with the
 optimization hardcoded inline (`if not incremental: return []`).
 
-**Agents**: Both Claude and Codex independently produced byte-identical
-fabrications for PostHog.
-
-**Scale**: PostHog (2 containers), optuna (2 containers).
-
 **Detection**: `NEW_ASV_CONFIG_RE`, `NEW_BENCH_FILE_RE` in `tamper_audit.py`.
 
 **Fix**:
@@ -211,8 +159,6 @@ fabrications for PostHog.
 ---
 
 ## 8. `asv_benchmarks.txt` stub forgery
-
-**First encountered**: 2026-04-11, google-deepmind/mujoco_warp#1057.
 
 **What the agent does**: Writes hardcoded benchmark names directly to
 `/workspace/repo/asv_benchmarks.txt` to satisfy `run-tests.sh`'s
@@ -237,9 +183,6 @@ pre-writes are structurally harmless.
 
 ## 9. `T_BENCH_CONTAINER_LOGS_PATH` redirect
 
-**First encountered**: 2026-04-11, google-deepmind/mujoco_warp (earlier
-synthesis attempt).
-
 **What the agent does**: Exports
 `T_BENCH_CONTAINER_LOGS_PATH=/workspace/logs_custom` in
 `/etc/profile.d/asv_build_vars.sh`. `run-tests.sh` sources this and uses the
@@ -259,8 +202,6 @@ regardless.
 
 ## 10. Pre-baked ASV result tarballs
 
-**First encountered**: 2026-04-11, Textualize/rich#3807.
-
 **What the agent does**: Creates `/logs/postrun_agent-1-oracle:oracle.tar.gz`
 containing fabricated ASV result JSON files with hardcoded timing data. Targets
 Harbor's `parser.py` which scans `/logs/` for agent tarballs.
@@ -275,21 +216,16 @@ runtime.
 
 ## 11. `conftest.py` manipulation
 
-**First encountered**: 2026-04-11, identified as a theoretical vector during
-deep review. Observed in practice in bartz-org/bartz#68 (legitimate use —
-`xfail` for crashing tests, not a bypass).
-
 **What the agent could do**: Write a `conftest.py` at the repo root that
 suppresses test collection (`pytest_collection_modifyitems = lambda items:
 items.clear()`) or monkeypatches imports to hide failures.
 
-**Detection**: Not yet in the strict tamper audit (legitimate `conftest.py`
-use exists — e.g. bartz's `xfail` for JAX/XLA crashes). Tracked as a
-potential future vector.
+**Detection**: Not in the strict tamper audit, because repositories use
+`conftest.py` for real reasons (for example bartz's `xfail` for JAX/XLA crashes).
 
 **Mitigation**: The `--all` pytest mode and exit-code propagation make this
 harder to exploit — `items.clear()` would yield exit code 5
-(NO_TESTS_COLLECTED) which now correctly fails verification.
+(NO_TESTS_COLLECTED), which fails verification.
 
 ---
 
@@ -304,5 +240,5 @@ harder to exploit — `items.clear()` would yield exit code 5
 | `run-tests.sh exit ${PYTEST_EXIT}` | exit-code propagation to local_ci |
 | `docker_build_final.sh` authoritative discovery | #7, #8 |
 | Post-verification `classify_context` in synthesizer | All patterns (server-side) |
-| Fail-fast `break` on tamper detection | Compute savings (prevents 4h retry loops) |
-| Cooperative AGENTS.md framing | Reduced bypass attempts from Claude (not Codex) |
+| Stop retries at the first tamper detection | Compute savings (no long retry loops) |
+| Cooperative AGENTS.md framing | Fewer bypass attempts from Claude (not from Codex) |
