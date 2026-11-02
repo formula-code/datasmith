@@ -102,16 +102,7 @@ mgr.build_pr_image("pandas-dev", "pandas", 16222)     # formulacode/pandas-dev-p
 mgr.build_pr_image("pandas-dev", "pandas", 16222, context="path/to/custom/context")
 ```
 
-Every task image holds a build manifest. Read it and evaluate its invariants without a rebuild or a container run:
-
-```python
-from datasmith.docker import read_build_manifest, evaluate_invariants
-
-manifest = read_build_manifest("formulacode/pandas-dev-pandas:16222")
-report = evaluate_invariants(manifest)
-# report.ok: True (all fatal invariants hold), False (a fatal invariant failed), None (no manifest).
-# report.fatal, report.warnings and report.skipped list the invariant ids.
-```
+Every task image holds a build manifest. See [Verification](../guide/verification.md#reading-a-manifest-programmatically) to read it and evaluate its invariants.
 
 ## Synthesizing a build context
 
@@ -119,14 +110,7 @@ report = evaluate_invariants(manifest)
 
 ## Publishing a dataset
 
-```python
-from datasmith.publish import records_from_supabase, HuggingFacePublisher
-
-# Verified, unpublished performance PRs merged in the window.
-records = records_from_supabase(start_date="2026-02-01", end_date="2026-03-01")
-
-HuggingFacePublisher().publish(records, version="formulacode@2026-03")
-```
+`records_from_supabase` selects the verified, unpublished records and `HuggingFacePublisher` uploads them. See [Publishing](../guide/publishing.md).
 
 ## Rendering Harbor tasks
 
