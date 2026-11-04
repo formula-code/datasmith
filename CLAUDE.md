@@ -72,7 +72,7 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 5. **render_problems** — `RenderShortProblemsRunner`: render a short problem text without linked issues; a text that gives away the fix is not stored
 6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
 7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
-8. **publish** — Push the selected images to DockerHub and the records to HuggingFace. A PR must pass two checks: it needs at least one successful `harbor_runs` row whose `max_speedup >= 1.05` in an admitted environment (`DATASMITH_PUBLISH_ENVIRONMENTS`, default **daytona** only), *and* its `candidate_containers` row must be `verification_state = 'verified'`. The harbor row shows the container is fast; `verification_state` shows its image passed the integrity checks. A `harbor_runs` row can belong to an older build of the container, so both checks are needed. The second check has no setting.
+8. **publish** — Push the selected images to DockerHub and the records to HuggingFace. A PR must pass two checks: it needs at least one successful `harbor_runs` row with a `max_speedup` in an admitted environment (`DATASMITH_PUBLISH_ENVIRONMENTS`, default **daytona** only), *and* its `candidate_containers` row must be `verification_state = 'verified'`. There is no speedup floor: the per-benchmark theta check decides the gain. The harbor row shows the container runs and is timed; `verification_state` shows its image passed the integrity checks. A `harbor_runs` row can belong to an older build of the container, so both checks are needed. The second check has no setting.
 9. **scrape_benchmark_source** — For each `(owner, repo)` in `candidate_containers`, check out the repo at its container SHA, AST-parse every ASV-style benchmark function under the repo's `benchmark_dir`, and upsert one row per `(owner, repo, benchmark_without_params)` into `benchmark_codes` for the FormulaCode website's data sync.
 
 Stage 6 has two synthesis paths. `TRY_DEFAULT` uses the stock template and
@@ -170,8 +170,8 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_PUBLISH_ENVIRONMENTS` (comma-separated Harbor environments
   whose runs count for stage 8; default `daytona`, because local Docker
   trials share the build host and their timings change with load. Set
-  `docker,daytona` only on purpose and record it. It does **not** change
-  `MIN_HARBOR_SPEEDUP`); and the database read limits —
+  `docker,daytona` only on purpose and record it);
+  and the database read limits —
   `DATASMITH_KEY_FILTER_CHUNK`, `DATASMITH_LARGE_TABLES`,
   `DATASMITH_LARGE_COLUMNS` (the last two are comma-separated name sets,
   not numbers).

@@ -13,8 +13,6 @@ from datasmith.utils.db import fetch_all, window_filters
 
 logger = get_logger("publish.records")
 
-MIN_HARBOR_SPEEDUP = 1.05
-
 
 # Harbor environments whose runs count for publication, comma-separated.
 # Daytona only by default; set DATASMITH_PUBLISH_ENVIRONMENTS=docker,daytona to add local Docker.
@@ -62,7 +60,7 @@ def records_from_parquet(data: bytes) -> list[FormulaCodeRecord]:
     return [FormulaCodeRecord(**row) for row in rows]
 
 
-def records_from_supabase(  # noqa: C901
+def records_from_supabase(
     start_date: str | None = None,
     end_date: str | None = None,
     unpublished_only: bool = True,
@@ -86,24 +84,18 @@ def records_from_supabase(  # noqa: C901
         **window_filters(start_date, end_date),
     )
 
-    # Stage 7 check: publish only PRs whose best successful harbor run, in an
-    # admitted environment, reaches MIN_HARBOR_SPEEDUP.
+    # Stage 7 check: publish only PRs with a successful, timed harbor run in an admitted environment.
+    # There is no speedup floor here; the per-benchmark theta check decides the gain.
     harbor_rows = fetch_all(
         "harbor_runs",
         select="owner, repo, sha, max_speedup, status, environment",
         in_filters={"environment": list(DATASMITH_PUBLISH_ENVIRONMENTS)},
     )
-    best_speedup: dict[tuple[str, str, str], float] = {}
-    for hr in harbor_rows:
-        if hr.get("status") != "success":
-            continue
-        speedup = hr.get("max_speedup")
-        if speedup is None:
-            continue
-        key = (hr["owner"], hr["repo"], hr["sha"])
-        prev = best_speedup.get(key)
-        if prev is None or speedup > prev:
-            best_speedup[key] = float(speedup)
+    timed_keys = {
+        (hr["owner"], hr["repo"], hr["sha"])
+        for hr in harbor_rows
+        if hr.get("status") == "success" and hr.get("max_speedup") is not None
+    }
 
     # Stage 6 check: the container must also have passed the integrity scan, since a
     # fast harbor run does not show the image was checked for tampering. Not configurable.
@@ -115,18 +107,13 @@ def records_from_supabase(  # noqa: C901
     verified_keys = {(v.get("owner", ""), v.get("repo", ""), v.get("sha", "")) for v in verified_rows}
 
     dropped_no_run = 0
-    dropped_slow = 0
     dropped_unverified = 0
     records: list[FormulaCodeRecord] = []
     for row in rows:
         sha = row.get("merge_commit_sha", "")
         key = (row.get("owner", ""), row.get("repo", ""), sha)
-        best = best_speedup.get(key)
-        if best is None:
+        if key not in timed_keys:
             dropped_no_run += 1
-            continue
-        if best < MIN_HARBOR_SPEEDUP:
-            dropped_slow += 1
             continue
         if key not in verified_keys:
             dropped_unverified += 1
@@ -153,14 +140,12 @@ def records_from_supabase(  # noqa: C901
                 "Failed to create record for %s/%s#%s", row.get("owner"), row.get("repo"), row.get("issue_number")
             )
 
-    if dropped_no_run or dropped_slow or dropped_unverified:
+    if dropped_no_run or dropped_unverified:
         logger.info(
             "publish: dropped %d records without a successful harbor run in %s, "
-            "%d below %.2fx speedup gate, %d whose container is not verification_state='verified' (kept %d)",
+            "%d whose container is not verification_state='verified' (kept %d)",
             dropped_no_run,
             ",".join(DATASMITH_PUBLISH_ENVIRONMENTS),
-            dropped_slow,
-            MIN_HARBOR_SPEEDUP,
             dropped_unverified,
             len(records),
         )

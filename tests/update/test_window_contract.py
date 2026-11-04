@@ -468,11 +468,7 @@ class TestPublishWindow:
         rows = _pull_requests(is_perf=True, container="docker.io/formulacode/img:1")
         tables = {
             "pull_requests": rows,
-            # Every PR clears the Daytona speedup gate AND has a verified
-            # container, so the only thing that can drop one here is the
-            # window. Both gates are satisfied for every row on purpose:
-            # a window test that also exercised the publish gates could not
-            # tell which one rejected a PR.
+            # Every PR has a timed Daytona run and a verified container, so only the window can drop one.
             "harbor_runs": [
                 {
                     "owner": _OWNER,

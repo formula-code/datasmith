@@ -957,7 +957,6 @@ class Pipeline:
                 extra={
                     "Date range": f"{start_date} to {end_date}",
                     "Harbor environments admitted": ",".join(_records.DATASMITH_PUBLISH_ENVIRONMENTS),
-                    "Min harbor speedup": _records.MIN_HARBOR_SPEEDUP,
                     "Container verification required": "verification_state='verified'",
                     "Tags that would be OVERWRITTEN on DockerHub": tag_line,
                 },
