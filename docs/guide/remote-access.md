@@ -60,7 +60,7 @@ access; include the machine or project you need the credentials for.
 Verify the connection:
 
 ```bash
-fc-data --preflight
+python -m datasmith.preflight
 ```
 
 ### Public read-only access

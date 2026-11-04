@@ -1,11 +1,11 @@
 # Pipeline (`fc-data`)
 
-`fc-data` is the primary command for running fc-data. It discovers performance-improving commits from GitHub, classifies them with LLM agents, resolves dependencies, synthesizes Docker build contexts, and publishes verified images.
+`fc-data` runs the FormulaCode update pipeline. It finds performance commits on GitHub, classifies them with LLM agents, resolves dependencies, synthesizes Docker build contexts, checks them with the Harbor oracle and publishes the verified images and records.
 
 ## Quick reference
 
 ```bash
-# Run all 7 stages for a date range
+# Run all 9 stages for a date range
 fc-data --start-date 2026-02-01 --end-date 2026-03-01
 
 # Resume from where you left off (skips completed stages)
@@ -24,24 +24,20 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --dry-run
 `--start-date` and `--end-date` mean one thing everywhere: a PR belongs to a run
 when its **`merged_at`** falls in the half-open interval `[start-date, end-date)`.
 
-* **`merged_at`, not `created_at`.** A run owns the work that *landed* while it
-  was watching. A project with a deliberate review process merges PRs that were
-  opened weeks or months earlier, and a `created_at` window silently drops all
-  of them.
-* **Half-open.** A PR merged at exactly midnight on `--end-date` belongs to the
-  next run, so `[Jan, Feb)` and `[Feb, Mar)` partition the corpus instead of
-  both claiming the boundary and doing every downstream step twice.
+* **`merged_at`, not `created_at`.** A run takes the PRs that were merged in
+  the window. Many projects merge PRs weeks or months after they were opened,
+  and a `created_at` window would drop them.
+* **Half-open.** A PR merged at midnight on `--end-date` belongs to the next
+  run, so `[Jan, Feb)` and `[Feb, Mar)` do not overlap and no PR is processed twice.
 
-Stages 3 through 8 all get this from a single definition,
-`datasmith.utils.db.window_filters`, rather than each spelling out its own
-filter; stage 2 asks GitHub's search API the same question in the API's own
-terms. Stage 1 (repository discovery) and stage 9 (benchmark-source scraping)
-are deliberately unwindowed — stage 9 feeds the website, which wants the full
-corpus rather than one run's slice of it.
+Stages 3 to 8 use one definition, `datasmith.utils.db.window_filters`. Stage 2
+asks the GitHub search API for the same window. Stage 1 (repository discovery)
+and stage 9 (benchmark source) use no window, because stage 9 feeds the website,
+which shows the whole corpus.
 
 The `±DATASMITH_NEIGHBOR_WINDOW_DAYS` band that stage 6 uses to enqueue
-neighbor PRs is *not* this window. It is a similarity heuristic centred on one
-PR, and it is meant to reach outside the run's range.
+neighbor PRs is a different window. It is centred on one PR and can reach
+outside the run's range.
 
 ## CLI flags
 
@@ -50,24 +46,28 @@ PR, and it is meant to reach outside the run's range.
 | `--start-date` | Start of date range to scan (YYYY-MM-DD) | **required** |
 | `--end-date` | End of date range to scan (YYYY-MM-DD) | **required** |
 | `--resume` | Skip already-completed stages, resume from next pending | `false` |
-| `--stage N` | Run only stage N (1–7); repeat for multiple (e.g. `--stage 1 --stage 2`) | all stages |
+| `--stage N` | Run only stage N (1–9); repeat for multiple (e.g. `--stage 1 --stage 2`) | all stages |
 | `--dry-run` | Log what each stage would do without executing | `false` |
 | `--n-concurrent N` | Max concurrent items per runner stage | auto |
-| `--tasks-per-repo N` | Cap tasks per repo for stages 5–6 (useful for large repos) | unlimited |
+| `--tasks-per-repo N` | Cap tasks per repo for stages 5–7 | unlimited |
 | `--agent AGENT` | Agent for stage 6 synthesis: `claude`, `codex`, `gemini`, `qwen`, or `none` | auto-detect |
-| `--force` | Re-process already-completed tasks in stages 5–6 | `false` |
+| `--force` | Re-process already-completed items in stages 3–7 | `false` |
 | `--offline-source PATH` | Import PR data from a Parquet file instead of scraping GitHub (stages 1–2) | — |
 | `--min-stars N` | Minimum GitHub stars for repo discovery in stage 1 | `500` |
+| `--harbor-environment` | Harbor environment for stage 7: `docker` or `daytona` | `docker` |
+| `--harbor-rounds N` | LSV timing rounds per Harbor trial in stage 7 | `2` |
+| `--harbor-limit N` | Cap total PRs sent to Harbor in stage 7 | no cap |
+| `--tasks SPECS` | Comma-separated `owner/repo#PR` specs; stages 6–7 run only these and ignore the date window | — |
 
 ## Pipeline stages
 
-The pipeline runs 7 stages in order. Each stage is backed by an async runner that tracks progress in Supabase and isolates per-item failures (a single failure never aborts the run).
+The pipeline runs 9 stages in order. Each stage uses an async runner that tracks progress in Supabase. A failed item is logged and does not stop the run.
 
 ---
 
 ### Stage 1: Scrape Repos
 
-Discovers Python repositories that have ASV (Airspeed Velocity) benchmarks. The discovery strategy combines multiple sources:
+Finds Python repositories that have ASV (Airspeed Velocity) benchmarks, from three sources:
 
 1. **GitHub code search** — Searches for repositories containing `asv.conf.json`, filtered by language (Python) and minimum star count (`--min-stars`, default 500).
 2. **Offline import** — If `--offline-source` is provided, imports repository names from a Parquet file.
@@ -97,7 +97,7 @@ For every repository in the `repositories` table, scrapes all merged pull reques
 - **File changes** — per-file additions, deletions, and change counts
 - **Timeline events** — comments, cross-references, review events (used later for link scraping)
 
-If `--offline-source` is provided, also bulk-imports PR records from the Parquet file (useful for seeding the database with historical data).
+If `--offline-source` is given, it also imports PR records from the Parquet file, for example to load historical data.
 
 ```bash
 fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 2
@@ -115,7 +115,7 @@ Runs two LLM agents in sequence on each unclassified PR:
 1. **`PerfClassifier`** — Reads the PR title, body, diff, and file change summary. Outputs a binary YES/NO decision on whether this PR improves performance.
 2. **`ClassifyJudge`** — For PRs classified as YES, determines the optimization type (one of 14 categories like "algorithmic", "caching", "parallelism", "memory") and difficulty level (easy/medium/hard).
 
-Only PRs that pass a symbolic pre-filter (`is_performance_commit_symbolic = True`, set during scraping based on keywords in the PR title/body/labels) are sent to the LLM — this keeps costs down by filtering out obviously irrelevant PRs first.
+Only PRs that pass a keyword filter (`is_performance_commit_symbolic = True`, set during scraping from the PR title, body and labels) go to the LLM. This keeps the LLM cost low.
 
 ```bash
 # Classify all unclassified PRs
@@ -133,7 +133,7 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 3 --force
 
 ### Stage 4: Resolve Packages
 
-For each performance-classified PR, checks out the repository at the merge commit SHA and emits a dependency **seed** — an environment in which the repository builds and asv runs. It is not a record of the environment as it was at commit time, and it is not a verdict on whether the container builds. Six units compose the stage:
+For each performance PR, checks out the repository at the merge commit SHA and writes a dependency **seed**: an environment in which the repository builds and asv runs. The seed is not the environment of the commit date, and it does not say whether the container builds. The stage has six steps:
 
 1. **discover** — Scan the commit tree for packaging roots and choose one, deterministically. A directory that holds only a `requirements.txt` or an `environment.yml` is not a packaging root. The choice is stored in `primary_root` and becomes the image's `BUILD_ROOT`, so apache/arrow builds in `python/` rather than at the repository root
 2. **declare** — Read only what the project *states* it needs: `[project].dependencies` and its optional groups, `setup.cfg` `install_requires`, a static `setup.py` parse, `[build-system].requires`, and the `asv.conf.json` `matrix.req`. No `requirements*.txt` glob, no `environment.yml`, and no names inferred from import statements. Every string is parsed with `packaging.requirements.Requirement`; one that will not parse is dropped and recorded, never rewritten, and never aborts its siblings
@@ -142,11 +142,11 @@ For each performance-classified PR, checks out the repository at the merge commi
 5. **probe** — A dry-run install against the interpreter that was chosen, recorded in `probe_status` and `probe_log`. **Advisory only**
 6. **emit** — One row per `(owner, repo, sha)`, carrying provenance: `resolver_version`, `uv_version`, `resolved_at`
 
-Benchmark tooling — `asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer` — is stripped from the declared set *and* from the compiled one. The base image already installs it, and naming it again in `env_payload` only lets the seed fight the image over versions.
+Benchmark tools (`asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer`) are removed from the declared set and from the compiled set. The base image installs them, and a second pin in `env_payload` would conflict with the image's versions.
 
-The seed may legitimately be empty. Where a project declares no dependencies, stage 4 writes `[]` and sets `probe_status = 'empty'`.
+The seed can be empty. Where a project declares no dependencies, stage 4 writes `[]` and sets `probe_status = 'empty'`.
 
-The resolved dependency set (`env_payload`) and the Python version used are consumed by stage 6 to build `docker_build_env.sh` — the shell script that installs dependencies inside the Docker image.
+Stage 6 uses the resolved dependency set (`env_payload`) and the Python version in `docker_build_env.sh`, the script that installs dependencies inside the Docker image.
 
 ```bash
 fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 4
@@ -156,22 +156,22 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 4
 **Runner:** `ResolvePackagesRunner`
 
 !!! note "Stage 4 gates nothing"
-    Every PR proceeds, whatever the probe saw. `probe_status` is a queue *ordering* key — `installable`, then `unresolved`, then `failed`, then `empty` — so confidently-installable seeds run first and `--tasks-per-repo` caps a run. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container and iterates on failure; its agent can replace the seed outright through `env_payload_override.json`.
+    Every PR goes on, whatever the probe saw. `probe_status` only orders the queue (`installable`, then `unresolved`, then `failed`, then `empty`), so seeds that install run first when `--tasks-per-repo` caps a run. Only stage 6 decides whether a commit builds, because it builds in the real container and retries on failure. Its agent can replace the seed through `env_payload_override.json`.
 
-    `can_install` is deprecated. It is nullable, and the redesigned runner neither reads nor writes it. Rows carrying `resolver_version = 'legacy'` came from the predecessor and have no provenance.
+    The runner does not read or write the nullable `can_install` column. Rows with `resolver_version = 'legacy'` have no provenance.
 
 !!! tip "Diagnosing a thin seed"
-    `dropped_requirements` records every requirement that was refused and why, so a missing package is diagnosable without a re-run. It is JSON-encoded text, like `env_payload`, so query it with a cast: `dropped_requirements::jsonb`. If resolution raises outright, check the `runner_failures` table.
+    `dropped_requirements` records each refused requirement and the reason, so you can find a missing package without a rerun. It is JSON-encoded text, like `env_payload`, so query it with a cast: `dropped_requirements::jsonb`. If resolution raises outright, check the `runner_failures` table.
 
 ---
 
 ### Stage 5: Render Problems
 
-Builds a rich, deconstructed problem context for each PR. This context is what the LLM agent sees during synthesis (stage 6) and what ends up in the final FormulaCode dataset. The process:
+Builds the problem context for each PR. The synthesis agent (stage 6) reads it, and it goes into the FormulaCode dataset. The steps:
 
 1. **Scrape linked issues** — Follows `#123`, `owner/repo#456`, and GitHub URL references in the PR body via BFS (up to depth 2). Fetches the full issue body and comments for each linked issue.
-2. **Extract problem observations** — Uses `ProblemExtractor` (an LLM agent) to separate the *problem description* from the *solution details* in the PR body. This prevents information leakage — the benchmark evaluator should see the problem, not how the author solved it.
-3. **Persist components** — Stores the linked issues JSON, extracted observations, repo description, and raw PR fields in the `candidate_prs` table, allowing the problem statement to be re-rendered later without re-scraping.
+2. **Extract problem observations** — `ProblemExtractor` (an LLM agent) separates the *problem description* from the *solution details* in the PR body, so the task shows the problem and not the author's solution.
+3. **Store components** — Stores the linked issues JSON, extracted observations, repo description and raw PR fields in the `candidate_prs` table, so the problem statement can be rendered again without a new scrape.
 
 ```bash
 # Render problem contexts
@@ -192,16 +192,11 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 5 --force
 
 ### Stage 6: Synthesize Images
 
-The most complex stage. For each PR with resolved packages and a rendered problem context, generates a working Docker build context — the set of shell scripts (`docker_build_pkg.sh`, `docker_build_run.sh`, etc.) that build the repository, install dependencies, check out the right commit, and run ASV benchmarks.
+For each PR with resolved packages and a rendered problem context, writes a working Docker build context: the shell scripts (`docker_build_pkg.sh`, `docker_build_run.sh` and others) that install dependencies, build the repository at the right commit and run the ASV benchmarks.
 
-The synthesizer is a state machine that tries the cheapest option first:
+The synthesizer tries the cheapest option first: a cached context, then contexts from other PRs of the same repository, then the stock template, then an LLM coding agent in a sandbox. The [Synthesis guide](synthesis.md) describes each state.
 
-1. **Check cache** — Look up Supabase for an existing, verified build script for this exact PR
-2. **Find similar** — Query for working scripts from the same repository (different PRs)
-3. **Try similar** — Run each similar script against the verifier chain (smoke test + profile test)
-4. **LLM generate** — Invoke a coding agent (Claude Code, Codex, or Gemini) in a sandboxed workspace to write the build scripts from scratch, iterating until verification passes or attempts are exhausted
-
-Each attempt (success or failure) is logged to the `error_logs` table with the agent output, failure stage, return code, and stderr — making it possible to diagnose and retry later.
+Each attempt is logged to the `error_logs` table with the agent output, failure stage, return code and stderr, so a failure can be diagnosed and retried.
 
 ```bash
 # Use the default auto-detected agent
@@ -225,29 +220,53 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 6 --force
 **Requires:** Docker daemon running, resolved packages (stage 4), rendered problems (stage 5). LLM agent CLI (`claude`, `codex`, `gemini`, or `qwen`) must be on `$PATH` unless `--agent none`.
 
 !!! warning
-    Synthesis can be expensive — each LLM attempt may consume significant tokens and each Docker build takes minutes. Use `--n-concurrent` and `--tasks-per-repo` to control cost. Start with `--agent none` to exhaust cached/similar scripts before using LLM generation.
+    Each LLM attempt uses many tokens and each Docker build takes minutes. Use `--n-concurrent` and `--tasks-per-repo` to limit cost. Run with `--agent none` first to use all cached and similar scripts before LLM generation.
 
 ---
 
-### Stage 7: Publish
+### Stage 7: Harbor Health Check
 
-The final stage. Builds three-tier Docker images (base → repo → PR) from synthesized contexts, verifies them, and pushes to DockerHub. Then exports all verified PRs as a versioned Parquet dataset to HuggingFace.
-
-The publish pipeline:
-
-1. **Query** — Fetches all performance-classified PRs with successful synthesis (`container_name IS NOT NULL`) that haven't been published yet
-2. **Build images** — Constructs the Docker image hierarchy: base image, per-repo image, per-PR image
-3. **Verify** — Runs the verifier chain (smoke import test + ASV profile test) on each PR image
-4. **Push to DockerHub** — Publishes verified images under the `formulacode/` namespace
-5. **Push to HuggingFace** — Exports FormulaCode records as versioned Parquet (e.g., `formulacode@2026-03`)
-6. **Mark published** — Sets `published_at` timestamp on each published PR row
+Renders a Harbor task for each PR with a synthesized container and runs it with Harbor's oracle agent, which applies the human patch. All tasks go to Harbor in one job. Each trial, failed or not, writes one `harbor_runs` row with its speedup. A PR that already has a successful run with a speedup is skipped, unless `--force` or `--tasks` is given.
 
 ```bash
-fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 7
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 7 --harbor-environment daytona --n-concurrent 4
 ```
 
-**Reads from:** `pull_requests`, `packages`, `candidate_containers`
+**Writes to:** `harbor_runs` table
+**Requires:** Docker daemon (or Daytona access for `--harbor-environment daytona`). More rounds (`--harbor-rounds`) make each trial longer, and large repositories can exceed Harbor's verifier time limit.
+
+---
+
+### Stage 8: Publish
+
+Selects the PRs to publish and pushes them:
+
+1. **Select** — Performance PRs merged in the window with no `published_at`, whose best successful `harbor_runs` speedup in an admitted environment is at least 1.05, and whose container has `verification_state = 'verified'`. `DATASMITH_PUBLISH_ENVIRONMENTS` lists the admitted environments (default `daytona`).
+2. **Push to DockerHub** — Pushes each selected container image under the `formulacode/` namespace.
+3. **Push to HuggingFace** — Exports the records as versioned Parquet (for example `formulacode@2026-03`).
+4. **Mark published** — Sets `published_at` on each published PR row.
+
+`--dry-run` lists the image tags that the push would overwrite on DockerHub.
+
+```bash
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 8
+```
+
+**Reads from:** `pull_requests`, `harbor_runs`, `candidate_containers`
 **Requires:** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `HF_TOKEN_PATH` in `tokens.env`. Docker daemon running.
+
+---
+
+### Stage 9: Scrape Benchmark Source
+
+For one commit per repository in `candidate_containers`, checks out the repository, parses the ASV benchmark files and stores their source code for the website. This stage uses no date window.
+
+```bash
+fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 9
+```
+
+**Writes to:** `benchmark_codes` table
+**Runner:** `ScrapeBenchmarkSourceRunner`
 
 ---
 
@@ -262,7 +281,7 @@ fc-data --start-date 2026-03-01 --end-date 2026-04-01
 # 2. If it gets interrupted, resume where it left off
 fc-data --start-date 2026-03-01 --end-date 2026-04-01 --resume
 
-# 3. After fixing a synthesis issue, re-run just stages 6-7
+# 3. After fixing a synthesis issue, run stages 6 and 7 again
 fc-data --start-date 2026-03-01 --end-date 2026-04-01 --stage 6 --stage 7 --force
 ```
 
@@ -279,7 +298,7 @@ for row in rows.data:
     print(f"{row['runner_name']}: {row['completed']}/{row['total']} ({row['failed']} failed)")
 ```
 
-Per-item failures are logged to `runner_failures` with full error messages and tracebacks, so you can diagnose and re-run specific stages without restarting from scratch.
+Per-item failures are logged to `runner_failures` with the error message and traceback, so you can diagnose them and run single stages again.
 
 ## Architecture
 
@@ -287,8 +306,8 @@ All runners extend `BaseRunner`, which provides:
 
 - **Concurrency control** — `asyncio.Semaphore` limits parallelism (set via `--n-concurrent`)
 - **Progress tracking** — Upserts to `runner_progress` every 10 items or 30 seconds
-- **Error isolation** — Per-item failures logged to `runner_failures`; the runner never aborts
-- **Graceful shutdown** — CTRL+C terminates agent subprocesses cleanly; press twice to force-kill
+- **Error isolation** — Per-item failures are logged to `runner_failures`; one failure does not stop the runner
+- **Shutdown** — CTRL+C stops agent subprocesses; press it twice to kill them
 
 ## Database tables
 
@@ -300,6 +319,8 @@ All runners extend `BaseRunner`, which provides:
 | `candidate_prs` | Stage 5 | Deconstructed PR context for re-rendering |
 | `candidate_containers` | Stage 6 | Successful agent-generated build scripts per SHA |
 | `error_logs` | Stage 6 | Per-attempt synthesis results (agent output, failure details) |
+| `harbor_runs` | Stage 7 | Oracle trial results and speedups |
+| `benchmark_codes` | Stage 9 | ASV benchmark source code per repository |
 | `runner_progress` | All stages | Live progress counters (total/completed/failed) |
 | `runner_failures` | All stages | Per-item failure details (error message, traceback) |
 | `hook_cache` | Various | Memoization cache for `@supabase_cached` functions |

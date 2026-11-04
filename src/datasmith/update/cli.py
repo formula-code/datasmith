@@ -80,7 +80,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-run even for tasks already processed; applies to stages 5 (render_problems) and 6 (synthesize_images)",
+        help="Re-run even for items already processed; applies to stages 3 to 7",
     )
     parser.add_argument(
         "--offline-source",
@@ -108,8 +108,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=2,
         metavar="N",
         help="Number of LSV timing rounds per Harbor trial in stage 7 (default: 2). "
-        "Higher values scale measure/init time linearly; 4 routinely blew Harbor's "
-        "6-hour verifier budget on large repos (scikit-image, arrow).",
+        "Measure time grows linearly with rounds, and large repos can exceed Harbor's verifier time limit.",
     )
     parser.add_argument(
         "--harbor-limit",

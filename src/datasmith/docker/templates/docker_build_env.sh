@@ -192,10 +192,8 @@ if [[ -z "$IMPORT_NAME" ]]; then
     echo "WARN: Could not determine import name; the pkg stage will fall back to local detection."
 fi
 
-# NOTE: asv.*.json discovery is deliberately NOT done here.  Some repos
-# (Qiskit, Dask, Astropy, …) keep their ASV config in a separate benchmark
-# repo that is cloned by docker_build_pkg.sh, which runs after this stage.
-# Gating the env stage on asv.*.json would make those repos unreachable.
+# No asv.*.json discovery here: some repos (Qiskit, Dask, Astropy) keep it in a benchmark repo
+# that docker_build_pkg.sh clones later.
 source /etc/profile.d/asv_build_vars.sh || true
 PY_VERSIONS="${PY_VERSION:-${ASV_PY_VERSIONS:-}}"
 
@@ -214,15 +212,6 @@ done
 
 cd /workspace/repo
 
-# Extract commit date and set UV_EXCLUDE_NEWER for time-consistent package resolution
-# COMMIT_DATE=$(git log -1 --format=%cI 2>/dev/null || echo "")
-# if [[ -n "$COMMIT_DATE" ]]; then
-#     COMMIT_DATE_BUFFER=$(date -d "$COMMIT_DATE +1 year" -Iseconds)
-#     export UV_EXCLUDE_NEWER="$COMMIT_DATE_BUFFER"
-#     echo "Using UV_EXCLUDE_NEWER=$UV_EXCLUDE_NEWER for time-capped resolution"
-# fi
-
-# write_vars "UV_EXCLUDE_NEWER" "$UV_EXCLUDE_NEWER"
 
 # Derive package name (for uninstall sweep)
 if [ -f pyproject.toml ]; then
@@ -239,15 +228,8 @@ for v in $PY_VERSIONS; do
     e="asv_$v"
     micromamba env list | awk '{print $1}' | grep -qx "$e" || { echo "missing $e"; exit 1; }
     PYTHON_BIN="/opt/conda/envs/$e/bin/python"
-    # Uninstall PUT by uv pip and micromamba to ensure clean re-install.
-    #
-    # --no-prune-deps is load-bearing. micromamba prunes dependencies by
-    # default, so removing the package under test also removes everything that
-    # was pulled in only for it. That cascade can take the environment's own
-    # interpreter with it: apache/arrow#1646 unlinked libarchive here and then
-    # died several steps later on "No virtual environment or system Python
-    # installation found for path /opt/conda/envs/asv_3.8/bin/python". We want
-    # exactly one package gone, never its dependency closure.
+    # Uninstall the package under test for a clean reinstall. --no-prune-deps keeps its
+    # dependencies; micromamba's default pruning can remove the env's own interpreter.
     [ -n "$PKG_NAME" ]    && uv pip uninstall --python "$PYTHON_BIN" "$PKG_NAME"    || true
     [ -n "$IMPORT_NAME" ] && uv pip uninstall --python "$PYTHON_BIN" "$IMPORT_NAME" || true
     [ -n "$PKG_NAME" ]    && micromamba remove -n "$e" -y --no-prune-deps "$PKG_NAME"    || true
@@ -298,14 +280,7 @@ for version in $PY_VERSIONS; do
 done
 
 # ── Manifest breadcrumbs: requested vs. resolved pins ─────────────────
-# NOTE: $ENV_PAYLOAD is deliberately NOT used here. By this point in the
-# script it holds the *path* docker_build_env.sh was invoked with
-# (`--env-payload /tmp/env_payload.json`, see the arg-parsing block above,
-# which reassigns the exported ENV_PAYLOAD build ARG to "$2"), not the raw
-# JSON payload text. $DEPENDENCIES_PATH is the flattened, one-spec-per-line
-# file that was actually fed to `uv pip install -r`, which is a more direct
-# and reliable source for "what was requested" than re-parsing JSON out of
-# an env var that no longer holds it.
+# Use $DEPENDENCIES_PATH (the file given to `uv pip install -r`), because $ENV_PAYLOAD here holds a path, not the JSON.
 fc_note pins_requested="$(tr '\n' ' ' < "$DEPENDENCIES_PATH" 2>/dev/null || true)"
 fc_note pins_resolved="$(micromamba run -n "$ENV_NAME" python -m pip freeze 2>/dev/null | tr '\n' ' ' || true)"
 

@@ -18,17 +18,6 @@ git checkout --quiet "${COMMIT_SHA}"
 # 2) cd into the folder containing the asv.conf.json
 cd "$(dirname "$ASV_CONF_PATH")"
 
-# asv run "$COMMIT_SHA^!" \
-#   --show-stderr \
-#   ${BENCH_REGEX:+--bench "$BENCH_REGEX"} \
-#   ${INTERLEAVE_ROUNDS:+--interleave-rounds} \
-#   ${APPEND_SAMPLES:+--append-samples --record-samples} \
-#   -a rounds=$ROUNDS \
-#   -a number=$NUMBER \
-#   -a repeat=$REPEAT \
-#   ${CPU_CORE:+-a cpu_affinity=[$CPU_CORE]} \
-#   | tee "$OUTPUT_DIR/benchmark_${COMMIT_SHA}.log"
-
 # change the "results_dir" in asv.conf.json to "/output/{COMMIT_SHA}/"
 # using python
 # Read the python versions from the asv.conf.json (without jq)

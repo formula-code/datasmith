@@ -1,13 +1,7 @@
-"""Startup environment checks, plus a report of what this machine actually has.
+"""Startup environment checks, and a report of this machine's limits.
 
-Two kinds of line come out of here and they are deliberately different.  A
-*check* can fail and block the run.  A *report* never can: spec section 6.4
-requires an operator on a new machine to see their real limits — token pool
-size, database round-trip latency, resolved concurrency caps — and none of
-those has a threshold that is wrong everywhere.  A 32.7 ms round trip to
-``db.formulacode.org`` is slower than 5.1 ms to local Postgres and is still a
-perfectly legitimate way to run the pipeline, so measuring it must not be able
-to refuse the run.
+A *check* can fail the run. A *report* (token pool size, database latency,
+concurrency caps) cannot, because no single threshold is right on every machine.
 """
 
 from __future__ import annotations
@@ -21,9 +15,7 @@ from datasmith.utils import get_logger
 
 logger = get_logger("preflight")
 
-# Round trips used to measure database latency.  The first is discarded: it
-# pays for connection setup and TLS, which is a one-off cost and not the
-# per-query cost the number is meant to describe.
+# Round trips used to measure database latency; the first is discarded, as it includes connection setup.
 DATASMITH_PREFLIGHT_DB_PINGS: int = int(os.environ.get("DATASMITH_PREFLIGHT_DB_PINGS", "5"))
 
 
@@ -44,10 +36,8 @@ def _report(name: str, detail: str) -> None:
 def resolved_concurrency_caps() -> list[tuple[str, int | float]]:
     """Return every concurrency and pacing dial with the value this run will use.
 
-    Pure, and importing-from-modules only, so it can be tested offline.  The
-    values are read from the modules rather than from ``os.environ`` directly:
-    that is where the fallback defaults live, so an operator who has set
-    nothing still sees the real numbers instead of an empty list.
+    Values come from the modules, which hold the defaults, so the list is complete
+    when nothing is set. Runs offline.
     """
     from datasmith.github import client as gh_client
     from datasmith.runners import classify_prs, render_problems, resolve_packages, scrape_commits
@@ -86,9 +76,7 @@ def run_preflight() -> bool:  # noqa: C901
     token_count = len([t for t in gh_tokens.split(",") if t.strip()]) if gh_tokens else 0
     all_ok &= _check("GH_TOKENS", token_count > 0, f"{token_count} token(s)")
     if token_count:
-        # The pool size is the ceiling on stages 2 and 3, and it is the number
-        # an operator most often assumes is larger than it is.  Say it, and say
-        # what it buys, rather than leaving it to be inferred from a count.
+        # The pool size limits stages 2 and 3; print its hourly budget.
         _report(
             "Token pool size",
             f"{token_count} token(s) — roughly {token_count * 5000} REST request(s) "
@@ -156,10 +144,7 @@ def run_preflight() -> bool:  # noqa: C901
         client.table("repositories").select("owner").limit(1).execute()
         all_ok &= _check("Connection", True)
 
-        # Measured, not assumed.  Local Postgres and db.formulacode.org
-        # through CF Access are both first-class, and they differ by roughly
-        # 6x; an operator needs to know which one they are on before they
-        # wonder why a skip set is slow.  Reported, never gated.
+        # Report only: local Postgres and db.formulacode.org have very different latency.
         pings = max(2, DATASMITH_PREFLIGHT_DB_PINGS)
         samples: list[float] = []
         for index in range(pings):

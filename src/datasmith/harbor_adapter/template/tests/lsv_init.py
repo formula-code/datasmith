@@ -103,13 +103,7 @@ def detect_source_root() -> Path:
     config_path = Path("/tests/config.json")
     if not config_path.exists():
         config_path = Path("/workspace/repo/tests/config.json")
-    # /tests/config.json is a HARBOR TRIAL artifact. It does not exist during
-    # stage-6 verification, where measure.sh runs lsv_init inside a freshly
-    # built image with nothing mounted. Reading it unconditionally makes
-    # detect_source_root raise FileNotFoundError before LSV is even imported,
-    # so no baseline is ever recorded -- which is exactly the failure momepy#237
-    # was rejected for, and the failure pysindy#139's tampered stub converted
-    # into a fabricated 1.0x. An absent config is normal; treat it as empty.
+    # /tests/config.json exists only in Harbor trials, not in stage 6 verification; treat an absent file as empty.
     if config_path.exists():
         try:
             config = json.loads(config_path.read_text())
@@ -133,10 +127,7 @@ def detect_source_root() -> Path:
         "doc", "docs", "test", "tests", ".github", "benchmarks", "asv_bench",
         "ci", "scripts", "examples", "docs_src", "doc_src",
     }
-    # Dirs that exist as a literal patch root but aren't the actual package —
-    # psygnal ships as src/psygnal, contourpy as lib/contourpy, etc. When the
-    # only non-skip patch root is one of these, skip step 1 and fall through
-    # to the <pkg>/__init__.py search.
+    # Patch roots that are not the package (src/psygnal, lib/contourpy); for these, search for <pkg>/__init__.py.
     src_layout_holders = {"src", "lib", "python", "packages"}
     # The image's build-time config carries patch_roots instead of the patch.
     roots = set(config.get("patch_roots") or {p.split("/")[0] for p in paths if "/" in p}) - skip
@@ -713,14 +704,8 @@ def main() -> None:
     parser.add_argument(
         "--rounds", type=int, default=1, help="Number of timing rounds (default: 1)"
     )
-    # `rounds` is consumed master-side by asv/runner.py's get_rounds and
-    # MULTIPLIES the worker's per-round sample count: pooled = rounds x repeat.
-    # The auto-repeat halving in asv_runner reads the WORKER's self.rounds --
-    # set in TimeBenchmark.__init__ from the repo's own class attr and never
-    # re-read by _load_vars() -- so --rounds is strictly monotone in samples.
-    # --repeat IS re-read worker-side, but setting it switches the per-round
-    # budget from max_time=20s to max_time=self.timeout, and an overrun is
-    # dropped silently by _extract_deltas. None = leave asv on auto.
+    # Samples per leg = rounds x repeat, and more rounds always add samples (see measure.sh).
+    # An explicit repeat changes asv's time budget per round; None leaves asv on auto.
     parser.add_argument(
         "--repeat", type=int, default=None, help="Samples per round (default: asv auto)"
     )
@@ -825,18 +810,8 @@ def main() -> None:
             print(f"[{_ts()}] [lsv_init] not reusing image baseline: {_reuse_reason}; re-measuring (force=True)")
 
     if not _force:
-        # Image baseline staged: the DB already holds the baselines + coverage
-        # (benchmark_dep) that per-trial lsv_measure reads, so we SKIP
-        # initialize_diffcheck entirely. We cannot rely on LSV's own short-circuit
-        # (`if not force and all(has_baseline)`): tasks with unmeasurable benchmarks
-        # (asv "skipped: NotImplementedError") never get a baseline for every bid,
-        # so all(has_baseline) is always False and it re-measures anyway.
-        # Correctness: identical to a fresh init at base_commit (same commit, same
-        # in-lineage deps DB) minus the redundant timing pass. Benchmarks without a
-        # baseline are exactly the unmeasurable ones -> no speedup contribution ->
-        # reward unchanged. The image lsv_init_results.json carries baseline_sha for
-        # invariant #15.
-        # The image was measured on this same tree before prepare.sh committed it.
+        # The image baseline already holds the baselines and coverage that lsv_measure reads, so skip
+        # initialize_diffcheck. LSV's own skip never fires when some benchmarks cannot be measured.
         _image["image_baseline_sha"], _image["baseline_sha"] = _image.get("baseline_sha"), _head
         _image["baseline_reuse"] = {"reused": True, "reason": None, "paired": _paired, "trial_fingerprint": _fingerprint}
         (OUTPUT_DIR / "lsv_init_results.json").write_text(json.dumps(_image, indent=2))
@@ -877,11 +852,8 @@ def main() -> None:
         # Write init results
         import dataclasses
 
-        # Record the sha the BASELINE was measured at. Without this, invariant
-        # #15 (baseline_sha == base_commit) has nothing to compare -- neither
-        # side of the comparison existed before, so the check could never fire.
-        # This is the failure it exists to catch: shapely measured its baselines
-        # AFTER the patch was applied, collapsing every speedup to ~1.0.
+        # Record the baseline sha for invariant #15 (baseline_sha == base_commit); a baseline taken
+        # after the patch makes every speedup about 1.0.
         try:
             baseline_sha = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), text=True

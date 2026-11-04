@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Python 3.9–3.12**
+- **Python 3.12 or later**
 - **[uv](https://astral.sh/uv/)** — Fast Python package manager
 - **[Node.js](https://nodejs.org/)** — For Supabase CLI
 - **Docker** — For image building and verification
@@ -33,7 +33,7 @@ This creates a virtual environment with `uv`, installs all dependencies, and set
 
 ## 3. Configure `tokens.env`
 
-fc-data reads all configuration from a `tokens.env` file in the repo root. The `Settings` class (powered by `pydantic-settings`) loads it automatically — no manual `source` or `export` needed.
+fc-data reads its configuration from a `tokens.env` file in the repo root. `import datasmith` loads the file, so you do not need `source` or `export`.
 
 Create the file:
 
@@ -62,7 +62,7 @@ GH_TOKENS=github_pat_xxx
 
 ### LLM backend variables
 
-Required for stages 3 (classification) and 6 (synthesis):
+Required for stages 3 (classify PRs), 5 (render problems) and 6 (synthesis, for missing problem statements):
 
 ```bash
 # === LLM backends ===
@@ -73,17 +73,11 @@ DSPY_API_KEY=local
 DSPY_MAX_TOKENS=16000
 ```
 
-Alternative backends (checked in priority order — first match wins):
-
-| Variable | Backend |
-|----------|---------|
-| `PORTKEY_API_KEY` | Portkey AI gateway |
-| `ANTHROPIC_API_KEY` | Anthropic (Claude) |
-| `DSPY_API_KEY` + `DSPY_API_BASE` | vLLM / OpenAI-compatible |
+The stage 6 build agent is a CLI agent (`claude`, `codex`, `gemini` or `qwen`) that uses its own login. See [Configuration](../guide/configuration.md#agent-backend-resolution) for the Portkey alternative.
 
 ### Publishing variables
 
-Required only for stage 7 (publish):
+Required only for stage 8 (publish):
 
 ```bash
 # === DockerHub ===
@@ -98,7 +92,7 @@ See [Configuration](../guide/configuration.md) for a complete reference of all e
 
 ## 4. Set up Supabase
 
-fc-data uses a local Supabase instance for all persistent state (no cloud account needed).
+fc-data keeps all persistent state in a local Supabase instance. You do not need a cloud account.
 
 ### Start the instance
 
@@ -166,14 +160,16 @@ Run the preflight check to confirm everything is configured:
 python -m datasmith.preflight
 ```
 
-This validates:
+This checks:
 
 | Check | What it verifies |
 |-------|-----------------|
-| Environment | `SUPABASE_URL`, `SUPABASE_KEY`, `GH_TOKENS` are set |
+| Environment | `SUPABASE_URL`, `SUPABASE_KEY` and `GH_TOKENS` are set, and the HuggingFace token file exists |
+| LLM Backend | `DSPY_MODEL` and `DSPY_API_BASE` are set, the server lists the model and answers a test completion |
 | Supabase | Database connection succeeds |
 | Docker | Docker daemon is running |
 | GitHub | API access works and rate limit is available |
+| Concurrency | Prints the resolved concurrency caps (report only) |
 
 Then run the test suite:
 
@@ -184,8 +180,7 @@ make test     # pytest
 
 ## Makefile reference
 
-`make help` lists every target, grouped by the sections below. The complete
-reference, with how often you actually run each one:
+`make help` lists every target, grouped by the sections below. The tables also give how often you run each one:
 
 ### Development
 
@@ -195,8 +190,7 @@ reference, with how often you actually run each one:
 | `make check` | every commit | Lock-file check, ruff lint, mypy type check, deptry dependency check |
 | `make test` | every commit | Run pytest with coverage (skips `-m slow`) |
 
-CI invokes `make check` by name (`.github/workflows/main.yml`), so the target
-cannot be renamed without updating the workflow.
+CI runs `make check` by name (`.github/workflows/main.yml`). If you rename the target, update the workflow.
 
 ### Packaging
 
@@ -205,8 +199,7 @@ cannot be renamed without updating the workflow.
 | `make build` | ad-hoc | Build a wheel locally |
 | `make clean-build` | ad-hoc | Remove build artifacts |
 
-Releases do not go through these targets — `.github/workflows/publish.yml`
-runs `uv run python -m build` directly.
+Releases use `.github/workflows/publish.yml`, which runs `uv run python -m build` directly.
 
 ### Housekeeping
 
@@ -237,8 +230,7 @@ reads, no Access gate). See [Remote access](../guide/remote-access.md).
 | `make grafana-logs` | ad-hoc | Tail Grafana container logs |
 | `make grafana-tunnel` | long-running | Expose Grafana publicly via Cloudflare Tunnel |
 
-`grafana-migrate` is not a historical one-shot: the role lives in the Postgres
-volume, so a wiped or recreated Supabase volume needs it applied again.
+The `grafana_ro` role is stored in the Postgres volume. Run `grafana-migrate` again after you wipe or recreate the Supabase volume.
 
 ### Model proxy (LiteLLM + vLLM)
 
@@ -248,14 +240,13 @@ volume, so a wiped or recreated Supabase volume needs it applied again.
 | `make model-tunnel` | long-running | Start LiteLLM, the model reconciler, and the Cloudflare Tunnel (`model.formulacode.org`) |
 | `make model-refresh` | ad-hoc | Reconcile the LiteLLM registry against live vLLM servers once (`ARGS="--dry-run"` to preview) |
 
-`model-proxy-install` doubles as the recovery step for a stale venv
-(`rm -rf .venv-litellm && make model-proxy-install`). `make model-tunnel`
+To repair a stale venv, run `rm -rf .venv-litellm && make model-proxy-install`. `make model-tunnel`
 depends on the same venv stamp, so it builds it on demand. See the
 [Model proxy guide](../guide/model-proxy.md).
 
 ## Next steps
 
-You're ready to run the pipeline:
+Run the pipeline:
 
 ```bash
 fc-data --start-date 2026-03-01 --end-date 2026-04-01

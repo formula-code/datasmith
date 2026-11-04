@@ -1,8 +1,6 @@
 """Live checks for an fc-data stage 2-5 run: GitHub budget, model, exclusions.
 
-Split out of ingest_preflight.sh because a Python heredoc nested inside a shell
-heredoc silently produced no output -- a check that cannot fail is worse than no
-check, since it reads as a pass.
+A separate file, because a Python heredoc inside a shell heredoc prints nothing and so always passes.
 """
 
 from __future__ import annotations
@@ -59,9 +57,8 @@ async def check_github() -> None:
 def check_model() -> None:
     """Confirm the LLM endpoint is up and its context fits what we will send.
 
-    vLLM ports are ephemeral: a restart moves them, and a stale DSPY_API_BASE is
-    a silent stall rather than an error. On failure this prints the live ports so
-    the fix is visible instead of deduced.
+    A vLLM restart changes the port, and a stale DSPY_API_BASE stalls with no error,
+    so a failure prints the live ports.
     """
     import httpx
 

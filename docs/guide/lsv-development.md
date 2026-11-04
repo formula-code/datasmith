@@ -1,9 +1,8 @@
 # Developing LSV alongside fc-data
 
-LSV (`asv.contrib.lightspeed`) is what turns "this container builds" into
-"this container can measure a speedup". It selects the benchmarks a patch
-impacts, times them before and after, and hands the numbers to
-`measure.sh` → `emit_measure.py` → the build manifest.
+LSV (`asv.contrib.lightspeed`) measures the speedup in a container. It selects
+the benchmarks that a patch affects, times them before and after the patch, and
+passes the numbers to `measure.sh`, then `emit_measure.py`, then the build manifest.
 
 It lives in a **separate repository** (formula-code/lsv, a fork of asv), so a
 change to how FormulaCode measures is a two-repo change.
@@ -28,25 +27,23 @@ re-render and rebuild the tasks that need it.
 `pyproject.toml` declares `name = "lsv"` while shipping the `asv/` package.
 Two consequences:
 
-- `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_**LSV**` is the env var that sets the
-  version, not `..._FOR_ASV`. Without it, an install from a tree with no
-  `.git` fails outright — setuptools_scm has nothing to read.
-- The fork asks `importlib_metadata` for its own version. Upstream asked for
-  `"asv"`, which only resolves when the unrelated PyPI `asv` distribution
-  happens to be installed alongside. `asv/_dist_version.py` now tries `lsv`
-  first and falls back to `asv`.
+- `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_**LSV**` sets the version, not
+  `..._FOR_ASV`. Without it, an install from a tree with no `.git` fails,
+  because setuptools_scm has nothing to read.
+- `asv/_dist_version.py` asks `importlib_metadata` for the `lsv` version first
+  and then for `asv`. The `asv` name resolves only when the PyPI `asv`
+  distribution is also installed.
 
 ### The PyPI `asv` wheel must be uninstalled first
 
 Two copies of the `asv` package on `sys.path` break plugin discovery:
-`pkgutil.iter_modules` walks one copy while the `Command` base class comes
-from the other, so the command registry ends up empty and the CLI dies with
+`pkgutil.iter_modules` reads one copy while the `Command` base class comes
+from the other, so the command registry is empty and the CLI fails with
 `KeyError: 'Quickstart'`. Uninstall the wheel before installing the fork.
 
 Because the fork then provides the CLI, `pyproject.toml` declares an `asv`
-console script alongside `lsv` — `docker_build_final.sh` runs
-`asv run --bench just-discover` for benchmark discovery and would otherwise
-lose its entrypoint.
+console script next to `lsv`, because `docker_build_final.sh` runs
+`asv run --bench just-discover` for benchmark discovery.
 
 ## Iterating without rebuilding an image
 
@@ -69,12 +66,12 @@ docker run --rm \
 ## Timing hyperparameters
 
 `rounds` maps to asv's `processes`; `repeat` is samples per round. asv's
-auto-repeat picks 1–10 and **halves it when `rounds > 1`**, so raising
-`rounds` alone does not monotonically buy accuracy.
+auto-repeat picks 1–10 and **halves it when `rounds > 1`**, so more
+`rounds` alone does not always give more accuracy.
 
 `asv._stats.is_different` runs a Mann-Whitney U test at `p_threshold=0.002`
-when raw samples are present, and falls back to a pessimistic 99% CI-overlap
-check when they are not. Its lower bound,
+when raw samples are present, and otherwise uses a conservative 99% CI-overlap
+check. Its lower bound,
 `p_min = 1/binom(n_a + n_b, min(n_a, n_b))`, means the Mann-Whitney branch
 **cannot fire below 6 samples per leg**:
 
@@ -83,7 +80,7 @@ check when they are not. Its lower bound,
 | 5 + 5 | 252 | 0.00397 | CI-overlap (weak) |
 | 6 + 6 | 924 | 0.00108 | Mann-Whitney U |
 
-Both are settable end to end:
+These variables set them:
 
 | variable | consumed by | default |
 |---|---|---|
@@ -93,7 +90,7 @@ Both are settable end to end:
 
 `asv.contrib.lightspeed` passes all three through `_timing_params`.
 
-## Do not push without asking
+## Changes to the fork
 
-The checkout is a working fork. Changes to it alter how every task image
-measures, so they land deliberately, not as a side effect of an experiment.
+A change to formula-code/lsv changes how every task image measures. Get a review
+before you push it, and do not push experiments.

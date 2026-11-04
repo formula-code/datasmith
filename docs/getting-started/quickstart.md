@@ -97,10 +97,34 @@ mgr = ImageManager()
 mgr.build_base_image()                               # formulacode/base:latest
 mgr.build_repo_image("pandas-dev", "pandas")          # formulacode/pandas-dev-pandas:latest
 mgr.build_pr_image("pandas-dev", "pandas", 16222)     # formulacode/pandas-dev-pandas:16222
+
+# Each call also takes a custom build context in place of the default template.
+mgr.build_pr_image("pandas-dev", "pandas", 16222, context="path/to/custom/context")
 ```
+
+Every task image holds a build manifest. See [Verification](../guide/verification.md#reading-a-manifest-programmatically) to read it and evaluate its invariants.
+
+## Synthesizing a build context
+
+`Synthesizer.run` writes and checks the build scripts for one PR, and `SynthesizeImagesRunner` runs it over many PRs. See the [Synthesis guide](../guide/synthesis.md) for the states, an example and the cost controls.
+
+## Publishing a dataset
+
+`records_from_supabase` selects the verified, unpublished records and `HuggingFacePublisher` uploads them. See [Publishing](../guide/publishing.md).
+
+## Rendering Harbor tasks
+
+```python
+from datasmith.harbor_adapter.adapter import FormulaCodeAdapter, FormulaCodeRecord
+
+FormulaCodeAdapter(harbor_tasks_root="tasks/").generate_task(FormulaCodeRecord(**record))
+```
+
+The `fc-render-tasks render` command does the same from a records file.
 
 ## Next steps
 
 - [Pipeline guide](../guide/pipeline.md) — Run the monthly update workflow
 - [Synthesis guide](../guide/synthesis.md) — Automatically generate Docker build contexts
 - [Configuration](../guide/configuration.md) — Environment variables reference
+- [Overview](../OVERVIEW.md) — From a rendered task to measurement, review and RL training

@@ -1338,9 +1338,7 @@ class Runner:
                 per_benchmark_speedups_by_agent[agent_id] = adv.per_benchmark_speedups
 
             return {
-                # Backward-compatible fields (summarize using the last available agent
-                # which can be 'oracle' as well; only 'nop' is excluded)
-                # last_agent is now in agent:model format
+                # Summary fields from the last agent other than 'nop' (can be 'oracle'); last_agent is agent:model.
                 "agent_advantage": result.agent_advantage,
                 "agent_advantage_level1": result.agent_advantage_level1,
                 "agent_advantage_level2": result.agent_advantage_level2,

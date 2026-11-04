@@ -24,18 +24,8 @@ CONF_NAME=$(find . -type f -name "asv.*.json" | head -n 1)
 # cd to dirname $CONF_NAME
 CWD=$(pwd)
 cd "$(dirname "$CONF_NAME")"
-# `asv` lives in the micromamba env (/opt/conda/envs/$ENV_NAME/bin), not in
-# the base conda on PATH (/opt/conda/bin). Calling it bare exits 127 and fails
-# the whole run stage.
-#
-# This was broken for every repository. All 1856 stored build_run_sh scripts,
-# across all 134 repos, add an activation here -- meaning the first thing every
-# synthesis agent ever did was repair this line. Lines below already use
-# `micromamba run -n`, so only this call was affected.
-#
-# Real CPU and RAM replace the hardcoded 1 / 4GB. asv writes them into
-# machine.json, which is the only machine record the measurement keeps, and a
-# stub there describes nothing.
+# `asv` is in the micromamba env, not on the base PATH, so call it through `micromamba run -n`.
+# asv writes the real CPU and RAM into machine.json, the only machine record the measurement keeps.
 _NPROC="$(nproc 2>/dev/null || echo 1)"
 _RAM_KB="$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
 if [ "${_RAM_KB:-0}" -gt 0 ]; then
@@ -138,20 +128,8 @@ export ASV_PY_VERSIONS="$ASV_PY_VERSIONS"
 export HEAD_SHA=$HEAD_SHA
 EOF
 
-# Record whether the injected benchmark survived repo lockdown.  These are
-# the facts that catch "git clean wiped the benchmark" before a trial does.
-# NOTE: BENCHMARK_DEST is not set anywhere in the current template pipeline
-# (docker_build_pkg.sh is agent-synthesized per-repo, outside Task 3's
-# scope); if/when that layer starts exporting it via asv_build_vars.sh,
-# this breadcrumb picks it up automatically.
-#
-# IMPORTANT: only emit benchmark_dest_present_post_clean when $BENCHMARK_DEST
-# is actually set. manifest.py's benchmark_dest_missing invariant is FATAL
-# and distinguishes "key absent" (None -> skipped) from "key present and
-# False" (fails). Unconditionally emitting 0 here -- which is what happens
-# on every build today, since nothing sets BENCHMARK_DEST yet -- would turn
-# a should-be-skipped invariant into a permanent fatal failure on every
-# single build once the evaluator is wired into local_ci.py::verify().
+# Record whether the injected benchmark survived `git clean`.
+# Emit only when $BENCHMARK_DEST is set: the fatal benchmark_dest_missing invariant skips an absent key.
 _BENCH_DEST="${BENCHMARK_DEST:-}"
 if [ -n "$_BENCH_DEST" ]; then
     if [ -f "/workspace/repo/$_BENCH_DEST" ]; then

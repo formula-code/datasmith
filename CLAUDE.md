@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is this project?
 
-fc-data is the Python toolchain for building the **FormulaCode** dataset — a benchmark of 67+ repositories with 964+ performance-improving commits, designed to evaluate LLMs' ability to optimize real-world codebases. It scores LLMs relative to the human-authored speedup using ASV (Airspeed Velocity) benchmarks rather than binary pass/fail tests.
+fc-data is the Python toolchain that builds the **FormulaCode** dataset, a benchmark of performance-improving commits from real repositories that evaluates how well LLMs optimize codebases. It scores LLMs relative to the human-authored speedup using ASV (Airspeed Velocity) benchmarks rather than binary pass/fail tests.
 
 ## Common commands
 
@@ -60,7 +60,7 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 | `measurement/` | Task timing (`fc-measure precheck` and `fc-measure measure`): the measure job (`run.py`, host lock folder `FC_MEASURE_LOCK_DIR`), precheck from the image build check, the per-benchmark noise rule (`noise.py`). See `docs/OVERVIEW.md` |
 | `publish/` | DockerHub + HuggingFace publishing (stage 8) and the parquet record round-trip |
 | `scrape/` | AST extraction of ASV benchmark functions from a checked-out repo (stage 9). Note: PR scraping lives in `github/`, not here |
-| `filters.py` | Cheap symbolic pre-screening. Stage 2 stores **every** merged PR and evaluates only the two components GraphQL can answer — the title keyword filter and file compliance — recording the verdict in `is_performance_commit_symbolic`. `check_patch_size` still lives here, but now runs from stage 3, where it gates the diff fetch and the LLM call rather than storage |
+| `filters.py` | Cheap symbolic pre-screening. Stage 2 stores **every** merged PR and evaluates only the two components GraphQL can answer — the title keyword filter and file compliance — recording the verdict in `is_performance_commit_symbolic`. `check_patch_size` is also here; stage 3 calls it before the diff fetch and the LLM call |
 | `preflight.py` | Startup environment checks run before the pipeline does any work |
 
 ### Pipeline stages (`fc-data`)
@@ -68,11 +68,11 @@ The dependency direction is roughly `utils/` → `github/` + `docker/` + `agents
 1. **scrape_repos** — Fetch repository metadata from GitHub
 2. **scrape_commits** — Scrape merged PRs via `GitHubClient.fetch_merged_prs`, which windows `merged_at` server-side through GitHub's search API and bisects the range when the 1000-result cap would truncate the answer. GraphQL-only apart from a ~1% REST fallback for PRs whose `files(first: 100)` list is truncated; no diffs are fetched here. A truncated leaf (`Truncated`) or a missing repository (`RepositoryNotFoundError`) fails that repository rather than reading as a healthy zero
 3. **classify_prs** — Fetch each candidate PR's diff, apply the `check_patch_size` gate, and only then call the LLM. Three outcomes stay distinct: an oversized patch is recorded with both `is_performance_commit` and `is_performance_commit_symbolic` false and no model call; a diff GitHub definitively will not serve records `is_performance_commit` false and leaves the symbolic column alone, because the size gate never ran; a failed request raises and lands in `runner_failures`. A fetched patch is persisted so a resumed run does not buy the same diff twice
-4. **resolve_packages** — Emit one dependency **seed** per commit, and the story of how it was reached. Six units compose it: `discover` picks the packaging root, `declare` reads only what the project states it needs, `interpreter` walks a declared ladder (`requires-python` → trove classifiers → `asv.conf.json` `pythons` → newest release at commit date) and records the rung in `interpreter_source`, `pin` runs one `uv pip compile` with the commit date as `--exclude-newer`, `probe` dry-runs the result, and the row is written. What it deliberately does not read: `requirements*.txt` globs, `environment.yml`, and import statements — so a project that declares nothing gets an empty seed and says so, rather than a list of invented PyPI names. Benchmark tooling (`asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer`) is stripped from both the declared set and the compiled one: the base image installs it, and a second install only starts a version conflict. **The stage gates nothing.** `can_install` is retained, nullable, and no longer read or written; `probe_status` (`installable` → `unresolved` → `failed` → `empty`) orders the stage 5 queue best-first and excludes nobody. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container.
+4. **resolve_packages** — Write one dependency **seed** per commit, with the provenance of each choice. It has six steps: `discover` picks the packaging root, `declare` reads only what the project states it needs, `interpreter` walks a declared ladder (`requires-python` → trove classifiers → `asv.conf.json` `pythons` → newest release at commit date) and records the rung in `interpreter_source`, `pin` runs one `uv pip compile` with the commit date as `--exclude-newer`, `probe` dry-runs the result, and the row is written. It does not read `requirements*.txt` globs, `environment.yml`, and import statements — so a project that declares nothing gets an empty seed and says so, rather than a list of invented PyPI names. Benchmark tooling (`asv`, `pytest`, `hypothesis`, `setuptools`, `wheel`, `pip`, `versioneer`) is stripped from both the declared set and the compiled one: the base image installs it, and a second install only starts a version conflict. **The stage gates nothing.** nothing reads or writes the nullable `can_install` column; `probe_status` (`installable` → `unresolved` → `failed` → `empty`) orders the stage 5 and 6 queues best-first and excludes nobody. Stage 6 is the sole arbiter of buildability, because it is the only stage that builds in the real container.
 5. **render_problems** — `RenderShortProblemsRunner`: render a short problem text without linked issues; a text that gives away the fix is not stored
 6. **synthesize_images** — Agent-based Docker build context synthesis (uses env_payload/python_version from stage 4)
 7. **harbor_healthcheck** — Run every synthesized container through Harbor's oracle agent, record per-benchmark speedups to `harbor_runs`. Supports local Docker and Daytona via `--harbor-environment`; the row records which one in `harbor_runs.environment`. Local runs are useful for iteration; only Daytona runs gate stage 8.
-8. **publish** — Build, verify, and publish Docker images to DockerHub. Two gates, and a PR must clear both: it needs at least one successful `harbor_runs` row whose `max_speedup >= 1.05` in an admitted environment (`DATASMITH_PUBLISH_ENVIRONMENTS`, default **daytona** only), *and* its `candidate_containers` row must be `verification_state = 'verified'`. The harbor row says the container is fast; `verification_state` says it is honest, and neither substitutes for the other — `harbor_runs` outlives the container generation that produced it, so a pre-honesty-gate row can carry a fast trial. That second gate is deliberately **not** a knob.
+8. **publish** — Push the selected images to DockerHub and the records to HuggingFace. A PR must pass two checks: it needs at least one successful `harbor_runs` row whose `max_speedup >= 1.05` in an admitted environment (`DATASMITH_PUBLISH_ENVIRONMENTS`, default **daytona** only), *and* its `candidate_containers` row must be `verification_state = 'verified'`. The harbor row shows the container is fast; `verification_state` shows its image passed the integrity checks. A `harbor_runs` row can belong to an older build of the container, so both checks are needed. The second check has no setting.
 9. **scrape_benchmark_source** — For each `(owner, repo)` in `candidate_containers`, check out the repo at its container SHA, AST-parse every ASV-style benchmark function under the repo's `benchmark_dir`, and upsert one row per `(owner, repo, benchmark_without_params)` into `benchmark_codes` for the FormulaCode website's data sync.
 
 Stage 6 has two synthesis paths. `TRY_DEFAULT` uses the stock template and
@@ -82,9 +82,9 @@ reflexive loop between a producer agent that edits `docker_build_pkg.sh` and
 it. Severity is decided in `agents/reflexive/severity.py`, never in the
 verifier's prompt.
 
-`--stage` is `action="append"` — repeat it to run a subset (`--stage 5 --stage 6`); stages then run in ascending order regardless of flag order. `--start-date`/`--end-date` are required even for a single stage. Other cross-stage knobs: `--dry-run` (log what each stage would do), `--force` (re-run already-processed tasks; stages 3–7), `--tasks-per-repo` (stages 5–7 only), `--agent {claude,codex,gemini,qwen,none}` for stage 6 synthesis, and `--tasks owner/repo#PR,...` to pin stage 7 to specific tasks, bypassing date/repo filters.
+`--stage` is `action="append"` — repeat it to run a subset (`--stage 5 --stage 6`); stages then run in ascending order regardless of flag order. `--start-date`/`--end-date` are required even for a single stage. Other cross-stage knobs: `--dry-run` (log what each stage would do), `--force` (re-run already-processed tasks; stages 3–7), `--tasks-per-repo` (stages 5–7 only), `--agent {claude,codex,gemini,qwen,none}` for stage 6 synthesis, and `--tasks owner/repo#PR,...` to run stages 6 and 7 only on those tasks, ignoring the date window.
 
-**The date window means `merged_at`, half-open `[start, end)`** — in stages 2 through 8 alike. A PR merged exactly at midnight on the end date belongs to the next window, so consecutive runs partition the corpus instead of overlapping, and a PR merged inside the window but opened months before it is now in scope. The rule lives in one place, `window_filters()` in `utils/db.py`; stages 3–8 call it rather than hand-writing filter kwargs, and stage 2 applies the same half-open bounds to GitHub's search API instead of to the database. An AST test asserts every windowing site either routes through the helper or is an audited exemption. Stage 9 windows nothing on purpose (the website wants the full corpus), and `synthesize_images._fetch_neighbor_items` keeps its own ±`DATASMITH_NEIGHBOR_WINDOW_DAYS` band around a PR's `created_at`, which is a similarity heuristic and deliberately reaches outside the run window.
+**The date window means `merged_at`, half-open `[start, end)`** — in stages 2 through 8 alike. A PR merged exactly at midnight on the end date belongs to the next window, so consecutive runs do not overlap, and a PR merged inside the window is included even when it was opened months before. The rule lives in one place, `window_filters()` in `utils/db.py`; stages 3–8 call it rather than hand-writing filter kwargs, and stage 2 applies the same half-open bounds to GitHub's search API instead of to the database. An AST test asserts every windowing site either routes through the helper or is an audited exemption. Stage 9 uses no window (the website shows the full corpus), and `synthesize_images._fetch_neighbor_items` uses its own ±`DATASMITH_NEIGHBOR_WINDOW_DAYS` band around a PR's `created_at`, which can reach outside the run window.
 
 ### Build manifest
 
@@ -92,21 +92,21 @@ Every task image seals a **build manifest** at `/opt/formulacode/build_manifest.
 
 The manifest has two blocks with different lifetimes: `build` is sealed inside the image and immutable, while `verify` does not exist until the container has actually run and is merged in afterwards by `agents/templates/local_ci.py` — the script the synthesis agent runs inside its sandbox. Invariants are three-valued — an invariant whose inputs are absent is **skipped**, not failed, so the module works against an image that has never been run. Severity is `fatal` (fails the step) or `warn` (recorded in `candidate_containers.manifest_warnings`, non-blocking). A check must never raise on a partially-populated manifest.
 
-The `verify` block also carries **measurement** facts: after `run_tests` passes, `local_ci.py` runs the image a second time against `/measure.sh`, which measures the impacted benchmarks with LSV at `base_commit`, applies the oracle patch (mounted read-only from `task/solution.patch`, never baked into the image), re-measures, and prints a `FORMULACODE_MEASURE_START/END` block. Three FATAL invariants gate it — `measure_timed_out`, `asv_exec_failed`, `oracle_patch_failed`. **Measurement facts must never be sealed via `fc_note`**: `fc_note` lives in the cached base image, so a breadcrumb change silently no-ops and produces an all-null `build` block indistinguishable from a healthy one.
+The `verify` block also carries **measurement** facts: after `run_tests` passes, `local_ci.py` runs the image a second time against `/measure.sh`, which measures the impacted benchmarks with LSV at `base_commit`, applies the oracle patch (mounted read-only from `task/solution.patch`, never baked into the image), re-measures, and prints a `FORMULACODE_MEASURE_START/END` block. Three FATAL invariants gate it — `measure_timed_out`, `asv_exec_failed`, `oracle_patch_failed`. **Never write measurement facts with `fc_note`**: `fc_note` is in the cached base image, so a breadcrumb change has no effect and gives an all-null `build` block that looks like a healthy one.
 
-Because the manifest gates publishing, the sealer is hardened against synthesis agents that tamper with it (for example, reassigning `rc` after the sealer, or `|| true` hiding an exit code). Treat changes near the sealer as security-relevant and add a regression test.
+The manifest decides publishing, so the sealer resists synthesis agents that tamper with it (for example, reassigning `rc` after the sealer, or `|| true` hiding an exit code). Treat changes near the sealer as security-relevant and add a regression test.
 
-### Where not to look
+### Where to look
 
-`archive/`, `docs/archive/`, `scratch/`, `jobs/`, `backups/`, and `dist/` are dead or historical — Ruff's `extend-exclude` skips several of them. `archive/scrape/CLAUDE.md` documents a report-builder layout that no longer exists. When searching for current behavior, scope to `src/`, `tests/` and `docs/guide/`.
+Search `src/`, `tests/` and `docs/guide/` for behavior. Local `archive/`, `scratch/`, `jobs/`, `backups/` and `dist/` folders, when present, are not part of the package.
 
 ## Code quality standards
 
-- **Python**: `pyproject.toml` declares `requires-python = ">=3.12"` and Ruff targets `py312`, but the CI matrix still runs tests on **3.11 and 3.12** — so avoid 3.12-only syntax in `src/` (PEP 695 type params are explicitly ignored in the Ruff config for this reason). Type hints required (mypy strict; `disallow_untyped_defs`)
+- **Python**: `pyproject.toml` declares `requires-python = ">=3.12"`, Ruff targets `py312` and CI tests on 3.12. Type hints are required (mypy, `disallow_untyped_defs`). Code that runs inside task containers (the templates) must run on Python 3.8
 - **Linting**: Ruff with 120-char line length. `E501`, `TRY003`, `SIM108`, `S603`/`S607` are globally ignored; `tests/*` additionally waives `S101` and friends
 - **Testing**: pytest + pytest-cov, `asyncio_mode = "auto"` (no `@pytest.mark.asyncio` needed). Tests that build or run real containers must be marked `slow` — `make test` and CI both run `-m "not slow"`
 - **Build**: hatchling backend, uv for dependency management. `make check` runs `uv lock --locked`, so a `pyproject.toml` dependency edit must be accompanied by a refreshed `uv.lock`
-- **CI**: GitHub Actions runs `make check` + tests on Python 3.11 and 3.12
+- **CI**: GitHub Actions runs `make check` and the tests on Python 3.12
 
 ### Design docs
 
@@ -163,60 +163,52 @@ import time (`src/datasmith/__init__.py` → `dotenv.load_dotenv`), so reading
   `DATASMITH_CLASSIFY_LLM_WORKERS`, `DATASMITH_RENDER_PROBLEMS_WORKERS`
   (stages 3 and 5 each use a bounded pool rather than inheriting the
   interpreter default sized `min(32, cpu_count + 4)`),
-  `DATASMITH_GH_SEARCH_CONCURRENCY` (bounds the bisection fan-out, so a
-  PostHog-scale month cannot burst ~80 concurrent GraphQL POSTs from a
-  one-token pool into GitHub's secondary rate limit),
+  `DATASMITH_GH_SEARCH_CONCURRENCY` (limits the bisection fan-out, so a
+  large repository month does not send enough concurrent GraphQL POSTs from a
+  one-token pool to hit GitHub's secondary rate limit),
   `DATASMITH_PREFLIGHT_DB_PINGS`; publication —
   `DATASMITH_PUBLISH_ENVIRONMENTS` (comma-separated Harbor environments
-  whose runs may gate stage 8; default `daytona`, since local Docker
-  trials share the build host and their timings move with load — set it
-  to `docker,daytona` only deliberately, and record that you did;
-  it does **not** relax `MIN_HARBOR_SPEEDUP`); and the database read limits —
+  whose runs count for stage 8; default `daytona`, because local Docker
+  trials share the build host and their timings change with load. Set
+  `docker,daytona` only on purpose and record it. It does **not** change
+  `MIN_HARBOR_SPEEDUP`); and the database read limits —
   `DATASMITH_KEY_FILTER_CHUNK`, `DATASMITH_LARGE_TABLES`,
   `DATASMITH_LARGE_COLUMNS` (the last two are comma-separated name sets,
   not numbers).
   The producer/verifier loop (stage 6, `agents/reflexive/`) adds
   `DATASMITH_PV_ENABLED`, `DATASMITH_PV_MAX_ROUNDS`,
   `DATASMITH_PV_STALL_REPEATS` (how many consecutive identical progress
-  keys end the loop; 1 restores the original single-shot detector, which
-  ended 27 of 38 recorded failures — 12 of them at round 2, giving the
-  producer one attempt per failure),
+  keys end the loop),
   `DATASMITH_PV_AGENT_TIMEOUT_S`, `DATASMITH_PV_BATTERY_TIMEOUT_S`,
-  `DATASMITH_VERIFY_TIMEOUT_S` (wall-clock for ONE verification — build,
-  tests and measurement together; default 5400. It must stay larger than
+  `DATASMITH_VERIFY_TIMEOUT_S` (wall-clock for ONE verification, build,
+  tests and measurement together; default 5400. Keep it larger than
   `DATASMITH_VERIFY_TEST_TIMEOUT_S` and `DATASMITH_VERIFY_MEASURE_TIMEOUT_S`,
-  which bound single steps: it was 3600, equal to each of them, so work still
-  inside its own allowance was killed and reported as a hang. Measured
-  tests+measurement on the verified corpus reached 3351 s),
+  which limit single steps, or a step inside its own limit is killed as a hang),
   `DATASMITH_PV_BATTERY_CPUS` (cores one battery container may use; 0
   disables the cap. modin, dask and pymc size their worker pools from
-  the visible core count, so an uncapped container claims the whole
-  host — three modin containers once ran 776 Ray workers between them),
+  the visible core count, so an uncapped container uses every core of the host),
   `DATASMITH_PV_EVIDENCE_BUDGET`, `DATASMITH_PV_PRODUCER_AGENT` and
   `DATASMITH_PV_VERIFIER_AGENT`, plus three for the host-side image scan
   (`agents/reflexive/image_integrity.py`) --
   `DATASMITH_PV_IMAGE_SCAN_TIMEOUT_S`,
   `DATASMITH_PV_IMAGE_SCAN_MAX_FILE_BYTES` and
   `DATASMITH_PV_IMAGE_SCAN_MAX_HITS`. `DATASMITH_PV_ENABLED` is off by default. Turn it
-  on only when, on the 16-container labelled validation set, both negative
-  controls (`attack-demo:1`, pysindy#139) are rejected, no hard-grounds
-  rejection is accepted, every disagreement with a label has a written cause,
-  and one repository completes reject, producer edit, rebuild, accept end to end.
+  on only after the loop passes the labelled validation set: it rejects the
+  negative controls, accepts no hard rejection, and completes reject, producer
+  edit, rebuild and accept for one repository.
 - **Two budgets, two dials.** Cores scale stage 4
   (`DATASMITH_RESOLVE_PACKAGES_WORKERS`); the single GitHub token scales
-  stages 2 and 3 and does not care how large the machine is. Keep them on
-  separate knobs so raising one cannot trip the other's rate limits, and
-  never size a pool from an implicit `cpu_count()` — `run_in_executor(None,
-  ...)` silently means something different on every host.
+  stages 2 and 3, whatever the size of the machine. Keep them as
+  separate settings so raising one cannot hit the other's rate limits, and
+  never size a pool from an implicit `cpu_count()`: `run_in_executor(None,
+  ...)` gives a different pool size on every host.
 - `DATASMITH_PYTHON_FLOOR` (default `3.8`) and `DATASMITH_PYTHON_CEILING`
   (default `3.12`) bound stage 4's interpreter ladder. The floor is the oldest
   interpreter the container toolchain still supports; the ceiling is the newest
-  it is known to build against, and it is a ceiling on purpose — a fresh run
-  must not silently start choosing an interpreter no existing image was built
-  with. Raise the ceiling only together with a base-image rebuild **and a
-  regeneration of `tests/resolution/fixtures/jan2026/`** — all 13 golden
-  fixtures record the ceiling as their `python_version`, so a raise fails
-  every one of them at once.
+  it is known to build against, so a run never chooses an interpreter that no
+  image was built with. Raise the ceiling only together with a base-image
+  rebuild **and a regeneration of `tests/resolution/fixtures/jan2026/`**: the
+  golden fixtures record the ceiling as their `python_version`.
 - `DATASMITH_ASV_PIP_ENV_TYPES` (default `virtualenv,venv,existing`) is the
   comma-separated set of `asv.conf.json` `environment_type` values whose
   `matrix` names PyPI distributions. Every other value — `conda`, `mamba`,
@@ -251,7 +243,7 @@ Local vLLM servers (on whatever ports they were launched with) are exposed via a
 
 Access is gated by two independent layers: a **grant** (does the role have the privilege at all) and an **RLS policy** (which rows). Migration `00015_revoke_anon_select.sql` revokes Supabase's default broad `anon` `SELECT` and re-grants it only on the public set, so every table not listed below returns `permission denied`. The service-role key bypasses both layers, so pipeline processes are unaffected.
 
-Fifteen tables are currently anon-readable, each with a `public_read` SELECT policy — verify with `grep -n "TO anon" supabase/migrations/*.sql` rather than trusting this list to stay current:
+These tables are anon-readable, each with a `public_read` SELECT policy. Check with `grep -n "TO anon" supabase/migrations/*.sql`:
 
 | Migration | Tables |
 |-----------|--------|
@@ -260,15 +252,15 @@ Fifteen tables are currently anon-readable, each with a `public_read` SELECT pol
 | `00021` / `00023` | the eight `findings_*` tables |
 | `00022` | `task_id_map` |
 
-Note that `00016` and `00017` used `GRANT ALL ... TO anon` rather than `GRANT SELECT`. Writes are still blocked, but only by RLS (the policy is SELECT-only) — the grant layer is not doing its share. Follow `00021`'s `GRANT SELECT` pattern for new public tables; don't copy `00016`/`00017`. Public anon access is served on `https://api.formulacode.org` (no Cloudflare Access gate); pipeline operators continue to use `https://db.formulacode.org` with CF Access + service-role key.
+Note that `00016` and `00017` used `GRANT ALL ... TO anon` rather than `GRANT SELECT`. Writes are blocked only by RLS (the policy is SELECT-only), not by the grant. Follow `00021`'s `GRANT SELECT` pattern for new public tables; don't copy `00016`/`00017`. Public anon access is served on `https://api.formulacode.org` (no Cloudflare Access gate); pipeline operators use `https://db.formulacode.org` with CF Access and the service-role key.
 
 ### Key tables
 
 | Table | Purpose | Populated by |
 |-------|---------|-------------|
 | `pull_requests` | All scraped PRs with classification, patches, rendered problems, container names | Stages 1-3, 5-6 |
-| `packages` | One seed per `(owner, repo, sha)`: `env_payload` (pinned deps) and `python_version`, plus `interpreter_source` (which ladder rung chose that interpreter), `primary_root`, `requires_python`, the advisory `probe_status` / `probe_log`, `dropped_requirements` (JSON-encoded text, like `env_payload` — every requirement that was refused, with its reason), and provenance: `resolver_version`, `uv_version`, `resolved_at`, `cutoff_used` (null when the commit-date cutoff had to be relaxed). `can_install` is deprecated — nullable, no longer read or written; `resolver_version = 'legacy'` marks the rows the predecessor wrote. | Stage 4 |
-| `candidate_containers` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA, plus `build_manifest` (sealed build facts merged with verify observations), `manifest_warnings` (non-fatal invariant ids), and `verification_state` (`unverified` / `verified`, with `verified_at`). `build_manifest IS NULL` identifies rows built before manifests existed; `verification_state = 'unverified'` identifies rows built before the honesty gate applied to them. | Stage 6 (on success) |
+| `packages` | One seed per `(owner, repo, sha)`: `env_payload` (pinned deps) and `python_version`, plus `interpreter_source` (which ladder rung chose that interpreter), `primary_root`, `requires_python`, the advisory `probe_status` / `probe_log`, `dropped_requirements` (JSON-encoded text, like `env_payload` — every requirement that was refused, with its reason), and provenance: `resolver_version`, `uv_version`, `resolved_at`, `cutoff_used` (null when the commit-date cutoff had to be relaxed). Nothing reads or writes the nullable `can_install` column; `resolver_version = 'legacy'` marks rows without provenance. | Stage 4 |
+| `candidate_containers` | Successful agent-generated `build_pkg_sh` / `build_run_sh` per SHA, plus `build_manifest` (sealed build facts merged with verify observations), `manifest_warnings` (non-fatal invariant ids), and `verification_state` (`unverified` / `verified`, with `verified_at`). `build_manifest IS NULL` marks a row without a manifest; `verification_state = 'unverified'` marks a row whose image no verifier accepted. | Stage 6 (on success) |
 | `harbor_runs` | One row per Harbor oracle trial for a synthesized container: `max_speedup`, `geomean_speedup`, `n_benchmarks`, `wallclock_sec`, `reward_payload`, `status`. One-to-many FK on `candidate_containers(owner, repo, sha)`. | Stage 7 |
 | `benchmark_information` | Per-benchmark speedup measurements from terminal-bench eval runs: one row per (run, owner/repo/issue, benchmark, agent, model). `speedup` is `(agent/nop)/(oracle/nop)` so 1.0 = parity with the human expert. `benchmark_type` (`time`/`mem`/`peakmem`/`track`) is a generated column derived from the ASV naming convention. | (manual) |
 | `benchmark_codes` | One row per `(owner, repo, benchmark_without_params)` carrying the Python source of each ASV benchmark function plus its setup. Joined to `benchmark_information` on `(owner, repo, benchmark_name)` by the FormulaCode website. | Stage 9 |
@@ -280,11 +272,11 @@ Note that `00016` and `00017` used `GRANT ALL ... TO anon` rather than `GRANT SE
 | `findings_*` | Eight denormalized tables backing the FormulaCode website's results pages (leaderboard, stratified/tag advantage, repo quintiles, cost Pareto, workload tradeoff, temporal generalization) plus `findings_metadata`. Public-read. | fc-eval's `analysis/export_website_findings.py` (out-of-band) |
 | `task_id_map` | Maps fc-eval's legacy on-disk task ids (`pandas_dev-pandas_3`) to canonical `(owner, repo, issue_number)`. Needed because the legacy suffix is a per-run sequence number, **not** the issue number, and its `_`/`-` sanitization is inconsistent. | fc-eval (out-of-band) |
 
-`resource_metrics` is a JSONB column (not a table) on both `error_logs` and `candidate_containers`, holding observed build/test cost — durations, image size, peak memory. It is always advisory; contrast `build_manifest`, which holds declared facts that gate behavior. The split is deliberate, so keep new cost measurements in `resource_metrics` and new gating facts in `build_manifest`.
+`resource_metrics` is a JSONB column (not a table) on both `error_logs` and `candidate_containers`, holding observed build/test cost — durations, image size, peak memory. It decides nothing, while `build_manifest` holds facts that decide behavior. Keep new cost measurements in `resource_metrics` and new deciding facts in `build_manifest`.
 
 ### Migrations
 
-SQL migrations live in `supabase/migrations/`, numbered `00001_` upward (currently through `00029_`). The sequence has gaps because numbers get claimed on branches before they land: `00018_lsv_cache_drop_cpu_model.sql` lives on `origin/lsv-cache-integration`, and `00024` is authored in a separate working tree (per `00025`'s header) — `00026` re-lands that same table under a number that is free here. So check other branches before claiming a number, and record in the file header why you skipped one. `00027_pull_requests_window_indexes.sql` adds the two indexes the stage 2–5 window predicates need on `pull_requests` — `merged_at` for the stage-wide scan, `(owner, repo, merged_at)` for the per-repository skip set — and deliberately grants nothing to `anon`. `00028_packages_resolution_v2.sql` carries the stage 4 redesign's provenance columns, and `00029_candidate_containers_verification_state.sql` adds `verification_state` — every pre-existing row defaults to `unverified`, because the corpus predates the honesty gate and has not earned the label.
+SQL migrations live in `supabase/migrations/`, numbered `00001_` upward. The sequence has gaps because numbers are claimed on branches before they merge, so check other branches before you claim a number, and say in the file header why you skipped one. `00027_pull_requests_window_indexes.sql` adds the indexes the stage 2–5 window predicates need on `pull_requests` (`merged_at`, and `(owner, repo, merged_at)` for the per-repository skip set) and grants nothing to `anon`. `00029_candidate_containers_verification_state.sql` adds `verification_state`, which defaults to `unverified`.
 
 To apply a new migration against the local instance:
 
@@ -295,7 +287,7 @@ conn.autocommit = True
 conn.cursor().execute(open('supabase/migrations/00025_candidate_containers_build_manifest.sql').read())
 ```
 
-**Do not grant broad access to `anon`.** Migration `00015_revoke_anon_select.sql` deliberately revoked Supabase's default `anon` `SELECT`; a new table is private by default and should stay that way. Only if a table is genuinely meant to be public do you add RLS plus a narrow grant, following the pattern in `00021_findings_tables.sql`:
+**Do not grant broad access to `anon`.** Migration `00015_revoke_anon_select.sql` revokes Supabase's default `anon` `SELECT`, so a new table is private. Keep it private. Only for a table that must be public, add RLS plus a narrow grant, following the pattern in `00021_findings_tables.sql`:
 
 ```sql
 ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;
@@ -309,11 +301,11 @@ Use `datasmith.utils.db.fetch_all(table, select=..., filters=..., gte_filters=..
 
 Two kwargs carry the ingestion window: `lt_filters` is a strict less-than, so the half-open `[start, end)` bound means the same thing in the database as it does in the GitHub query it must agree with, and `in_filters` scopes a read to the keys the caller actually asked about so a skip set stops pulling its whole table (chunk the value list at the call site — PostgREST puts it in the URL).
 
-`fetch_all` **refuses an unfiltered select of a large text column on a large table**, raising `UnfilteredLargeSelectError`: `fetch_all("pull_requests", select="patch")` streams `patch` across every row and has already killed PostgREST with an out-of-memory abort. Narrow it with any filter, ask for only the columns you need, or override the two sets via `DATASMITH_LARGE_TABLES` / `DATASMITH_LARGE_COLUMNS`.
+`fetch_all` **refuses an unfiltered select of a large text column on a large table**, raising `UnfilteredLargeSelectError`: `fetch_all("pull_requests", select="patch")` reads `patch` from every row and can run PostgREST out of memory. Narrow it with any filter, ask for only the columns you need, or override the two sets via `DATASMITH_LARGE_TABLES` / `DATASMITH_LARGE_COLUMNS`.
 
 ### Level aggregation
 
-Per-benchmark speedups are rolled up into four levels via **geometric mean** in `src/datasmith/harbor_adapter/template/parser.py` (`geometric_mean()` + `aggregate_by_hierarchy()`):
+Per-benchmark speedups are rolled up into four levels via **geometric mean** in `src/datasmith/harbor_adapter/template/tests/parser.py` (`geometric_mean()` + `aggregate_by_hierarchy()`):
 
 - **level1** — identity, one entry per benchmark (`module.Class.method`)
 - **level2** — grouped by `module.Class` (drop the last dotted segment), geomean within each group
@@ -330,4 +322,4 @@ The one exception is `task_id_map`, which exists precisely to translate *externa
 
 ## Environment setup
 
-Requires a `tokens.env` file in the repo root with `GH_TOKEN`, `CACHE_LOCATION`, `SUPABASE_URL`, `SUPABASE_KEY`, and optionally `DSPY_*` vars for LLM backends and `DOCKERHUB_*` vars for publishing. See README.md for the full template.
+Requires a `tokens.env` file in the repo root with `GH_TOKENS`, `SUPABASE_URL`, `SUPABASE_KEY`, and optionally `DSPY_*` vars for LLM backends, `DOCKERHUB_*` vars for publishing and `CACHE_LOCATION` for the resolver cache. See `docs/getting-started/installation.md` and `docs/guide/configuration.md`.

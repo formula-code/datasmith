@@ -248,9 +248,8 @@ def download_snapshots(
     """Download oracle snapshots from the `snapshots` storage bucket and extract them.
 
     Prod stores the oracle baseline tarball at
-    ``snapshots/{owner}__{repo}__{issue}/oracle.tar.gz`` (rooted at ``.snapshots``). We read
-    the storage object directly — the old ``tasks.snapshot_storage_url`` lookup referenced a
-    table that no longer exists in the current DB.
+    ``snapshots/{owner}__{repo}__{issue}/oracle.tar.gz`` (rooted at ``.snapshots``), read directly
+    from storage.
     """
     snapshot_dir = Path(snapshot_dir)
     tarball_path = Path("/tmp/oracle_snapshots.tar.gz")

@@ -1,13 +1,11 @@
 # Verification
 
-Dataset verification ensures that each task's Docker image builds correctly and passes all validation checks.
+Verification checks that each task's Docker image builds, passes its tests and can measure a speedup.
 
 ## Measurability
 
-Stage-6 verification proves more than "the image builds". After the test stage
-passes, `local_ci.py` runs the image a second time against `/measure.sh`, which
-proves the container can **measure a speedup** — the measurement this dataset
-exists to collect.
+After the test stage passes, stage 6 (`local_ci.py`) runs the image again with
+`/measure.sh`. This shows that the container can **measure a speedup**.
 
 ```mermaid
 flowchart LR
@@ -21,37 +19,35 @@ flowchart LR
 ```
 
 The oracle patch is bind-mounted read-only from `task/solution.patch` and is
-never baked into the image — a published task image carrying the solution would
-be readable by the agent under evaluation. Benchmark-directory and `asv.*.json`
-sections are filtered out of the patch before it is applied, mirroring what
-`run-tests.sh` resets at trial time, so the measured benchmarks are the ones
-that exist at *both* commits.
+not stored in the image, because the agent under evaluation could read it there.
+The benchmark directory and `asv.*.json` sections are removed from the patch
+before it is applied, as `run-tests.sh` resets them at trial time. The measured
+benchmarks are then the ones that exist at both commits.
 
-Three fatal invariants gate the step:
+Three fatal invariants stop the step:
 
 | Invariant | Fires when |
 |-----------|-----------|
-| `measure_timed_out` | measurement exceeded its limit — a timeout is a **failure**, never a pass |
+| `measure_timed_out` | measurement exceeded its limit; a timeout is a **failure** |
 | `asv_exec_failed` | no benchmark produced a finite, non-zero timing at both commits |
 | `oracle_patch_failed` | the stored patch exists but did not apply |
 
-Three more are recorded as warnings rather than blocking: `speedup_direction`
+Three more are warnings and do not stop the step: `speedup_direction`
 (geomean below 1.0), `oracle_patch_touches_benchmarks` (the PR modified its own
 benchmarks, so the measured set is narrower than the patch), and
 `measure_partial` (LSV reported an error but still produced usable timings).
 
 A failure here writes `failure.json` with `"stage": "measure"`.
 
-**Cost.** The measure step adds roughly 14 minutes to a task at the median
-(~26 minutes at p90), measured across 83 real oracle trials. It runs only after
-the build *and* test stages have both passed, so a doomed attempt never pays it.
+**Cost.** The measure step adds minutes to each task. It runs only after the
+build and test stages pass, so a failed attempt does not pay for it.
 
-### Knobs
+### Settings
 
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `DATASMITH_VERIFY_MEASURE_TIMEOUT_S` | `3600` | Wall-clock limit for the measure step |
-| `DATASMITH_VERIFY_MEASURE_ROUNDS` | `2` | LSV timing rounds; matches stage 7 |
+| `DATASMITH_VERIFY_MEASURE_ROUNDS` | `2` | LSV timing rounds; the same default as `--harbor-rounds` in stage 7 |
 | `DATASMITH_VERIFY_MEASURE_GEOMEAN_MIN` | `1.0` | Threshold for the `speedup_direction` warning |
 
 ## Correctness tests in harbor tasks
@@ -80,33 +76,14 @@ The first three follow the host's grading rules in `fcrl.grading`, so the reward
 
 ## Preflight check
 
-Before running verification, confirm your environment is properly configured:
-
-```bash
-python -m datasmith.preflight
-```
-
-This checks:
-
-| Check | What it validates |
-|-------|-------------------|
-| Environment | `SUPABASE_URL`, `SUPABASE_KEY`, `GH_TOKENS`, `HF_TOKEN` |
-| Supabase | Database connection |
-| Docker | Docker daemon is running |
-| GitHub | API access and remaining rate limit |
-
-It also prints three `[INFO]` lines that **cannot fail the run**: the GitHub
-token pool size and the hourly budget it buys, the measured median database
-round-trip latency (local Postgres and `db.formulacode.org` differ by roughly
-6x, and both are legitimate), and every resolved concurrency dial for stages
-2–5. Those are reports rather than checks because none of them has a threshold
-that is correct on every machine — they exist so an operator on a new host can
-see their real limits before wondering why a stage is slow.
+Run `python -m datasmith.preflight` before verification. [Installation](../getting-started/installation.md#5-verify-your-setup)
+lists its checks. It also prints report lines that cannot fail the run: the GitHub token pool size and its hourly
+request budget, the median database round-trip latency, and the resolved concurrency settings for stages 2 to 5.
+These values differ between machines and have no single correct threshold.
 
 ## Reading a manifest programmatically
 
-Inspect any built image's sealed build manifest and evaluate the invariants
-over it:
+Read the build manifest of a built image and evaluate the invariants:
 
 ```python
 from datasmith.docker import read_build_manifest, evaluate_invariants
@@ -120,10 +97,8 @@ report.warnings  # ["speedup_direction", "discovery_fallback_used"]
 report.skipped   # invariants whose inputs were absent
 ```
 
-`ok` is deliberately three-valued. Every image built before build manifests
-existed has none, and for those `read_build_manifest` returns `None` and
-`evaluate_invariants(None)` reports `ok=None` with every invariant skipped —
-rather than raising, or worse, reporting a clean pass it never checked.
+`ok` has three values. For an image without a manifest, `read_build_manifest`
+returns `None`, and `evaluate_invariants(None)` reports `ok=None` with every
+invariant skipped. It does not report a pass for checks it did not run.
 
-This reads facts the build already recorded, so it is fast, offline, and works
-against any published image without rebuilding it.
+This reads what the build recorded, so it runs offline and needs no rebuild.

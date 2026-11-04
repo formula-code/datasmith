@@ -131,28 +131,12 @@ fc_note rounds="${DATASMITH_LSV_ROUNDS:-5}"
 _ORIGIN="$(git -C /workspace/repo remote get-url origin 2>/dev/null || true)"
 if [ -n "$_ORIGIN" ]; then
     fc_note owner="$(printf '%s' "$_ORIGIN" | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')"
-    # NOTE: was `sed -E 's#.*/([^/]+?)(\.git)?$#\1#'`. POSIX ERE (sed -E) has no
-    # non-greedy quantifier, so the `?` on `[^/]+?` is a silent no-op: `[^/]+`
-    # greedily consumes "requests.git" whole and `(\.git)?` matches nothing,
-    # leaving the .git suffix in `repo` on every build (verified below).
-    # `basename ... .git` strips the suffix unconditionally and correctly, with
-    # no regex to get wrong.
+    # basename strips the .git suffix; POSIX sed -E has no non-greedy quantifier for this.
     fc_note repo="$(basename "$_ORIGIN" .git)"
 fi
 
-# Scan every baked script for credential literals.  grep -q returns 1 on no
-# match, which is the clean case.
-#
-# The pattern is assembled from fragments so that it does NOT appear verbatim
-# in this file. It used to be written as one literal, and this script is one of
-# the files it scans, so it matched itself. secrets_scan_clean was therefore 0
-# on every build ever made, and the FATAL secrets_present invariant meant the
-# stock template could never pass verification.
-#
-# One synthesis agent diagnosed this correctly and then replaced `grep` with a
-# wrapper that reported clean for this exact invocation. Disabling a detector
-# to silence a false positive is the wrong repair, but the false positive was
-# real, and it was ours.
+# Scan every baked script for credential literals; grep -q returns 1 when clean.
+# The pattern is built from fragments, because this file is also scanned and must not match itself.
 _SECRET_RE="sb""_secret_|service""_role|SUPABASE_[A-Z_]*KEY=[A-Za-z0-9]"
 if grep -rqE "$_SECRET_RE" \
      /docker_build_final.sh /run-tests.sh /profile.sh 2>/dev/null; then

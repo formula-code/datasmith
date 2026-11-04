@@ -692,10 +692,7 @@ PY
 install_detect_extras
 
 # -------- System bootstrap (idempotent) --------
-# When run from a bare image (e.g. ubuntu:22.04) these install the
-# toolchain that Dockerfile.base otherwise provides inline.
-# Each guard checks whether the tool is already present so the block
-# is a no-op when the Dockerfile already set things up.
+# On a bare image (e.g. ubuntu:22.04), install the toolchain that Dockerfile.base otherwise provides.
 
 export DEBIAN_FRONTEND=noninteractive
 

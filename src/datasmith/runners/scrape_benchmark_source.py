@@ -1,6 +1,6 @@
 """Runner for stage 9: scrape ASV benchmark source code per (owner, repo, sha).
 
-Reads candidate_containers for the date window, checks out each repo at its
+Reads candidate_containers (no date window, one SHA per repo), checks out each repo at its
 SHA via :func:`prepare_repo_checkout`, parses ``benchmarks/*.py`` with the
 extractor in :mod:`datasmith.scrape.benchmark_source`, and upserts rows into
 ``benchmark_codes``.

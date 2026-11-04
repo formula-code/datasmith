@@ -5,16 +5,19 @@ fc-data publishes verified tasks to DockerHub (Docker images) and HuggingFace (P
 ## Publishing workflow
 
 ```python
-from datasmith.utils.db import get_client
 from datasmith.publish import records_from_supabase, HuggingFacePublisher
 
-# Query all verified, unpublished perf PRs from the last month
+# Verified, unpublished performance PRs merged in the window.
 records = records_from_supabase(start_date="2026-02-01", end_date="2026-03-01")
 
-# Publish to HuggingFace as a versioned Parquet dataset
+# Upload to HuggingFace as a versioned Parquet file.
 hf = HuggingFacePublisher()
 hf.publish(records, version="formulacode@2026-03")
 ```
+
+`records_from_supabase` keeps a PR only when its best successful Harbor run reaches a 1.05x speedup in an admitted
+environment and its container has `verification_state = 'verified'`. See
+[Pipeline, stage 8](pipeline.md#stage-8-publish).
 
 ## Querying the database directly
 
@@ -33,25 +36,24 @@ rows = sb.table("pull_requests") \
 
 ## Dataset versioning
 
-- Versions follow `@YYYY-MM` format (e.g., `formulacode@2026-03`)
-- The dataset is updated monthly
-- Each publish run creates a new version tag on HuggingFace
-- Publishing is append-only — prior versions are never overwritten
+- Versions use the `@YYYY-MM` format (for example `formulacode@2026-03`).
+- Each version is one file, `data/<version>.parquet`, in the `formulacode/formulacode` dataset repository.
+- A second publish in the same month replaces that month's file. Files of other months do not change.
 
 ## DockerHub publishing
 
-`DockerHubPublisher` handles:
+`DockerHubPublisher` provides:
 
-- Lazy authentication with DockerHub credentials
-- Retry with exponential backoff via `@with_backoff`
-- Version tagging with `@YYYY-MM` suffix
-- Remote tag listing for delta publish (only push new/changed images)
+- Login with `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` at the first push
+- `push`, with retries and exponential backoff (`@with_backoff`)
+- `tag_with_version`, which adds a `@YYYY-MM` suffix
+- `list_remote_tags` and `filter_unpublished`, to push only tags that are not on DockerHub
 
 ## Pipeline integration
 
-Publishing is the final stage of the `fc-data` pipeline (stage 7). The `publish_pipeline()` function orchestrates:
+Publishing is stage 8 of the `fc-data` pipeline. `publish_pipeline()` does these steps:
 
-1. Query DB for unpublished, verified PRs
-2. Push Docker images to DockerHub
-3. Upload Parquet dataset to HuggingFace
-4. Mark records with `published_at` timestamp
+1. Query the database for unpublished, verified PRs
+2. Push their Docker images to DockerHub
+3. Upload the Parquet file to HuggingFace
+4. Set `published_at` on each published record
