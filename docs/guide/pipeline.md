@@ -241,7 +241,7 @@ fc-data --start-date 2026-02-01 --end-date 2026-03-01 --stage 7 --harbor-environ
 
 Selects the PRs to publish and pushes them:
 
-1. **Select** — Performance PRs merged in the window with no `published_at`, whose best successful `harbor_runs` speedup in an admitted environment is at least 1.05, and whose container has `verification_state = 'verified'`. `DATASMITH_PUBLISH_ENVIRONMENTS` lists the admitted environments (default `daytona`).
+1. **Select** — Performance PRs merged in the window with no `published_at`, that have a successful, timed `harbor_runs` row in an admitted environment, and whose container has `verification_state = 'verified'`. `DATASMITH_PUBLISH_ENVIRONMENTS` lists the admitted environments (default `daytona`).
 2. **Push to DockerHub** — Pushes each selected container image under the `formulacode/` namespace.
 3. **Push to HuggingFace** — Exports the records as versioned Parquet (for example `formulacode@2026-03`).
 4. **Mark published** — Sets `published_at` on each published PR row.

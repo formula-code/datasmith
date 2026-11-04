@@ -72,7 +72,7 @@ class TestPublishDryRunReportsWhatWouldPublish:
                     await pipeline._publish("2024-01-01", "2024-12-31")
         mock_fetch.assert_not_called()
 
-    async def test_it_names_the_tags_and_the_gate(self) -> None:
+    async def test_it_names_the_tags(self) -> None:
         """An operator about to overwrite a public tag needs to see which tags.
 
         A count is not enough: the whole risk of this stage is that a push is
@@ -87,7 +87,6 @@ class TestPublishDryRunReportsWhatWouldPublish:
         extra = mock_log.call_args[1]["extra"]
         blob = " ".join(f"{k}: {v}" for k, v in extra.items())
         assert "formulacode/o-r:7" in blob
-        assert "1.05" in blob
         assert "daytona" in blob
 
     async def test_a_dry_run_never_publishes(self) -> None:

@@ -19,8 +19,6 @@ from datasmith.utils.overrides import expected_n_for, fetch_overrides
 
 logger = get_logger("runners.harbor_healthcheck")
 
-MIN_SPEEDUP_GATE = 1.05  # mirrored by publish/records.py
-
 
 def _patch_harbor_trial_name() -> None:
     """Remove the random suffix Harbor appends to every trial name.
@@ -493,19 +491,7 @@ async def run_harbor_healthcheck(
                     _keep_oracle_snapshots(trial, snapshots_dir)
 
     n_success = sum(1 for r in rows if r["status"] == "success")
-    n_fast = sum(
-        1
-        for r in rows
-        if r["status"] == "success" and r["max_speedup"] is not None and r["max_speedup"] >= MIN_SPEEDUP_GATE
-    )
-    logger.info(
-        "Harbor job '%s' done: %d/%d trials succeeded, %d >= %.2fx gate",
-        job_name,
-        n_success,
-        len(rows),
-        n_fast,
-        MIN_SPEEDUP_GATE,
-    )
+    logger.info("Harbor job '%s' done: %d/%d trials succeeded", job_name, n_success, len(rows))
 
     _insert_harbor_runs(rows)
     return rows

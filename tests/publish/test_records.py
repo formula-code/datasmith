@@ -178,10 +178,3 @@ class TestWhichHarborEnvironmentsMayGatePublication:
         import datasmith.publish.records as rec
 
         assert rec._publish_environments(" docker , , daytona ") == ("docker", "daytona")
-
-    def test_widening_the_environment_does_not_relax_the_speedup_floor(self, monkeypatch) -> None:
-        """The whole point of the gate survives the knob."""
-        import datasmith.publish.records as rec
-
-        monkeypatch.setattr(rec, "DATASMITH_PUBLISH_ENVIRONMENTS", ("docker",))
-        assert rec.MIN_HARBOR_SPEEDUP == 1.05

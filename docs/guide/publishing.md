@@ -15,7 +15,7 @@ hf = HuggingFacePublisher()
 hf.publish(records, version="formulacode@2026-03")
 ```
 
-`records_from_supabase` keeps a PR only when its best successful Harbor run reaches a 1.05x speedup in an admitted
+`records_from_supabase` keeps a PR only when it has a successful, timed Harbor run in an admitted
 environment and its container has `verification_state = 'verified'`. See
 [Pipeline, stage 8](pipeline.md#stage-8-publish).
 
