@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -318,6 +319,106 @@ def skipped_or_missing(base_oc, agent_oc):
     return skipped, missing
 
 
+# --------------------------- Base tests the oracle patch edits ---------------------------
+
+ORACLE_TEST_EDITS = "oracle_test_edits.json"
+# Node id prefixes: "path::test", "path::Class", "path" or a folder ending in "/" ("" is every test).
+_ORACLE_EDITED = []
+
+
+def _is_test_class(node):
+    return isinstance(node, ast.ClassDef) and (node.name.startswith("Test") or any(
+        (getattr(b, "id", None) or getattr(b, "attr", None) or "").endswith("TestCase") for b in node.bases))
+
+
+def _is_test_func(node):
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test")
+
+
+def _hits(node, edit):
+    """True if ``edit`` (("removed", line) or ("insert", after line, indent, decorator)) changes ``node``."""
+    start = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
+    end = node.end_lineno
+    if edit[0] == "removed":
+        return start <= edit[1] <= end
+    k, indent, decorator = edit[1:]
+    return start <= k < end or (k == end and indent > node.col_offset) or (decorator and k + 1 == start)
+
+
+def edited_test_prefixes(path, source, edits):
+    """Node id prefixes in ``path`` whose base code the oracle patch changes. A change inside a test changes that
+    test, elsewhere in a test class that class, and anywhere else (fixtures, helpers, an import that loses a name)
+    the whole file. Lines added between tests (new tests, new imports) change nothing that runs."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return [path]
+    lines = source.splitlines()
+    todo = [("removed", n) for n in edits.get("removed") or []
+            if 0 < n <= len(lines) and lines[n - 1].strip() and not lines[n - 1].strip().startswith("#")]
+    todo += [("insert", k, indent, bool(dec)) for k, indent, dec in edits.get("inserts") or []]
+    dropped = set(edits.get("dropped_names") or [])
+    out = set()
+    for edit in todo:
+        for node in tree.body:
+            if not _hits(node, edit):
+                continue
+            if _is_test_func(node):
+                out.add("%s::%s" % (path, node.name))
+            elif _is_test_class(node):
+                member = next((m for m in node.body if _hits(m, edit)), None)
+                if member is not None and _is_test_func(member):
+                    out.add("%s::%s::%s" % (path, node.name, member.name))
+                elif member is not None or edit[0] == "removed" or edit[3]:
+                    out.add("%s::%s" % (path, node.name))
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = {(a.asname or a.name).split(".")[0] for a in node.names}
+                if edit[0] == "removed" and names & dropped:
+                    return [path]
+            elif isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant):
+                continue
+            else:
+                return [path]
+    return sorted(out)
+
+
+def _support_folder(path):
+    """The folder whose tests a changed conftest.py, helper or data file in a tests folder can change."""
+    if os.path.basename(path) == "conftest.py":
+        d = os.path.dirname(path)
+        return d + "/" if d else ""
+    m = list(re.finditer(r"(^|/)tests?/", path))
+    return path[: m[-1].end()] if m else path
+
+
+def load_oracle_edited(edits_path, repo_root, base_ref):
+    """Prefixes of the base tests that tests/oracle_test_edits.json (written at render time) marks as edited."""
+    try:
+        with open(edits_path) as fh:
+            edits = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    out = []
+    for path, e in sorted(edits.items()):
+        if not is_test_file(path):
+            out.append(_support_folder(path))
+            continue
+        code, source, _ = _run(["git", "show", "%s:%s" % (base_ref, path)], cwd=repo_root) if base_ref else (1, "", "")
+        if e.get("deleted") or code != 0:
+            out.append(path)
+        else:
+            out += edited_test_prefixes(path, source, e)
+    return sorted(set(out))
+
+
+def oracle_edited(nodeid, prefixes=None):
+    nid = nodeid.split("[", 1)[0]
+    for p in _ORACLE_EDITED if prefixes is None else prefixes:
+        if p == "" or nid == p or nid.startswith(p + "::") or (p.endswith("/") and nid.startswith(p)):
+            return True
+    return False
+
+
 class _BaseRebuildFailed(Exception):
     pass
 
@@ -405,7 +506,12 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
     if not full_agent_run:
         missing = []
     regressed = sorted(set(regressed) | set(skipped) | set(missing))
-    n_base_pass = sum(1 for o in base_oc.values() if o == "passed")
+    # A base test the oracle patch edits or deletes can fail for a correct fix (dask#11373).
+    edited = [n for n in regressed if oracle_edited(n)]
+    regressed = [n for n in regressed if n not in edited]
+    skipped = [n for n in skipped if n not in edited]
+    missing = [n for n in missing if n not in edited]
+    n_base_pass = sum(1 for n, o in base_oc.items() if o == "passed" and not oracle_edited(n))
     out = {
         # Tests that all skip at base check nothing, so they do not count as a pytest run.
         "ran": bool(stashed and selected_tests and base_oc and n_base_pass),
@@ -417,6 +523,7 @@ def run_base_and_diff(selected_tests, extra_args, repo_root, agent_results, base
         "n_base_pass": n_base_pass,
         "regressed": regressed,
         "n_regressed": len(regressed),
+        "oracle_edited": edited,
     }
     if base_error:
         out["base_error"] = base_error
@@ -1150,6 +1257,9 @@ if __name__ == "__main__":
         os.environ["FC_PYTEST_CONFIG"] = write_base_pytest_config(args.base_ref, args.repo_root or detect_repo_root())
     except Exception as e:  # noqa: BLE001 -- without it pytest reads the repo's own config, as before
         print("[pytest_runner] base pytest config not written: %s" % e, file=sys.stderr)
+    _ORACLE_EDITED[:] = load_oracle_edited(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ORACLE_TEST_EDITS),
+        args.repo_root or detect_repo_root(), args.base_ref)
     if args.base_only:
         base_only(args)
         sys.exit(0)
@@ -1193,6 +1303,7 @@ if __name__ == "__main__":
         output["regression"] = {"ran": False, "error": "%s: %s" % (type(e).__name__, e)}
 
     output["fc_runner"] = "regression-v1+template"
+    output["oracle_edited_tests"] = list(_ORACLE_EDITED)
     # Written now too: if test.sh stops the runner at FC_PYTEST_TIMEOUT during the wider check, these results stand.
     write_results(output)
 

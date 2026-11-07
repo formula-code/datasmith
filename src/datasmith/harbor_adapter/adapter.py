@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2, rmtree
 
+from datasmith.harbor_adapter.test_edits import ORACLE_TEST_EDITS, oracle_test_edits
 from datasmith.harbor_adapter.utils import (
     DATASMITH_LSV_ROUNDS,
     make_task_id,
@@ -148,6 +149,7 @@ class FormulaCodeAdapter:
         )
         _write(tests / "test.sh", test_sh, executable=True)
         _write(tests / "config.json", config_json)
+        _write(tests / ORACLE_TEST_EDITS, json.dumps(oracle_test_edits(rec.patch), indent=2, sort_keys=True))
         _write(solution / "solve.sh", render_template("solution/solve.sh", solution_patch=rec.patch), executable=True)
         setup_sh = render_template("tests/setup.sh", extra_setup_commands="")
         _write(tests / "setup.sh", setup_sh, executable=True)

@@ -28,7 +28,7 @@ _HERE = Path(__file__).resolve().parent
 _TEMPLATE_DIR = _HERE / "template"
 # Render code whose changes alter the rendered output (jinja context, task.toml
 # renderer, static-file list). Template files are covered by _TEMPLATE_DIR.
-_RENDER_SOURCES = ("adapter.py", "utils.py", "records.py")
+_RENDER_SOURCES = ("adapter.py", "utils.py", "records.py", "test_edits.py")
 
 
 def _iter_digest_files() -> Iterable[tuple[str, Path]]:
